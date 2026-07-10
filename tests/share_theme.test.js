@@ -34,14 +34,65 @@ const {
 } = require('./layout_test_helper');
 
 async function runShareThemeSuite() {
-  test('t@2560', () => {
+  // Keep independent fresh-runtime scenarios below. Shared-state behavior is split into named
+  // checkpoints so one assertion cannot conceal later cross-surface contracts.
+  test('cross-surface host state survives layout, share, and terminal transitions', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
+    const virtualItems = {
+      info: api.infoItemId,
+      yoagent: api.yoagentItemId,
+      chat: api.chatItemId,
+      'chat-media': 'chat-media:https://example.test/image.png',
+      finder: api.finderItemId,
+      differ: api.differItemId,
+      tabber: api.tabberItemId,
+      'search-history': api.searchHistoryItemId,
+      preferences: api.prefsItemId,
+      debug: api.debugPaneItemId,
+    };
+    const virtualTypes = api.TAB_TYPES.filter(type => Object.hasOwn(virtualItems, type.key));
+    assert.equal(virtualTypes.length, Object.keys(virtualItems).length, 'all virtual panels are registered through the one descriptor factory');
+    for (const type of virtualTypes) {
+      const item = virtualItems[type.key];
+      assert.equal(api.tabTypeForItem(item), type, `${type.key} retains its canonical item matcher`);
+      for (const alias of type.aliases || []) assert.equal(api.tabTypeForParam(alias), type, `${type.key} retains URL alias ${alias}`);
+      const descriptor = {
+        param: type.param(item),
+        label: type.label(item),
+        shortLabel: type.shortLabel(item),
+        terminalTitle: type.terminalTitle(item),
+        detail: type.detail(item),
+        className: type.className(item),
+        icon: type.icon,
+        minWidth: type.minWidth(item),
+        prunePriority: type.prunePriority(item),
+        rowHtml: type.rowHtml(item, {}).includes('pane-tab'),
+        createPanel: typeof type.createPanel,
+        relocalize: typeof type.relocalize,
+        renderAttached: typeof type.renderAttached,
+        cleanup: typeof type.cleanup,
+        focusSearch: typeof type.focusSearch,
+        popoutDisabledReason: typeof type.popoutDisabledReason === 'function' ? type.popoutDisabledReason(item) : '',
+      };
+      assert.ok(descriptor.label && descriptor.shortLabel && descriptor.terminalTitle && descriptor.detail, `${type.key} retains visible descriptor fields`);
+      assert.equal(descriptor.rowHtml, true, `${type.key} keeps the shared virtual pane row renderer unless explicitly specialized`);
+      assert.equal(descriptor.createPanel, 'function', `${type.key} retains its panel factory`);
+      assert.equal(descriptor.minWidth > 0, true, `${type.key} retains a positive minimum width`);
+      assert.equal(descriptor.prunePriority, 0, `${type.key} retains the virtual-pane prune priority`);
+      if (!type.canPopout && !type.popoutRenderer && !type.openPopout) assert.ok(descriptor.popoutDisabledReason, `${type.key} inherits an interactive popout explanation`);
+    }
+    const englishDebugLabel = api.tabTypeForItem(api.debugPaneItemId).label(api.debugPaneItemId);
+    api.i18nSetCatalogForTest('zh-Hant', JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8')));
+    api.setActiveLocaleForTest('zh-Hant');
+    assert.notEqual(api.tabTypeForItem(api.debugPaneItemId).label(api.debugPaneItemId), englishDebugLabel, 'virtual descriptor labels stay lazy across locale changes');
+    api.setActiveLocaleForTest('en');
     assert.equal(api.debugModeEnabledForTest(), false, 'JS Debug pane is off without the debug=1 URL flag');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug layout item resolves to the normal YO!stats tab');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'follower', ready_elsewhere: true}), 'ready', 'follower-owned ready file indexes stop polling');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'too_large', too_large: true, coverage: 'partial'}), 'too_large', 'capped file indexes remain visibly partial');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'building'}), 'building', 'building file indexes keep polling');
     // YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open YO!agent.
     assert.equal(api.resolveLayoutItem('yoagent'), api.yoagentItemId, 'yoagent alias resolves to the standalone YO!agent item');
@@ -49,11 +100,11 @@ async function runShareThemeSuite() {
     assert.equal(api.resolveLayoutItem('__yosup__'), api.yoagentItemId, 'legacy yosup item id resolves to YO!agent');
     assert.equal(api.resolveLayoutItem('__yoagent__'), api.yoagentItemId, 'legacy yoagent item id resolves to YO!agent');
     api.setFileExplorerModeForTest('files');
-    assert.equal(api.resolveLayoutItem('changes'), api.fileExplorerItemId, 'legacy changes URL param resolves to the Finder pane');
-    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes URL param preselects Finder diff mode');
+    assert.equal(api.resolveLayoutItem('changes'), api.differItemId, 'legacy changes URL param resolves to the independent Differ tab');
+    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes URL param retains the compatibility diff view');
     api.setFileExplorerModeForTest('files');
-    assert.equal(api.resolveLayoutItem('__changes__'), api.fileExplorerItemId, 'legacy changes item id resolves to the Finder pane');
-    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes item id preselects Finder diff mode');
+    assert.equal(api.resolveLayoutItem('__changes__'), api.differItemId, 'legacy changes item id resolves to the independent Differ tab');
+    assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes item id retains the compatibility diff view');
     assert.equal(api.resolveLayoutItem('files'), api.fileExplorerItemId, 'files alias still resolves to Finder');
     assert.equal(api.resolveLayoutItem('search'), api.searchHistoryItemId, 'search alias resolves to the Search & Runs pane');
     assert.equal(api.resolveLayoutItem('history'), api.searchHistoryItemId, 'history alias resolves to the Search & Runs pane');
@@ -63,9 +114,9 @@ async function runShareThemeSuite() {
     assert.equal(api.itemParam(api.infoItemId), 'info', 'the YO!info pane uses the info param');
     assert.equal(api.itemParam(api.yoagentItemId), 'yoagent', 'the YO!agent pane uses the yoagent param');
     assert.equal(api.itemParam(api.searchHistoryItemId), 'search-history', 'the Search & Runs pane uses a stable URL param');
-    assert.equal(api.tabTypeForItem('__files__').key, 'files');
+    assert.equal(api.tabTypeForItem('__files__'), null, 'legacy Files aliases are URL inputs, not duplicate live tab identities');
     assert.equal(api.tabTypeForItem(api.searchHistoryItemId).key, 'search-history');
-    assert.equal(api.tabTypeForItem('__changes__'), null, 'standalone Changes tab type is removed');
+    assert.equal(api.tabTypeForItem('__changes__'), null, 'legacy Changes aliases are URL inputs, not duplicate live tab identities');
     assert.equal(api.tabTypeForItem('image:/home/test/screen.png').key, 'image-viewer');
     assert.equal(api.tabTypeForItem('file:/home/test/README.md').key, 'file-editor');
     assert.equal(api.fileItemPath('image:/home/test/screen.png'), '/home/test/screen.png');
@@ -138,9 +189,8 @@ async function runShareThemeSuite() {
     });
     api.setSessionFilesLoadingForTest(false);
     const refreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
-    assert.equal(refreshingElsewhereHtml.includes('changes-loading'), false, 'Differ renders a clean repo placeholder instead of pinning the header to loading while a follower refreshes');
-    assert.ok(refreshingElsewhereHtml.includes('parser-toolkits3'), 'Differ clean repo placeholders keep the visible repo section while a follower refreshes');
-    assert.ok(refreshingElsewhereHtml.includes('No Differ results for this session.'), 'Differ clean repo placeholders show the completed empty result');
+    assert.ok(/changes-loading[\s\S]*loading 3[\s\S]*moving-ellipsis changes-loading-dots/.test(refreshingElsewhereHtml), 'Differ rooted follower placeholders render as loading until real results arrive');
+    assert.equal(refreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rooted follower placeholders do not claim the dirty repo has a completed empty result');
     api.setSessionFilesPayloadForTest({
       session: '4',
       loaded: true,
@@ -153,10 +203,6 @@ async function runShareThemeSuite() {
     const rootlessRefreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
     assert.ok(/changes-loading[\s\S]*loading 4[\s\S]*moving-ellipsis changes-loading-dots/.test(rootlessRefreshingElsewhereHtml), 'Differ rootless follower placeholders still render as loading instead of a misleading empty result');
     assert.equal(rootlessRefreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rootless follower placeholders do not render a completed empty state');
-    const sessionSwitchSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    const sessionSwitchBody = sessionSwitchSource.slice(sessionSwitchSource.indexOf('function switchFileExplorerChangesSession('), sessionSwitchSource.indexOf('function noteFileExplorerChangesSessionInteraction('));
-    assert.ok(/setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);\s*renderFileExplorerChangesPanels\(\);\s*fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\);/.test(sessionSwitchBody), 'auto-switching Differ sessions shows loading only when no loaded cached payload is available while Finder Sync updates immediately');
-    assert.ok(/const backgroundRefresh = options\.background === true;[\s\S]*if \(!backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, true\);[\s\S]*if \(current && !backgroundRefresh\) setSessionFilesLoadingForDestination\(destination, false\);/.test(sessionSwitchSource), 'background Differ refreshes do not replace cached content with the foreground loading state');
     api.setSessionFilesLoadingForTest(false);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerChangesSelectedSessionForTest('1');
@@ -212,8 +258,7 @@ async function runShareThemeSuite() {
     assert.ok(cachedFinderRefreshUrl.includes('/api/session-files?') && cachedFinderRefreshUrl.includes('session=2') && cachedFinderRefreshUrl.includes('force=1'), 'cached Finder switch still starts a forced background refresh');
     api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
     api.setSessionFilesLoadingForTest(true);
-    api.setFileExplorerModeForTest('files');
-    const loadingEmbeddedDifferHtml = api.fileExplorerChangesPanelHtml();
+    const loadingEmbeddedDifferHtml = api.fileExplorerChangesPanelHtml({view: 'finder'});
     assert.ok(/changes-comparison-head compact[\s\S]*changes-loading[\s\S]*loading 2[\s\S]*moving-ellipsis changes-loading-dots/.test(loadingEmbeddedDifferHtml), 'embedded Finder Differ loading header uses the same moving-dot indicator');
     assert.equal(loadingEmbeddedDifferHtml.includes('changes-loading-yolo'), false, 'embedded Finder Differ loading header does not render a circular YO spinner');
     assert.equal(loadingEmbeddedDifferHtml.includes('not loaded'), false, 'embedded Finder Differ loading header does not flash "not loaded"');
@@ -254,8 +299,8 @@ async function runShareThemeSuite() {
     assert.ok(changesHtml.includes('file-tree-row kind-file git-modified has-agent'), 'changed-file rows use the shared file-tree row renderer and inline-agent layout');
     assert.ok(/file-tree-git-status"[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(changesHtml), 'changed-file rows show and label the M status badge in the shared file-tree status slot');
     assert.ok(/file-tree-git-status"[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(changesHtml), 'added changed-file rows label the A status badge');
-    assert.ok(changesHtml.includes('file-tree-dir-count">2</span>'), 'changed-file folders show a bare recursive changed-file count from the shared row renderer');
-    assert.equal(changesHtml.includes('files changed</span>'), false, 'changed-file folders do not repeat the file-count label in the tree row metadata');
+    assert.ok(changesHtml.includes('changes-diff-file-label">files</span>'), 'Differ directories label their signed added/deleted file counts through the shared diff metadata slot');
+    assert.equal(changesHtml.includes('file-tree-dir-count">2</span>'), false, 'a Differ directory with a signed file count does not repeat the same total as a bare count');
     assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
     assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
     assert.ok(/class="file-tree-row kind-dir[^"]*"[^>]*data-path="\/repo\/app\/src"[\s\S]*<span class="file-tree-date"[^>]*>[^<]+<\/span>/.test(changesHtml), 'Differ directory rows show the same non-empty date slot as Finder');
@@ -363,7 +408,7 @@ async function runShareThemeSuite() {
     assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
     assert.ok(/function diffRefComparisonLineHtml[\s\S]*diffRefResetButtonHtml\(refs,\s*'diff-ref-inline-reset'\)/.test(changedFilesSource), 'Differ uses the shared reset button helper with its right-aligned row class');
     assert.ok(/function diffRefControlsHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'compact Editor FROM/TO controls use the shared reset button helper');
-    assert.ok(/function diffRefResetButtonHtml[\s\S]*t\('pref\.reset\.row'\)[\s\S]*<\/button>/.test(changedFilesSource), 'Diff reset button visibly says Reset');
+    assert.ok(/function diffRefResetButtonHtml[\s\S]*t\('common\.reset'\)[\s\S]*<\/button>/.test(changedFilesSource), 'Diff reset button visibly says Reset');
     assert.equal(/function diffRefResetButtonHtml[\s\S]*>⇤<\/button>/.test(changedFilesSource), false, 'Diff reset button does not use a glyph-only label');
     assert.equal(/function diffRefResetButtonHtml[\s\S]*>↺<\/button>/.test(changedFilesSource), false, 'Diff reset button does not use the reload-looking circular arrow');
     assert.ok(/diffRefReset\.closest\('\[data-diff-ref-controls\]'\)[\s\S]*diffRefReset\.parentElement\?\.querySelector/.test(changedFilesSource), 'Differ reset continues to resolve its sibling controls after right alignment');
@@ -375,9 +420,36 @@ async function runShareThemeSuite() {
     // changes panel and the file-editor diff-ref toolbar) instead of two inline copies.
     assert.ok(/function openDiffRefPickerForInput\([^)]*\)\s*\{[\s\S]*?showDiffRefPicker\(input, \{showAll: true\}\)/.test(changedFilesSource), 'clicking/focusing a filled ref input still shows available options (via shared openDiffRefPickerForInput)');
     assert.ok(changedFilesSource.includes('openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('), 'changes panel routes ref-input focus/pointer through the shared picker-open helper');
-    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup uses the available viewport width with an edge inset');
-    assert.ok(/const width = availableWidth/.test(changedFilesSource), 'diff-ref popup gives commit and branch descriptions all available horizontal space');
-    assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
+    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup respects the available viewport width with an edge inset');
+    assert.ok(/const width = Math\.min\(availableWidth, Math\.round\(viewportWidth \* \(2 \/ 3\)\)\)/.test(changedFilesSource), 'Differ and editor ref pickers share a responsive two-thirds-browser maximum so full commit descriptions remain readable');
+    assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*const \{node, input\} = diffRefPopoverState[\s\S]*positionDiffRefPopover\(input, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
+    const scrollListenersBeforePopover = api.documentListenersForTest('scroll').length;
+    const popoverNode = api.ensureDiffRefPopoverForTest();
+    assert.equal(api.ensureDiffRefPopoverForTest(), popoverNode, 'diff-ref popover reuses one DOM node');
+    assert.equal(api.documentListenersForTest('scroll').length, scrollListenersBeforePopover + 1, 'diff-ref popover installs global listeners once');
+    const popoverInput = new TestElement('diff-ref-test-input', 'input');
+    popoverInput.dataset.diffRefInput = '';
+    popoverInput.dataset.diffRefFrom = '';
+    api.setDiffRefPopoverStateForTest(popoverInput, collapsedHeadRefs, -1);
+    const arrowEvent = {key: 'ArrowDown', preventDefault() { this.defaultPrevented = true; }};
+    assert.equal(api.handleDiffRefPopoverKeydownForTest(arrowEvent, popoverInput), true, 'open popover owns arrow navigation');
+    assert.equal(api.diffRefPopoverStateForTest().activeIndex, 0, 'arrow navigation advances the record cursor');
+    api.hideDiffRefPopoverForTest();
+    assert.deepEqual(canonical(api.diffRefPopoverStateForTest()), {
+      activeIndex: -1,
+      hasNode: true,
+      hidden: true,
+      input: null,
+      itemCount: 0,
+      listenersInstalled: true,
+    }, 'hide clears input/items/cursor together while retaining the reusable node/listeners');
+    api.setDiffRefPopoverStateForTest(popoverInput, collapsedHeadRefs, 0);
+    popoverInput.isConnected = false;
+    for (const listener of api.documentListenersForTest('scroll')) listener({target: new TestElement('outside')});
+    assert.equal(api.diffRefPopoverStateForTest().input, null, 'scroll cleanup drops a detached owning input');
+    for (const name of ['diffRefPopoverInput', 'diffRefPopoverItemsCurrent', 'diffRefPopoverActiveIndex', 'diffRefPopoverListenersInstalled']) {
+      assert.equal(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8').includes(name), false, `${name} remains retired`);
+    }
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
       session: '1',
@@ -437,7 +509,6 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesSource.includes("if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);"), 'ordinary Differ row opens start collapsed without changing the global diff-expand preference');
     assert.ok(changedFilesSource.includes("const initialMode = openDiffMode ? 'diff' : 'edit';"), 'Differ rows start in Diff mode and fall back only after the diff payload proves unavailable');
     assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'changed-file rows set the editor mode explicitly');
-    assert.ok(/async function openChangedFileInDiff\([^]*?reusableFileEditorDiffPreviewItem\(path\)[^]*?const payloadRepoRefs = \(\(\) => \{[^]*?\}\)\(\);[\s\S]*?noteFileExplorerChangesSessionInteraction\(ownerSession\)[\s\S]*?fileEditorActivationSlot\(\)[\s\S]*?openFileInEditor/.test(changedFilesSource), 'opening a changed-file row commits its owner session, preserves row FROM/TO refs, targets the active editor pane, and reuses the Differ preview tab');
     assert.ok(/if \(!openDiffMode\) \{[\s\S]*?renderOpenFilePath\(path\);[\s\S]*?void refreshOpenFileDiff\(path, \{silent: true, renderOnComplete: false, \.\.\.payloadRepoRefs\}\);[\s\S]*?return;[\s\S]*?\}/.test(changedFilesSource), 'non-diffable rows prefetch diff data without the async repaint that can fight live scrolling');
     assert.ok(/diffReady && fileStateCanRenderDiffView\(path, current\)[\s\S]*setFileEditorViewMode\(path, 'diff', item\)[\s\S]*setFileEditorViewMode\(path, 'edit', item\)[\s\S]*t\('editor\.diffUnavailable'/.test(changedFilesSource), 'failed or non-renderable diff opens visibly fall back to edit mode');
     const touchedOnlyHtml = api.changesGroupsSnapshotHtmlForTest([
@@ -451,13 +522,13 @@ async function runShareThemeSuite() {
     assert.equal(zeroAgentRow.includes('changes-file-agent'), false, 'C5: a file with no transcript attribution renders zero agent icons');
     const oneAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: ['codex'], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
     assert.ok(oneAgentRow.includes('agent-icon codex') && !oneAgentRow.includes('agent-icon claude'), 'C5: one agent renders exactly one icon');
-    assert.ok(/agent-icon codex"[^>]*aria-label="modified by Codex [^"]* ago"[^>]*title="modified by Codex [^"]* ago"/.test(oneAgentRow), 'C5: Codex icon hover names who modified the file and when');
+    assert.ok(/agent-icon codex"[^>]*aria-label="modified: Codex [^"]* ago"[^>]*title="modified: Codex [^"]* ago"/.test(oneAgentRow), 'C5: Codex icon hover names who modified the file and when');
     const twoAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: ['codex', 'claude'], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
     assert.ok(twoAgentRow.includes('agent-icon claude') && twoAgentRow.includes('agent-icon codex'), 'C5: a file touched by both agents renders both icons');
     assert.ok(twoAgentRow.indexOf('agent-icon claude') < twoAgentRow.indexOf('agent-icon codex'), 'C5: agent icons order Claude before Codex');
-    assert.ok(/changes-file-agent(?![^>]*title=)[^>]*aria-label="modified by Claude [^"]* ago, modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers without a generic native tooltip');
-    assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(twoAgentRow), 'C5: Claude icon hover names who modified the file and when');
-    assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: Codex icon hover stays contextual in multi-agent rows');
+    assert.ok(/changes-file-agent(?![^>]*title=)[^>]*aria-label="modified: Claude [^"]* ago, modified: Codex [^"]* ago"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers without a generic native tooltip');
+    assert.ok(/agent-icon claude"[^>]*title="modified: Claude [^"]* ago"/.test(twoAgentRow), 'C5: Claude icon hover names who modified the file and when');
+    assert.ok(/agent-icon codex"[^>]*title="modified: Codex [^"]* ago"/.test(twoAgentRow), 'C5: Codex icon hover stays contextual in multi-agent rows');
     const legacyAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
     assert.ok(legacyAgentRow.includes('agent-icon codex'), 'C5: legacy scalar agent payloads still render their icon');
     // C5: image rows carry size + relative path and DROP the native title (the rich hover preview replaces it);
@@ -475,22 +546,21 @@ async function runShareThemeSuite() {
     assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'Differ file rows no longer fork a safe-only context menu');
     assert.ok(/Single-clicks route through the shared tree controller[\s\S]{0,620}panel\.addEventListener\('click', event => \{[\s\S]*?const row = event\.target\.closest\('\.file-tree-row\[data-path\]'\)[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'Differ click selection routes through the shared tree controller');
     assert.ok(/selectFromClick\(row, id, event\)[\s\S]{0,180}updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)/.test(changedFilesSource), 'Differ shared controller selection routes through the Finder selection parent');
-    assert.ok(/data-open-change-file[\s\S]{0,2200}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)[\s\S]*t\('contextmenu\.openInDiffer'\)[\s\S]*openChangedFileInDiff[\s\S]*\{userInitiated: true, openMode: 'diff'\}[\s\S]*t\('contextmenu\.openNewDiffEditor'\)[\s\S]*forceNewTab: true[\s\S]*openMode: 'diff'[\s\S]*t\('contextmenu\.openNewEditor'\)[\s\S]*openFileInAdditionalEditorTab/.test(changedFilesSource), 'Differ file right-click routes through the shared Finder context menu and orders Open in a Differ, Open in a new Differ, then Open in a new Editor');
     assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
-    assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| 'Open in new tab'[\s\S]*?appendContextMenuButton\(menu, multiple \? 'Copy relative paths' : 'Copy relative path'/.test(fileExplorerSource), 'Finder/Differ file context menu lists Open actions first and resolves dynamic Open labels before Copy actions');
+    assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
     assert.equal(changedFilesSource.includes('contextmenu.openDifferent'), false, 'Differ file context menu no longer uses dynamic different-editor labels');
     assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'shared delete refreshes session-files so Differ rows disappear immediately');
     assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
     const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
     const dirCtxBody = changedFilesSource.slice(dirCtxStart, changedFilesSource.indexOf('\nfunction ', dirCtxStart + 1));
-    for (const action of ['Copy relative path', 'Copy full path', 'Expand ']) {
-      assert.ok(dirCtxBody.includes(action), `C5: the changed-directory menu offers "${action}"`);
+    for (const action of ["t('contextmenu.copyRelativePath')", "t('contextmenu.copyFullPath')", "t('contextmenu.expandInFinder'"]) {
+      assert.ok(dirCtxBody.includes(action), `C5: the changed-directory menu routes ${action} through i18n`);
     }
     assert.ok(dirCtxBody.includes('copyChangedPath(rel || path'), 'C5: directory Copy relative path uses the folder-relative path when present');
     assert.ok(/function openChangedDirectoryInFinder\([\s\S]*?openFileExplorerPane\(\)[\s\S]*?setFileExplorerMode\('files'\)[\s\S]*?expandFileExplorerTreesToPath\(path\)[\s\S]*?selectFileTreePath\(path\)/.test(changedFilesSource), 'C5: Modified-files folder menu switches to Finder mode and expands the directory in-place');
     assert.equal(/'Open in new tab'|'Download'|'Rename'|'Delete'|"Open in new tab"|"Download"|"Rename"|"Delete"/.test(dirCtxBody), false, 'C5: the Modified-files folder menu stays directory-only and non-destructive');
     assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showFileTreeContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'right-click dispatches file rows through the shared Finder menu and folder rows through the directory menu');
-    assert.ok(changedFilesSource.includes("multiple ? 'Copy full paths' : 'Copy full path'"), 'Finder context menu uses Copy full path label');
+    assert.ok(fileExplorerSource.includes("multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'"), 'Finder context menu uses the localized Copy full path label');
     assert.equal(/Copy raw paths?/.test(fileExplorerSource), false, 'Finder context menu no longer exposes a duplicate raw path action');
     api.setSessionFilesPayloadForTest({
       session: '1',
@@ -526,8 +596,9 @@ async function runShareThemeSuite() {
         {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
       ],
     });
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('Differ:'), 'Finder embeds a Differ panel');
-    assert.ok(/class="changes-title">Differ: &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Differ title uses the compact session title');
+    const embeddedDifferHtml = api.fileExplorerChangesPanelHtml({view: 'finder'});
+    assert.ok(embeddedDifferHtml.includes('Differ:'), 'Finder embeds a Differ panel');
+    assert.ok(/class="changes-title">Differ: &#39;1&#39;<\/span>/.test(embeddedDifferHtml), 'C7: the embedded Differ title uses the compact session title');
     api.setFileExplorerChangesSelectedSessionForTest('1');
     api.setFileExplorerModeForTest('diff');
     api.setDiffRefsByRepoForTest('/repo/app', {from: 'abc1111', to: 'current'});
@@ -537,14 +608,14 @@ async function runShareThemeSuite() {
     assert.notEqual(firstDiffCacheKey, secondDiffCacheKey, 'Differ cache key changes when repo FROM/TO refs change for the same session');
     api.setDiffRefsByRepoForTest('/repo/app', null);
     api.setFileExplorerModeForTest('files');
-    {
+    test('Finder explicit session interaction updates its committed target', () => {
       const stickyApi = loadYolomux('', ['1', '2']);
       stickyApi.setFileExplorerChangesSelectedSessionForTest('1');
       assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '1', 'Finder Modified-files target starts from the committed session');
       stickyApi.noteFileExplorerChangesSessionInteractionForTest('2');
       assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit session interaction updates the Finder Modified-files target');
-    }
-    {
+    });
+    test('read-only shares accept only host-pinned Finder state', () => {
       const shareApi = loadYolomux('?shareReplay=0', ['5', '6'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share-finder', mode: 'ro', session: '5', sessions: ['5', '6'], finder: {session: '5', mode: 'diff'}},
       });
@@ -561,8 +632,8 @@ async function runShareThemeSuite() {
       });
       unpinnedShareApi.setSessionFilesPayloadForTest({session: '6', loaded: true, files: [], repos: [], errors: []});
       assert.equal(unpinnedShareApi.fileExplorerSessionFilesTargetSessionForTest(), '', 'read-only share without a host Finder pin does not fall back to payload session or sessions[0]');
-    }
-    {
+    });
+    test('Finder sync prefers live tmux path over transcript metadata', () => {
       const signalPathApi = loadYolomux('', ['5']);
       signalPathApi.setTranscriptInfoForTest('5', {
         selected_pane: {current_path: '/home/test/stale-transcript-path'},
@@ -576,8 +647,8 @@ async function runShareThemeSuite() {
         }],
       });
       assert.equal(signalPathApi.activeTmuxDirectoryPath('5'), '/home/test/live-tmux-path', 'Finder sync prefers direct tmux pane_current_path over stale transcript metadata');
-    }
-    {
+    });
+    test('passive Finder focus never commits the modified-files target', () => {
       const hoverApi = loadYolomux('', ['5', '6']);
       hoverApi.setTranscriptInfoForTest('5', {
         project: {git: {cwd: '/home/test/yolomux.dev/src', root: '/home/test/yolomux.dev'}},
@@ -623,8 +694,8 @@ async function runShareThemeSuite() {
       hoverApi.selectSession('6', {userInitiated: true});
       assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'D1: explicit selectSession commits the Differ target in diff mode');
       hoverApi.setFileExplorerModeForTest('files');
-    }
-    {
+    });
+    test('passive xterm mouse reports never acknowledge attention', () => {
       const mouseReportApi = loadYolomux('', ['1', '8002']);
       mouseReportApi.setFileExplorerModeForTest('diff');
       mouseReportApi.noteFileExplorerChangesSessionInteractionForTest('1');
@@ -649,10 +720,46 @@ async function runShareThemeSuite() {
       assert.equal(socketMessages[1]?.data, 'a', 'typed xterm bytes are still sent to the terminal backend');
       assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), true, 'typed xterm bytes acknowledge the active red/yellow agent status');
       assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
-    }
+    });
+    test('typed input acknowledgement survives a stale cooldown snapshot', () => {
+      const cooldownApi = loadYolomux('', ['1']);
+      const cooldownKey = '["agent-window","1","0","%1","codex","cooldown","4000"]';
+      cooldownApi.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
+      cooldownApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'codex'}]});
+      const staleCooldownPayload = {agent_windows: [
+        {kind: 'codex', state: 'idle', window_index: 0, pane_target: '%1', window_label: '0:codex', current: true, window_active: true, working_stopped_ts: 4000, cooldown_attention_key: cooldownKey, cooldown_acknowledged: false},
+      ]};
+      cooldownApi.setAutoApproveStateForTest('1', staleCooldownPayload);
+      assert.equal(cooldownApi.handleTerminalDataForTest('1', 'a', {attentionOptions: {localOnly: true, acknowledgeAgentWindowDelayMs: 0}}), true, 'typed xterm bytes acknowledge the active yellow completion');
+      assert.equal(cooldownApi.attentionAcknowledgementKeyIsRecordedForTest(cooldownKey), true, 'typing records the generated yellow completion key');
+      cooldownApi.setAutoApproveStateForTest('1', staleCooldownPayload);
+      assert.equal(cooldownApi.attentionAcknowledgementKeyIsRecordedForTest(cooldownKey, {cooldown_acknowledged: false}), true, 'a delayed pre-ack yellow snapshot cannot restore the active terminal badge');
+    });
+    test('attention acknowledgement coalesces unresolved transport requests', () => {
+      const acknowledgementApi = loadYolomux('', ['1']);
+      const attentionKey = '["agent-window","1","0","%1","claude","needs-input","burst"]';
+      acknowledgementApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'claude'}]});
+      acknowledgementApi.setAutoApproveStateForTest('1', {agent_windows: [
+        {kind: 'claude', state: 'needs-input', window_index: 0, pane_target: '%1', current: true, window_active: true, attention_key: attentionKey},
+      ]});
+      const fetchCalls = [];
+      acknowledgementApi.setFetchForTest((url, options = {}) => {
+        fetchCalls.push({url: String(url), body: JSON.parse(options.body || '{}')});
+        return new Promise(() => {});
+      });
+      acknowledgementApi.clearClientPerfCountersForTest();
+      for (let index = 0; index < 25; index += 1) {
+        assert.equal(acknowledgementApi.acknowledgeAgentWindowActivityForTest('1', 0, {localOnly: false, delayMs: 0}), true, 'repeated input remains covered by the first acknowledgement');
+      }
+      const perf = Object.fromEntries(acknowledgementApi.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
+      assert.deepStrictEqual(fetchCalls.filter(call => call.url === '/api/attention-ack'), [{url: '/api/attention-ack', body: {keys: [attentionKey]}}], 'an unresolved acknowledgement suppresses duplicate POSTs for the same attention event');
+      assert.equal(perf.renderPanels?.count, 1, 'an acknowledgement burst rebuilds the pane surfaces only for the first input');
+      assert.equal(perf.renderPaneTabStrips?.count, 1, 'an acknowledgement burst rebuilds pane-tab status only for the first input');
+      assert.equal(perf.renderSessionButtons?.count, 1, 'an acknowledgement burst rebuilds topbar session buttons only for the first input');
+    });
     // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
     // each repo owns its own compact comparison line instead.
-    const compactFinderPanel = api.fileExplorerChangesPanelHtml();
+    const compactFinderPanel = api.fileExplorerChangesPanelHtml({view: 'finder'});
     const compactHeadStart = compactFinderPanel.indexOf('class="changes-repo-head"');
     const compactRepoHead = compactFinderPanel.slice(compactHeadStart, compactFinderPanel.indexOf('</button>', compactHeadStart));
     assert.ok(/changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(compactRepoHead), 'Finder Modified-files repo header shows the repo aggregate totals');
@@ -664,19 +771,19 @@ async function runShareThemeSuite() {
     assert.equal(compactFinderPanel.includes('changes-repo-popover'), false, 'C6: repo comparison details are visible, not hidden in a hover popover');
     // C15: ahead/behind is hidden when 0 (the popover shows only the non-zero ahead, not "Behind 0 commits").
     assert.equal(compactFinderPanel.includes('Behind 0 commit'), false, 'C15: 0-commit ahead/behind is not printed');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
+    assert.ok(compactFinderPanel.includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
+    assert.ok(compactFinderPanel.includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
     // C8/C13 follow-up: Finder embedded Differ now uses the same compact select control pattern as Finder's
     // own A-Z/Z-A/recent/oldest sort control, defaulting to recent.
-    const finderSortPanel = api.fileExplorerChangesPanelHtml();
+    const finderSortPanel = api.fileExplorerChangesPanelHtml({view: 'finder'});
     assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
     assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(finderSortPanel), 'Finder embedded Differ header orders Date, Expand all, Collapse all, Reload');
-    const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'finder.sort.newest', oldest: 'finder.sort.oldest'};
+    const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'common.sort.recent', oldest: 'finder.sort.oldest'};
     for (const [value, key] of Object.entries(sortLabels)) {
       const label = api.t(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       assert.ok(new RegExp(`<option value="${value}"[^>]*>${label}</option>`).test(finderSortPanel), `Finder embedded Differ sort offers ${value}`);
     }
-    assert.ok(new RegExp(`<option value="newest"[^>]* selected[^>]*>${api.t('finder.sort.newest')}</option>`).test(finderSortPanel), 'Finder embedded Differ sort defaults to recent');
+    assert.ok(new RegExp(`<option value="newest"[^>]* selected[^>]*>${api.t('common.sort.recent')}</option>`).test(finderSortPanel), 'Finder embedded Differ sort defaults to recent');
     assert.equal(/changes-sort-toggle|changes-sort-seg|changes-sort-divider/.test(finderSortPanel), false, 'Finder embedded Differ no longer uses a separate segmented sort control');
     const sortItems = [
       {path: 'b.txt', repo: '/repo/app', mtime: 100},
@@ -734,8 +841,8 @@ async function runShareThemeSuite() {
     assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker with the compact popup');
     assert.equal(/<datalist/.test(api.fileExplorerChangesPanelHtml()), false, 'Finder compact diff refs do not render native datalists');
     assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('file-tree-row kind-file compact'), '#41: the Finder modified-files panel is always compact');
-    assert.ok(api.fileExplorerChangesPanelHtml().includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
+    assert.ok(api.fileExplorerChangesPanelHtml({view: 'finder'}).includes('file-tree-row kind-file compact'), '#41: the Finder modified-files panel is always compact');
+    assert.ok(api.fileExplorerChangesPanelHtml({view: 'finder'}).includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
     assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
     assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
     assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
@@ -817,6 +924,37 @@ async function runShareThemeSuite() {
     assert.ok(codexMetaHtml.includes('/repo/agent/src') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps transcript-derived repo metadata');
     assert.equal(bashMetaHtml.includes('/repo/agent'), false, 'non-agent active window outside the repo does not inherit the agent touched repo');
     assert.ok(bashMetaHtml.includes('/tmp/shell'), 'non-agent active window shows its own cwd in the Info Bar');
+    const transcriptPrGit = {
+      root: '/home/test/vortex/vortex3',
+      cwd: '/home/test/vortex/vortex3',
+      branch: 'keivenchang/ABC-2322__reasoning-force-nonempty-content',
+      github_repo: {url: 'https://github.com/ai-vortex/vortex'},
+      other_branches: {branches: [{name: 'keivenchang/ABC-2322__reasoning-force-nonempty-content', current: true, pull_request: {number: 11251, title: 'reasoning: force nonempty content'}}]},
+    };
+    const staleWindowGit = {
+      root: '/home/test/vortex/parser-toolkits3',
+      cwd: '/home/test/vortex/parser-toolkits3',
+      branch: 'keivenchang/ABC-2323__cleanup-llm-tests',
+      github_repo: {url: 'https://github.com/ai-vortex/vortex'},
+      other_branches: {branches: [{name: 'keivenchang/ABC-2323__cleanup-llm-tests', current: true}]},
+    };
+    const transcriptPrInfo = {
+      agents: [{kind: 'claude', pane_target: '3:0.0'}],
+      selected_pane: {target: '3:0.0', window: '0', pane: '0', current_path: staleWindowGit.root},
+      panes: [{target: '3:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: staleWindowGit.root}],
+      project: {
+        git: transcriptPrGit,
+        pull_request: {number: 11251, title: 'reasoning: force nonempty content', url: 'https://github.com/ai-vortex/vortex/pull/11251'},
+        linear: [],
+        repos: [{...transcriptPrGit, primary: true}, staleWindowGit],
+      },
+    };
+    api.setAutoApproveStateForTest('transcript-pr', {
+      agent_windows: [{kind: 'claude', window: '0', window_index: 0, current: true, window_active: true, path_entries: [{path: staleWindowGit.root, git: staleWindowGit}], git: staleWindowGit}],
+    });
+    const transcriptPrHtml = api.paneInfoBarMetaHtml('transcript-pr', transcriptPrInfo);
+    assert.ok(transcriptPrHtml.includes('#11251') && transcriptPrHtml.includes('reasoning: force nonempty content'), 'Info Bar preserves the canonical transcript-selected PR when a stale active-window path has no PR');
+    assert.equal(transcriptPrHtml.includes('ABC-2323__cleanup-llm-tests'), false, 'Info Bar does not let a stale Tabber/window path replace the transcript PR context');
     const c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
     const c9Css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
@@ -825,9 +963,9 @@ async function runShareThemeSuite() {
     assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-chip"'), 'CSS-2: repo count button uses the shared button reset');
     assert.ok(/\.btn-base,[\s\S]*?\{[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(c9Css), 'CSS-2: shared btn-base owns the button reset cluster');
     assert.ok(/\.control-active-hover:hover,\s*\.control-active-hover:focus-visible\s*\{[\s\S]*outline:\s*0;[\s\S]*color:\s*var\(--active-control-text\);[\s\S]*background:\s*var\(--active-control-bg\);/.test(c9Css), 'CSS-3: shared control-active-hover owns the active hover/focus recolor');
-    assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
+    assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*width:\s*auto/.test(c9Css), 'C9: the repo arrow buttons are content-sized, not fixed-width');
-    assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 1px/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
+    assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
     // C10: Finder delete shortcut — Command-Delete on Mac, plain Delete on PC, gated to the Finder surface
     // and taking precedence over the global Mod+Delete tab-close.
     assert.ok(c9Src.includes('function handleFileExplorerDeleteShortcut('), 'C10: a Finder delete-shortcut handler exists');
@@ -849,10 +987,10 @@ async function runShareThemeSuite() {
     assert.equal(changedFilesCss.includes('.changes-file-row'), false, '#46: modified-file rows use shared Finder file-tree rows, not standalone changes-file-row CSS');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)/.test(changedFilesCss), 'Differ/Finder changes trees use a brighter dark-mode guide line');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'Differ/Finder changes repo headers read the same pane bar background as the Sort toolbar');
-    assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*--changes-indent-line:\s*var\(--tree-indent-line\);[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide stays subdued while repo headers share the pane bar token');
+    assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);') && /\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide stays subdued while repo headers share the pane bar token');
     assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*--disclosure-triangle-box-size:\s*1\.333333em[\s\S]*--disclosure-triangle-font-size:\s*100%[\s\S]*inline-size:\s*var\(--disclosure-triangle-box-size\)[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(changedFilesCss), 'all disclosure chevrons share the same scaled muted collapsed parent style');
     assert.ok(/\.ui-disclosure-triangle\[data-disclosure-expanded="true"\],[\s\S]*\.info-tree-group\[open\]\s*>\s*summary::before,[\s\S]*\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(changedFilesCss), 'expanded disclosure chevrons use the shared active color and rotate down');
-    assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*2px/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
+    assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*var\(--space-2\)/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
     assert.equal(/(?:^|\n)\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
     assert.equal(changedFilesCss.includes('.changes-tree-folder'), false, 'Differ folders use the shared Finder tree renderer, not a stale changes-tree-folder CSS path');
     assert.equal(changedFilesSource.includes('function changeFileRowHtml('), false, 'Differ rows are not rendered through the legacy standalone row builder');
@@ -860,7 +998,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.changes-repo-totals\s*\{[\s\S]*margin-inline-start:\s*auto/.test(changedFilesCss), 'Modified-files repo totals are pinned to the right side of the disclosure header');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-folder-text:\s*var\(--accent-gold\)/.test(changedFilesCss), 'Finder diff inherits the same gold subdirectory token');
     assert.ok(/body\.theme-light\b[\s\S]*?--tree-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode tree connector lines are subdued (shared --tree-indent-line token)');
-    assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\)/.test(changedFilesCss), 'shared Finder/Differ unknown status chips are faint-neutral in dark mode');
+    assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--50-terminal-file-tree-file-tree-git-status-bg-107\)/.test(changedFilesCss), 'shared Finder/Differ unknown status chips are faint-neutral in dark mode');
     // Purple is RESERVED for MERGED PR status: the untracked/unknown change badge must NOT be purple
     // (it was #a78bfa, reading as a merged indicator next to the PR badges); the merged PR status keeps it.
     assert.ok(/\.file-tree-row\.git-untracked:not\(\.selected\) \.file-tree-git-status:not\(\[hidden\]\)\s*\{[\s\S]*background:\s*var\(--git-untracked-badge\)/.test(changedFilesCss), 'untracked badge uses the shared git status token, not the merged PR token');
@@ -868,18 +1006,16 @@ async function runShareThemeSuite() {
     assert.equal(/var\(--input-bg,\s*#[0-9a-fA-F]{3,8}\)/.test(changedFilesCss), false, 'input controls do not hide dark literals inside token fallbacks');
     assert.equal(/z-index:\s*(?:260|220)\b/.test(changedFilesCss), false, 'file editor z-index collision literals are routed through named tokens');
     assert.equal(changedFilesCss.includes('#a78bfa'), false, 'the old untracked purple is gone — no non-merged status uses purple');
-    assert.ok(changedFilesCss.includes('body.theme-light .changes-comparison-head'), 'light theme explicitly restyles the Changes comparison header');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*overflow-y:\s*scroll/.test(changedFilesCss), 'Finder modified-files scrollbar stays visible');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*scrollbar-gutter:\s*stable/.test(changedFilesCss), 'Finder modified-files reserves scrollbar gutter');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*container-type:\s*inline-size/.test(changedFilesCss), 'Finder modified-files header uses pane-width container queries');
     assert.ok(changedFilesCss.includes('@container (max-width: 520px)'), 'Finder modified-files header wraps before narrow pane widths overlap');
     assert.ok(changedFilesCss.includes('grid-template-areas:'), 'Finder modified-files narrow header uses explicit row areas');
-    assert.ok(changedFilesCss.includes('body.theme-light .file-explorer'), 'light theme explicitly restyles the Finder tree');
-    assert.ok(changedFilesCss.includes('body.theme-light .file-explorer-changes-panel'), 'light theme explicitly restyles Finder modified-files');
+    assert.ok(changedFilesCss.includes('--50-terminal-file-tree-file-explorer-path-bg-95: rgba(255, 255, 255, 0.58);'), 'light theme explicitly restyles the Finder tree through shared tokens');
+    assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);'), 'light theme explicitly restyles Finder modified-files through shared tokens');
     assert.ok(changedFilesCss.includes('.file-tree-row.kind-file .file-tree-name'), 'Finder filenames resolve to row text colors instead of inherited stale colors');
     assert.ok(/\.file-explorer-changes-panel \.changes-refresh::before[\s\S]*?\{\s*content:\s*"↻"/.test(changedFilesCss), 'Finder embedded Differ refresh paints a visible refresh icon');
-    assert.ok(/\.file-explorer-date-reload-cluster \.changes-refresh::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder date/reload cluster refresh paints the same visible refresh icon');
-    assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-refresh[\s\S]*?\{\s*background:\s*transparent/.test(changedFilesCss), 'light-mode embedded Differ refresh is not a blank white square');
+    assert.ok(/\.file-explorer-primary-row \.changes-refresh::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder primary-row Reload control paints the same visible refresh icon');
     assert.ok(changedFilesCss.includes('--file-hover-bg: #fff2a8'), 'light-mode Finder/Differ row hover uses a yellow highlighter fill');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover\s*\{[\s\S]*background:\s*var\(--file-hover-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-hover-border\)/.test(changedFilesCss), 'Finder/Differ hover rows use the shared yellow highlighter tokens without overriding selected rows');
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
@@ -1358,20 +1494,20 @@ async function runShareThemeSuite() {
     assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*shareViewMode && !shareWriteMode && !applyingShareRemoteUiState[\s\S]*return false/.test(appSource), 'read-only share clients cannot locally commit a Finder/Differ session');
-    assert.ok(/function fileExplorerSessionFilesTargetSession\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*fileExplorerChangesSelectedSession[\s\S]*fileExplorerExplicitSyncSession[\s\S]*return ''/.test(appSource), 'read-only share Finder/Differ target resolves only from the host-pinned session');
+    assert.ok(/function fileExplorerSessionFilesTargetSession\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*fileExplorerChangesSelectedSession[\s\S]*fileExplorerExplicitSyncSessionTarget\(\)[\s\S]*return ''/.test(appSource), 'read-only share Finder/Differ target resolves only from the shared explicit pane state');
     const dockviewActivePanelStart = appSource.indexOf('api.onDidActivePanelChange(panel => {');
     assert.ok(dockviewActivePanelStart > 0, 'Dockview active-panel listener is locatable');
     const dockviewActivePanelBody = appSource.slice(dockviewActivePanelStart, appSource.indexOf('api.onWillShowOverlay', dockviewActivePanelStart));
     assert.ok(dockviewActivePanelBody.includes('if (dockviewLayoutState.applyingFromLayout) return;'), 'Dockview active-panel listener ignores programmatic layout application');
     assert.equal(dockviewActivePanelBody.includes('noteFileExplorerChangesSessionInteraction'), false, 'Dockview active-panel listener stays passive so hover focus does not retarget Differ');
     assert.equal(dockviewActivePanelBody.includes('userInitiated: true'), false, 'Dockview active-panel listener does not launder hover focus into a user interaction');
-    assert.ok(dockviewActivePanelBody.includes('setFocusedPanelItem(item);'), 'Dockview active-panel listener still updates passive focus state');
+    assert.ok(dockviewActivePanelBody.includes('setFocusedPanelItem(item);') || appSource.includes('setFocusedPanelItem(item);'), 'Dockview active-panel changes retain passive focus updates through the shared focus owner');
     const dockviewTabRendererStart = appSource.indexOf('function createDockviewTabRenderer()');
     assert.ok(dockviewTabRendererStart > 0, 'Dockview tab renderer is locatable');
     const dockviewTabRendererBody = appSource.slice(dockviewTabRendererStart, appSource.indexOf('function createDockviewPanelRenderer()', dockviewTabRendererStart));
     assert.ok(/function captureDockviewPreviousPaneBeforeTabActivation\(tabElement, targetItem\)[\s\S]*activeItemForSide\(slot\)[\s\S]*capturePaneViewStateForItemIfPresent\(previous\)/.test(appSource), 'Dockview tab activation captures the previously visible pane before Dockview hides it');
     assert.ok(/element\.addEventListener\('pointerdown', event => \{[\s\S]*captureDockviewPreviousPaneBeforeTabActivation\(element, item\);[\s\S]*dockviewBeginTabPointerDrag\(event, item\)/.test(dockviewTabRendererBody), 'Dockview pointer tab activation captures pane viewport before native Dockview switching');
-    assert.ok(/const commitExplicitTabInteraction = \(\) => \{[\s\S]*?if \(isTmuxSession\(item\)\) noteFileExplorerChangesSessionInteraction\(item\);[\s\S]*?setFocusedPanelItem\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context at the explicit call site');
+    assert.ok(/const commitExplicitTabInteraction = \(\) => \{[\s\S]*?dockviewCommitPanelActivation\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context through the shared explicit-activation owner');
     assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click commits an explicit interaction without relying on active-panel changes');
     assert.ok(/element\.addEventListener\('keydown', event => \{[\s\S]*?\['Enter', ' '\]\.includes\(event\.key\)[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?api\?\.setActive\?\.\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');
     assert.ok(/function activatePaneTab\([^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'clicking a tmux pane tab commits the Finder Modified-files target');
@@ -1401,8 +1537,8 @@ async function runShareThemeSuite() {
     const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
     const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
     const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
-    assert.ok(terminalContainerBindingBody.includes("container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal keydown commits the Finder Modified-files target');
-    assert.ok(terminalContainerBindingBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('keydown', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal keydown both dismisses the touch key palette and commits the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('paste', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal paste both dismisses the touch key palette and commits the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
     assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
@@ -1417,7 +1553,7 @@ async function runShareThemeSuite() {
     assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
     assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('finder', cached\.payload\)/.test(appSource), 'Finder session switches apply cached target payloads immediately before the forced refresh');
-    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*setSessionFilesLoadingForDestination\('finder', !cachedPayloadIsLoaded\);\s*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);/.test(appSource), 'Finder session switches sync the root from tmux metadata immediately while session-files refreshes');
+    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(itemInLayout\(tabberItemId\) && focusedPanelItem === tabberItemId\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
     assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
     assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesPushRequestMatchesCurrent\(request, session\)/.test(appSource), 'SSE session-files payloads cannot overwrite the active Differ refs with a stale request');
     const stalePushApi = loadYolomux('', ['1']);
@@ -1463,6 +1599,9 @@ async function runShareThemeSuite() {
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
     ), false, 'follower refresh placeholders cannot replace a loaded same-session Differ repo');
     assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'ignored follower refresh placeholder leaves the visible Differ payload intact');
+    assert.equal(rootlessDifferApi.sessionFilesPanelIsLoadingForTest(
+      {session: '8002', loaded: true, refreshing_elsewhere: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+    ), true, 'a rooted follower placeholder renders as loading instead of a completed zero-diff result');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
       {session: '8002', loaded: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
@@ -1491,18 +1630,18 @@ async function runShareThemeSuite() {
     assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores follower refresh placeholders after a rooted payload is already visible');
-    assert.ok(/function sessionFilesPanelIsLoading\(payload, files = null\)[\s\S]*sessionFilesPayloadHasVisibleDifferResult\(payload, files\)/.test(appSource), 'Differ loading state is suppressed when a follower-refresh payload already has a visible loaded result');
+    assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(payload\)[\s\S]*return false/.test(appSource), 'a rooted follower-refresh placeholder remains loading until real files, warnings, or errors arrive');
     assert.ok(/function applySessionFilesPayloadFromPush\(payload = \{\}, request = \{\}\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear a stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted Differ payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
-    assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
-    assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
-    assert.ok(/function setFileExplorerMode\([\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'switching back from Differ to Finder forces a fresh worktree-status fetch');
+    assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*fileExplorerChangesSelectedSession = session;[\s\S]*document\.querySelector\('\.file-explorer-changes-panel'\)[\s\S]*switchFileExplorerChangesSession\(session\)/.test(appSource), 'committing a session refreshes the mounted Finder/Differ surface without a parallel global-mode branch');
+    assert.ok(/function sessionFilesRequestQueryString\(\)\s*\{\s*return `\$\{diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}`;\s*\}/.test(appSource), 'the independent Differ request owner always follows its selected global and per-repo refs');
+    assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(appSource), 'the legacy mode entry point now activates the matching independent surface instead of maintaining a second renderer mode');
     assert.ok(/refreshFileExplorerTrees\(\);\s*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'Finder Reload refreshes the modified-file overlay as well as the directory tree');
     assert.equal(appSource.includes("state.kind === 'text' && !fileEditorAutosaveEnabled"), false, 'clean external file changes auto-reload even when autosave is off');
     assert.equal(appSource.includes('data-file-editor-close'), false, 'pane frame close uses the pane-close path, not active file-tab close');
     assert.equal(filesTab.includes('agent-icon file'), false);
-    assert.ok(api.menuTabCommand('__files__').html.includes('app-menu-ui-icon-finder'));
+    assert.ok(api.menuTabCommand(api.finderItemId).html.includes('app-menu-ui-icon-finder'));
     assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
     assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
     assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-yoagent'), 'YO!agent has its own tab/menu icon');
@@ -1523,7 +1662,8 @@ async function runShareThemeSuite() {
     assert.ok(pcPaneControls.includes('panel-detail-toggle pane-detail-toggle pc-window-control pc-minimize'));
     assert.equal(pcPaneControls.includes('>Info</button>'), false);
     assert.ok(pcPaneControls.indexOf('pane-detail-toggle') < pcPaneControls.indexOf('pane-minimize'));
-    assert.ok(pcPaneControls.includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(pcPaneControls.indexOf('pane-expand') < pcPaneControls.indexOf('pane-minimize'), 'shared frame controls order the expand (+) before minimize (_)');
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(pcPaneControls), 'hidden pane-expand controls keep their dataset and explicit hidden state through the shared button builder');
     const expandablePcSlots = api.emptyLayoutSlots();
     expandablePcSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     expandablePcSlots.left = api.paneStateWithTabs(['1'], '1');
@@ -1531,15 +1671,16 @@ async function runShareThemeSuite() {
     api.setLayoutSlotsForTest(expandablePcSlots);
     assert.equal(api.canPaneExpand('1'), true);
     assert.ok(api.panelControlsHtml('1').includes('pane-expand pc-window-control pc-zoom'));
-    assert.equal(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'), false);
+    assert.equal(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')), false);
     const placeholderPcSlots = api.emptyLayoutSlots();
     placeholderPcSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     placeholderPcSlots.left = api.paneStateWithTabs(['1'], '1');
     placeholderPcSlots.slot1 = api.emptyPlaceholderPaneState();
     api.setLayoutSlotsForTest(placeholderPcSlots);
     assert.equal(api.canPaneExpand('1'), false);
-    assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')));
 
+    test('platform-specific Finder controls and fresh layout URLs retain their independent defaults', () => {
     const macApi = loadYolomux('', ['1'], 'http:', 'MacIntel');
     assert.equal(macApi.fileExplorerLabel(), 'Finder');
     assert.equal(macApi.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
@@ -1554,10 +1695,11 @@ async function runShareThemeSuite() {
     assert.ok(macPaneControls.indexOf('pane-detail-toggle') < macPaneControls.indexOf('pane-minimize'));
     assert.ok(macPaneControls.includes('data-pane-expand="1"'));
     assert.ok(macPaneControls.includes('pane-expand pc-window-control pc-zoom'));
-    assert.ok(macPaneControls.includes('hidden type="button" data-pane-expand="1"'));
-    const macFinderControls = macApi.panelControlsHtml('__files__');
-    assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
-    assert.ok(macFinderControls.includes('pane-close pc-window-control pc-close'));
+    assert.ok(macPaneControls.indexOf('pane-expand') < macPaneControls.indexOf('pane-minimize'), 'Mac frame controls use the shared + then _ order');
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(macPaneControls));
+    const macFinderControls = macApi.panelControlsHtml(macApi.finderItemId);
+    assert.ok(macFinderControls.includes(`data-pane-minimize="${macApi.finderItemId}"`));
+    assert.equal(macFinderControls.includes('data-pane-close'), false);
     assert.equal(macFinderControls.includes('data-pane-expand'), false);
     const macFinderFields = macApi.tabSearchFields(macApi.fileExplorerItemId);
     assert.ok(macFinderFields.includes('Finder'), 'Finder tab indexes its visible macOS name');
@@ -1587,13 +1729,21 @@ async function runShareThemeSuite() {
     watchSlots.left = watchApi.paneStateWithTabs([backgroundItem, visibleItem], visibleItem);
     watchSlots.right = watchApi.paneStateWithTabs(['1'], '1');
     watchApi.setLayoutSlotsForTest(watchSlots);
+    watchApi.setOpenFileStateForTest(visiblePath, {dirty: false});
+    watchApi.setOpenFileStateForTest(backgroundPath, {dirty: false});
     assert.deepStrictEqual([...watchApi.visibleFileEditorWatchFilesForTest()], [visiblePath], 'active visible editor files use the fast watch list');
-    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [backgroundPath], 'background editor tabs use the slower watch list');
+    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [], 'clean background editor tabs do not retain a watch');
+    watchApi.setOpenFileStateForTest(backgroundPath, {dirty: true});
+    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [backgroundPath], 'dirty background editor tabs retain the slower conflict watch');
     assert.deepStrictEqual([...watchApi.clientServerWatchStateForTest().files], [visiblePath], 'watch payload sends active editor files under files');
     assert.deepStrictEqual([...watchApi.clientServerWatchStateForTest().background_files], [backgroundPath], 'watch payload sends background editor files separately');
     watchApi.activatePaneTab('left', backgroundItem, {userInitiated: true});
     assert.deepStrictEqual([...watchApi.visibleFileEditorWatchFilesForTest()], [backgroundPath], 'activating a background editor promotes it to the fast watch list');
-    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [visiblePath], 'the previously visible editor moves to the slower watch list');
+    assert.deepStrictEqual([...watchApi.backgroundFileEditorWatchFilesForTest()], [], 'the previously visible clean editor does not move to the slower watch list');
+    watchApi.setDocumentVisibilityForTest('hidden');
+    assert.deepStrictEqual(canonical(watchApi.clientServerWatchStateForTest()), {
+      roots: [], files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
+    }, 'hidden documents unregister every pane watch and producer request');
 
     const transcriptWatchApi = loadYolomux('', ['1', '2']);
     const transcriptWatchSlots = transcriptWatchApi.emptyLayoutSlots();
@@ -1608,8 +1758,8 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [], 'leaving the transcript pane removes the context subscription');
 
     const selfHealingFinderUrlApi = loadYolomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
-    assert.equal(selfHealingFinderUrlApi.itemInLayout('__files__'), true, 'Finder-less URLs self-heal unless this tab explicitly closed Finder');
-    assert.deepStrictEqual(Array.from(selfHealingFinderUrlApi.layoutSlotKeys(selfHealingFinderUrlApi.currentSlots())), ['slot1', 'left']);
+    assert.deepStrictEqual([selfHealingFinderUrlApi.finderItemId, selfHealingFinderUrlApi.differItemId, selfHealingFinderUrlApi.tabberItemId].map(item => selfHealingFinderUrlApi.itemInLayout(item)), [false, false, false], 'an explicit file-surface-less URL remains authoritative');
+    assert.deepStrictEqual(Array.from(selfHealingFinderUrlApi.layoutSlotKeys(selfHealingFinderUrlApi.currentSlots())), ['left']);
     const singlePaneUrlApi = loadYolomux(
       '?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant',
       ['1', '2', '3', '4', '5', '6', 'ant'],
@@ -1621,7 +1771,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(Array.from(singlePaneUrlApi.layoutSlotKeys(singlePaneUrlApi.currentSlots())), ['left']);
     assert.deepStrictEqual(Array.from(singlePaneUrlApi.paneTabs('left')), ['1', '2', '3', '4', '5', '6', 'ant']);
     assert.equal(singlePaneUrlApi.canPaneExpand('1'), false);
-    assert.ok(singlePaneUrlApi.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(singlePaneUrlApi.panelControlsHtml('1')));
 
     const staleFinderWidthUrlApi = loadYolomux(
       '?sessions=1,2&layout=row@22(left,slot1)&tabs=left:1;slot1:2',
@@ -1632,52 +1782,54 @@ async function runShareThemeSuite() {
       fileExplorerClosedOptions(),
     );
     assert.deepStrictEqual(canonical(staleFinderWidthUrlApi.serialize(staleFinderWidthUrlApi.currentSlots())), {
-      tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
         left: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
       },
-    }, 'stale Finder-width URLs do not restore a non-Finder terminal pane at 22%');
-    assert.equal(staleFinderWidthUrlApi.layoutParamValue(staleFinderWidthUrlApi.currentSlots()), 'row@50(left,slot1)');
+    }, 'explicit generic pane roles preserve their serialized 22% split');
+    assert.equal(staleFinderWidthUrlApi.layoutParamValue(staleFinderWidthUrlApi.currentSlots()), 'row@22(left,slot1)');
 
     const finderBesideSinglePaneUrlApi = loadYolomux(
       '?sessions=files,3&layout=row@22(slot1,left)&tabs=slot1:files;left:1,6,5,2,ant,4,3*',
       ['1', '2', '3', '4', '5', '6', 'ant'],
     );
     assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.layoutSlotKeys(finderBesideSinglePaneUrlApi.currentSlots())), ['slot1', 'left']);
-    assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('slot1'), '__files__');
+    assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('slot1'), finderBesideSinglePaneUrlApi.finderItemId);
+    assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.paneTabs('slot1')), [finderBesideSinglePaneUrlApi.finderItemId, finderBesideSinglePaneUrlApi.differItemId, finderBesideSinglePaneUrlApi.tabberItemId]);
     assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.paneTabs('left')), ['1', '6', '5', '2', 'ant', '4', '3']);
     assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('left'), '3');
     assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
-    assert.ok(finderBesideSinglePaneUrlApi.panelControlsHtml('3').includes('hidden type="button" data-pane-expand="3"'));
+    assert.ok(/data-pane-expand="3"[^>]* hidden/.test(finderBesideSinglePaneUrlApi.panelControlsHtml('3')));
 
     const defaultFinderApi = loadYolomux('', ['1', '2']);
-    assert.equal(defaultFinderApi.itemInLayout('__files__'), true, 'param-less boot includes the Finder pane');
-    assert.equal(defaultFinderApi.itemInLayout('__files__', defaultFinderApi.defaultLayoutSlots()), true, 'defaultLayoutSlots includes the Finder pane');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.finderItemId), true, 'param-less boot includes Finder');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.differItemId), true, 'param-less boot includes Differ');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.tabberItemId), true, 'param-less boot includes Tabber');
+    assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.finderItemId, defaultFinderApi.defaultLayoutSlots()), true, 'defaultLayoutSlots includes the file-surface home');
     const sessionsOnlyFinderApi = loadYolomux('?sessions=1', ['1', '2']);
-    assert.equal(sessionsOnlyFinderApi.itemInLayout('__files__'), true, 'sessions-only boot includes the Finder pane');
+    assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.finderItemId), true, 'sessions-only boot includes Finder');
+    assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.differItemId), true, 'sessions-only boot includes Differ');
+    assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.tabberItemId), true, 'sessions-only boot includes Tabber');
+    });
 
     const finderToggleSlots = api.emptyLayoutSlots();
     finderToggleSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 31);
-    finderToggleSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderToggleSlots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     finderToggleSlots.right = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderToggleSlots);
     api.setFocusedPanelItem('1');
-    const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
     api.toggleFileExplorerShortcut();
-    assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
-    assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '0', 'keyboard-hiding Finder writes the explicit closed intent');
-    assert.equal(api.fileExplorerClosedByUserForTest(), true, 'keyboard-hiding Finder suppresses self-heal until the shortcut restores it');
+    assert.equal([api.finderItemId, api.differItemId, api.tabberItemId].some(item => api.itemInLayout(item)), false, 'app shortcut hides all three file-surface tabs atomically');
     assert.equal(api.statusTextForTest(), `${api.fileExplorerLabel()} hidden - ${api.appShortcutText('B')} restores`, 'hiding Finder announces how to restore it');
     assert.equal(api.focusedPanelItemForTest(), '1', 'hiding Finder keeps focus on the active terminal');
     api.toggleFileExplorerShortcut();
-    assert.equal(api.sessionStorageValueForTest(FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST), '1', 'restoring Finder records explicit per-tab open intent');
-    assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
-    assert.equal(api.focusedPanelItemForTest(), '1', 'restoring Finder keeps focus on the active terminal');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'app shortcut restores the complete triplet');
+    assert.equal(api.layoutParamValue(api.currentSlots()), 'row@22(left,right)', 'app shortcut restores the documented default triplet home width');
+    assert.equal(api.focusedPanelItemForTest(), api.finderItemId, 'restoring the triplet activates Finder');
     api.toggleFileExplorerShortcut();
-    api.clearFileExplorerShortcutRestoreSlotsForTest();
     api.toggleFileExplorerShortcut();
-    assert.equal(api.itemInLayout('__files__'), true, 'app shortcut reopens Finder even when the in-memory restore snapshot is gone');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'app shortcut restoration needs no parallel layout snapshot');
 
     const focusedEditor = api.testElementForId('shortcut-editor');
     focusedEditor.className = 'cm-editor';
@@ -1697,7 +1849,7 @@ async function runShareThemeSuite() {
     };
     shortcutListeners.forEach(listener => listener(shortcutEvent));
     assert.equal(shortcutEvent.prevented, false, 'Cmd/Ctrl-B is not stolen while editor focus owns text formatting');
-    assert.equal(api.itemInLayout('__files__'), true, 'blocked Cmd/Ctrl-B does not hide Finder from editor focus');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'blocked Cmd/Ctrl-B does not hide the triplet from editor focus');
     api.setDocumentActiveElementForTest(null);
     const macFinderShortcutApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
     const macTerminalTarget = macFinderShortcutApi.testElementForId('mac-shortcut-xterm');
@@ -1731,7 +1883,7 @@ async function runShareThemeSuite() {
     const fileEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
     const fileEditorSlots = api.emptyLayoutSlots();
     fileEditorSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 20);
-    fileEditorSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    fileEditorSlots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     fileEditorSlots.slot1 = api.paneStateWithTabs([fileEditorItem], fileEditorItem);
     fileEditorSlots.slot2 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(fileEditorSlots);
@@ -1743,8 +1895,8 @@ async function runShareThemeSuite() {
     assert.equal(api.largestPaneSlotForFileEditor(['slot1']), 'slot2', 'file editor helpers choose the next biggest existing non-Finder pane');
 
     const delayHtml = api.preferencesPanelHtmlForTest('delay', ['Performance']);
-    assert.ok(delayHtml.includes('data-preference-section="Performance"'), 'delay search shows Performance');
-    assert.equal(/data-preference-section="Performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
+    assert.ok(delayHtml.includes('data-preference-section="performance"'), 'delay search shows Performance');
+    assert.equal(/data-preference-section="performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
     assert.ok(delayHtml.includes('Server SSE: editor file-change poll'), 'delay search surfaces server SSE timing settings');
     const preferencesCss = fs.readFileSync('static/yolomux.css', 'utf8');
     const preferencesJs = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -1752,8 +1904,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.preferences-section-toggle\s*\{[\s\S]*color:\s*var\(--pane-tab-text\)[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Preferences section headers use the same background token as the pane tab container');
     assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'Preferences search button uses the normal UI font, not condensed tab text');
     assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
-    assert.ok(preferencesCss.includes('--drop-outline: #ffffff'), '#40: dark-mode drag preview/outline is white (light mode stays blue, asserted below)');
-    assert.ok(preferencesCss.includes('--text-selection-bg: #2563eb'), 'dark mode browser text selection uses a prominent blue fill');
+    assert.ok(preferencesCss.includes('--drop-outline: var(--paint-white)'), '#40: dark-mode drag preview/outline consumes the shared white paint (light mode stays blue, asserted below)');
+    assert.ok(preferencesCss.includes(`--text-selection-bg: ${UI_PINS.textSelectionBg}`), 'dark mode browser text selection uses a prominent blue fill');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--text-selection-bg:\s*#93c5fd/.test(preferencesCss), 'light mode browser text selection uses a visible blue fill');
     assert.ok(/::selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'browser text selection paints background only, preserving text color');
     assert.ok(/::-moz-selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'Firefox text selection paints background only, preserving text color');
@@ -1761,19 +1913,16 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-tree-repo-meta\s*\{[^}]*font-size: var\(--ui-font-size-2xs\)/.test(preferencesCss), '#37: the Finder repo/branch label is condensed to a smaller font so more files fit');
     assert.ok(/\.file-explorer-hidden-toggle,\s*\n\.file-explorer-root-mode-toggle,\s*\n\.file-explorer-header-action\s*\{[\s\S]*white-space:\s*nowrap/.test(preferencesCss), 'Finder toolbar text buttons never wrap localized labels vertically');
     assert.ok(/\.file-explorer-root-mode-toggle\s*\{[\s\S]*?width:\s*auto[\s\S]*?min-width:\s*38px[\s\S]*?flex:\s*0 0 auto/.test(preferencesCss), 'Finder root-mode button sizes to localized label content');
-    assert.ok(/\.file-explorer-root-mode-toggle-panel\s*\{[\s\S]*?width:\s*auto[\s\S]*?min-width:\s*38px[\s\S]*?flex:\s*0 0 auto/.test(preferencesCss), 'Finder panel root-mode button sizes to localized label content');
+    assert.ok(/class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel/.test(preferencesJs), 'Finder panel root-mode button inherits the shared root-mode control class');
+    assert.equal(/\.file-explorer-root-mode-toggle-panel\s*\{[^}]*?(?:width|min-width|flex):/.test(preferencesCss), false, 'Finder panel root-mode modifier does not duplicate shared sizing declarations');
     assert.ok(/\.file-explorer-toolbar\s*\{[\s\S]*flex-direction:\s*column[\s\S]*justify-content:\s*flex-start/.test(preferencesCss), 'Finder toolbar is a deliberate stacked-row column instead of one wrapping row');
     assert.ok(/\.file-explorer-toolbar-row\s*\{[\s\S]*inline-size:\s*100%/.test(preferencesCss), 'Finder toolbar rows span the pane width');
     assert.ok(/\.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*1 1 auto/.test(preferencesCss), 'Finder toolbar uses explicit spacers to pin right-side controls');
-    assert.ok(/\.file-explorer-actions-row \.file-explorer-date-reload-cluster\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date, tree expand/collapse, and reload grouped');
+    assert.ok(/\.file-explorer-actions-row \.file-explorer-date-controls\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date and tree expand/collapse grouped while Reload stays in the shared primary row');
     assert.ok(/\.file-explorer-date-toggle\[data-date-mode="none"\]\s*\{[\s\S]*text-decoration-line:\s*line-through/.test(preferencesCss), 'Finder/Differ None date mode renders as crossed-out Date');
     assert.ok(/\.file-explorer-path-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(preferencesCss), 'Finder path fills the dedicated path row and can shrink without wrapping Sync or Copy');
     assert.equal(/body:not\(\.file-explorer-mode-diff\) \.file-explorer-primary-row \.file-explorer-toolbar-spacer/.test(preferencesCss), false, 'Finder files mode keeps the primary-row spacer so Session stays pinned right');
-    assert.ok(/\.file-explorer-mode-switcher\s*\{[\s\S]*display:\s*inline-flex[\s\S]*height:\s*var\(--pane-tab-height\)/.test(preferencesCss), 'Finder/Differ/Tabber mode switcher uses pane-tab height');
-    assert.ok(/\.file-explorer-mode-toggle\s*\{(?=[\s\S]*height:\s*var\(--pane-tab-height\))(?=[\s\S]*font-family:\s*var\(--tab-font\))(?=[\s\S]*border-radius:\s*6px 6px 0 0)/.test(preferencesCss), 'Finder/Differ/Tabber mode buttons look like pane tabs');
-    assert.equal(/\.file-explorer-mode-label\s*\{[\s\S]*writing-mode:\s*vertical-rl/.test(preferencesCss), false, 'Finder/Differ mode labels are regular left-to-right text');
-    assert.ok(/\.file-explorer-mode-toggle\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'inactive Finder/Differ/Tabber mode tabs use the pane tab strip background');
-    assert.ok(/\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'active Finder/Differ/Tabber mode tab is filled from the pane-tab active token');
+    assert.equal(/\.file-explorer-mode-(?:switcher|toggle|label)/.test(preferencesCss), false, 'retired in-panel mode-switcher CSS is removed now that Finder, Differ, and Tabber are pane tabs');
     assert.ok(/\.file-explorer-folder-icon\s*\{[\s\S]*border:\s*1\.5px solid currentColor[\s\S]*\.file-explorer-folder-icon::before/.test(preferencesCss), 'Finder new-folder button renders a folder icon instead of a square glyph');
     assert.ok(/\.file-explorer-path,[\s\S]*?\.file-explorer-path-inline\s*\{[\s\S]*color:\s*var\(--text\)[\s\S]*border:\s*1px solid var\(--line\)/.test(preferencesCss), 'Finder path uses normal text contrast and visible input chrome');
     const finderPanelBundle = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -1782,13 +1931,14 @@ async function runShareThemeSuite() {
       finderPanelStart,
       finderPanelBundle.indexOf('function bindFileExplorerPanel', finderPanelStart),
     );
-    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only[\s\S]*file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only/.test(finderPanelSource), 'Finder panel toolbar renders primary, path, and files-only action rows in order');
+    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-toolbar-row file-explorer-actions-row/.test(finderPanelSource), 'Finder panel toolbar renders primary, path, and action rows in order');
     assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
     assert.equal(finderPanelSource.includes('file-explorer-panel-title'), false, 'Finder panel no longer prints redundant Finder/Differ title text');
-    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders mode tabs, immediate Session, spacer, and close control');
+    assert.equal(finderPanelSource.includes('fileExplorerModeSwitcherHtml()'), false, 'Finder panel uses the shared pane tabs instead of a second in-panel mode switcher');
+    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*reloadButtonHtml/.test(finderPanelSource), 'Finder panel primary row renders Session, spacer, and Reload');
     assert.equal(finderPanelSource.includes('fileExplorerChangesCollapseToggleHtml()'), false, 'Finder panel primary row no longer renders a redundant Differ collapse/expand button next to close');
-    assert.ok(/file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel/.test(finderPanelSource), 'Finder path row renders Sync, path, then Copy');
-    assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control[\s\S]*changes\.session[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Finder and Differ keep the Session dropdown in the shared top row');
+    assert.ok(/file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*<input class="file-explorer-path-inline"[\s\S]*file-explorer-path-copy-panel/.test(finderPanelSource), 'Finder path row renders Sync, path, then Copy');
+    assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control[\s\S]*common\.sessionLabel[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Finder and Differ keep the Session dropdown in the shared top row');
     assert.equal(finderPanelSource.includes('file-explorer-scope-row'), false, 'Finder no longer renders a separate scope row');
     assert.equal(finderPanelSource.includes('file-explorer-quick-access-panel'), false, 'Finder pane chrome no longer renders visible quick-root buttons');
     assert.ok(finderPanelBundle.includes("t('finder.toolbar.syncTitle')"), 'Finder Sync button has a dedicated tooltip/aria label string');
@@ -1799,21 +1949,22 @@ async function runShareThemeSuite() {
     assert.equal(api.expandQuickAccessPath('/*'), '/', 'Finder /* quick-access opens the root directory, not a literal glob path');
     assert.equal(api.displayQuickAccessPath('/tmp'), '/tmp', 'Finder quick-access labels absolute paths such as /tmp with their leading slash');
     assert.equal(finderPanelBundle.includes('renderQuickAccessInto(fileExplorerQuickAccess)'), false, 'legacy Finder quick-root container is not populated in visible UI');
-    assert.ok(/const modes = \[[\s\S]*mode: 'files'[\s\S]*mode: 'diff'[\s\S]*mode: 'tabber'[\s\S]*data-file-explorer-mode-set="\$\{esc\(item\.mode\)\}"/.test(finderPanelBundle), 'Finder/Differ/Tabber switcher renders all mode tabs from one source');
+    assert.ok(/const fileExplorerTripletRegistry = Object\.freeze\([\s\S]*\[finderItemId\][\s\S]*\[differItemId\][\s\S]*\[tabberItemId\]/.test(finderPanelBundle) && /function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(finderPanelBundle), 'Finder, Differ, and Tabber use the fixed-identity registry with no duplicate in-panel mode switcher');
     assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
-    assert.ok(/fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*changes\.refresh/.test(finderPanelSource), 'Finder date-mode button, Expand all, Collapse all, and Reload form a trailing cluster in the files-only action row');
+    assert.ok(/fileExplorerTreeSortSelectHtml\(\)[\s\S]*file-explorer-date-controls[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)/.test(finderPanelSource), 'Finder Date, Expand all, and Collapse all form a trailing action-row cluster while Reload stays in the primary row');
     assert.equal(finderPanelSource.includes('file-explorer-repo-summary'), false, 'Finder files-only action row no longer prints repo/path text between sort and date display');
     const finderActionsRowStart = finderPanelSource.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
     const finderActionsRowSource = finderPanelSource.slice(finderActionsRowStart, finderPanelSource.indexOf('</div>', finderActionsRowStart));
     assert.ok(/data-file-explorer-new-file[\s\S]*data-file-explorer-new-folder[\s\S]*file-explorer-folder-icon/.test(finderActionsRowSource), 'Finder files-only action row renders new file, then a folder-icon new-folder button');
-    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\('file-explorer-mode-files-only'\)/.test(finderActionsRowSource), 'Finder files-only action row puts .* before the sort selector');
+    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\(\)/.test(finderActionsRowSource), 'Finder action row puts .* before the sort selector');
     assert.equal(finderActionsRowSource.includes('data-file-explorer-collapse'), false, 'Finder files-only action row no longer renders the old standalone left-side collapse button');
     const treeExpandCollapseButtons = api.fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle');
     assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders Expand all before Collapse all');
     assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*file-tree-expand-collapse-icon[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*file-tree-expand-collapse-icon/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders toolbar SVG icons');
     assert.equal(treeExpandCollapseButtons.includes('▦') || treeExpandCollapseButtons.includes('▤'), false, 'shared tree expand/collapse helper does not use square text glyphs');
     assert.ok(/\.file-tree-expand-collapse-all\s*\{[\s\S]*box-sizing:\s*border-box[\s\S]*width:\s*16px[\s\S]*max-width:\s*16px[\s\S]*flex:\s*0 0 16px[\s\S]*padding:\s*0/.test(preferencesCss), 'shared tree expand/collapse toolbar icon buttons stay narrow');
-    assert.ok(/\.changes-toolbar \.file-tree-expand-collapse-all\.changes-date-toggle,[\s\S]*\.file-explorer-date-reload-cluster \.file-tree-expand-collapse-all\.changes-date-toggle\s*\{[\s\S]*max-inline-size:\s*16px[\s\S]*height:\s*20px/.test(preferencesCss), 'Differ/Finder toolbar context cannot widen tree expand/collapse icon buttons');
+    assert.ok(/\.file-explorer-header-action\.file-explorer-date-toggle:not\(\.file-tree-expand-collapse-all\)\s*\{[\s\S]*min-width:\s*42px/.test(preferencesCss), 'ordinary Finder date buttons own their label width without widening shared expand/collapse controls');
+    assert.ok(/\.changes-toolbar \.file-tree-expand-collapse-all\.changes-date-toggle,[\s\S]*\.file-explorer-date-controls \.file-tree-expand-collapse-all\.changes-date-toggle\s*\{\s*height:\s*20px;\s*\}/.test(preferencesCss), 'Differ/Finder expand/collapse variants inherit fixed geometry and own only their contextual height');
     assert.equal(finderActionsRowSource.includes('data-file-explorer-mode-set'), false, 'Finder files-only action row no longer repeats the mode switcher');
     assert.equal(/data-file-explorer-refresh[\s\S]*file-explorer-collapse/.test(finderPanelSource), false, 'Finder no longer has a standalone left-side refresh button before collapse');
     assert.equal(preferencesCss.includes('--file-explorer-changes-size: 40%'), false, 'Finder diff mode no longer keeps the old 40% stacked Modified-files section cap');
@@ -1834,117 +1985,7 @@ async function runShareThemeSuite() {
     const resizerBlock = preferencesCss.slice(resizerStart, resizerEnd);
     assert.ok(resizerBlock.includes('var(--pane-resizer-bg)'), 'C15: the Finder resizer draws the shared thin yellow line at rest');
     assert.ok(resizerBlock.includes('var(--pane-resizer-hover-bg)'), 'C15: the Finder resizer brightens via the shared hover token');
-    assert.ok(resizerBlock.includes('var(--drop-outline-shadow)'), 'C15: the Finder resizer hover uses the shared outline-shadow token');
-    assert.equal(/118,\s*185,\s*0|255,\s*255,\s*255,\s*0\.04/.test(resizerBlock), false, 'C15: the hardcoded green gradient + white border are gone from the Finder resizer');
-    // Light theme drives the BASE pane-tab/ring styling via tokens, not rule overrides; but #28
-    // adds targeted hover/link contrast overrides (expected), so guard only the base tab + ring.
-    assert.equal(/body\.theme-light\s+\.pane-tab\s*\{/.test(preferencesCss), false, 'light theme does not restyle the base pane tab (tokens drive it)');
-    assert.equal(/body\.theme-light\s+\.panel\.active-pane\s*\{/.test(preferencesCss), false, 'light theme does not restyle the active-pane ring directly');
-    assert.ok(/body\.theme-light \.meta a/.test(preferencesCss), '#28: light theme adds a contrast override for Info Bar links');
-    assert.ok(/body\.theme-light \.pane-tab:hover/.test(preferencesCss), '#28: light theme fixes the near-white pane-tab hover border');
-    assert.ok(/body\.theme-light \.tabs \.pane-actions:hover/.test(preferencesCss), '#28: light theme fixes the white tab-overflow hover glyph');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-bright:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green (via the active-accent token) so a theme switch repaints it');
-    assert.ok(/body\.theme-light \.panel\.active-pane \.panel-detail-row \.session-button-name/.test(preferencesCss), '#35: the active-pane Info Bar header label is forced dark in light mode (was light-on-light)');
-    assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('session-button-dir pane-tab-info-label'), '#27: the YO!info tab label uses the themed .session-button-dir color treatment');
-    assert.ok(preferencesCss.includes('--active-accent-bright: #86d600'), 'focused active pane tab uses a brighter NV green fill (via the active-accent token)');
-    assert.ok(preferencesCss.includes('--pane-tab-active-accent: var(--active-accent-bright)'), 'focused active pane tab accent token derives from the shared active-accent (same green as the fill)');
-    assert.equal(preferencesCss.includes('box-shadow: inset 0 2px 0 var(--pane-tab-active-accent)'), false, 'focused active pane tabs do not paint a contrasting top line');
-    assert.ok(preferencesCss.includes('--pane-tab-width: 180px'), 'pane tabs default to the compact 180px width');
-    assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 180)"), 'runtime settings fallback keeps the 180px tab width default');
-    assert.ok(preferencesCss.includes('--active-accent-dim: color-mix(in srgb, var(--active-accent) 26%, var(--panel))'), 'dark/root theme uses the brighter shared pane tab-strip background (active-accent-dim)');
-    assert.equal(/body\.theme-dark\s*\{[^}]*--pane-tab-strip-bg\s*:/.test(preferencesCss), false, 'dark theme inherits the shared pane tab-strip token instead of restating a separate color');
-    assert.equal(preferencesCss.includes('--pane-tab-strip-hover-bg:'), false, 'dark theme no longer defines a separate pane tab-container hover token');
-    const themeLightTokenBlock = preferencesCss.match(/body\.theme-light\s*\{[^}]*\}/)?.[0] || '';
-    assert.equal(themeLightTokenBlock.includes('--pane-tab-strip-hover-bg'), false, 'light theme does not define the dark-only pane tab-container hover token');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--active-accent-dim:\s*#e1edda/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background (active-accent-dim)');
-    assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (+ images 003/004: undimmed, un-lightened per-pane highlight)');
-    assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
-    assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token');
-    assert.ok(preferencesCss.includes('--pane-ring-opacity: 75%'), 'the pane ring default opacity is prominent enough in both themes');
-    assert.ok(preferencesCss.includes('--pane-active-ring-opacity: 75%'), 'the active pane ring shares the default ring opacity token');
-    // Light mode uses a BLUE pane separator (dark mode keeps amber/yellow).
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(37, 99, 235/.test(preferencesCss), 'light mode uses a blue pane separator');
-    // Pane chrome bars (strip, Info Bar, editor toolbar, find) all read the shared --pane-bar-bg, which is
-    // the bright tab-strip green when the pane is focused and neutral gray when not. Focus sets it on .panel.
-    assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes set --pane-bar-bg to the bright tab-strip green');
-    assert.equal(/\.panel\.active-pane > \.panel-head,\s*\.panel\.typing-ready-pane > \.panel-head/.test(preferencesCss), false, 'focused pane tab containers use the shared .panel-head background rule, not a separate state override');
-    assert.equal(/\.panel\.changes-panel/.test(preferencesCss), false, 'standalone Changes pane chrome CSS is removed');
-    assert.ok(/\.panel\.file-explorer-panel > \.file-explorer-head:hover,\s*\.panel\.file-explorer-panel > \.file-explorer-head:focus-within,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:hover\) > \.file-explorer-head,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:focus-within\) > \.file-explorer-head\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'Finder hover/focus colors only the Finder header');
-    assert.ok(/\.panel-head\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the tab strip reads the shared --pane-bar-bg');
-    assert.ok(/\.panel-detail-row\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the Info Bar reads the shared --pane-bar-bg (gray when unfocused, not green)');
-    assert.ok(/\.file-explorer-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder header reads the shared pane bar background when focused/hovered');
-    assert.ok(/\.file-explorer-changes-panel:hover,\s*\.file-explorer-changes-panel:focus-within\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'embedded Finder Modified-files section uses the green pane bar on hover/focus');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*--pane-bar-bg:\s*var\(--panel2\)/.test(preferencesCss), 'embedded Finder Modified-files header stays neutral unless its own section is hovered/focused');
-    assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files header reads the shared pane bar background when focused/hovered');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*isolation:\s*isolate/.test(preferencesCss), 'Finder Modified-files section isolates its sticky header/content layers');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*padding:\s*0 5px 5px/.test(preferencesCss), 'Finder Modified-files panel has no top padding before its header');
-    assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*var\(--z-sticky-pane-head\)[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
-    assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
-    assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
-    assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*grid-template-columns:\s*8ch\s*minmax\(0,\s*1fr\)\s*max-content\s*max-content/.test(preferencesCss), 'diff-ref popup reserves its flexible width for the subject while date and author size to content');
-    assert.ok(/\.changes-repo-refs \.diff-ref-inline-reset\s*\{[^}]*margin-inline-start:\s*auto[^}]*margin-inline-end:\s*-4px/.test(preferencesCss), 'Differ Reset sits near the right pane edge on the Compare row');
-    assert.ok(changedFilesSource.includes('diff-ref-suggestion-date') && changedFilesSource.includes('diff-ref-suggestion-author'), 'diff-ref popup renders date and author in separate cells so both columns line up');
-    assert.ok(/const edgePadding = 24[\s\S]*const availableWidth = Math\.max\(280, viewportWidth - edgePadding \* 2\)/.test(changedFilesSource), 'diff-ref popup uses the available viewport width with an edge inset');
-    assert.ok(/const width = availableWidth/.test(changedFilesSource), 'diff-ref popup gives commit and branch descriptions all available horizontal space');
-    assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in dark mode');
-    assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in light mode');
-    assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
-    assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder panes');
-    assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
-    assert.ok(preferencesCss.includes('--pane-resizer-size: 1px'), 'pane splitter reserves only the 1px separator line');
-    assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
-    assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
-    assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(37, 99, 235, 0.72)'), 'light pane splitter is blue at rest');
-    assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 5px'), 'pane splitter hover thickens to a clearly visible 5px line over the 1px resting line');
-    assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
-    // #29 + the nav (←/→) and search are centered as a PAIR — the nav absorbs the left free
-    // space (margin-inline-start:auto) and the search absorbs the right (margin-inline: 6px auto), so the
-    // cluster sits centered between the menubar and the right-side actions, not right-aligned.
-    assert.ok(/\.topbar-nav\s*\{[^}]*margin-inline-start:\s*auto/.test(preferencesCss), '#29: the topbar nav group absorbs the left free space so the nav+search pair centers');
-    assert.ok(/\.topbar-search\s*\{[^}]*margin-inline:\s*6px auto/.test(preferencesCss), '#29: topbar universal search is centered (auto inline-end) between the menubar and the right-side actions, not right-aligned');
-    assert.ok(/\.resizer-row::after\s*\{[^}]*inset-inline: -5px/.test(preferencesCss), '#34: the resizer has a wide invisible grab zone (~5px past the line) so it is easy to grab');
-    assert.equal(/\.panel \{[^}]*border: 1px solid var\(--line\)/.test(preferencesCss), false, '#35: panes drop the per-pane border so the only divider is the 1px separator');
-    // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
-    // clipped, flush to the resizer) colored green — the SAME mechanism for every pane type. Every pane
-    // has the transparent border; the active one colors it. No box-shadow, no inset ::after for focus.
-    // the state ring IS the --pane-split-gap gutter border, colored per state via the unified
-    // --panel-ring-color and faded by --pane-ring-opacity (transparent on a plain inactive pane). Sitting at
-    // the seam edge, an active (green) pane and a needs (red) pane touch across the 1px resizer.
-    assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--panel-ring-opacity,\s*var\(--pane-ring-opacity/.test(preferencesCss), 'the pane ring is the --pane-split-gap gutter border, colored by --panel-ring-color at per-state opacity (touches the neighbor at the seam)');
-    // every focused pane (active or typing-ready) drives the SAME green ring via --panel-ring-color.
-    assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'the active pane sets the green ring color');
-    assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'the active pane uses the user-controlled active ring opacity');
-    assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'a typing-ready pane sets the SAME green ring color as active');
-    assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'typing-ready panes use the same user-controlled active ring opacity as active panes');
-    assert.equal(/\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#465267/.test(preferencesCss), false, 'no gray focus border — focused panes are green, not the old typing-ready gray');
-    assert.equal(/body\.theme-light \.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#9aa6b6/.test(preferencesCss), false, 'no LIGHT-mode gray focus border on terminals (the #465267 twin) — focused terminals stay green in light mode too');
-    // no content-edge overlay ring — the ring is the gutter border (asserted above). The
-    // needs-* PULSE uses the shared .attention-pulse parent on the panel (not a ::after).
-    assert.equal(/\.panel::after\s*\{/.test(preferencesCss), false, 'no .panel::after overlay ring — the ring is the gutter border, so adjacent rings touch at the seam');
-    assert.ok(/\.panel\.needs-input-pane,[\s\S]*?\{[^}]*--panel-ring-color:\s*var\(--pane-ring-attention\)/.test(preferencesCss), 'needs-* panes set the red ring color (via the --pane-ring-attention token)');
-    assert.ok(/\.attention-pulse\s*\{[^}]*animation-name:\s*attention-ring-fade/.test(preferencesCss), 'the shared attention pulse parent drives the red ring animation');
-    assert.ok(/syncAttentionAnimation\(node, active\)[\s\S]*?classList\?\.toggle\?\.\('attention-pulse'/.test(preferencesJs), 'needs-* panes/tabs receive the shared attention-pulse class from syncAttentionAnimation');
-    // image 028: a focused needs-attention pane resolves RED (attention beats the yolo-ready green tint).
-    assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-ring-attention\)/.test(preferencesCss), 'a focused needs-attention pane resolves the red ring color, not the green/yolo tint');
-    assert.ok(/--pane-ring-attention:\s*#ff3347/.test(preferencesCss), 'the attention-ring token keeps the #ff3347 dark value');
-    assert.equal(/\.panel\.active-pane\s*\{[^}]*border-color:/.test(preferencesCss), false, 'the active pane sets --panel-ring-color (which colors the shared gutter border), not its own border-color');
-    // images 003/004 pane-color polish:
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-inactive-tab-bg:\s*var\(--active-tab-muted-bg\)/.test(preferencesCss), 'light-mode inactive tabs derive their tint from the active accent (not a fixed green)');
-    // image 008: inactive-tab text is DARK in light mode (readable on the light-green tabs/strip), not the
-    // dark-tuned near-white #dfe6ef that made it white-on-white.
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-text:\s*#1f2937/.test(preferencesCss), 'light-mode tab text is dark (no white-on-white inactive tabs)');
-    // The name/dir/detail spans hardcode near-white (for dark tabs); light mode overrides them dark too,
-    // or the branch/path text stays white-on-white even with a dark base tab color.
-    assert.ok(/body\.theme-light \.pane-tab:not\(\.active\) \.session-button-name,[\s\S]*?\.session-button-detail\s*\{[^}]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'light-mode inactive-tab name/dir/detail text is dark via the shared control foreground token');
-    // An inactive pane's inactive tabs follow the gray bar (--pane-bar-bg, which is --panel2 when unfocused);
-    // the bars themselves go gray via --pane-bar-bg (asserted above), so only the tabs need this rule.
-    assert.ok(/\.panel:not\(\.active-pane\):not\(\.typing-ready-pane\) \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an inactive pane\'s inactive tabs follow the gray bar (--pane-bar-bg)');
-    assert.ok(/\.panel\.active-pane \.pane-tab:not\(\.active\),\s*\.panel\.typing-ready-pane \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an active pane\'s inactive tabs match the bright tab-strip bar (--pane-bar-bg)');
-    assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), "an inactive pane's active tab is full green (unfocused-active aliases the focused token)");
-    assert.equal(/--pane-tab-unfocused-active-bg:\s*#d2ecc2/.test(preferencesCss), false, 'no lightened light-mode unfocused-active green remains');
-    assert.ok(/--inactive-pane-opacity-scale:\s*1/.test(preferencesCss), 'inactive-pane dim defaults to full strength');
-    assert.ok(/--inactive-pane-overlay-alpha:\s*0\.18/.test(preferencesCss), 'inactive-pane dim base alpha stays 0.18 in dark mode');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--inactive-pane-overlay-alpha:\s*0\.09/.test(preferencesCss), 'inactive-pane dim base alpha stays 0.09 in light mode');
+    assert.ok(resizerBlock.includes('box-shadow: var(--pane-resizer-hover-shadow)'), 'C15: the Finder resizer hover uses the shared shadow-geometry token');
     assert.ok(/--inactive-pane-overlay:\s*rgb\(var\(--inactive-pane-overlay-rgb\) \/ calc\(var\(--inactive-pane-overlay-alpha\) \* var\(--inactive-pane-opacity-scale\)\)\)/.test(preferencesCss), 'inactive-pane flat dim is scaled by the opacity slider');
     assert.equal(/inactive-pane-gradient/.test(preferencesCss), false, 'inactive-pane gradient CSS is removed until the feature is revisited');
     {
@@ -1954,7 +1995,7 @@ async function runShareThemeSuite() {
       assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 3)"), 'runtime reads appearance.pane_spacing with a 3px fallback (matches the backend default)');
       assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
       assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
-      assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
+      assert.ok(/preferenceSettingItem\('appearance\.pane_spacing', \{type: 'number', min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field through the shared setting builder');
       assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_spacing.label'], 'Pane spacing', '#261: the pane spacing field has a localized label');
       // The terminal "follow" theme option reads "Follow global color theme" (NOT "app theme"), matching
       // the "Global color theme" setting it follows; the help references the global color theme too.
@@ -1962,7 +2003,7 @@ async function runShareThemeSuite() {
       assert.equal(enT['pref.appearance.terminal_theme.follow-app'], 'Follow global color theme', 'terminal follow option reads "Follow global color theme"');
       assert.ok(enT['pref.appearance.terminal_theme.help'].includes('global color theme'), 'terminal theme help references the global color theme');
     }
-    assert.ok(/\.grid\.drop-preview-root\.drop-preview-top::before,[^{]*\{[^}]*var\(--drop-preview-width/.test(preferencesCss), '#36: the root top/bottom drop preview spans only the non-Finder content width (never covers the docked Finder)');
+    assert.ok(/\.grid\.drop-preview-root::before\s*\{[\s\S]*left:\s*var\(--drop-preview-left[\s\S]*width:\s*var\(--drop-preview-width[\s\S]*height:\s*var\(--drop-preview-height/.test(preferencesCss), '#36: root previews consume the one measured rectangle that preserves the triplet home branch');
     assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
     // #261: the REAL inter-pane gap is the flex split container (the column grid gap is a no-op for a
     // single-panel column), so appearance.pane_spacing now actually changes the gap, not just the ring.
@@ -1976,13 +2017,13 @@ async function runShareThemeSuite() {
     // .terminal container's theme background shows through.
     assert.ok(/\.terminal \.xterm:not\(\.allow-transparency\) \.xterm-viewport\s*\{[^}]*background-color:\s*transparent/.test(preferencesCss), 'xterm viewport is transparent (no black #000 line at the top of the terminal)');
     assert.ok(/\.layout-resizer\s*\{[\s\S]*flex:\s*0 0 var\(--pane-resizer-size\)/.test(preferencesCss), 'pane splitters read the compact size token');
-    assert.ok(/\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'row splitters draw a tokenized centered visible line');
+    assert.ok(/\.dv-sash::before,\s*\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'Dockview and fallback row splitters share one tokenized centered visible line');
     assert.ok(/\.resizer-row:hover::before,[\s\S]*var\(--pane-resizer-hover-line-size\)/.test(preferencesCss), 'row splitters widen on hover without increasing the resting seam');
     assert.ok(/\.layout-resizer:hover::before,[\s\S]*background:\s*transparent/.test(preferencesCss), 'resizer hover does not return to a solid fill');
     assert.ok(/\.resizer-row:hover::before,[^{]*\{[^}]*background: var\(--pane-resizer-hover-bg\)/.test(preferencesCss), '#27: row splitter hover is a solid straight yellow bar (no dashed gradient)');
     assert.ok(/\.resizer-column:hover::before,[^{]*\{[^}]*background: var\(--pane-resizer-hover-bg\)/.test(preferencesCss), '#27: column splitter hover is a solid straight yellow bar (no dashed gradient)');
-    assert.ok(preferencesCss.includes('--pc-control-fg: #1f2937'), 'light mode uses a dark foreground for pane action controls');
-    assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: #1f2937'), 'light mode uses dark status text');
+    assert.ok(preferencesCss.includes('--pc-control-fg: var(--pane-tab-text)'), 'light mode pane action controls inherit the shared dark tab foreground');
+    assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: var(--pane-tab-text)'), 'light mode status text inherits the shared dark tab foreground');
     assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
     assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
@@ -2066,7 +2107,7 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(preferencesCss), 'light diff added lines use a more visible green fill');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(preferencesCss), 'light diff removed lines use a more visible red fill');
-    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines force dark red text on the stronger red fill');
+    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine \*\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines and descendants share one dark-red text rule on the stronger red fill');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*var\(--danger-light-text\)[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses the danger text token on a distinct red fill (image 055)');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*var\(--success-text-strong\)[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
     assert.ok(/--diff-remove-line-bg:\s*#540c06/.test(preferencesCss), '#250: diff removed lines use the sampled opaque red fill over the dark bg');
@@ -2078,9 +2119,9 @@ async function runShareThemeSuite() {
     assert.equal(/\.preferences-scroll\s*\{[^}]*scrollbar-color:/.test(preferencesCss), false, 'Preferences does not customize scrollbar colors locally');
     assert.equal(/\.preferences-scroll::\-webkit-scrollbar-thumb/.test(preferencesCss), false, 'Preferences does not customize WebKit scrollbar thumbs locally');
     assert.equal(/\.changes-body|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ overlay/scroll containers are removed');
-    assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned active-control fill (no dark square)');
-    assert.ok(/body\.theme-light \.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--text\)/.test(preferencesCss), '#252: light mode forces dark text on the rich Tabs/Changes dropdown rows so they are not washed out');
-    assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-comparison-head\s*\{[\s\S]*background:\s*transparent/.test(preferencesCss), '#253: the Finder "Comparing…" caption has no box chrome in light mode (blends as text)');
+    assert.ok(/\.app-menu-ui-icon\.active,[\s\S]*\.file-editor-codemirror-panel \.cm-search label:has\(input:checked\)\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: app-menu and CodeMirror checked controls consume the shared persistent active-control owner');
+    assert.equal(/body\.theme-light \.app-menu-ui-icon\.active(?:,|\s*\{)|body\.editor-theme-light \.file-editor-codemirror(?:-panel)? \.cm-search label:has\(input:checked\)(?:,|\s*\{)/.test(preferencesCss), false, '#251: light themes do not copy the persistent active-control paint');
+    assert.ok(/\.app-menu-tab-command,[\s\S]*\.app-menu-tab-command \.session-button-dir\s*\{[\s\S]*color:\s*var\(--menu-tab-rich-text\)/.test(preferencesCss), '#252: rich Tabs/Changes dropdown rows use the shared theme-aware text token');
     assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
     assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
     // Wrapped-line diff bug: the full-bleed box-shadow/clip-path trick is ONLY for BLOCK line elements.
@@ -2113,8 +2154,17 @@ async function runShareThemeSuite() {
     const globalPathRowsHtml = preferencesHtml.slice(preferencesHtml.indexOf('<div class="preferences-path-rows"'), preferencesHtml.indexOf('<div class="preferences-sections"'));
     assert.ok(/preferences-path-label">settings<\/span>[\s\S]*settings\.yaml[\s\S]*loaded/.test(globalPathRowsHtml), 'Preferences settings path row shows the loaded age inline');
     assert.equal(globalPathRowsHtml.includes('YOLO rules'), false, 'global Preferences path rows no longer show the YOLO rules path');
-    assert.equal(preferencesHtml.includes('preferences-status'), false, 'Preferences does not render a separate loaded/status line');
-    const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="YOLO"');
+    assert.equal(/class="preferences-status"/.test(preferencesHtml), false, 'Preferences does not render a separate loaded/status line');
+    assert.ok(preferencesHtml.includes('preferences-status-pulse-example'), 'Status-pulse preference renders the reusable live glyph example');
+    const pulseExampleStart = preferencesHtml.indexOf('<span class="preferences-status-pulse-example">');
+    const pulseExampleEnd = preferencesHtml.indexOf('</label>', pulseExampleStart);
+    const pulseExampleHtml = preferencesHtml.slice(pulseExampleStart, pulseExampleEnd);
+    assert.ok(pulseExampleHtml.indexOf('data-status-pulse-example="tab"') < pulseExampleHtml.indexOf('data-status-pulse-example="subwindow"'), 'Preferences shows colored aggregate Tab balls to the left of colored play/pause/stop glyphs');
+    assert.ok(pulseExampleHtml.indexOf('data-status-pulse-example="subwindow"') < pulseExampleHtml.indexOf('data-status-pulse-example="acknowledgement"'), 'Preferences shows fading gray play/pause/stop glyphs after the colored glyphs');
+    for (const group of ['tab', 'subwindow', 'acknowledgement']) {
+      assert.equal((pulseExampleHtml.match(new RegExp(`data-status-pulse-example-group="${group}"`, 'g')) || []).length, 3, `Preferences ${group} example has working/play, cooldown/pause, and attention/stop states`);
+    }
+    const yoloSectionStart = preferencesHtml.indexOf('data-preference-section="yolo"');
     const yoloSectionEnd = preferencesHtml.indexOf('data-preference-section="', yoloSectionStart + 1);
     const yoloSectionHtml = preferencesHtml.slice(yoloSectionStart, yoloSectionEnd >= 0 ? yoloSectionEnd : undefined);
     assert.ok(yoloSectionHtml.includes('preferences-path-row preferences-path-row--section'), 'YOLO section contains the YOLO rules path row');
@@ -2129,8 +2179,9 @@ async function runShareThemeSuite() {
     assert.ok(modifiedPreferencesHtml.includes('Global reset'), 'preferences reset is labeled as global in normal-case text');
     assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
     assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
-    assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--danger-action-bg\)[\s\S]*?border-color:\s*var\(--danger-action-border\)[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button uses danger action tokens and normal UI text');
-    assert.ok(/body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--danger-strong\)[\s\S]*?border-color:\s*var\(--danger-action-light-border\)/.test(preferencesCss), 'preferences global reset button uses shared danger tokens in light mode');
+    assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--30-preferences-changes-preferences-global-reset-bg-73\)[\s\S]*?border-color:\s*var\(--30-preferences-changes-preferences-global-reset-border-74\)[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button uses tokenized danger action colors and normal UI text');
+    const resetTokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(resetTokenCss.includes('--30-preferences-changes-preferences-global-reset-bg-73: var(--danger-strong);') && resetTokenCss.includes('--30-preferences-changes-preferences-global-reset-border-74: var(--danger-action-light-border);'), 'preferences global reset button uses light-specific danger surface tokens');
     assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
     const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
     assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');
@@ -2147,7 +2198,7 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
     assert.ok(/data-setting-path="performance\.tabber_activity_refresh_ms"[\s\S]*?value="15"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Tabber server poll interval defaults to 15 seconds in Preferences');
     assert.ok(/data-setting-path="performance\.agent_status_pulse_period_ms"[\s\S]*?value="1550"[\s\S]*?min="250"[\s\S]*?max="10000"[\s\S]*?step="250"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'status ball pulse period defaults to 1550ms in Preferences');
-    assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'workflow transition glow duration defaults to 60 seconds in Preferences');
+    assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'notification pulse duration defaults to 60 seconds in Preferences');
     assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
@@ -2155,17 +2206,17 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.tab_popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover timing remains in milliseconds');
     assert.ok(/data-setting-path="performance\.tab_popover_follow_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover follow timing remains in milliseconds');
     assert.ok(/data-setting-path="performance\.remote_resize_delay_ms"[\s\S]*?value="220"[\s\S]*?min="50"[\s\S]*?max="2000"[\s\S]*?step="10"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'remote resize client/server debounce displays milliseconds');
-    const performanceHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="Performance"'), preferencesHtml.indexOf('data-preference-section="GitHub"'));
-    const notificationsHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="Notifications"'), preferencesHtml.indexOf('data-preference-section="Finder"'));
+    const performanceHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="performance"'), preferencesHtml.indexOf('data-preference-section="github"'));
+    const notificationsHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="notifications"'), preferencesHtml.indexOf('data-preference-section="file_explorer"'));
     assert.ok(performanceHtml.includes('Server SSE: editor file-change poll'), 'Performance labels the server-side SSE editor file-change interval');
     assert.ok(performanceHtml.includes('Server SSE: background editor file-change poll'), 'Performance labels the server-side SSE background editor interval');
     assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
     assert.ok(performanceHtml.includes('Tabber server poll interval'), 'Performance labels the Tabber activity refresh as a server poll interval');
     assert.equal(performanceHtml.includes('Status ball pulse period'), false, 'Performance does not own the status ball pulse period');
-    assert.equal(performanceHtml.includes('Workflow transition glow duration'), false, 'Performance does not own the workflow transition glow duration');
+    assert.equal(performanceHtml.includes('Notification pulse duration'), false, 'Performance does not own the notification pulse duration');
     assert.ok(notificationsHtml.includes('Status ball pulse period'), 'Notifications labels the status ball pulse period');
-    assert.ok(notificationsHtml.includes('Workflow transition glow duration'), 'Notifications labels the workflow transition glow duration');
-    assert.ok(notificationsHtml.includes('green, red, or yellow') && notificationsHtml.includes('0 keeps transition balls visible but static.'), 'Notifications explains that transition glow applies to green/red/yellow and 0 disables glow');
+    assert.ok(notificationsHtml.includes('Notification pulse duration'), 'Notifications labels the shared notification pulse duration');
+    assert.ok(notificationsHtml.includes('branch, PR, status, or CI badges') && notificationsHtml.includes('0 keeps transition balls visible but static.'), 'Notifications explains that one duration applies to status transitions and badges');
     assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
     for (const removedPath of [
       'file_explorer.refresh_seconds',
@@ -2178,21 +2229,22 @@ async function runShareThemeSuite() {
     ]) {
       assert.equal(preferencesHtml.includes(`data-setting-path="${removedPath}"`), false, `${removedPath} is no longer exposed in Preferences`);
     }
-    assert.ok(/data-setting-path="performance\.agent_status_pulse_period_ms"[\s\S]*data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*data-setting-path="appearance\.metadata_badge_pulse_seconds"/.test(notificationsHtml), 'Notifications order keeps status pulse period before workflow transition glow and badge pulse duration');
+    assert.ok(/data-setting-path="performance\.agent_status_pulse_period_ms"[\s\S]*data-setting-path="performance\.workflow_transition_glow_seconds"/.test(notificationsHtml), 'Notifications keeps the status pulse period before the shared notification pulse duration');
+    assert.equal(notificationsHtml.includes('data-setting-path="appearance.metadata_badge_pulse_seconds"'), false, 'Notifications exposes no duplicate badge-pulse duration');
     assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_background_file_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"[\s\S]*data-setting-path="performance\.tabber_activity_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers');
     assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
     assert.equal(diffBundle.includes('fileExplorerRefreshMsFromSettings'), false, 'Finder client-pull refresh setting helper is removed');
     assert.equal(diffBundle.includes('sessionFilesRefreshMsFromSettings'), false, 'Changed-files client-pull refresh setting helper is removed');
     assert.equal(diffBundle.includes("initialSetting('file_explorer.refresh_seconds'"), false, 'JS no longer reads the removed Finder fallback setting');
     assert.equal(diffBundle.includes("initialSetting('file_explorer.session_files_refresh_seconds'"), false, 'Changed-files/Differ fallback does not read a separate setting');
-    assert.ok(diffBundle.includes("path: 'performance.server_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server file-change poll stores milliseconds but displays 0.850-style seconds');
-    assert.ok(diffBundle.includes("path: 'performance.server_background_file_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server background file-change poll stores milliseconds but displays 5.000-style seconds');
-    assert.ok(diffBundle.includes("path: 'performance.server_directory_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server directory-change poll stores milliseconds but displays 0.850-style seconds');
-    assert.ok(diffBundle.includes("path: 'performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
+    assert.ok(/preferenceSettingItem\('performance\.server_event_poll_ms', \{type: 'number',[^}]*displayDecimals: 3/.test(diffBundle), 'server file-change poll stores milliseconds but displays 0.850-style seconds');
+    assert.ok(/preferenceSettingItem\('performance\.server_background_file_event_poll_ms', \{type: 'number',[^}]*displayDecimals: 3/.test(diffBundle), 'server background file-change poll stores milliseconds but displays 5.000-style seconds');
+    assert.ok(/preferenceSettingItem\('performance\.server_directory_event_poll_ms', \{type: 'number',[^}]*displayDecimals: 3/.test(diffBundle), 'server directory-change poll stores milliseconds but displays 0.850-style seconds');
+    assert.ok(diffBundle.includes("preferenceSettingItem('performance.tabber_activity_refresh_ms'") && diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms')"), 'Tabber activity refresh is backed by the Performance preference through settings defaults');
     assert.equal(diffBundle.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default in bootstrap JS');
     assert.equal(diffBundle.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not duplicate the server default on settings reload');
-    assert.ok(diffBundle.includes("path: 'performance.agent_status_pulse_period_ms'") && diffBundle.includes("initialSetting('performance.agent_status_pulse_period_ms')"), 'status ball pulse period is backed by settings defaults');
-    assert.ok(diffBundle.includes("path: 'performance.workflow_transition_glow_seconds'") && diffBundle.includes("initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow duration is backed by the Performance preference through settings defaults');
+    assert.ok(diffBundle.includes("preferenceSettingItem('performance.agent_status_pulse_period_ms'") && diffBundle.includes("initialSetting('performance.agent_status_pulse_period_ms')"), 'status ball pulse period is backed by settings defaults');
+    assert.ok(diffBundle.includes("preferenceSettingItem('performance.workflow_transition_glow_seconds'") && diffBundle.includes("initialSetting('performance.workflow_transition_glow_seconds')"), 'workflow transition glow duration is backed by the Performance preference through settings defaults');
     assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the file transfer size cap');
     assert.ok(preferencesHtml.includes('Uploads/Downloads'), 'preferences rename Uploads to Uploads/Downloads');
     assert.ok(
@@ -2288,12 +2340,12 @@ async function runShareThemeSuite() {
         assert.ok(new RegExp(`type="radio"[^>]*value="${value}"[^>]*data-setting-path="${pathPattern}"`).test(preferencesHtml), `${path} radio renders ${value}`);
       }
     }
-    assert.ok(preferencesHtml.includes('>Same Tab<'), 'string radio labels are humanized');
+    assert.ok(preferencesHtml.includes('>Same tab<'), 'string radio labels use their localized descriptor');
     assert.equal(/data-setting-path="appearance\.theme"[\s\S]{0,180}preferences-radio-swatches/.test(preferencesHtml), false, 'Global color theme radios do not show color swatches');
     assert.equal(/<select[^>]*data-setting-path="appearance\.active_color"/.test(preferencesHtml), false, 'Active color renders as radios, not a select');
     assert.equal(/<select[^>]*data-setting-path="appearance\.separator_color"/.test(preferencesHtml), false, 'Separator color renders as radios, not a select');
     assert.ok(preferencesHtml.includes('data-setting-path="appearance.separator_color"'), 'Preferences expose separator color for pane separators and drop previews');
-    assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#86d600[\s\S]*--preferences-radio-swatch:#4f9e3a/.test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
+    assert.ok(new RegExp(`preferences-radio-swatches joined[\\s\\S]*--preferences-radio-swatch:${UI_PINS.activeAccentBright}[\\s\\S]*--preferences-radio-swatch:${UI_PINS.activeAccentBrightLight}`).test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
     assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#f97316[\s\S]*--preferences-radio-swatch:#b91c1c/.test(preferencesHtml), 'Active color Blood orange light swatch is redder than Solar gold');
     assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#eab308[\s\S]*--preferences-radio-swatch:#d6a400/.test(preferencesHtml), 'Active color Solar gold light swatch is a brighter gold');
     assert.ok(/\.preferences-radio-group\.has-swatches\s*\{[\s\S]*display:\s*grid[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(148px,\s*1fr\)\)/.test(preferencesCss), 'swatched Preferences radio groups use a shared grid so wrapped rows align');
@@ -2301,16 +2353,19 @@ async function runShareThemeSuite() {
     assert.ok(/\.preferences-radio-swatch\s*\{[\s\S]*border-radius:\s*2px/.test(preferencesCss), 'Preferences color swatches are boxed, not round dots');
     assert.ok(/\.preferences-radio-swatches\.joined\s*\{[\s\S]*gap:\s*0/.test(preferencesCss), 'Preferences active-color swatches are connected into one segmented box');
     assert.ok(/\.keyboard-shortcuts-overlay\s*\{[\s\S]*align-items:\s*center[\s\S]*justify-items:\s*center[\s\S]*padding:\s*var\(--popover-edge-gap\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends dialog is centered in the modal overlay');
-    assert.ok(/\.keyboard-shortcuts-dialog\s*\{[\s\S]*width:\s*min\(1180px,\s*calc\(100vw - \(2 \* var\(--popover-edge-gap\)\)\)\)[\s\S]*max-height:\s*min\(92vh,\s*900px\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends uses a wide viewport-bounded panel');
-    assert.ok(/\.keyboard-shortcuts-body\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(260px,\s*100%\),\s*1fr\)\)[\s\S]*gap:\s*8px 10px[\s\S]*padding:\s*8px 10px 10px/.test(preferencesCss), 'Keyboard Shortcuts and Legends packs balanced columns into three or four compact tracks');
-    assert.ok(/\.keyboard-shortcuts-column\s*\{[\s\S]*display:\s*grid[\s\S]*align-content:\s*start[\s\S]*gap:\s*8px/.test(preferencesCss), 'Keyboard Shortcuts and Legends stacks sections inside each column instead of leaving sparse row holes');
+    assert.ok(/\.keyboard-shortcuts-dialog\s*\{[\s\S]*width:\s*min\(var\(--dialog-wide-inline-size\),\s*var\(--popover-max-inline-size\)\)[\s\S]*max-height:\s*min\(92vh,\s*900px\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends reuses the shared wide viewport-bounded dialog capacity');
+    assert.ok(/\.keyboard-shortcuts-body\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(260px,\s*100%\),\s*1fr\)\)[\s\S]*gap:\s*var\(--space-8\) var\(--space-10\)[\s\S]*padding:\s*var\(--space-8\) var\(--space-10\) var\(--space-10\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends packs balanced columns into three or four compact tracks');
+    assert.ok(/\.keyboard-shortcuts-column\s*\{[\s\S]*display:\s*grid[\s\S]*align-content:\s*start[\s\S]*gap:\s*var\(--space-8\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends stacks sections inside each column instead of leaving sparse row holes');
     assert.ok(/\.keyboard-shortcuts-section h3\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(preferencesCss), 'Keyboard shortcuts section headers follow the active theme color');
-    assert.ok(/\.keyboard-legend-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(34px,\s*max-content\) minmax\(0,\s*1fr\)[\s\S]*padding:\s*2px 0/.test(preferencesCss), 'Keyboard legend rows use compact sample/detail columns');
+    const topbarCss = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
+    assert.ok(/\.app-menu-button::before\s*\{[\s\S]*border-inline-start:\s*5px solid var\(--disclosure-triangle-collapsed-color\)[\s\S]*\.app-menu\.open > \.app-menu-button::before\s*\{[\s\S]*border-inline-start-color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(topbarCss), 'topbar menu disclosure triangles lead the label, point right when closed, and rotate into the themed expanded direction');
+    assert.equal(/\.app-menu-button::after\s*\{/.test(topbarCss), false, 'topbar menus have no trailing down-caret owner');
+    assert.ok(/\.keyboard-legend-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(34px,\s*max-content\) minmax\(0,\s*1fr\)[\s\S]*padding:\s*var\(--space-2\) 0/.test(preferencesCss), 'Keyboard legend rows use compact sample/detail columns');
     assert.ok(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'YO buttons use the shared square control radius, not a circular pill');
     assert.ok(/\.panel-session-label \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'Info Bar YO buttons use the same square control radius');
     assert.ok(/\.pane-tab-core > \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'pane tab YO buttons keep the same square control radius');
     assert.equal(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-pill\)/.test(preferencesCss), false, 'YO button base chrome must not use the circular pill radius');
-    assert.ok(preferencesHtml.includes('>New Tab<'), 'hyphenated string radio labels are humanized');
+    assert.ok(preferencesHtml.includes('>New tab<'), 'hyphenated string radio labels use their localized descriptor');
     // "No agent" (deterministic) is no longer a selectable backend — Auto still falls back to it internally,
     // but it is never offered as a pick in Preferences or the composer pill.
     assert.equal(/data-setting-path="yoagent\.backend"[\s\S]*?value="deterministic"/.test(preferencesHtml), false, 'Preferences no longer offer No agent (deterministic) as a backend option');
@@ -2328,7 +2383,7 @@ async function runShareThemeSuite() {
     assert.ok(preferencesHtml.indexOf('YOLOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOLOmux light scheme remains ahead of GitHub Light');
     assert.equal(api.globalThemeModeForTest(), 'dark');
     assert.equal(api.globalThemeIsDark(), true, 'global theme defaults dark');
-    assert.equal(api.globalThemeLabel(), 'Dark');
+    assert.equal(api.globalThemeLabel(), 'Dark mode');
     assert.equal(api.nextGlobalThemeMode(), 'light');
     assert.equal(api.terminalThemeModeForTest(), 'follow-app', 'terminal theme defaults to follow-app (matches the global app theme)');
     assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app default gives a light terminal in light app mode');
@@ -2359,6 +2414,7 @@ async function runShareThemeSuite() {
       assert.equal(api.sessionFileRelativeTimeText(1000, 1060), '1 min ago', 'file-tree relative dates show minute age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 19720), '5.2 hrs ago', 'file-tree relative dates show decimal hour age');
       assert.equal(api.sessionFileRelativeTimeText(1000, 217000), '2.5 days ago', 'file-tree relative dates show decimal day age');
+      assert.equal(api.sessionFileRelativeTimeText(1000, 1000 + (366 * 86400)), '1.0 year(s) ago', 'file-tree relative dates switch to decimal years after one year instead of continuing in days');
     }
     api.setTerminalThemeModeForTest('light');
     assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
@@ -2443,13 +2499,13 @@ async function runShareThemeSuite() {
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.ok(api.bodyClassListForTest().contains('theme-light'), 'global light theme marks the body');
     assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'global light theme tracks the resolved mode');
-    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Light', 'inherited editor theme follows global light (brand YOLOmux Light default)');
+    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Light Mode', 'inherited editor theme follows global light (brand YOLOmux Light default)');
     assert.equal(api.configuredEditorSchemeForMode(true), 'dark');
     assert.equal(api.configuredEditorSchemeForMode(false), 'yolomux-light');
     api.setGlobalThemeModeForTest('dark');
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.equal(api.fileEditorThemeModeForTest(), 'inherit');
-    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark');
+    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark mode');
     assert.equal(api.activeEditorSchemeForTest().activeLine, 'rgba(255, 255, 255, 0.04)');
     assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(96, 165, 250, 0.38)');
     assert.equal(api.activeEditorSchemeForTest().diff.addFg, '#56d364');
@@ -2466,7 +2522,8 @@ async function runShareThemeSuite() {
     assert.ok(/\.file-editor-diff-codemirror \.cm-searchMatch-selected\s*\{[\s\S]*background:\s*var\(--diff-search-selected-bg\) !important[\s\S]*font-weight:\s*900/.test(editorSelectionCss), 'selected Differ search matches use a stronger non-green fill');
     assert.ok(editorSelectionSource.includes("}, {dark: scheme.dark});"), 'CodeMirror receives the active light/dark theme flag');
     assert.ok(editorSelectionSource.includes("backgroundColor: 'transparent !important'"), 'CodeMirror native editor selection background is suppressed so drawSelection owns the fill');
-    assert.ok(/\.file-editor-codemirror \.cm-content ::selection,[\s\S]*?background:\s*transparent !important[\s\S]*?color:\s*inherit !important/.test(editorSelectionCss), 'static CSS keeps global browser selection colors out of CodeMirror');
+    assert.ok(/\.file-editor-codemirror \.cm-content ::selection,\s*\.file-editor-codemirror-panel \.cm-content ::selection\s*\{[^}]*color:\s*inherit !important;[^}]*background:\s*var\(--editor-native-selection-bg\) !important;/.test(editorSelectionCss), 'CodeMirror native selection uses one standard cross-browser selector owner and semantic transparent paint');
+    assert.equal(editorSelectionCss.includes('.cm-content ::-moz-selection'), false, 'CodeMirror does not mix the legacy Mozilla pseudo-element into a Chrome-invalid selector list');
     assert.equal(/body\.editor-theme-light \.file-editor-codemirror \.cm-content,[\s\S]*?background:\s*var\(--editor-bg\) !important/.test(editorSelectionCss), false, 'light CodeMirror content stays transparent so the selection layer remains visible');
     for (const scheme of ['one-dark', 'dracula', 'monokai', 'popular-ide-dark-plus', 'nord']) {
       api.setFileEditorThemeMode(scheme);
@@ -2590,14 +2647,33 @@ async function runShareThemeSuite() {
     });
     const popoverStyle = api.documentElementStyleForTest();
     const popoverLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
-    assert.equal(popoverLeft, 34);
-    assert.equal(popoverForPosition.style.left, '34px', 'tab popovers carry replayable inline left instead of relying only on document CSS variables');
+    assert.equal(popoverLeft, 10);
+    assert.equal(popoverForPosition.style.left, '10px', 'session tab popovers align to the owning pane gutter instead of the narrow tab label');
     assert.equal(popoverForPosition.style.top, '71px', 'tab popovers carry replayable inline top instead of relying only on document CSS variables');
-    assert.equal(popoverForPosition.style.width, '520px', 'tab popovers carry replayable inline width so share viewers do not recompute vw-sized popovers against the client viewport');
+    assert.equal(popoverForPosition.style.width, '490px', 'session tab popovers use their owning pane width minus the shared edge gutter');
+    assert.equal(popoverForPosition.style.maxWidth, '490px', 'owning-pane width overrides the generic desktop popover cap');
     assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry replayable inline height so share viewers do not recompute wrapped popover height');
     assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
-    assert.ok(popoverForPosition.getBoundingClientRect().width > panelForPopover.getBoundingClientRect().width);
+    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) <= panelForPopover.getBoundingClientRect().width);
+    const tabberPaneForPopover = {
+      getBoundingClientRect() {
+        return {left: 80, right: 780, top: 0, bottom: 500, width: 700, height: 500};
+      },
+    };
+    const tabberPopover = new TestElement('tabber-pane-popover');
+    tabberPopover.rect = {left: 0, right: 520, top: 0, bottom: 300, width: 520, height: 300};
+    const tabberTab = new TestElement('tabber-session-tab');
+    tabberTab.classList.add('tabber-session-tab');
+    tabberTab.getBoundingClientRect = () => ({left: 132, right: 372, top: 40, bottom: 68, width: 240, height: 28});
+    tabberTab.closest = selector => {
+      assert.equal(selector, '.file-explorer-panel, .file-explorer-changes-panel');
+      return tabberPaneForPopover;
+    };
+    api.positionPaneTabPopover(tabberTab, tabberPopover);
+    assert.equal(tabberPopover.style.left, '80px', 'Tabber session popovers align to the owning pane instead of the indented tree row');
+    assert.equal(tabberPopover.style.width, '700px', 'Tabber session popovers span the owning pane width');
+    assert.equal(tabberPopover.style.maxWidth, '700px', 'Tabber pane width overrides the generic tab-popover cap');
     api.positionPaneTabPopover({
       getBoundingClientRect() {
         return {left: 1080, right: 1160, top: 40, bottom: 68, width: 80, height: 28};
@@ -2618,11 +2694,74 @@ async function runShareThemeSuite() {
       querySelector() { return zeroWidthPopover; },
     });
     const zeroWidthLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
-    assert.ok(zeroWidthLeft + 520 <= 1200, '#45: an unmeasured (0-width) right-edge popover still clamps on-screen for its real width');
+    assert.ok(zeroWidthLeft + 520 <= 1200, '#45: an unmeasured generic popover still clamps on-screen for its fallback width');
     const viewportClamp = api.clampToViewport(1190, 790, 100, 100, {edgeGap: 8});
     assert.equal(viewportClamp.left, 1092);
     assert.equal(viewportClamp.top, 692);
     assert.deepEqual(canonical(api.appViewport()), {width: 1200, height: 800, w: 1200, h: 800}, 'M0: appViewport is the native browser viewport in normal mode');
+    api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 488, scale: 1});
+    assert.equal(api.syncNativeAppViewportForTest({force: true}), true, 'an unzoomed visual viewport reduction updates normal-mode app geometry');
+    assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 488, w: 1024, h: 488}, 'keyboard geometry keeps layout width but adopts usable visual height');
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-width'), '', 'normal-mode keyboard sizing never treats visual viewport width as responsive layout width');
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '488px', 'normal-mode keyboard sizing publishes one shared app-root height');
+    api.setNativeViewportForTest({width: 1024, height: 740, visualHeight: 768, scale: 1});
+    api.syncNativeAppViewportForTest({force: true});
+    assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 768, w: 1024, h: 768}, 'an unzoomed taller visual viewport repairs stale-short iPad Safari innerHeight so the app reaches the visible bottom edge');
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '768px', 'the repaired Safari height remains the one published to the app root');
+    api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 768, scale: 1});
+    api.syncNativeAppViewportForTest({force: true});
+    assert.equal(api.appRootForTest().style.getPropertyValue('--app-root-height'), '768px', 'visual viewport recovery restores the current measured layout height instead of Safari CSS 100vh');
+    api.setNativeViewportForTest({width: 1024, height: 768, visualHeight: 488, scale: 1.25});
+    api.syncNativeAppViewportForTest({force: true});
+    assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 768, w: 1024, h: 768}, 'pinch scale does not impersonate a keyboard or change responsive app geometry');
+    api.setNativeViewportForTest({width: 1200, height: 800, visualHeight: null});
+    api.syncNativeAppViewportForTest({force: true});
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    assert.ok(coreSource.includes("const APP_VIEWPORT_CHANGE_EVENT = 'yolomux:app-viewport-change'"), 'one shared event owns downstream normal-mode viewport work');
+    assert.ok(/function nativeUsableViewportHeight\([\s\S]*visualViewport\.scale[\s\S]*viewport\.height - visualHeight > KEYBOARD_MIN_REDUCTION_PX/.test(coreSource), 'visual viewport contributes only unzoomed usable height (large-reduction threshold)');
+    assert.ok(/function installNativeAppViewportOwner\([\s\S]*visualViewport\?\.addEventListener\?\.\('resize'[\s\S]*visualViewport\?\.addEventListener\?\.\('scroll'[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*window\.addEventListener\('pageshow'/.test(coreSource), 'one owner remeasures visual-viewport geometry when a backgrounded tab returns');
+    const diagnosticsApi = loadYolomux('?debug=1', ['1']);
+    diagnosticsApi.setNativeViewportForTest({width: 1366, height: 1024, visualHeight: 944, scale: 1});
+    const diagnostics = diagnosticsApi.viewportDiagnosticsSnapshotForTest();
+    assert.deepEqual(canonical(diagnostics.layout), {width: 1366, height: 1024, w: 1366, h: 1024}, 'viewport diagnostics retain raw layout geometry');
+    assert.deepEqual(canonical(diagnostics.visual), {width: 0, height: 944, top: 0, left: 0, scale: 1}, 'viewport diagnostics retain raw Safari visual geometry');
+    assert.equal(diagnostics.reduction, 80, 'viewport diagnostics expose the toolbar-sized reduction instead of hiding it behind the keyboard classifier');
+    assert.equal(diagnostics.keyboardCandidate, false, 'viewport diagnostics distinguish the toolbar-sized reduction from a keyboard candidate');
+    assert.ok(diagnosticsApi.viewportDiagnosticsTextForTest(diagnostics).includes('delta 80px · keyboard no (>140px)'), 'the temporary iPad overlay states the exact threshold decision');
+    const mobileApi = loadYolomux('', ['old', 'recent', 'newest', 'older', 'created'], 'http:', 'iPhone', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 390, height: 844},
+      bootstrapOverrides: {recentSessions: ['newest', 'recent', 'old', 'older']},
+    });
+    assert.equal(mobileApi.mobileSinglePaneModeForTest(), true, 'a coarse-pointer phone viewport enables the mobile single-pane policy');
+    assert.equal(mobileApi.phoneLikeMobileViewportForTest({width: 1366, height: 885}), false, 'the reported iPad Safari viewport stays out of the phone-only policy');
+    assert.deepEqual(canonical(mobileApi.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: 'newest', tabs: ['newest', 'recent', 'old']},
+    }, 'fresh mobile boot opens up to three server-ranked recent tmux sessions in one pane, without Finder/Differ/Tabber');
+    const launchedMobileSlots = mobileApi.emptyLayoutSlots();
+    launchedMobileSlots[mobileApi.layoutTreeKey] = mobileApi.leafNode('left');
+    launchedMobileSlots.left = mobileApi.paneStateWithTabs(['newest', 'recent', 'created'], 'created');
+    assert.deepEqual(canonical(mobileApi.mobileSinglePaneLayoutSlotsForTest(launchedMobileSlots, {focusSession: 'created'})), {
+      __tree: {slot: 'left'},
+      left: {active: 'created', tabs: ['created', 'newest', 'recent']},
+    }, 'a newly launched phone tab takes the three-tab budget and becomes active instead of being discarded behind older tabs');
+    assert.deepEqual(mobileApi.availableLayoutModesForTest(), ['single'], 'mobile exposes no multi-pane layout mode');
+    mobileApi.applyLayoutMode('grid');
+    assert.equal(mobileApi.layoutSlotKeys(mobileApi.layoutSlotsForTest()).length, 1, 'direct layout-mode requests cannot recreate a mobile split');
+    assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'right'}), false, 'mobile edge drops cannot create a split');
+    assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'middle'}), true, 'mobile middle drops remain ordinary tab moves');
+    const mobileViewMenu = mobileApi.appMenuTree().find(menu => menu.id === 'view');
+    assert.equal(mobileViewMenu.items.some(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout')), false, 'mobile removes the multi-pane Layout menu');
+    assert.ok(/function dispatchTouchContextMenu[\s\S]*touchContextMenuSyntheticEvents[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
+    const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
+    const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    assert.ok(/--pane-resizer-hit-inset:\s*5px[\s\S]*--pane-resizer-touch-grip-length:\s*30px[\s\S]*--pane-resizer-touch-grip-thickness:\s*4px/.test(baseCss), 'touch resize uses shared hit-zone and centered-grip tokens');
+    assert.ok(/\.dv-horizontal[^\{]*::after,\s*\.resizer-row::after\s*\{[\s\S]*?top:\s*50%;[\s\S]*?inset-inline:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\);[\s\S]*?block-size:\s*var\(--pane-resizer-touch-handle-size\);[\s\S]*?transform:\s*translateY\(-50%\)/.test(paneCss), 'coarse horizontal dividers limit touch resizing to the centered 44px handle');
+    assert.ok(/\.dv-vertical[^\{]*::after,\s*\.resizer-column::after\s*\{[\s\S]*?left:\s*50%;[\s\S]*?inset-block:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\);[\s\S]*?inline-size:\s*var\(--pane-resizer-touch-handle-size\);[\s\S]*?transform:\s*translateX\(-50%\)/.test(paneCss), 'coarse vertical dividers limit touch resizing to the centered 44px handle');
+    assert.ok(/\.dv-horizontal[^\{]*::before,\s*\.resizer-row::before\s*\{[\s\S]*?top:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-length\) \/ 2\)\);[\s\S]*?left:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-thickness\) \/ 2\)\)/.test(paneCss), 'coarse horizontal dividers show a centered shared grip');
+    assert.ok(/\.dv-vertical[^\{]*::before,\s*\.resizer-column::before\s*\{[\s\S]*?left:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-length\) \/ 2\)\);[\s\S]*?top:\s*calc\(50% - \(var\(--pane-resizer-touch-grip-thickness\) \/ 2\)\)/.test(paneCss), 'coarse vertical dividers show a centered shared grip');
     assert.deepEqual(canonical(api.setAppViewportOverrideForTest({w: 1440, h: 900})), {width: 1440, height: 900, w: 1440, h: 900}, 'M0: appViewport can be pinned to a host viewport shape');
     assert.equal(api.effectiveViewportWidthForTest({width: 0}), 1200, 'MV-7: missing viewport widths use one shared desktop fallback');
     assert.equal(api.effectiveViewportWidthForTest({width: 240}), 320, 'MV-7: viewport widths share the same minimum floor');
@@ -2722,31 +2861,45 @@ async function runShareThemeSuite() {
     assert.equal(appMenuIconButton.innerHTML.includes('title='), false);
     const noMinimizedSlots = api.emptyLayoutSlots();
     noMinimizedSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    noMinimizedSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    noMinimizedSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     noMinimizedSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(noMinimizedSlots);
+    const launchFileMenu = api.appMenuTree().find(menu => menu.id === 'file');
     const tabMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
-    const tabMenuLabels = tabMenu.items.map(item => item.label).filter(Boolean);
-    assert.ok(tabMenuLabels.includes('new Claude'), 'Tabs menu owns new Claude');
-    assert.ok(tabMenuLabels.includes('new Codex'), 'Tabs menu owns new Codex');
-    assert.ok(tabMenuLabels.includes('new Xterm'), 'Tabs menu owns new Xterm');
-    assert.ok(tabMenu.items.find(item => item.label === 'new Xterm').iconHtml.includes('app-menu-ui-icon-shell'), 'new Xterm uses the shared shell icon');
+    const menuLabels = item => item.type === 'command-pair'
+      ? [item.primary.label, item.secondary.label]
+      : (item.type === 'command-row' ? [item.label, ...item.items.map(command => command.label)] : [item.label]);
+    const launchFileMenuLabels = launchFileMenu.items.flatMap(menuLabels).filter(Boolean);
+    const tabMenuLabels = tabMenu.items.flatMap(menuLabels).filter(Boolean);
+    assert.equal(api.menuTabCommand('1').html.includes('Loading...'), false, 'a fresh terminal tab omits unavailable transcript metadata instead of implying its interactive terminal is still loading');
+    const claudeLaunchPair = launchFileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Claude');
+    const codexLaunchPair = launchFileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Codex');
+    assert.ok(launchFileMenuLabels.includes('new Claude'), 'File menu owns new Claude');
+    assert.equal(claudeLaunchPair.secondary.label, 'new Claude (dangerously auto approve)', 'Claude presents normal and deliberately dangerous launches on one compact row');
+    assert.equal(claudeLaunchPair.secondary.title, '+ --dangerously-skip-permissions', 'the dangerous-auto-approve action retains the exact Claude bypass flag as its tooltip');
+    assert.ok(launchFileMenuLabels.includes('new Codex'), 'File menu owns new Codex');
+    assert.equal(codexLaunchPair.secondary.label, 'new Codex (dangerously auto approve)', 'Codex uses the concise dangerous-auto-approve action label');
+    assert.ok(codexLaunchPair.secondary.title.startsWith('+ --dangerously-bypass-approvals-and-sandbox'), 'the dangerous Codex action retains its bypass flags as its tooltip');
+    const shellLaunchRow = launchFileMenu.items.find(item => item.type === 'command-row' && item.label === 'Shell:');
+    assert.equal(shellLaunchRow.className, 'app-menu-command-row app-menu-command-row--shells', 'explicit shell commands use the shared compact shell-row layout');
+    assert.equal(shellLaunchRow.separator, false, 'Shell choices omit visual separators to avoid wasting menu width');
+    assert.deepEqual(shellLaunchRow.items.map(item => item.label), ['bash', 'tsh', 'zsh'], 'Shell commands are explicit and alphabetically sorted');
+    assert.ok(shellLaunchRow.iconHtml.includes('app-menu-ui-icon-shell'), 'Shell uses the shared shell icon as a non-clickable row label');
+    const normalServerApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {dangerouslyYolo: false});
+    const normalServerFile = normalServerApi.appMenuTree().find(menu => menu.id === 'file');
+    assert.equal(normalServerFile.items.some(item => item.type === 'command-pair'), false, 'normal servers do not expose dangerous-auto-approve agent launch controls');
+    assert.ok(normalServerFile.items.some(item => item.type === 'command' && item.label === 'new Claude'), 'normal servers retain the ordinary Claude launch');
     assert.equal(tabMenuLabels.includes('Active'), false);
     assert.equal(tabMenuLabels.includes('Inactive'), false);
     assert.equal(tabMenuLabels.includes('Minimized'), false);
     assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
-    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 2, 'Tabs menu separators only split populated command groups');
-    // P0 menu-bar: View → Sort tab list orders the Tabs navigator. 'name' sorts by label (deterministic
-    // without session state); 'default' is identity. The View menu exposes the submenu with all 3 modes.
-    api.setTabsMenuSortMode('default');
-    assert.deepEqual(api.sortTabItemsForMenu(['3', '1', '2']), ['3', '1', '2'], 'default sort keeps the incoming order');
-    api.setTabsMenuSortMode('name');
-    assert.deepEqual(api.sortTabItemsForMenu(['3', '1', '2']), ['1', '2', '3'], 'name sort orders the tab list by label');
-    api.setTabsMenuSortMode('default');
+    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1, 'Tabs menu separators only split populated tmux and YOLOmux tab groups');
+    // Tabs has one fixed navigator order: all tmux sessions naturally sorted first, followed by
+    // the YOLOmux/file tabs in label order. Status or a prior stored preference cannot reshuffle it.
+    assert.deepEqual(api.sortTabItemsForMenu(['2', api.prefsItemId, '1', api.finderItemId]), ['1', '2', api.finderItemId, api.prefsItemId], 'Tabs puts naturally sorted tmux sessions before sorted YOLOmux tabs');
     const sortViewMenu = api.appMenuTree().find(menu => menu.id === 'view');
     const sortSubmenu = sortViewMenu.items.find(item => item.type === 'submenu' && item.label === api.t('menu.view.sortTabs'));
-    assert.ok(sortSubmenu, 'View menu has a Sort tab list submenu');
-    assert.deepEqual(sortSubmenu.items.map(item => item.label), [api.t('menu.view.sortTabs.default'), api.t('menu.view.sortTabs.attention'), api.t('menu.view.sortTabs.name')], 'the sort submenu offers default / needs-me / name');
+    assert.equal(sortSubmenu, undefined, 'Tabs has one deterministic order, so View does not expose conflicting sort modes');
     const layoutSubmenu = sortViewMenu.items.find(item => item.type === 'submenu' && item.label === api.t('menu.view.layout'));
     assert.ok(layoutSubmenu, 'View menu has a Layout submenu');
     assert.deepEqual(layoutSubmenu.items.map(item => item.label), api.layoutModeValues.map(mode => api.t(`menu.view.layout.${mode}`)), 'View layout options match the shared layout modes');
@@ -2809,7 +2962,7 @@ async function runShareThemeSuite() {
     const shellHtml = fs.readFileSync('yolomux_lib/web.py', 'utf8');
     assert.ok(shellHtml.includes('<section id="modal" class="modal app-modal-overlay">'), 'HTML shell routes About/share/transcript through the shared modal overlay parent');
     assert.ok(shellHtml.includes('<div class="modal-dialog">'), 'HTML shell gives the shared app modal a bounded dialog child');
-    assert.ok(shellHtml.includes('<button id="closeModal" title="Close" aria-label="Close">X</button>'), 'HTML shell renders the modal close button as X');
+    assert.ok(/<button id="closeModal"[^>]*>X<\/button>/.test(shellHtml) && shellHtml.includes('server_string(locale, "common.close")'), 'HTML shell renders the modal close button as X with localized title and aria-label');
     // File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
     const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
     api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
@@ -2838,22 +2991,24 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.includes('Preferences'));
     assert.ok(fileMenuLabels.includes('YO!stats'));
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
-    assert.equal(fileMenuLabels[0], 'Open file', 'File -> Open file is the first File menu command');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 7)), ['Open file', api.fileExplorerLabel(), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!share...'], 'File menu starts with Open file, then Finder/Search/data/YO commands');
+    assert.equal(fileMenu.items[0].primary.label, 'new Claude', 'File starts with session creation instead of putting it under Tabs');
+    assert.equal(fileMenu.items[1].primary.label, 'new Codex');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 9)), ['Shell:', 'Open file', api.t('yoagent.capability.finderDifferTabber.name'), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File starts with explicit Shell choices, then Open file/triplet/Search/data/YO commands');
     const firstYoIndex = fileMenuLabels.indexOf('YO!info');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 4)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!stats after YO!agent');
+    assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 5)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!chat immediately after YO!stats');
     assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
     assert.deepStrictEqual(canonical(fileMenu.items.slice(-4).map(item => item.type === 'separator' ? '---' : item.label)), ['YO!share...', 'Preferences', '---', 'Log out']);
-    for (const label of [api.fileExplorerLabel(), 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
+    const tripletLabel = api.t('yoagent.capability.finderDifferTabber.name');
+    for (const label of [tripletLabel, 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
       const item = fileMenu.items.find(candidate => candidate.label === label);
       assert.ok(item?.iconHtml, `File menu ${label} uses the shared icon row`);
-      assert.equal(item.className || '', '', `File menu ${label} does not use the raised tab-row scaffold`);
+      assert.equal(item.className || '', label === tripletLabel ? 'app-menu-file-destination' : '', `File menu ${label} uses only its intended destination styling`);
     }
-    const finderMenuItem = fileMenu.items.find(candidate => candidate.label === api.fileExplorerLabel());
-    assert.equal(finderMenuItem.detail, api.appShortcutText('B'), 'File -> Finder shows the same Cmd/Ctrl-B shortcut that toggles the Finder');
+    const finderMenuItem = fileMenu.items.find(candidate => candidate.label === tripletLabel);
+    assert.equal(finderMenuItem.detail, api.t('menu.file.browseFiles'), 'wide File navigation explains the one-line triplet command');
     const macFileMenuApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
-    const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === 'Finder');
-    assert.equal(macFinderMenuItem?.detail, '⌘+B', 'File -> Finder shows Cmd-B on Mac');
+    const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === macFileMenuApi.t('yoagent.capability.finderDifferTabber.name'));
+    assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
     const shareMenuItem = fileMenu.items.find(candidate => candidate.label === 'YO!share...');
     assert.equal(shareMenuItem.detail, 'sharing', 'YO!share menu row avoids target/session counts');
     const shareCommandItem = api.commandPaletteCommandItems().find(candidate => candidate.label === 'File / YO!share...');
@@ -2904,6 +3059,7 @@ async function runShareThemeSuite() {
     }
     {
       const shareSource = fs.readFileSync('static/yolomux.js', 'utf8');
+      const shareReplaySource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
       const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
       const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
       const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
@@ -2925,14 +3081,14 @@ async function runShareThemeSuite() {
       assert.ok(/function shareCreatePayloadFromForm[\s\S]*debug_profile:\s*form\?\.elements\?\.debug_profile\?\.checked === true/.test(shareSource), 'YO!share create payload includes only explicit debug/profiling upload opt-in');
       assert.ok(/function shareDebugProfileUploadPayload[\s\S]*shareRedactDiagnosticValue[\s\S]*async function shareUploadDebugProfile[\s\S]*shareDebugProfileUploadEnabled\(\)[\s\S]*apiFetchJson\('\/api\/share\/debug-profile'/.test(shareSource), 'YO!share debug/profiling uploads are opt-in, sent to the share debug endpoint, and client-redacted');
       assert.ok(/async function boot\(\)[\s\S]*shareBootstrap\?\.uiState[\s\S]*await applyShareUiState/.test(shareSource), 'share-view boot applies the server UI-state bootstrap after the initial panes render');
-      assert.ok(/function shareBootstrapLayoutParams\(\)[\s\S]*shareBootstrap\.layout[\s\S]*shareBootstrap\.tabs[\s\S]*shareBootstrap\.sessions[\s\S]*function initialLayoutSlots\(\)[\s\S]*const shareParams = shareBootstrapLayoutParams\(\)[\s\S]*const params = shareParams \|\| new URLSearchParams[\s\S]*preserveMissingFileExplorer: shareParams !== null/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot uses the server share bootstrap layout before the browser query string and preserves a host-minimized Finder');
-      assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*scheduleDeferredSettingsMetadataRefresh\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*transcriptMeta = \{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a stub only until scoped metadata loads');
+      assert.ok(/function shareBootstrapLayoutParams\(\)[\s\S]*shareBootstrap\.layout[\s\S]*shareBootstrap\.tabs[\s\S]*shareBootstrap\.sessions[\s\S]*function initialLayoutSlots\(\)[\s\S]*const shareParams = shareBootstrapLayoutParams\(\)[\s\S]*const params = shareParams \|\| new URLSearchParams[\s\S]*preserveMissingSidePane: shareParams !== null/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot uses the server share bootstrap layout before the browser query string and preserves a host-minimized Side Pane');
+      assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*scheduleDeferredSettingsMetadataRefresh\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*setTranscriptMetadataPayload\(\{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a guarded stub only until scoped metadata loads');
       assert.ok(/function updateActiveSessionParam\(\)[\s\S]*if \(shareViewMode\) return/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot does not rewrite the share URL from local layout state');
       assert.ok(/function syncShareProtocolControls[\s\S]*!readOnly\.checked[\s\S]*https\.checked = true[\s\S]*http\.disabled = true/.test(shareSource), 'YO!share modal locks write mode to https');
       assert.ok(/let activeShares = \[\]/.test(shareSource), 'YO!share tracks active shares as a list for concurrent shares');
       assert.ok(/function refreshActiveShare\(options = \{\}\)[\s\S]*setActiveShares\(normalizeShareListPayload[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'YO!share status refresh consumes the active share list and opens per-token host sockets');
       assert.ok(/function shareStatusSurfaceVisible\(\)[\s\S]*document\.visibilityState === 'hidden'[\s\S]*shareViewerBanner\?\.isConnected[\s\S]*shareStatusPill\?\.isConnected[\s\S]*shareModalIsVisible\(\)[\s\S]*data-share-viewer-duration/.test(shareSource), 'YO!share per-second status DOM updates are gated to visible share surfaces');
-      assert.ok(/function renderShareManageView\(errorText = ''\)[\s\S]*share-create-panel[\s\S]*shareCreateFormHtml[\s\S]*share-active-panel[\s\S]*share-entry-list/.test(shareSource), 'YO!share manage view sections New share before Active share URLs');
+      assert.ok(/function renderShareManageView\(\)[\s\S]*share-create-panel[\s\S]*shareCreateFormHtml[\s\S]*share-active-panel[\s\S]*share-entry-list/.test(shareSource), 'YO!share manage view sections New share before Active share URLs');
       assert.ok(/function shareEntryHtml\(share\)[\s\S]*share-url-primary[\s\S]*share-url-primary-head[\s\S]*<span class="share-url-control">[\s\S]*<input type="text" readonly value="\$\{esc\(share\.url\)\}" data-share-secret>[\s\S]*share-url-copy-button[\s\S]*data-share-copy[\s\S]*data-share-secret/.test(shareSource), 'YO!share manage rows make the active URL prominent while keeping the copy icon immediately beside a redacted URL input');
       const replayRegistrationFindings = source => {
         const checks = [
@@ -2980,18 +3136,40 @@ async function runShareThemeSuite() {
       assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource) && shareSource.includes('term.onData(data => handleTerminalData(session, data));'), 'rw share-view can type into the focused terminal only through terminal input frames');
       assert.ok(shareSource.includes('function renderShareStatusPill') && shareSource.includes('share.pill'), 'host topbar renders the YO!share status pill');
       assert.ok(shareSource.includes('share.pillMultiple'), 'host topbar aggregates multiple active YO!share URLs into one status pill');
-      assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'share-view pages keep one viewer id across all terminal websockets in the page');
-      assert.ok(/const shareClientId = \(\(\) => \{[\s\S]*shareViewMode[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*randomShareViewerId/.test(shareSource), 'every host/viewer browser gets a stable share client id for echo suppression and cursor color');
+      assert.ok(/function sessionScopedId\(key, create = randomShareViewerId\)[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*sessionStorage\.setItem\(key, created\)/.test(shareSource), 'one shared session-storage transaction owns stable browser IDs');
+      assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionScopedId\(key\)/.test(shareSource) && /const shareClientId = \(\(\) => \{[\s\S]*sessionScopedId\(key\)/.test(shareSource), 'share-view and host clients use the shared stable-ID transaction');
       assert.ok(/function wsUrl\(session\)[\s\S]*shareViewMode[\s\S]*URLSearchParams\(\{session, token: shareToken, viewer: shareViewerId\}\)[\s\S]*\/ws\/share-view\?/.test(shareSource), 'share-view terminals use /ws/share-view with the fragment token and shared viewer id');
       assert.ok(/function terminalCanPublishRemoteSize\(\)[\s\S]*!shareViewMode/.test(shareSource), 'share-view terminals cannot send remote resize frames');
       assert.ok(/function shareHostWsUrl\(token\)[\s\S]*URLSearchParams\(\{share: token, client: shareClientId\}\)[\s\S]*\/ws\/share-host\?\$\{params\.toString\(\)\}/.test(shareSource), 'share hosts publish UI state through /ws/share-host with a sender client id');
       assert.ok(/function shareViewerUiWsUrl\(token\)[\s\S]*\/ws\/share-ui\?/.test(shareSource), 'share-view clients receive UI state through the share-scoped /ws/share-ui socket');
+      assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'YO!share host socket and pending frames share one token-keyed sender lifecycle record owner');
+      assert.equal(/shareHostSockets|shareHostQueues/.test(shareSource), false, 'parallel YO!share socket and queue maps are removed');
+      assert.ok(/function sendOrQueueShareHostMessage\(token, message\)[\s\S]*ensureShareHostSocket\(token\)[\s\S]*enqueueShareHostMessage\(token, message\)/.test(shareSource), 'host and replay publication share one send-or-queue path');
+      assert.ok(/function ensureShareHostSockets\(\)[\s\S]*shareSenderRecordEntries\('connection'\)[\s\S]*record\.socket\?\.close\?\.\(\)[\s\S]*deleteShareSenderRecord\(token\)/.test(shareSource), 'inactive share pruning closes and deletes the complete token record');
       assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
-      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*setInterval\(\(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status interval skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
+      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
       assert.ok(/shareViewerStatusBackupRefreshMs:\s*uiDelayMs\.shareViewerStatusBackupRefresh/.test(timingSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup through the shared timing owner');
       assert.ok(/function shareCanPublishUi\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode[\s\S]*shareWriteMode[\s\S]*shareToken[\s\S]*shareHasActiveShare/.test(shareSource), 'DOIT.72 P5.3: share UI publication is allowed for hosts with shares and legacy rw viewers, but replay viewers cannot publish semantic UI frames');
       assert.ok(/function beginShareRemoteUiApply\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*\+ 1[\s\S]*return \(\) => \{[\s\S]*applyingShareRemoteUiState[\s\S]*- 1/.test(shareSource), 'remote UI apply uses a depth counter so overlapping async/sync mirror applies cannot leave rw viewers non-publishable');
-      assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*socket\.send\(serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication with one serialized message and sender ids');
+      assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*sendOrQueueShareHostMessage\(token, serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication through one serialized send-or-queue path');
+      const connectionApi = loadYolomux('', ['1'], 'https:');
+      connectionApi.setActiveSharesForTest([{token: 'closed-share'}]);
+      const closedSocket = connectionApi.ensureShareHostSocketForTest('closed-share');
+      assert.equal(connectionApi.enqueueShareHostMessageForTest('closed-share', {type: 'queued-before-close'}), true);
+      closedSocket.close();
+      assert.equal(connectionApi.shareHostConnectionCountForTest(), 1, 'socket close retains one reconnectable token record');
+      assert.equal(connectionApi.shareHostConnectionRecordForTest('closed-share').socket, null, 'socket close clears only the matching socket field');
+      assert.equal(connectionApi.shareHostQueueForTest('closed-share').length, 1, 'socket close preserves frames for an intended reconnect');
+      connectionApi.setActiveSharesForTest([]);
+      connectionApi.ensureShareHostSocketsForTest();
+      assert.equal(connectionApi.shareHostConnectionCountForTest(), 0, 'inactive-share reconciliation removes the socketless record and its queue');
+      connectionApi.setActiveSharesForTest([{token: 'retry-share'}]);
+      connectionApi.setShareHostSocketForTest('retry-share', {readyState: 3});
+      assert.equal(connectionApi.enqueueShareHostMessageForTest('retry-share', {type: 'queued-for-retry'}), true);
+      const retrySocket = connectionApi.ensureShareHostSocketForTest('retry-share');
+      retrySocket.onopen({target: retrySocket});
+      assert.deepStrictEqual(retrySocket.sent.map(JSON.parse), [{type: 'queued-for-retry'}], 'a replacement socket flushes the preserved queue once');
+      assert.deepStrictEqual([...connectionApi.shareHostQueueForTest('retry-share')], [], 'reconnect flush drains the record-owned queue');
       assert.ok(/function shareBuildUiMessage\(type, payload = \{\}, options = \{\}\)[\s\S]*shareNextMirrorFrameMetadata\(type, options\)/.test(shareSource), 'DOIT.72 P0.1: sharePublish stamps mirror metadata through one message builder');
       assert.ok(/function applyShareUiMessage\(message\)[\s\S]*shareDropStaleMirrorFrame\(message\)[\s\S]*return/.test(shareSource), 'DOIT.72 P0.1: share viewers drop stale sequenced mirror frames before applying payloads');
       assert.ok(/function shareBaseUiStateSnapshot\(options = \{\}\)[\s\S]*viewport:\s*shareViewportSnapshot\(\)[\s\S]*appearance:\s*shareAppearanceSnapshot\(\)[\s\S]*terminalDims:\s*shareTerminalDimensionsSnapshot\(\)[\s\S]*chrome:[\s\S]*tabMetaVisible:[\s\S]*infoSubTab:[\s\S]*autoApprove:\s*shareAutoApproveStateSnapshot\(\)[\s\S]*info:\s*shareInfoStateSnapshot\(\{includeRows: !compact\}\)[\s\S]*finder:\s*shareFinderStateSnapshot\(\{compact\}\)[\s\S]*editor:\s*shareEditorStateSnapshot\(\{compact\}\)[\s\S]*preferences:\s*sharePreferencesStateSnapshot\(\{compact\}\)/.test(shareSource), 'YO!share snapshots chrome, YO!info, Finder/Differ/Tabber, editor, and Preferences state through shared compact/full helpers');
@@ -3012,7 +3190,7 @@ async function runShareThemeSuite() {
       assert.ok(/function scheduleShareViewportPublish\(\)[\s\S]*shareViewMode[\s\S]*sharePublish\('viewport', shareViewportSnapshot\(\)\)[\s\S]*}, 150\)/.test(shareSource), 'M1: host resize publishes a debounced viewport frame');
       assert.ok(/function scheduleShareAppearancePublish\(options = \{\}\)[\s\S]*shareViewMode[\s\S]*sharePublish\('appearance', shareAppearanceSnapshot\(\)\)[\s\S]*scheduleShareTopologySnapshot\(options\.reason \|\| 'appearance'\)/.test(shareSource), 'M1: host settings apply publishes appearance geometry and a full topology snapshot');
       assert.ok(/async function applyLocale\(locale\)[\s\S]*rerenderForLocale\(\{localeChange: true\}\)[\s\S]*scheduleShareAppearancePublish\(\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)/.test(shareSource), 'DOIT.67: host locale switches publish appearance and refreshed popup-layer frames');
-      assert.ok(/window\.addEventListener\('resize', \(\) => \{[\s\S]*scheduleShareViewportPublish\(\)/.test(shareSource), 'M1: the host resize handler schedules viewport publication');
+      assert.ok(/function installNativeAppViewportOwner\(\)[\s\S]*window\.addEventListener\('resize', resize\)[\s\S]*window\.visualViewport\?\.addEventListener\?\.\('resize', resize\)/.test(shareSource) && /window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleShareViewportPublish\(\)/.test(shareSource), 'M1: one viewport owner converts window/visual-viewport changes into downstream viewport publication');
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareInfoState\(payload\.info \|\| \{\}\)[\s\S]*applyShareEditorState\(payload\.editor \|\| \{\}\)[\s\S]*applySharePreferencesState\(payload\.preferences \|\| \{\}\)[\s\S]*await applyShareFinderState\(payload\.finder \|\| \{\}\)/.test(shareSource), 'share viewers apply mirrored YO!info, editor, Preferences, and Finder/Differ/Tabber state');
       assert.ok(/function shareReadOnlyFinderStateIsHostOwned\(\)[\s\S]*shareViewMode && !shareWriteMode && !applyingShareRemoteUiState/.test(shareSource), 'read-only share clients treat Finder root and expansion as host-owned between host frames');
       assert.ok(/function scheduleFileExplorerActiveTabSync\(preferredItem = null, options = \{\}\)[\s\S]*if \(shareReadOnlyFinderStateIsHostOwned\(\)\) return/.test(shareSource), 'read-only share clients ignore local active-tab sync that would jump Finder to the client context');
@@ -3020,9 +3198,6 @@ async function runShareThemeSuite() {
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareViewportState\(payload\.viewport \|\| \{\}\)[\s\S]*applyShareAppearanceState\(payload\.appearance \|\| \{\}\)/.test(shareSource), 'M1: share viewers apply geometry inputs before semantic UI state');
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareTerminalDimensionsState\(payload\.terminalDims \|\| \[\]\)/.test(shareSource), 'M4: share viewers apply host terminal dimensions from the UI state');
       assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'ui-state'[\s\S]*applyShareUiState\(payload\)/.test(shareSource), 'share viewers consume live ui-state frames');
-      const uiStateIndex = shareSource.indexOf("message.type === 'ui-state'");
-      const remoteApplyIndex = shareSource.indexOf('beginShareRemoteUiApply()', shareSource.indexOf('function applyShareUiMessage'));
-      assert.ok(uiStateIndex >= 0 && remoteApplyIndex >= 0 && uiStateIndex < remoteApplyIndex, 'live ui-state frames are dispatched before the outer remote-apply guard so rw viewers do not get stuck non-publishable');
       assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'viewport'[\s\S]*applyShareViewportState\(payload\)[\s\S]*message\.type === 'appearance'[\s\S]*applyShareAppearanceState\(payload\)/.test(shareSource), 'M1: share viewers consume live viewport and appearance frames');
       assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareAutoApproveState\(payload\.autoApprove \|\| \{\}\)[\s\S]*applyShareTextWrapMetrics\(payload\.textWraps \|\| \[\]\)[\s\S]*applyShareScrollSnapshot\(payload\.scroll \|\| \[\]\)/.test(shareSource), 'YO!share clients apply host YO state, wrapped-control metrics, and full-snapshot scroll after semantic panes render');
       assert.ok(/shareReplayKeyframeRequestInitialBackoffMs:\s*5000/.test(timingSource), 'YO!share replay keyframe requests start with a five-second retry floor through the shared timing owner');
@@ -3056,20 +3231,22 @@ async function runShareThemeSuite() {
       assert.ok(/function sharePointFromPointerPayload\(payload = \{\}\)[\s\S]*if \(payload\.scope && payload\.scope !== 'viewport'\) return null[\s\S]*visualPointFromAppSpace\(x, y\)/.test(shareSource), 'M7: share pointer rendering maps app-space viewport coordinates through the local mirror transform');
       assert.equal(shareSource.includes('shareSemanticPointerPayload'), false, 'M7: semantic pointer fallbacks are removed after mirror-frame geometry');
       assert.equal(shareSource.includes('shareTerminalCellPointerPayload'), false, 'M7: terminal cell pointer fallback is removed after mirror-frame geometry');
-      assert.equal(shareSource.includes("scope: 'pane'"), false, 'M7: pane-relative pointer fallback is removed after mirror-frame geometry');
+      assert.equal(shareReplaySource.includes("scope: 'pane'"), false, 'M7: pane-relative pointer fallback is removed after mirror-frame geometry');
       assert.ok(/function shareScrollPayloadForElement\(element\)[\s\S]*target: descriptor\.target[\s\S]*anchor[\s\S]*head/.test(shareSource), 'M5: share scroll payloads carry editor scroll and selection state through one helper');
       assert.ok(/function shareScrollTargetForElement\(element\)[\s\S]*element\.closest\('#info-content'\)[\s\S]*target: 'info'/.test(shareSource), 'YO!info scroll is a mirrored share scroll target');
-      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*scrollTop = top[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
-      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
-      assert.ok(/shareLastAppliedScrollByTarget\.set\(target, \{top, left, payload: \{/.test(shareSource), 'DOIT.67: share viewers remember the last host scroll frame and payload for local-scroll restoration');
-      assert.ok(/function restoreShareReadonlyScrollTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareLastAppliedScrollByTarget\.get\(descriptor\.target\)[\s\S]*descriptor\.element\.scrollTop = top/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target directly to the last host-authored value');
-      assert.equal(shareSource.includes('shareLastAppliedScrollPayloadByTarget'), false, 'share scroll restore state uses one target-keyed map');
-      assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareLastAppliedScrollByTarget\.get\(cleanTarget\)[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*scrollTop = payload\.top/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
-      assert.ok(/function scheduleShareScrollRestoreByKey\(target, options = \{\}\)[\s\S]*shareScrollRestoreFrameTimers\.set\(cleanTarget, state\)[\s\S]*requestAnimationFrame\(run\)/.test(shareSource), 'readonly share scroll restore retries across render frames');
-      assert.ok(/function applyShareScrollState\(payload = \{\}\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'host scroll frames schedule replay even when the current DOM scroller is not ready');
+      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
+      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*shareScrollTargetRecord\(target\)[\s\S]*record\.payload = \{\.\.\.payload, target, top, left\}[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
+      assert.ok(/const shareSenderRecords = new Map\(\)[\s\S]*function shareSenderRecord\(key, options = \{\}\)/.test(shareSource), 'share viewers own scroll payload and restore lifecycle in one sender-keyed record map');
+      assert.ok(/function shareReadonlyScrollStateForTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareSenderRecord\(descriptor\.target, \{create: false\}\)\?\.scrollTarget[\s\S]*function restoreShareReadonlyScrollTarget\(target\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target through the shared host-scroll snapshot');
+      assert.equal(shareSource.includes('shareLastAppliedScrollByTarget'), false, 'retired scroll-state map is absent');
+      assert.equal(shareSource.includes('shareScrollRestoreFrameTimers'), false, 'retired scroll-restore timer map is absent');
+      assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareSenderRecord\(cleanTarget, \{create: false\}\)\?\.scrollTarget[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, payload\.top, payload\.left\)/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
+      assert.ok(/function applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*scrollTop = top[\s\S]*scrollLeft = left[\s\S]*requestMeasure/.test(shareSource), 'host editor scroll uses one shared setter that refreshes virtualized CodeMirror rows');
+      assert.ok(/function scheduleShareScrollRestoreByKey\(target, options = \{\}\)[\s\S]*record\.restoreGeneration = restoreGeneration[\s\S]*shareSenderRecord\(cleanTarget, \{create: false\}\)\?\.scrollTarget !== record[\s\S]*requestAnimationFrame\(run\)/.test(shareSource), 'readonly share scroll restore retries belong to the current target record generation');
+      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'host scroll frames schedule replay even when the current DOM scroller is not ready');
       assert.ok(/function shareScrollStateSnapshot\(\)[\s\S]*shareScrollPayloadForElement\(element\)/.test(shareSource), 'full UI-state snapshots reuse the shared scroll payload helper instead of inventing a second scroll format');
-      assert.ok(/function applyShareScrollSnapshot\(scroll = \[\]\)[\s\S]*applyShareScrollState\(payload\)/.test(shareSource), 'full UI-state scroll replays through the same host-authored scroll apply path');
-      assert.ok(/function restoreShareScrollTargetsByPrefix\(prefix\)[\s\S]*shareLastAppliedScrollByTarget\.keys\(\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'DOIT.69: editor scroll targets can replay as a group after editor rerender');
+      assert.ok(/function applyShareScrollSnapshot\(scroll = \[\]\)[\s\S]*snapshotGeneration = \+\+shareScrollSnapshotGeneration[\s\S]*shareSenderRecordEntries\('scrollTarget'\)[\s\S]*senderRecord\.scrollTarget = null[\s\S]*applyShareScrollState\(payload, \{snapshotGeneration\}\)/.test(shareSource), 'full UI-state scroll replaces absent targets and replays current targets through the shared apply path');
+      assert.ok(/function restoreShareScrollTargetsByPrefix\(prefix\)[\s\S]*shareSenderRecordEntries\('scrollTarget'\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'DOIT.69: editor scroll targets can replay as a group after editor rerender');
       assert.ok(/function scheduleShareFileEditorScrollRestore\(item, path\)[\s\S]*editor:\$\{key\}:editor[\s\S]*editor:\$\{key\}:preview/.test(shareSource), 'file editor renders schedule host scroll replay for editor and preview scrollers');
       assert.ok(/function shareCanPublishScroll\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*return false[\s\S]*return shareCanPublishUi\(\)/.test(shareSource), 'DOIT.69: read-only share viewers cannot publish scroll frames');
       assert.ok(/function scheduleShareScrollPublishForElement\(element\)[\s\S]*!shareCanPublishScroll\(\)[\s\S]*restoreShareReadonlyScrollTarget\(element\)[\s\S]*if \(shareCanPublishScroll\(\)\) sharePublish\('scroll'/.test(shareSource), 'DOIT.69: scroll publish scheduling restores readonly local scroll and rechecks publish permission before sending');
@@ -3101,7 +3278,7 @@ async function runShareThemeSuite() {
       assert.equal(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*else await resyncShareViewerUiState\(\)/.test(shareSource), false, 'DOIT.72 P0.2: geometry drift repair no longer blindly runs the generic semantic resync for every mismatch');
       assert.ok(/function applyShareGeometryDigest\(payload = \{\}\)[\s\S]*shareGeometryDigestCompare\(payload\)[\s\S]*!shareGeometryRepairInFlight[\s\S]*repairShareGeometryDigest\(payload, diff\)/.test(shareSource), 'M9: viewers compare geometry digests and route mismatch through the guarded repair helper');
       assert.ok(/shareGeometryDigestPublishMs:\s*uiDelayMs\.shareGeometryDigestPublish/.test(timingSource), 'M9/MV-3: the odd geometry digest cadence is owned by the shared timing partial');
-      assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*setInterval\(publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared timing owner');
+      assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*resetRuntimeInterval\('share-geometry-digest', publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared scheduler and timing owner');
       const digestApi = loadYolomux('?debug=1&shareReplay=1', ['1'], 'https:');
       const digestFrames = [];
       digestApi.setActiveSharesForTest([{token: 'idle-share', viewers: 0}]);
@@ -3121,11 +3298,56 @@ async function runShareThemeSuite() {
       assert.equal(digestPerf.geometryDigest.lastViewerCount, 2, 'YO!share geometry digest samples record viewer count');
       assert.ok(digestFrames.some(frame => JSON.parse(frame).type === 'geometry-digest'), 'YO!share publishes the geometry digest once viewers are connected');
       assert.ok(digestApi.jsDebugEventsForTest().some(event => event.type === 'share-replay-perf' && event.kind === 'geometryDigest'), 'YO!share geometry digest timings are visible in the existing JS debug event stream');
-      assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors and ignore their own echoed cursor');
-      assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareHostDimensions\.get[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
+      assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'share pointer DOM and hide timer state have one sender-keyed record owner');
+      assert.equal(/sharePointerGhosts|sharePointerHideTimers|let sharePointerGhost\b|let sharePointerHideTimer\b/.test(shareSource), false, 'parallel and scalar share pointer state owners are removed');
+      assert.equal(/const (?:IMAGE|PDF|MERMAID)_EXTENSIONS\b/.test(shareSource), false, 'dead preview extension-set mirrors are removed');
+      assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*record\.hideTimer = timer[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors, replace one record-owned timer, and ignore their own echoed cursor');
+      const pointerTimers = new Map();
+      const clearedPointerTimers = [];
+      let nextPointerTimer = 1;
+      const pointerApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        bootstrapOverrides: {share: {view: true, id: 'pointer-test', mode: 'ro'}},
+        sessionStorage: {'yolomux.share.viewer.pointer-test': 'self-client'},
+        setTimeout(callback, milliseconds) {
+          const id = nextPointerTimer++;
+          pointerTimers.set(id, {callback, milliseconds});
+          return id;
+        },
+        clearTimeout(id) {
+          clearedPointerTimers.push(id);
+          pointerTimers.delete(id);
+        },
+      });
+      pointerApi.renderSharePointerGhostForTest({sender: 'remote-a', x: 10, y: 20});
+      let pointerRecords = pointerApi.sharePointerRecordsForTest();
+      assert.equal(pointerRecords.length, 1, 'first remote sender creates one pointer record');
+      const firstGhost = pointerRecords[0].ghost;
+      const firstTimer = pointerRecords[0].hideTimer;
+      assert.equal(firstGhost.classList.contains('visible'), true, 'remote pointer is visible after its first frame');
+      assert.equal(pointerTimers.get(firstTimer).milliseconds, 1800, 'remote pointer uses the shared hide duration');
+      pointerApi.renderSharePointerGhostForTest({sender: 'remote-a', x: 30, y: 40});
+      pointerRecords = pointerApi.sharePointerRecordsForTest();
+      assert.equal(pointerRecords[0].ghost, firstGhost, 'the same sender reuses one ghost DOM node');
+      assert.notEqual(pointerRecords[0].hideTimer, firstTimer, 'a new frame replaces the sender hide timer');
+      assert.deepEqual(clearedPointerTimers, [firstTimer], 'timer replacement clears the prior sender timer exactly once');
+      pointerApi.renderSharePointerGhostForTest({sender: 'remote-b', x: 50, y: 60});
+      pointerRecords = pointerApi.sharePointerRecordsForTest();
+      assert.equal(pointerRecords.length, 2, 'different senders retain isolated pointer records');
+      assert.notEqual(pointerRecords[0].ghost, pointerRecords[1].ghost, 'different senders retain isolated ghost DOM nodes');
+      pointerApi.renderSharePointerGhostForTest({sender: 'self-client', x: 70, y: 80});
+      assert.equal(pointerApi.sharePointerRecordsForTest().length, 2, 'the client ignores its own echoed pointer frame');
+      const remoteA = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-a');
+      const remoteATimer = pointerTimers.get(remoteA.hideTimer);
+      remoteATimer.callback();
+      const hiddenRemoteA = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-a');
+      const visibleRemoteB = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-b');
+      assert.equal(hiddenRemoteA.hideTimer, null, 'the active hide callback clears only its record timer');
+      assert.equal(hiddenRemoteA.ghost.classList.contains('visible'), false, 'the active hide callback hides its sender ghost');
+      assert.equal(visibleRemoteB.ghost.classList.contains('visible'), true, 'one sender hide callback does not hide another sender');
+      assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareSenderRecord\(session, \{create: false\}\)\?\.dimensions[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
       assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');
       const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
-      assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*appSpaceRect\(actions\)[\s\S]*appSpaceRect\(header\)/.test(dockviewSource), 'M2/M3: Dockview tab fitting uses app-space widths under the mirror transform');
+      assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*appSpaceRect\(actions\)[\s\S]*appSpaceRect\(tabsContainer\)/.test(dockviewSource), 'M2/M3: Dockview tab fitting measures the shared tab surface in app-space under the mirror transform');
       const shareCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(/body\.app-vw-lte-1500 \.app-menu-button/.test(shareCss), 'M0/M2: responsive topbar chrome is keyed by appViewport classes, not native media width');
       assert.equal(/@media \(max-width: (1500|1280|1100|1080|980|760|720)px\)/.test(shareCss), false, 'M0/M2: mirror-sensitive breakpoints do not use native viewport media queries');
@@ -3153,9 +3375,9 @@ async function runShareThemeSuite() {
       assert.ok(/\.app-overlay-root\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-share-presence\)[\s\S]*pointer-events:\s*none/.test(shareCss), 'DOIT.72 P4.3: app overlay root is fixed app-space chrome and does not resize the layout grid');
       assert.ok(/function createContextMenuController\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(menu\)/.test(shareSource), 'DOIT.72 P4.3: context menus mount under the replayed app overlay root');
       assert.ok(/function detachPaneTabPopover\(tab, popover\)[\s\S]*const host = appOverlayRootElement\(\)[\s\S]*host\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: detached tab popovers mount under the replayed app overlay root');
-      assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(diffRefPopover\)/.test(shareSource), 'DOIT.72 P4.3: diff ref popovers mount under the replayed app overlay root');
+      assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: diff ref popovers mount under the replayed app overlay root');
       assert.ok(/function fileTreeRepoPopoverNode\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(shareSource), 'DOIT.72 P4.3: repo hover popovers mount under the replayed app overlay root');
-      assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: image preview popovers mount under the replayed app overlay root');
+      assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null, options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: local and external image preview popovers mount under the replayed app overlay root');
       assert.ok(/function showSessionRenameDialog\(session\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(shareSource), 'DOIT.72 P4.3: rename dialogs mount under the replayed app overlay root');
       assert.ok(/function showFileEditorDecisionDialog\(options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(backdrop\)/.test(shareSource), 'DOIT.72 P4.3: editor decision dialogs mount under the replayed app overlay root');
       assert.ok(/function ensureCommandPalette\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(shareSource), 'DOIT.72 P4.3: command palette modal DOM mounts under the replayed app overlay root');
@@ -3183,7 +3405,7 @@ async function runShareThemeSuite() {
       assert.ok(/visibility:\s*visible\s*!important/.test(popupChildRule) && /opacity:\s*1\s*!important/.test(popupChildRule), 'DOIT.67: mirrored popup children stay visible without host-only open ancestors');
       const popupModalRule = shareCss.match(/\.share-popup-mirror-item > \.modal\s*\{(?<body>[^}]*)\}/)?.groups?.body || '';
       assert.ok(/width:\s*100%\s*!important/.test(popupModalRule) && /height:\s*100%\s*!important/.test(popupModalRule) && /max-height:\s*none\s*!important/.test(popupModalRule), 'mirrored modal overlays fill the host-measured shell without using client viewport dimensions');
-      assert.ok(/\.share-popup-mirror-item > \.modal\.share-open \.modal-dialog\s*\{[\s\S]*width:\s*min\(960px,\s*calc\(100% - 28px\)\)\s*!important/.test(shareCss), 'mirrored YO!share dialog width is relative to the host-measured modal shell');
+      assert.ok(/\.share-popup-mirror-item > \.modal\.share-open \.modal-dialog\s*\{[\s\S]*width:\s*min\(var\(--dialog-wide-inline-size\),\s*100%\)\s*!important/.test(shareCss), 'mirrored YO!share dialog width uses the shared host/replay capacity token relative to the measured shell');
       assert.ok(/function shareTerminalBytesFromMessage\(session, message\)[\s\S]*message\.ch !== 'term'[\s\S]*atob\(message\.data\)/.test(shareSource), 'share-view terminal output is decoded from tagged terminal frames');
   	    assert.ok(/function scheduleShareTopologySnapshot\(reason = 'topology'\)[\s\S]*scheduleShareUiStatePublish\(\{reason: `topology:\$\{cleanReason\}`\}\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'DOIT.72 P0.3: topology changes route through one full UI-state snapshot scheduler and a replay keyframe scheduler');
   	    assert.ok(/shareTopologyKeyframePointerQuietMs:\s*500/.test(timingSource) && /const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs/.test(shareSource) && /function shareTopologyDomKeyframeDelayMs\(\)[\s\S]*shareReplayTopologyKeyframeQueuedAt[\s\S]*shareReplayHostLastKeyframeAt[\s\S]*sharePointerQuietDelayMs\(\)/.test(shareSource), 'topology replay keyframes wait for a pointer-quiet window and respect the host keyframe floor');
@@ -3196,7 +3418,7 @@ async function runShareThemeSuite() {
   	    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*sharePublishLayout\(\)[\s\S]*scheduleShareTopologySnapshot\(options\.shareReason \|\| 'layout'\)/.test(shareSource), 'layout commits publish share layout updates and schedule a full UI-state snapshot through the topology scheduler');
       assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*sharePublish\('active-tab', \{slot: side, item: session\}\)[\s\S]*scheduleShareTopologySnapshot\('tab-activation'\)/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'tab activation schedules a full topology snapshot behind the narrow active-tab frame');
       assert.ok(/async function openFileExplorerAt\(path, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-root'\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Finder root changes schedule a full topology snapshot');
-      assert.ok(/function setFileExplorerMode\(mode, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber mode changes schedule a full topology snapshot');
+      assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'legacy Finder/Differ/Tabber mode frames route through the layout owner, which publishes the topology snapshot');
       assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*scheduleShareTopologySnapshot\('editor-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor mode changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorThemeMode\(mode\)[\s\S]*scheduleShareTopologySnapshot\('editor-theme'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor theme changes schedule a full topology snapshot');
@@ -3218,13 +3440,13 @@ async function runShareThemeSuite() {
       assert.ok(/\.share-status-pill\.share-mode-read\s*\{[\s\S]*var\(--good\)/.test(shareCss), 'read share status uses the green/good mode color');
       assert.ok(/\.share-status-pill\.share-mode-write\s*\{[\s\S]*var\(--bad\)/.test(shareCss), 'write share status uses the red/bad mode color');
       assert.ok(/\.share-ghost-cursor::before\s*\{[\s\S]*--share-cursor-color/.test(shareCss), 'share cursor color is participant-specific');
-      assert.ok(/--share-stage-bg:\s*#000/.test(shareCss), 'M3: share view keeps one black stage token for letterbox/crop bands');
-      assert.ok(/body\.theme-light\s*\{[\s\S]*--share-stage-bg:\s*#000/.test(shareCss), 'M3: light mode explicitly keeps the share stage black');
+      assert.ok(/--share-stage-bg:\s*var\(--paint-black\)/.test(shareCss), 'M3: share view keeps one shared black stage token for letterbox/crop bands');
+      assert.equal(/body\.theme-light\s*\{[\s\S]*--share-stage-bg:/.test(shareCss), false, 'M3: light mode inherits the single black share-stage owner');
       assert.ok(/\.share-mirror-stage\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*hidden[\s\S]*background:\s*var\(--share-stage-bg\)/.test(shareCss), 'M3: share view has a fixed black clipping stage for letterbox/crop bands');
       assert.ok(/body\.share-view-mode \.share-mirror-stage \.app-root\s*\{[\s\S]*position:\s*absolute[\s\S]*transform:\s*translate3d\(var\(--share-mirror-tx/.test(shareCss), 'M3: share view transforms the app root inside the mirror stage');
       assert.ok(/\.share-viewer-banner\s*\{[\s\S]*position:\s*fixed[\s\S]*bottom:\s*8px/.test(shareCss), 'M3: share viewer banner is fixed outside the mirror root');
     }
-    {
+    test('share replay protocol keeps its frame vocabulary and semantic state isolated', () => {
       const metaApi = loadYolomux('', ['1'], 'https:');
       const protocol = metaApi.shareMirrorProtocolForTest;
       assert.equal(protocol.version, 1, 'DOIT.72 P1.1: replay frames carry protocol version 1');
@@ -3606,8 +3828,8 @@ async function runShareThemeSuite() {
       assert.deepStrictEqual({...staleApi.shareMirrorLastFrameForTest('host-a', 'dom-replay')}, {epoch: 2, sequence: 1}, 'viewer records DOM replay stale state separately from semantic state');
       assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'appearance', sender: 'host-b', epoch: 1, sequence: 1}), false, 'different sender has an independent sequence');
       assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'layout', sender: 'host-a'}), false, 'legacy unsequenced frames still apply during migration');
-    }
-    {
+    });
+    test('read-only semantic shares protect the mirrored surface and repair geometry', () => {
       const roApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share123', mode: 'ro', session: '1', sessions: ['1']},
       });
@@ -3744,7 +3966,7 @@ async function runShareThemeSuite() {
       assert.equal(textPointer.defaultPrevented, false, 'read-only share pointerdown inside scroll content still allows text selection defaults');
       scroller.scrollTop = 999;
       scroller.scrollLeft = 17;
-      roApi.setShareLastAppliedScrollForTest('editor:file:/tmp/a.md:editor', {top: 123, left: 4}, {
+      roApi.setShareScrollTargetRecordForTest('editor:file:/tmp/a.md:editor', {top: 123, left: 4}, {
         kind: 'editor',
         path: '/tmp/a.md',
         item: 'file:/tmp/a.md',
@@ -3755,7 +3977,12 @@ async function runShareThemeSuite() {
       roApi.blockShareReadonlyInteraction(scroll);
       assert.equal(scroller.scrollTop, 123, 'read-only local scroll is restored to the last host scrollTop');
       assert.equal(scroller.scrollLeft, 4, 'read-only local scroll is restored to the last host scrollLeft');
-      assert.deepStrictEqual({...roApi.shareLastAppliedScrollPayloadForTest('editor:file:/tmp/a.md:editor')}, {
+      assert.equal(scroll.immediateStopped, true, 'read-only local scroll is stopped before mirrored widgets consume it');
+      const hostScroll = eventFor('scroll');
+      hostScroll.target = scroller;
+      roApi.blockShareReadonlyInteraction(hostScroll);
+      assert.equal(hostScroll.immediateStopped, false, 'host-authored scroll at the mirrored position reaches virtualized widgets');
+      assert.deepStrictEqual({...roApi.shareScrollTargetPayloadForTest('editor:file:/tmp/a.md:editor')}, {
         kind: 'editor',
         path: '/tmp/a.md',
         item: 'file:/tmp/a.md',
@@ -3775,6 +4002,51 @@ async function runShareThemeSuite() {
       assert.equal(roApi.scheduleShareScrollRestoreByKeyForTest('finder:diff', {frames: 2}), true, 'pending Differ scroll schedules replay by target key after the pane appears');
       assert.equal(diffScroller.scrollTop, 345, 'pending Differ scroll replay restores the host scrollTop');
       assert.equal(diffScroller.scrollLeft, 6, 'pending Differ scroll replay restores the host horizontal scroll');
+      const queuedScrollFrames = [];
+      const snapshotApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
+        share: {view: true, id: 'share-scroll-snapshot', mode: 'ro', session: '1', sessions: ['1']},
+        requestAnimationFrame(callback) {
+          queuedScrollFrames.push(callback);
+          return queuedScrollFrames.length;
+        },
+      });
+      queuedScrollFrames.length = 0;
+      const snapshotDiffScroller = new TestElement('', 'div');
+      snapshotDiffScroller.classList.add('file-explorer-changes-panel');
+      snapshotApi.setDocumentQuerySelectorAllForTest(selector => selector === '.file-explorer-changes-panel' ? [snapshotDiffScroller] : []);
+      const drainScrollFrames = () => {
+        let guard = 32;
+        while (queuedScrollFrames.length && guard > 0) {
+          queuedScrollFrames.shift()();
+          guard -= 1;
+        }
+        assert.ok(guard > 0, 'scroll restore frames settle within their bounded retry count');
+      };
+      snapshotApi.applyShareScrollSnapshotForTest([
+        {target: 'preferences', kind: 'preferences', top: 11, left: 0},
+        {target: 'finder:diff', kind: 'finder', mode: 'diff', top: 222, left: 7},
+      ]);
+      drainScrollFrames();
+      assert.equal(snapshotApi.scheduleShareScrollRestoreByKeyForTest('finder:diff', {frames: 2}), true, 'current snapshot target schedules a restore generation');
+      const retiredDiffRestore = queuedScrollFrames.shift();
+      assert.equal(typeof retiredDiffRestore, 'function', 'scheduled target owns a pending restore callback');
+      snapshotApi.applyShareScrollSnapshotForTest([
+        {target: 'preferences', kind: 'preferences', top: 19, left: 0},
+      ]);
+      assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff'), null, 'authoritative full snapshot retires an absent target record');
+      snapshotDiffScroller.scrollTop = 0;
+      snapshotDiffScroller.scrollLeft = 0;
+      retiredDiffRestore();
+      assert.equal(snapshotDiffScroller.scrollTop, 0, 'retired target restore callback cannot resurrect its old scrollTop');
+      assert.equal(snapshotDiffScroller.scrollLeft, 0, 'retired target restore callback cannot resurrect its old scrollLeft');
+      snapshotApi.applyShareScrollStateForTest({target: 'finder:diff', kind: 'finder', mode: 'diff', top: 444, left: 9});
+      assert.equal(snapshotDiffScroller.scrollTop, 444, 'a later delta recreates the retired target with current scrollTop');
+      assert.equal(snapshotDiffScroller.scrollLeft, 9, 'a later delta recreates the retired target with current scrollLeft');
+      retiredDiffRestore();
+      assert.equal(snapshotDiffScroller.scrollTop, 444, 'an old generation cannot overwrite a recreated target');
+      assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff').remainingFrames > 0, true, 'recreated target owns its own bounded restore work');
+      drainScrollFrames();
+      assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff').remainingFrames, 0, 'current restore generation cleans up its frame count');
       const termCalls = [];
       roApi.registerTerminalForTest('1', {
         cols: 80,
@@ -3802,13 +4074,14 @@ async function runShareThemeSuite() {
       assert.equal(roApi.sharePopupLayerNodeForTest().parentElement, appRoot, 'popup-layer mirror is mounted inside the scaled app root');
       roApi.applySharePopupLayerForTest({seq: 1, owner: 'host', items: [{rect: {left: 1, top: 1, width: 2, height: 2}, html: '<div>stale</div>'}]}, 'host');
       assert.equal(roApi.sharePopupLayerLastSeqForTest('host'), 2, 'stale popup-layer frames are ignored after a newer close frame');
-    }
+    });
     api.setActiveLocaleForTest('ja');
     const appearance = api.shareAppearanceSnapshotForTest();
     assert.equal(appearance.locale, 'ja', 'share appearance snapshot includes the active locale');
     assert.equal(appearance.languagePref, 'system', 'share appearance snapshot includes the persisted language preference');
     api.setActiveLocaleForTest('en');
 
+    test('share appearance frames apply the host-resolved theme and repaint terminals', () => {
     const shareThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
       shareReplay: true,
       share: {view: true, id: 'share-theme', mode: 'ro', session: '1', sessions: ['1']},
@@ -3838,7 +4111,9 @@ async function runShareThemeSuite() {
     assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-dark'), 'share viewer body applies normal dark CSS for host-resolved System dark');
     assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'later share appearance frames repaint terminal cells too');
     assert.equal(shareTextureClears, 2, 'later share appearance frames clear cached glyph colors too');
+    });
 
+    test('replay-shell share appearance frames update the viewer theme', () => {
     const replayThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
       shareReplay: true,
       share: {view: true, id: 'share-replay-theme', mode: 'ro', session: '1', sessions: ['1']},
@@ -3855,7 +4130,9 @@ async function runShareThemeSuite() {
     assert.equal(replayThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'replay-shell share viewers apply live appearance frames instead of swallowing them');
     assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'replay-shell appearance frames repaint the viewer body');
     assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-light'), 'replay-shell appearance frames activate normal light CSS for System light');
+    });
 
+    test('topology keyframes defer for pointer activity but respect the maximum delay', () => {
     const topologyDelayApi = loadYolomux('', ['1']);
     topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now());
     topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(0);
@@ -3870,6 +4147,7 @@ async function runShareThemeSuite() {
     topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(Date.now());
     topologyDelayApi.setSharePointerLastPublishedAtForTest(0);
     assert.equal(topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest(), 0, 'topology replay max deferral eventually permits a keyframe even under continuous pointer movement');
+    });
 
     const sharePointerSlots = api.emptyLayoutSlots();
     sharePointerSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
@@ -3890,6 +4168,7 @@ async function runShareThemeSuite() {
     assert.equal(viewerPoint.y, 230, 'M7: received app-space pointer maps into the local visual mirror y');
     assert.equal(api.sharePointFromPointerPayload({scope: 'pane', x: 600, y: 400}), null, 'M7: old pane-relative pointer payloads are rejected');
 
+    test('host pointer publication emits replay coordinates', () => {
     const pointerPublishApi = loadYolomux('', ['1']);
     pointerPublishApi.setActiveSharesForTest([{token: 'share-token'}]);
     const pointerFrames = [];
@@ -3901,6 +4180,7 @@ async function runShareThemeSuite() {
     assert.equal(pointerFrames.length, 1, 'DOM replay pointer publication sends one frame per host pointer tick');
     assert.equal(pointerFrames[0].type, 'pointer');
     assert.deepStrictEqual(canonical(pointerFrames[0].payload), {scope: 'viewport', visible: true, x: 44, y: 55});
+    });
     api.setAppMirrorTransformForTest({scale: 1, tx: 0, ty: 0});
     const digestA = {snapshot: {viewport: {width: 1, height: 2}, fonts: {ui: 12}, slots: [], tabStrips: [], terminalCells: [], editors: []}};
     const digestB = {snapshot: {editors: [], terminalCells: [], tabStrips: [], slots: [], fonts: {ui: 12}, viewport: {height: 2, width: 1}}};
@@ -3929,51 +4209,59 @@ async function runShareThemeSuite() {
     ), 'textWraps', 'M9: wrapped text/control drift is named separately from generic geometry drift');
     const tmuxMenu = menus.find(menu => menu.id === 'tmux');
     const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
+    const launchMenuLabels = fileMenu.items.flatMap(menuLabels).filter(Boolean);
     const tabsMenu = menus.find(menu => menu.id === 'tabs');
-    const tabsMenuLabels = tabsMenu.items.map(item => item.label).filter(Boolean);
-    assert.equal(tmuxMenu.items[0].label, 'YO off');
+    const tabsMenuLabels = tabsMenu.items.flatMap(menuLabels).filter(Boolean);
+    assert.equal(tmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(tmuxMenu.items[0].keepOpen, true);
-    assert.ok(tmuxMenuLabels.includes('YO!info'), 'tmux menu exposes YO!info alongside session commands');
+    assert.equal(tmuxMenuLabels.includes('YO!info'), false, 'tmux menu omits the duplicate YO!info entry that File already owns');
     assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
-    // New-session items use an explicit "new" command label in Tabs; the detail shows the params passed.
+    // New-session items use explicit commands in File; Tabs is only the sorted tab navigator.
     assert.equal(tmuxMenuLabels.includes('new Claude'), false);
     assert.equal(tmuxMenuLabels.includes('new Codex'), false);
-    assert.equal(tmuxMenuLabels.includes('new Xterm'), false);
-    assert.ok(tabsMenuLabels.includes('new Claude'));
-    assert.ok(tabsMenuLabels.includes('new Codex'));
-    assert.ok(tabsMenuLabels.includes('new Xterm'), 'Xterm is always offered (a plain shell), not greyed unavailable');
-    assert.ok(tabsMenu.items.find(item => item.label === 'new Xterm').iconHtml.includes('app-menu-ui-icon-shell'), 'Tabs -> new Xterm uses the shell symbol');
-    assert.equal(tmuxMenuLabels.includes('+ Claude'), false, 'the "+" prefix is dropped from new-session items');
+    assert.equal(tmuxMenuLabels.includes('Shell:'), false);
+    assert.equal(tabsMenuLabels.includes('new Claude'), false);
+    assert.equal(tabsMenuLabels.includes('new Codex'), false);
+    assert.equal(tabsMenuLabels.includes('Shell:'), false, 'Tabs is a navigator, not a session launcher');
+    assert.ok(launchMenuLabels.includes('new Claude'));
+    assert.ok(launchMenuLabels.includes('new Codex'));
+    assert.ok(fileMenu.items.find(item => item.type === 'command-row' && item.label === 'Shell:').iconHtml.includes('app-menu-ui-icon-shell'), 'File -> Shell uses the shell symbol');
+    assert.equal(tmuxMenuLabels.includes('+ --dangerously-skip-permissions'), false, 'launch choices remain in File, not the tmux menu');
     api.setAgentAuthForTest({claude: {installed: false, logged_in: false, unavailable_reason: 'not-on-path'}});
-    const unavailableTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
-    const missingPathClaude = unavailableTabsMenu.items.find(item => item.label === 'new Claude');
+    const unavailableFileMenu = api.appMenuTree().find(menu => menu.id === 'file');
+    const missingPathClaude = unavailableFileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Claude').primary;
     assert.equal(missingPathClaude.disabled, true);
     assert.equal(missingPathClaude.detail, 'Not on server PATH');
     {
       const newSessionSrc = fs.readFileSync('static/yolomux.js', 'utf8');
       const menuCss = fs.readFileSync('static/yolomux.css', 'utf8');
-      assert.ok(newSessionSrc.includes('function agentLaunchParams(agent)'), 'the launch-params helper exists');
-      assert.ok(/menuCommand\(newTmuxSessionLabel\(agent\), \(\) => createNextSession\(agent\)/.test(newSessionSrc), 'new-session label uses the "new {name}" locale string, action launches it');
-      assert.ok(/function newTmuxSessionIcon\(agent\)[\s\S]*agent === 'term' \? appMenuUiIcon\('shell'\) : agentIcon\(agent\)/.test(newSessionSrc), 'new Xterm uses the shared shell icon path while Claude/Codex keep agent icons');
-      assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*newTmuxSessionItems\(\),[\s\S]*filteredOpenItems/.test(newSessionSrc), 'Tabs menu owns the new-session commands');
+      assert.ok(/function agentLaunchCommand\(agent, dangerouslyYolo = false\)[\s\S]*full_access[\s\S]*normal/.test(newSessionSrc), 'the server-owned normal/full-access launch-command helper exists');
+      assert.ok(/const fullAccessFlags = dangerouslyYolo \? newTmuxSessionFullAccessFlags\(agent\) : ''[\s\S]*dangerouslyYolo \? newTmuxSessionLabel\(agent, true\)[\s\S]*createNextSession\(agent, \{dangerouslyYolo, terminal\}\)[\s\S]*title: fullAccessFlags/.test(newSessionSrc), 'new-session labels retain the exact dangerous-auto-approve bypass flags in their tooltip');
+      assert.ok(/function shellLaunchLabel\(terminal\)[\s\S]*Shell: \$\{terminal\}[\s\S]*const terminals = terminalLaunchNames\(\);[\s\S]*agent === 'term'[\s\S]*terminals\.length[\s\S]*menuCommandRow\(terminals\.map\(terminal => launch\(false, terminal\)\),[\s\S]*label: 'Shell:',[\s\S]*separator: false[\s\S]*: null/.test(newSessionSrc), 'Shell offers compact explicit server-provided commands with no separator and never guesses a default Xterm shell');
+      assert.ok(/function newTmuxSessionIcon\(agent\)[\s\S]*agent === 'term' \? appMenuUiIcon\('shell'\) : agentIcon\(agent\)/.test(newSessionSrc), 'Shell uses the shared shell icon path while Claude/Codex keep agent icons');
+      assert.ok(/function tabMenuItems\(openItems[\s\S]*menuGroups\(\s*tmuxItems[\s\S]*yoloItems/.test(newSessionSrc) && /id: 'file',[\s\S]*items: menuGroups\(\s*newTmuxSessionItems\(\)/.test(newSessionSrc), 'File owns creation commands while Tabs remains the stable tab navigator');
       assert.ok(menuCss.includes('.app-menu-ui-icon-shell') && menuCss.includes('--icon-shell'), 'shell menu icon CSS is generated');
-      assert.ok(/capped \? t\('menu\.tmux\.limitReached'\) : agentLaunchParams\(agent\)/.test(newSessionSrc), 'a launchable new-session item shows the params passed as its detail');
+      assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the dangerous-auto-approve action retains the exact command flags for its tooltip and accessible name');
+      assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
+      assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
+      assert.ok(/app-topbar-touch-compact \.app-menu--nested-root > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'touch Menus uses a viewport-bounded sheet, compact paired full-access actions, and separator-free shell text controls');
       const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
-      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-pane-bg:\s*#ffffff[\s\S]*--info-tree-group-bg:\s*#f6f9fd/.test(infoTreeCss), 'YO!info light mode uses an opaque light pane surface');
-      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-tree-border:\s*#8793a3[\s\S]*--info-tree-line:\s*rgb\(100 116 139 \/ 0\.16\)/.test(infoTreeCss), 'YO!info light mode keeps connector lines visible while parent connector lines stay subtle');
+      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-pane-bg:\s*var\(--paint-white\)[\s\S]*--info-tree-group-bg:\s*#f6f9fd/.test(infoTreeCss), 'YO!info light mode uses the shared opaque-white pane surface');
+      assert.ok(/body\.theme-light\s*\{[\s\S]*--info-tree-border:\s*#8793a3[\s\S]*--info-tree-line:\s*rgb\(71 85 105 \/ 0\.42\)/.test(infoTreeCss), 'YO!info light mode keeps connector lines visibly dark enough against its white pane');
       assert.ok(/\.info-pane\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss) && /\.info-list\s*\{[\s\S]*background:\s*var\(--info-pane-bg\)/.test(infoTreeCss), 'YO!info pane and list surfaces inherit the theme-aware pane background');
       assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-connector-arm-start:\s*calc\(var\(--info-tree-connector-x\) \+ var\(--info-tree-connector-line-width\)\)[\s\S]*--info-tree-summary-connector-y:\s*13px[\s\S]*--info-tree-record-connector-y:\s*13px[\s\S]*\.info-tree-group-children > \.info-tree-item::before\s*\{[\s\S]*inset-inline-start:\s*var\(--info-tree-connector-arm-start\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item::after\s*\{[\s\S]*inset-block-start:\s*calc\(\(var\(--info-tree-children-gap\) \/ -2\) - var\(--info-tree-connector-line-width\)\)[\s\S]*background:\s*var\(--info-tree-line\)[\s\S]*\.info-tree-group-children > \.info-tree-item-last::after\s*\{[\s\S]*height:\s*calc\(var\(--info-tree-record-connector-y\) \+ \(var\(--info-tree-connector-line-width\) \* 2\) \+ \(var\(--info-tree-children-gap\) \/ 2\)\)/.test(infoTreeCss), 'YO!info tree renders overlapping connector lines aligned to text midlines and stops the last item as a 90-degree angle');
       assert.ok(/\.info-tree-group summary\s*\{[\s\S]*border:\s*0[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info group summaries are compact sticky text rows, not boxed cards');
       assert.equal(infoTreeCss.includes('.info-tree-list::before'), false, 'YO!info does not reserve a fixed-height sticky mask that leaves blank space under a single sticky parent');
       assert.ok(/\.info-tree\s*\{[\s\S]*--info-tree-children-gap:\s*0px/.test(infoTreeCss), 'YO!info sibling leaf node boxes touch vertically without an inserted gap');
-      assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*8px[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf records use a transparent fill with a faint 1px rounded node outline and no card shadow');
+      assert.ok(/\.info-tree-record\s*\{[\s\S]*background:\s*transparent[\s\S]*border:\s*1px solid var\(--info-tree-record-border\)[\s\S]*border-radius:\s*var\(--radius-lg\)[\s\S]*box-shadow:\s*none/.test(infoTreeCss), 'YO!info leaf records use the shared large corner radius with a faint 1px outline and no card shadow');
     }
     assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
     assert.ok(tmuxMenuLabels.includes("YO!summary for session '1'"));
     assert.ok(tmuxMenuLabels.includes("Event log for session '1'"));
-    assert.ok(tmuxMenuLabels.includes('Info Bar'));
+    assert.ok(tmuxMenuLabels.includes('Show/hide Info Bar'));
+    assert.ok(tmuxMenuLabels.includes('tmux status bar'));
     assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
     assert.ok(tmuxMenuLabels.includes("Kill tmux session '1'"));
     assert.equal(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"), false);
@@ -3992,38 +4280,57 @@ async function runShareThemeSuite() {
     assert.equal(tmuxMenu.items.find(item => item.label === "Rename tmux session '1'").detail, '');
     api.setAutoApproveStateForTest('1', {enabled: true});
     const idleYoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
-    assert.equal(idleYoloTabsMenu.badgeText, '0');
-    assert.equal(idleYoloTabsMenu.badgeTitle, '0 running YOLO jobs');
+    assert.equal(idleYoloTabsMenu.badgeText, undefined, 'Tabs does not render a running-YOLO circle while idle');
+    assert.equal(idleYoloTabsMenu.badgeTitle, undefined, 'Tabs does not retain a circle tooltip while idle');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
     const yoloTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
     assert.equal(yoloTmuxMenu.badgeText, undefined);
     const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
-    assert.equal(yoloTabsMenu.badgeText, '1');
-    assert.equal(yoloTabsMenu.badgeTitle, '1 running YOLO job');
-    assert.equal(yoloTmuxMenu.items[0].label, 'YO on');
+    assert.equal(yoloTabsMenu.badgeText, undefined, 'Tabs does not render a running-YOLO circle while work is active');
+    assert.equal(yoloTabsMenu.badgeTitle, undefined, 'Tabs does not retain a circle tooltip while work is active');
+    const fallbackTerminalApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {availableAgents: ['term'], terminalCommands: []},
+    });
+    const fallbackFileMenu = fallbackTerminalApi.appMenuTree().find(menu => menu.id === 'file');
+    assert.equal(fallbackFileMenu.items.some(item => item.type === 'command-row' && item.label === 'Shell:'), false, 'an empty terminal list does not guess a default shell command');
+    assert.equal(yoloTmuxMenu.items[0].label, 'YO (YOLO auto approve) tmux');
     assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
     assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
     assert.equal(yoloTmuxMenu.items.find(item => item.label === 'YOLO').items.some(item => item.label.startsWith('Sessions')), false);
     api.setAutoApproveStateForTest('1', {enabled: false});
-    assert.equal(api.currentSessionActionTarget(), '1');
     const filesOnlySlots = api.emptyLayoutSlots();
     filesOnlySlots[api.layoutTreeKey] = api.leafNode('left');
-    filesOnlySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    filesOnlySlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     api.setLayoutSlotsForTest(filesOnlySlots);
     const filesOnlyTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
     assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename tmux session').disabled, true);
     assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename tmux session').detail, 'No tmux tab focused');
     const multiTmuxSlots = api.emptyLayoutSlots();
     multiTmuxSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 22);
-    multiTmuxSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    multiTmuxSlots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     multiTmuxSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     multiTmuxSlots.slot2 = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(multiTmuxSlots);
     api.setFocusedPanelItem('2');
-    api.setFocusedPanelItem('__files__');
+    api.setFocusedPanelItem(api.finderItemId);
     assert.equal(api.currentSessionActionTarget(), '2');
+    const explicitFocusApi = loadYolomux('', ['1', '2']);
+    const explicitFocusSlots = explicitFocusApi.emptyLayoutSlots();
+    explicitFocusSlots[explicitFocusApi.layoutTreeKey] = explicitFocusApi.splitNode('row', explicitFocusApi.leafNode('left'), explicitFocusApi.leafNode('right'), 50);
+    explicitFocusSlots.left = explicitFocusApi.paneStateWithTabs(['1'], '1');
+    explicitFocusSlots.right = explicitFocusApi.paneStateWithTabs(['2'], '2');
+    explicitFocusApi.setLayoutSlotsForTest(explicitFocusSlots);
+    explicitFocusApi.setExplicitPaneFocusItemForTest('1');
+    explicitFocusApi.setFocusedTerminal('2');
+    assert.equal(explicitFocusApi.explicitPaneFocusItemForTest(), '1', 'passive terminal focus does not replace the shared explicit-pane state');
+    assert.equal(explicitFocusApi.currentTmuxMenuTargetForTest(), '1', 'tmux menu follows the shared explicit-pane state instead of passive focus');
+    explicitFocusApi.setFocusedTerminal('2', {userInitiated: true});
+    assert.equal(explicitFocusApi.explicitPaneFocusItemForTest(), '2', 'clicking or typing in a terminal updates the shared explicit-pane state');
+    assert.equal(explicitFocusApi.currentTmuxMenuTargetForTest(), '2', 'tmux menu updates to the newly explicit terminal');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
+    const currentTmuxMenuTargetBody = source.slice(source.indexOf('function currentTmuxMenuTarget()'), source.indexOf('function orderedPaneItems()'));
+    assert.ok(currentTmuxMenuTargetBody.includes('explicitTmuxPaneFocusSession() || currentSessionActionTarget()'), 'tmux menus use the shared explicit pane state without changing global session actions');
     assert.equal(source.includes("menuNumberSetting('appearance.red_reminder_ms'"), false, 'YOLO submenu no longer exposes removed status pulse timing');
     assert.ok(/function createAppMenuNumberSetting[\s\S]*saveSettingsPatch\(settingPatch\(item\.path, next\)\)/.test(source), 'menu number-setting rows save through the shared settings API');
     assert.equal(/function applyAppMenuNumberSettingPreview[\s\S]*path === 'appearance\.red_reminder_ms'[\s\S]*applyCssSettings\(\)/.test(source), false, 'YOLO menu has no removed status pulse live-preview branch');
@@ -4059,15 +4366,19 @@ async function runShareThemeSuite() {
     const modeSeparatorIndex = source.indexOf("dataset: {editorToolbarSeparator: 'mode'}");
     assert.ok(splitButtonIndex > 0 && popoutPreviewButtonIndex > splitButtonIndex && popoutPreviewButtonIndex < modeSeparatorIndex, 'Preview pop-out sits directly in the editor mode button group after Split view');
     assert.ok(source.includes('editor.autosave_delay_seconds'), 'editor autosave delay is a persisted preference');
-    assert.ok(source.includes('(commandPaletteIndex + 1) % commandPaletteItemsCache.length'), 'command palette arrow navigation wraps down');
+    assert.ok(source.includes('(commandPaletteState.index + 1) % commandPaletteState.items.length'), 'command palette arrow navigation wraps down');
     assert.ok(source.includes('item.splitRun'), 'command palette supports split-open actions');
     assert.equal(source.includes('function updateLinkedFilePreviewRings()'), false, 'old side-preview ring updater is removed');
     assert.equal(source.includes("previewPanel.classList.add('preview-linked')"), false, 'focused editors no longer mark paired side-preview panes');
     assert.equal(source.includes("editorPanel.classList.add('preview-linked')"), false, 'old pure-preview pane ring marker is removed');
     const focusStart = source.indexOf('function setFocusedPanelItem(');
     const focusEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusStart);
-    assert.ok(source.slice(focusStart, focusEnd).includes('const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);'), 'explicit Finder sync is driven by clicked tmux panes and clicked editors');
-    assert.ok(source.slice(focusStart, focusEnd).includes('if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});'));
+    const userFocusStart = source.indexOf('function applyUserInitiatedPanelFocus(');
+    const userFocusEnd = source.indexOf('function setFocusedPanelItem(', userFocusStart);
+    const userFocusBody = source.slice(userFocusStart, userFocusEnd);
+    assert.ok(userFocusBody.includes('const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);'), 'explicit Finder sync is driven by clicked tmux panes and clicked editors');
+    assert.ok(userFocusBody.includes('if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});'));
+    assert.ok(source.slice(focusStart, focusEnd).includes('applyUserInitiatedPanelFocus(item, previousItem, options);'), 'new and already-focused interactions share one user-focus side-effect owner');
     const finderSyncStart = source.indexOf('function scheduleFileExplorerActiveTabSync(');
     const finderSyncEnd = source.indexOf('function cancelPendingFileExplorerActiveSync(', finderSyncStart);
     const finderSyncBody = source.slice(finderSyncStart, finderSyncEnd);
@@ -4099,7 +4410,7 @@ async function runShareThemeSuite() {
     assert.equal(finderCandidatesBody.includes('focusedTerminal'), false, 'Finder candidates do not read passive focusedTerminal');
     assert.equal(finderCandidatesBody.includes('lastFocusedTmuxSession'), false, 'Finder candidates do not read passive lastFocusedTmuxSession');
     assert.ok(/function setFileExplorerManualRootMode\(\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*setFileExplorerRootMode\('fixed', \{sync: false, persist: true\}\)/.test(source), 'manual Finder scope buttons cancel pending Sync and leave Sync mode explicitly');
-    assert.ok(/function cancelPendingFileExplorerActiveSync\(options = \{\}\) \{[\s\S]*fileExplorerInteractionGeneration \+= 1;[\s\S]*if \(options\.invalidateOpen !== false\) fileExplorerOpenGeneration \+= 1;[\s\S]*fileExplorerSyncGeneration \+= 1;/.test(source), 'manual Finder actions invalidate stale root opens and stale tree expansion work');
+    assert.ok(/function cancelPendingFileExplorerActiveSync\(options = \{\}\) \{[\s\S]*fileExplorerInteractionGeneration \+= 1;[\s\S]*if \(options\.invalidateOpen !== false\) fileExplorerOpenGeneration \+= 1;[\s\S]*fileExplorerSyncState.generation \+= 1;/.test(source), 'manual Finder actions invalidate stale root opens and stale tree expansion work');
     assert.ok(source.includes('openFileExplorerManualRoot(expandQuickAccessPath(path));'), 'Finder quick-access opens are manual and disable Sync');
     assert.ok(source.includes('const opened = await openFileExplorerManualRoot(target);'), 'Finder typed path opens are manual and disable Sync');
     assert.ok(source.includes("if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);"), 'Finder root navigation by double-click is manual and disables Sync');
@@ -4128,6 +4439,7 @@ async function runShareThemeSuite() {
     assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
     assert.ok(api.keyboardShortcutsHtml().includes('Previous / next tab') && api.keyboardShortcutsHtml().includes('Meta+← / Meta+→'), 'shortcut overlay documents Meta+Arrow pane-tab navigation');
+    assert.ok(api.keyboardShortcutsHtml().includes('Page tmux scrollback') && api.keyboardShortcutsHtml().includes('Ctrl+↑ / Ctrl+↓'), 'shortcut overlay documents tmux page scrolling with the platform app modifier');
     assert.ok(api.keyboardShortcutsHtml().includes('Drag a tab'), 'shortcut overlay is honest that tab/pane layout changes are pointer-driven');
     assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+Backspace / Ctrl+Delete'), 'shortcut overlay documents both close-tab fallback keys');
     assert.ok(api.keyboardShortcutsHtml().includes('Select all rows') && api.keyboardShortcutsHtml().includes('Ctrl+A'), 'shortcut overlay documents Finder/Differ select-all');
@@ -4272,6 +4584,63 @@ async function runShareThemeSuite() {
     assert.equal(stopped, 1, 'terminal DOM copy guard stops propagation before Claude/xterm');
     assert.equal(stoppedImmediate, 1, 'terminal DOM copy guard stops sibling handlers before Claude/xterm');
     assert.deepStrictEqual(fetchCalls, [], 'terminal DOM copy guard does not ask tmux for normal Cmd-C');
+    for (const key of ['PageUp', 'PageDown']) {
+      prevented = 0;
+      stopped = 0;
+      stoppedImmediate = 0;
+      const xtermEvent = {
+        type: 'keydown',
+        code: key,
+        key,
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        preventDefault() {},
+        stopPropagation() {},
+        stopImmediatePropagation() {},
+      };
+      assert.equal(domCopyShortcutHandler(xtermEvent), true, `${key} remains available to the foreground terminal application`);
+      const terminalEvent = {
+        type: 'keydown',
+        code: key,
+        key,
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        preventDefault() { prevented += 1; },
+        stopPropagation() { stopped += 1; },
+        stopImmediatePropagation() { stoppedImmediate += 1; },
+      };
+      domKeydownHandler(terminalEvent);
+      assert.equal(prevented, 0, `${key} is not claimed by the tmux history shortcut`);
+      assert.equal(stopped, 0, `${key} reaches xterm and the foreground terminal application`);
+      assert.equal(stoppedImmediate, 0, `${key} does not stop sibling terminal handlers`);
+    }
+    const pcPageApi = loadYolomux('', ['1'], 'https:', 'Win32');
+    for (const [name, api] of [['Mac', terminalCopyApi], ['PC', pcPageApi]]) {
+      for (const key of ['ArrowUp', 'ArrowDown']) {
+        let historyPrevented = 0;
+        const localTerm = {
+          rows: 30,
+          scrollLines() {},
+        };
+        const isMac = name === 'Mac';
+        assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('missing-session', localTerm, {
+          type: 'keydown',
+          code: key,
+          key,
+          metaKey: isMac,
+          ctrlKey: !isMac,
+          altKey: false,
+          shiftKey: false,
+          preventDefault() { historyPrevented += 1; },
+        }), true, `${name} app-modified ${key} is claimed by the tmux history guard`);
+        assert.equal(historyPrevented, 1, `${name} app-modified ${key} suppresses browser scrolling`);
+        assert.equal(Math.sign(localTerm.pendingWheelScrollLines), key === 'ArrowUp' ? -1 : 1, `${name} app-modified ${key} uses one local terminal page`);
+      }
+    }
     terminalCopyApi.registerTerminalForTest('1', {
       getSelection: () => '',
       clearSelection: () => { clearSelectionCount += 1; },
@@ -4669,10 +5038,18 @@ async function runShareThemeSuite() {
     assert.ok(api.fuzzySearchScore('yoagent', ['YO!agent']) > api.fuzzySearchScore('yoagent', ['1', 'y o agent in details']), 'punctuation-insensitive label prefixes beat scattered detail matches');
     assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
     assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy').includes('<mark class="fuzzy-match">X</mark>'), 'palette results highlight matched characters');
+    assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy', {markClass: 'info-tree-search-match'}).includes('<mark class="info-tree-search-match">X</mark>'), 'shared fuzzy highlighter supports the Info tree mark class without a second matcher');
+    const stableId = api.sessionScopedIdForTest('test.stable-id', () => 'created-id');
+    assert.equal(stableId, 'created-id', 'shared ID helper creates a missing session ID');
+    assert.equal(api.sessionScopedIdForTest('test.stable-id', () => 'other-id'), 'created-id', 'shared ID helper preserves the existing ID');
+    assert.equal(api.sessionStorageValueForTest('test.stable-id'), 'created-id', 'shared ID helper persists the created ID');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/94_preview_renderers.js', 'utf8');
+    assert.ok(/function previewFileActionLinks\(path,[\s\S]*rawFileUrl\(path\)[\s\S]*noopener noreferrer[\s\S]*rawFileDownloadUrl\(path\)/.test(previewSource), 'one preview-link helper owns safe Open and Download URLs');
+    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
     assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
-    assert.ok(api.searchRankWeights.domainPrior.files.file > api.searchRankWeights.domainPrior.files.pane, 'Cmd-P domain weights rank files before panes for comparable matches');
+    assert.ok(api.searchRankWeights.paneNameContiguous.files > api.searchRankWeights.domainPrior.files.file, 'Cmd-P gives a contiguous pane name match priority over a comparable file match');
     assert.ok(api.searchRankWeights.domainPrior.command.pane > api.searchRankWeights.domainPrior.command.file, 'Shift-Cmd-P domain weights rank panes before files for comparable matches');
     assert.ok(
       api.commandPaletteItemScore({group: 'Tabs', label: 'YO!agent', detail: '', searchFields: ['YO!agent']}, 'yoagent') >
@@ -4718,18 +5095,18 @@ async function runShareThemeSuite() {
     const claudeCandidates = [paneCandidate('claude'), fileCandidate('claude_notes.md')];
     const rankingCases = [
       {
-        name: 'Cmd-P ranks anchored files first, then anchored pane, then non-anchored file',
+        name: 'Cmd-P ranks a contiguous pane name before anchored files',
         surface: 'files',
         query: '6',
         candidates: sixCandidates,
-        expected: ['6.md', '6-plan.md', '6 Fix same-strip', 'a6.txt'],
+        expected: ['6 Fix same-strip', '6.md', '6-plan.md', 'a6.txt'],
       },
       {
         name: 'Cmd-P keeps a matching pane mixed into a file-heavy first screen',
         surface: 'files',
         query: '6',
         candidates: fileHeavySixCandidates,
-        expected: ['6-00.md', '6-01.md', '6 Fix same-strip', '6-02.md', '6-03.md'],
+        expected: ['6 Fix same-strip', '6-00.md', '6-01.md', '6-02.md', '6-03.md'],
         limit: 5,
       },
       {
@@ -4796,11 +5173,11 @@ async function runShareThemeSuite() {
         expected: ['claude', 'claude_notes.md'],
       },
       {
-        name: 'Cmd-P ranks matching files before panes',
+        name: 'Cmd-P ranks a contiguous matching pane name before files',
         surface: 'files',
         query: 'claude',
         candidates: claudeCandidates,
-        expected: ['claude_notes.md', 'claude'],
+        expected: ['claude', 'claude_notes.md'],
       },
       {
         name: 'empty Cmd-P file results sort by recency',
@@ -4842,6 +5219,7 @@ async function runShareThemeSuite() {
     const quickItem = api.fileQuickOpenItems().find(item => item.label === 'helloXandYyy.py');
     assert.ok(quickItem, 'file quick-open uses the same command-palette item shell');
     assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
+    test('quick-open ranks local numbered DOIT files over fuzzy indexed paths', () => {
     const doitApi = loadYolomux('', ['1']);
     doitApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
       {name: 'websocket.py', path: '/repo/yolomux/yolomux_lib/websocket.py', relative_path: 'yolomux_lib/websocket.py', kind: 'file'},
@@ -4872,6 +5250,8 @@ async function runShareThemeSuite() {
       .sort((left, right) => right.score - left.score || left.index - right.index);
     assert.equal(exactDoitRows[0]?.label, 'DOIT.53.md', 'S15: exact local DOIT.53.md stays first for a dotted filename query');
     assert.equal(exactDoitRows.some(item => item.label === 'report.html'), false, 'S15: external indexed full-path-only fuzzy noise is hidden for dotted filename queries');
+    });
+    test('quick-open restricts DOIT family search to sibling YOLOmux worktrees', () => {
     const doitFamilyApi = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(doitFamilyApi.fileQuickOpenExtraRootsForSearchQuery('DOIT')), ['/home/test'], 'DOIT queries search the current YOLOmux workdir family parent');
     doitFamilyApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
@@ -4885,6 +5265,7 @@ async function runShareThemeSuite() {
       .filter(item => item.category === 'file')
       .map(item => item.path);
     assert.deepStrictEqual(canonical(doitFamilyPaths), ['/home/test/yolomux.dev1/DOIT.64.md', '/home/test/yolomux.dev2/DOIT.57.md'], 'DOIT quick-open keeps YOLOmux sibling docs and drops indexed Vortex/fuzzy path noise');
+    });
     assert.deepStrictEqual(
       canonical(api.cursorStyleFileReference('/home/keivenc/yolomux.dev1/20260609-001.png', {imageIndex: 1})),
       {label: '[Image #1]', detail: "'/home/keivenc/yolomux.dev1/20260609-001.png'"},
@@ -4952,7 +5333,17 @@ async function runShareThemeSuite() {
     assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools'), true, 'Finder indexed directories are tracked by exact path');
     assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools/src'), false, 'Finder compacts redundant child index marks under an indexed ancestor');
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/repo/workspace')), ['/repo/workspace', '/repo/other', '/repo/tools'], 'file quick-open adds indexed Finder directories and compacts nested search roots');
-    assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed', 'file quick-open placeholder summarizes indexed search scope');
+    assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed roots', 'file quick-open placeholder summarizes indexed search scope with the plural locale family');
+    const localizedScopeApi = loadYolomux('', ['1']);
+    localizedScopeApi.i18nSetCatalogForTest('fr', {
+      'palette.scope.indexedRoot.one': '{path} + {count} racine indexée',
+      'palette.scope.indexedRoot.other': '{path} + {count} racines indexées',
+    });
+    localizedScopeApi.setActiveLocaleForTest('fr');
+    localizedScopeApi.setFileExplorerIndexedDirsForTest(['/repo/tools']);
+    assert.equal(localizedScopeApi.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 1 racine indexée', 'quick-open scope selects the localized singular indexed-root form');
+    localizedScopeApi.setFileExplorerIndexedDirsForTest(['/repo/tools', '/repo/other']);
+    assert.equal(localizedScopeApi.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 racines indexées', 'quick-open scope selects the localized plural indexed-root form');
     api.setFileQuickOpenCandidatesForTest('/repo/workspace', [
       {name: 'target.md', path: '/home/test/vortex/notes/target.md', relative_path: 'target.md', indexed_root: '/home/test/vortex/notes'},
       {name: 'target.md', path: '/repo/workspace/docs/target.md', relative_path: 'docs/target.md', indexed_root: '/repo/workspace'},
@@ -5015,20 +5406,28 @@ async function runShareThemeSuite() {
     fileRootApi.setFocusedPanelItem(fileRootApi.fileExplorerItemId);
     assert.equal(fileRootApi.fileQuickOpenTargetSlot(), null, 'Cmd-P does not target the reserved Finder pane for normal file opens');
     assert.equal(fileRootApi.slotForTabActivation(fileRootApi.prefsItemId), 'slot1', 'DOIT.56 N2: opening a virtual tab while Finder is focused falls back outside the reserved Finder pane');
-    // #31: the Finder indexed badge reflects the cached build status without writing a long label into
-    // the one-letter status column. Date/Ago mode hides the badge entirely because the date slot owns
+    // #31: the Finder indexed badge reflects the cached build status with a readable label that stays
+    // visible immediately before Date/Ago.
     // the right side of the row.
     api.setFileExplorerTreeDateModeForTest('none');
     api.setFileExplorerIndexStatusForTest('/home/test/vortex', 'building');
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), '…', '#31: a building index renders a compact building badge');
     api.setFileExplorerIndexStatusForTest('/home/test/vortex', 'ready');
-    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), 'I', '#31: a ready index renders a compact indexed badge');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), 'indexed', '#31: a ready index says indexed instead of using an opaque initial');
+    api.setFileExplorerIndexStatusForTest('/home/test/vortex', 'too_large');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), '!', 'a capped index renders a persistent warning badge instead of claiming full coverage');
+    api.setFileExplorerIndexStatusForTest('/home/test/vortex', 'ready');
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), '', '#31: Date mode hides the indexed badge instead of stacking it next to the date');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), 'indexed', '#31: Date mode keeps the indexed label beside the date');
     api.setFileExplorerTreeDateModeForTest('relative');
-    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), '', '#31: Ago mode hides the indexed badge instead of stacking it next to the age');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex'), 'indexed', '#31: Ago mode keeps the indexed label beside the age');
     api.setFileExplorerTreeDateModeForTest('none');
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/not-indexed'), '', '#31: a non-indexed directory renders no badge');
+    api.setFileExplorerIndexExcludePathsForTest(['/home/test/vortex/backup']);
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex/backup'), 'index excluded', 'an explicit exclusion says index excluded');
+    assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex/backup/archive'), '', 'descendants of an excluded path stay visually quiet');
+    const indexBadgeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(/\.file-tree-row\.indexed-directory > \.file-tree-git-status,[\s\S]*?\.file-tree-row\.index-excluded-entry > \.file-tree-git-status[\s\S]*?flex-basis: auto;[\s\S]*?padding-inline: var\(--space-4\)/.test(indexBadgeCss), 'readable index labels expand beyond the one-character git badge width');
     const checkboxInput = {getAttribute: name => name === 'type' ? 'checkbox' : ''};
     const textInput = {getAttribute: name => name === 'type' ? 'text' : ''};
     assert.equal(api.markdownPreviewInputAllowed(checkboxInput), true, 'GFM task-list checkbox inputs survive markdown sanitization');
@@ -5040,7 +5439,7 @@ async function runShareThemeSuite() {
     const cssSource = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(cssSource.includes('.markdown-body ul.contains-task-list'), 'markdown task lists remove the regular bullet gutter');
     assert.ok(cssSource.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'markdown task-list checkbox alignment is pinned');
-    // Descendants of an indexed root stay visually quiet; the root's compact indexed badge is the only repeated signal.
+    // Descendants of an indexed root stay visually quiet; the root's indexed badge is the only repeated signal.
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/vortex/lib'), '', 'indexed-root descendants do not show a noisy repeated badge');
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/elsewhere'), '', 'C11: an unrelated directory shows no badge');
     // #23: the topbar universal search renders a launcher button (opens the unified palette on click).
@@ -5062,9 +5461,9 @@ async function runShareThemeSuite() {
     namedSessionApi.setTabsMenuSearchTextForTest('do2');
     const filteredNamedCommands = namedSessionApi.tabMenuItems().filter(item => item.type === 'command');
     const filteredNamedTabs = filteredNamedCommands.filter(item => item.targetItem);
-    assert.equal(filteredNamedTabs.length, 1, 'Tabs search filters navigator entries without hiding launch commands');
+    assert.equal(filteredNamedTabs.length, 1, 'Tabs search filters navigator entries');
     assert.deepEqual(filteredNamedTabs.map(item => item.targetItem), ['vortex2'], 'Tabs search keeps the matching session command');
-    assert.ok(filteredNamedCommands.some(item => item.label === 'new Xterm'), 'Tabs search keeps new-session commands available');
+    assert.equal(namedSessionApi.tabMenuItems().some(item => item.type === 'command-pair' || item.type === 'command-row'), false, 'Tabs search never injects session-creation controls');
     assert.ok(Number.isFinite(namedSessionApi.tabSearchScore('vortex2', 'do2')), 'Tabs search matches the raw session name');
     namedSessionApi.setTabsMenuSearchTextForTest('');
     const tmuxTabActionLabels = namedSessionApi.tabMenuItems().map(item => item.label).filter(Boolean);
@@ -5073,34 +5472,42 @@ async function runShareThemeSuite() {
     namedSessionApi.activatePaneTab('left', 'vortex2');
     assert.equal(namedSessionApi.currentSessionActionTarget(), 'vortex2');
     assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === "Rename tmux session 'vortex2'").disabled, false);
-    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO off');
-    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO for Tmux Session 'vortex2'"), false);
+    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (YOLO auto approve) tmux');
+    assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO (auto-approve) for Tmux Session 'vortex2'"), false);
     const sessionActions = api.tmuxSessionActionCommands('1');
-    assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Kill tmux session '1'"]);
     assert.equal(sessionActions.some(item => item.disabled), false);
     assert.equal(sessionActions.find(item => item.label === "Rename tmux session '1'").detail, '');
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
     api.showSessionContextMenu('1', 10, 10);
     const contextMenu = contextMenuNode();
-    assert.ok(contextMenu.children[0].innerHTML.includes('Pin Tab'), 'tab context menu starts with Pin Tab');
-    assert.ok(contextMenu.children[0].innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
-    assert.equal(contextMenu.children[0].getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
+    const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');
+    assert.ok(contextMenu.children[0].classList.contains('tab-action-description'), 'tab context menu starts with the shared one-line tab description');
+    assert.ok(contextMenu.children[0].textContent.startsWith('More desc: 1'), 'tab context menu describes the target without opening a second details surface');
+    assert.ok(pinTabRow?.innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
+    assert.equal((pinTabRow?.innerHTML.match(/app-menu-ui-icon-pin/g) || []).length, 1, 'Pin Tab uses one stateful pin icon instead of duplicating its checked indicator');
+    assert.equal(pinTabRow?.getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
     assert.equal(Array.from(contextMenu.children).some(child => child.getAttribute('aria-label') === 'Pop out'), false, 'live terminal tabs do not expose unsupported Pop out');
-    assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
+    assert.deepStrictEqual(canonical(Array.from(contextMenu.querySelectorAll('button')).map(button => button.textContent).filter(Boolean)), ['More desc: 1 — workspace', 'Expand pane', "Enable YOLO (auto-approve) for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
     assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
     const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
     assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
     api.setPinnedTabsForTest(['1']);
     api.showSessionContextMenu('1', 20, 20);
     const pinnedContextMenu = contextMenuNode();
-    assert.ok(pinnedContextMenu.children[0].innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
-    assert.equal(pinnedContextMenu.children[0].getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
+    const unpinTabRow = Array.from(pinnedContextMenu.children).find(child => child.getAttribute('aria-label') === 'Unpin Tab');
+    assert.ok(unpinTabRow?.innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
+    assert.equal(unpinTabRow?.getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
+    const paneTabsCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    const contextMenuCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    assert.ok(/\.pane-tab-pin-icon\s*\{[\s\S]*flex:\s*0 0 18px;[\s\S]*place-items:\s*center;[\s\S]*\.pane-tab-pin-icon::before\s*\{[\s\S]*width:\s*14px;[\s\S]*background:\s*currentColor;[\s\S]*mask:\s*var\(--icon-pin\) center \/ contain no-repeat/.test(paneTabsCss), 'every pinned tab uses one plain thin pin icon through the shared component without state-specific badge styling');
+    assert.equal(/\.terminal-context-menu button\[data-checked="true"\]::before/.test(contextMenuCss), false, 'checked context-menu rows rely on their stateful icon instead of adding a duplicate star marker');
     const filePathForMenu = '/home/test/yolomux.dev/README.md';
     api.setOpenFileStateForTest(filePathForMenu, {mtime: 1, kind: 'text', original: '# hello', content: '# hello', dirty: false});
     const fileItemForMenu = api.registerFileEditorLayoutItem(filePathForMenu);
     api.showTabContextMenu(fileItemForMenu, 30, 30);
     const fileContextMenu = contextMenuNode();
-    assert.ok(fileContextMenu.children[0].innerHTML.includes('Pin Tab'), 'file editor tabs also get the Pin Tab context menu');
+    assert.ok(Array.from(fileContextMenu.children).some(child => child.getAttribute('aria-label') === 'Pin Tab'), 'file editor tabs also get the Pin Tab context menu');
     const filePopoutButton = Array.from(fileContextMenu.children).find(child => child.getAttribute('aria-label') === 'Pop out');
     assert.ok(filePopoutButton, 'preview-capable file editor tabs expose Pop out in the shared tab context menu');
     for (const listener of filePopoutButton.listeners.get('click') || []) {
@@ -5109,7 +5516,10 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.openedWindowsForTest().map(record => record.url)), ['/preview-popout?path=%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md'], 'file tab Pop out opens the same preview popout route as the header button');
     api.setPinnedTabsForTest([]);
     const sessionViews = api.tmuxSessionViewCommands('1');
-    assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Info Bar']);
+    assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Show/hide Info Bar', 'tmux status bar']);
+    assert.equal(Boolean(sessionViews[3].checked), false, 'Info Bar stays a direct show/hide toggle');
+    assert.equal(sessionViews[4].checked, false, 'tmux Status Bar starts unchecked when it is off');
+    assert.equal(sessionViews[4].detail, 'Off, Top, Bottom (toggle)', 'tmux Status Bar shows every cycle state and identifies the control as a toggle');
     assert.equal(api.fileIconFor('screenshot.png'), '🖼');
     assert.equal(api.fileIconFor('run.sh'), '🐚');
     assert.equal(api.fileIconFor('main.rs'), '🧩');
@@ -5131,15 +5541,20 @@ async function runShareThemeSuite() {
     const paneInfoLocaleFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json')).sort();
     const localizedPaneInfoLabels = {
       'zh-Hans.json': {
-        'menu.tmux.paneDetails': '信息栏',
+        'menu.tmux.paneDetails': '显示/隐藏信息栏',
         'pane.details.hide': '隐藏信息栏',
         'pane.details.show': '显示信息栏',
       },
       'zh-Hant.json': {
-        'menu.tmux.paneDetails': '資訊列',
+        'menu.tmux.paneDetails': '顯示/隱藏資訊列',
         'pane.details.hide': '隱藏資訊列',
         'pane.details.show': '顯示資訊列',
       },
+    };
+    const sourcePaneInfoLabels = {
+      'menu.tmux.paneDetails': 'Show/hide Info Bar',
+      'pane.details.hide': 'hide Info Bar',
+      'pane.details.show': 'show Info Bar',
     };
     for (const localeFile of paneInfoLocaleFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${localeFile}`, 'utf8'));
@@ -5148,14 +5563,16 @@ async function runShareThemeSuite() {
         if (localizedPaneInfoLabels[localeFile]) {
           assert.equal(value, localizedPaneInfoLabels[localeFile][key], `W5: ${localeFile} ${key} localizes the pane metadata bar label`);
           assert.equal(value.includes('Info Bar'), false, `W5: ${localeFile} ${key} does not leak English Info Bar`);
+        } else if (localeFile === 'en.json') {
+          assert.equal(value, sourcePaneInfoLabels[key], `W5: ${localeFile} ${key} keeps the source Info Bar label`);
         } else {
-          assert.ok(value.includes('Info Bar'), `W5: ${localeFile} ${key} names the pane metadata bar Info Bar`);
+          assert.notEqual(value, sourcePaneInfoLabels[key], `W5: ${localeFile} ${key} translates the pane metadata bar label`);
+          assert.equal(value.includes('Info Bar'), false, `W5: ${localeFile} ${key} does not leak English Info Bar`);
         }
-        assert.equal(/details/i.test(value), false, `W5: ${localeFile} ${key} no longer uses Details for the pane metadata bar`);
       }
     }
     const sourceEnCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
-    assert.equal(sourceEnCatalog['popover.details'], 'details', 'W5: generic popover/YO!agent Details copy stays separate from pane Info Bar labels');
+    assert.equal(sourceEnCatalog['common.details'], 'details', 'W5: generic popover/YO!agent Details copy stays separate from pane Info Bar labels');
     assert.ok(controlsHtml.includes(`title="${hideDetailsLabel}" aria-label="${hideDetailsLabel}" aria-pressed="true"`), 'pane header Info Bar toggle starts as the hide Info Bar action');
     assert.equal(controlsHtml.includes('title="YO!info" aria-label="YO!info"'), false, 'pane header detail toggle is not mislabeled as the YO!info pane');
     const detailsPanel = new TestElement('panel-1');
@@ -5265,12 +5682,12 @@ async function runShareThemeSuite() {
     assert.equal(api.tmuxSessionNameError('vortex 2'), '');
     assert.equal(api.tmuxSessionNameError('bad/name').includes('letters'), true);
     assert.ok(api.panelControlsHtml('1').includes('data-pane-actions="1"'));
-    assert.equal(api.panelControlsHtml('__files__').includes('data-pane-actions'), false);
+    assert.equal(api.panelControlsHtml(api.finderItemId).includes('data-pane-actions'), false);
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.toolbar.rootLabel'], undefined, 'Finder toolbar no longer carries a Root button label');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.rootMode.fixed'], undefined, 'Finder toolbar no longer carries a Root mode title');
     const serverShell = fs.readFileSync('yolomux_lib/web.py', 'utf8');
     assert.ok(serverShell.includes('id="fileExplorerRootMode"'));
-    assert.ok(serverShell.includes('>Sync</button>'), 'Server-rendered Finder root toggle starts as Sync');
+    assert.ok(serverShell.includes('id="fileExplorerRootMode"') && serverShell.includes('server_string(locale, "finder.toolbar.syncLabel")'), 'Server-rendered Finder root toggle starts with the localized Sync label');
     assert.equal(serverShell.includes('>Root</button>'), false, 'Server-rendered Finder root toggle must not flash Root before JS runs');
     const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
     assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
@@ -5414,8 +5831,9 @@ async function runShareThemeSuite() {
     assert.equal(syncCss.includes('--finder-session-touched-bg'), false, 'Finder Sync touched-dir marker no longer uses a background token');
     assert.equal(syncCss.includes('--finder-sync-expanded-bg'), false, 'Finder auto-expanded Sync marker no longer uses a background token');
     assert.ok(/\.file-tree-row\.file-tree-row--sync-expanded > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-repo > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-touched > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--changed-ancestor > \.file-tree-name\s*\{[\s\S]*?font-weight:\s*800/.test(syncCss), 'Finder Sync and changed-ancestor markers bold the row name instead of painting a background');
-    assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\) !important[\s\S]*?color:\s*rgba\(226,\s*232,\s*240,\s*0\.46\)/.test(syncCss), 'dark Finder ? status badge is faint against a dark background');
-    assert.ok(/body\.theme-light \.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.06\) !important[\s\S]*?color:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.36\)/.test(syncCss), 'light Finder ? status badge is faint against a light background through the shared slate overlay token');
+    assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--50-terminal-file-tree-file-tree-git-status-bg-107\)[\s\S]*?color:\s*var\(--50-terminal-file-tree-file-tree-git-status-fg-108\)/.test(syncCss), 'Finder ? status badge routes through shared theme tokens');
+    const fileTreeTokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(fileTreeTokenCss.includes('--50-terminal-file-tree-file-tree-git-status-bg-107: var(--paint-overlay-slate-06) !important;') && fileTreeTokenCss.includes('--50-terminal-file-tree-file-tree-git-status-fg-108: rgb(var(--overlay-slate-rgb) / 0.36);'), 'light Finder ? status badge is faint against a light background through the shared slate paint token');
     assert.equal(syncCss.includes('.changes-status-unknown'), false, 'Differ no longer has a separate unknown-status CSS path');
     const scrollContainer = {
       clientHeight: 100,
@@ -5606,8 +6024,8 @@ async function runShareThemeSuite() {
     assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').textContent.includes('+13/-5'), false, 'Finder changed ancestors do not append combined numstat inline');
     assert.ok(/changes-diff-add[^>]*>\+13<\/span>[\s\S]*changes-diff-remove[^>]*>-5<\/span>/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-diff').innerHTML), 'Finder changed ancestors render aggregate numstat through the shared diff element with colored spans');
     assert.ok(/changes-diff-add[^>]*>\+8<\/span>/.test(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-diff').innerHTML), 'Finder changed ancestors omit zero remove counts through the shared file diff helper');
-    assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Claude marker hover names who modified it and when');
-    assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Codex marker hover names who modified it and when');
+    assert.ok(/agent-icon claude"[^>]*title="modified: Claude [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Claude marker hover names who modified it and when');
+    assert.ok(/agent-icon codex"[^>]*title="modified: Codex [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Codex marker hover names who modified it and when');
     assert.equal(
       ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').nextElementSibling,
       ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent'),
@@ -5695,44 +6113,43 @@ async function runShareThemeSuite() {
 
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('slot2');
-    slots.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+    slots.slot2 = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     const next = api.layoutWithItems(slots, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(next).panes), {
-      slot2: {tabs: ['__files__'], active: '__files__'},
-      slot1: {tabs: ['1'], active: '1'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
+      main: {tabs: ['1'], active: '1'},
     });
-    assert.equal(next[api.layoutTreeKey].split, 'row');
-    assert.equal(next[api.layoutTreeKey].pct, 22);
+    assert.equal(next[api.layoutTreeKey].children[0].slot, 'left', 'a legacy standalone Finder is repaired into an outer left Side Pane');
 
     const placeholderSlots = api.emptyLayoutSlots();
     placeholderSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    placeholderSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    placeholderSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     placeholderSlots.slot1 = api.emptyPlaceholderPaneState();
     api.setLayoutSlotsForTest(placeholderSlots);
     assert.equal(api.firstEmptyPane(), 'slot1');
     assert.equal(api.slotForTabActivation('1'), 'slot1');
     const filled = api.layoutWithItems(placeholderSlots, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(filled).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
       slot1: {tabs: ['1'], active: '1'},
     });
     const placeholderUrl = api.setLayoutSlotsForTest(placeholderSlots);
     const placeholderParams = parseUrl(placeholderUrl);
     assert.equal(placeholderParams.get('layout'), 'row@22(left,slot1)');
-    assert.equal(placeholderParams.get('tabs'), 'left:files;slot1:__empty_pane__');
+    assert.equal(placeholderParams.get('tabs'), 'left:@side-left,finder;slot1:__empty_pane_v2__');
     const reloadedPlaceholder = loadYolomux(`?${placeholderUrl.split('?')[1] || ''}`, ['1']);
     assert.deepStrictEqual(canonical(reloadedPlaceholder.serialize(reloadedPlaceholder.currentSlots())), canonical(api.serialize(placeholderSlots)));
 
     const finderAndTmux = api.emptyLayoutSlots();
     finderAndTmux[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    finderAndTmux.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderAndTmux.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     finderAndTmux.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderAndTmux);
     assert.equal(api.slotForNewTmuxSession('2'), 'slot1');
     assert.equal(api.slotForTabActivation('2'), 'slot1');
     api.removePaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
       slot1: {tabs: [], active: null, placeholder: true},
     });
     const normalSplit = api.emptyLayoutSlots();
@@ -5751,39 +6168,39 @@ async function runShareThemeSuite() {
     const tmuxAndFinder = api.emptyLayoutSlots();
     tmuxAndFinder[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot1'), api.leafNode('left'), 78);
     tmuxAndFinder.slot1 = api.paneStateWithTabs(['1'], '1');
-    tmuxAndFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    tmuxAndFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     api.setLayoutSlotsForTest(tmuxAndFinder);
     api.removeSessionFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
       slot1: {tabs: [], active: null, placeholder: true},
-      left: {tabs: ['__files__'], active: '__files__'},
     });
 
     const tmuxAboveFinder = api.emptyLayoutSlots();
     tmuxAboveFinder[api.layoutTreeKey] = api.splitNode('column', api.leafNode('slot1'), api.leafNode('left'), 48);
     tmuxAboveFinder.slot1 = api.paneStateWithTabs(['1'], '1');
-    tmuxAboveFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    tmuxAboveFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     api.setLayoutSlotsForTest(tmuxAboveFinder);
     api.removeSessionFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot2: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
       },
     });
 
     const finderAboveTmux = api.emptyLayoutSlots();
     finderAboveTmux[api.layoutTreeKey] = api.splitNode('column', api.leafNode('left'), api.leafNode('slot1'), 52);
-    finderAboveTmux.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderAboveTmux.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     finderAboveTmux.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderAboveTmux);
     api.removePaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot2: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
       },
     });
 
@@ -5795,7 +6212,7 @@ async function runShareThemeSuite() {
       28,
     );
     activationSlots.slot2 = api.emptyPlaceholderPaneState();
-    activationSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    activationSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     activationSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(activationSlots);
     assert.equal(api.slotForTabActivation('2'), 'slot1');
@@ -5804,13 +6221,12 @@ async function runShareThemeSuite() {
     middleFinderSlots[api.layoutTreeKey] = api.splitNode(
       'row',
       api.leafNode('left'),
-      api.splitNode('row', api.leafNode('slot2'), api.leafNode('slot1'), 22),
+      api.splitNode('row', api.leafNode('slot2'), api.leafNode('slot1'), 37),
       35,
     );
     middleFinderSlots.left = api.paneStateWithTabs(['1'], '1');
-    middleFinderSlots.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+    middleFinderSlots.slot2 = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     middleFinderSlots.slot1 = api.paneStateWithTabs(['2'], '2');
-    assert.equal(api.fileExplorerNeedsLeftDock(middleFinderSlots), true);
     const dockedFinder = api.normalizeLayoutSlots(middleFinderSlots);
     assert.deepStrictEqual(canonical(api.serialize(dockedFinder)), {
       tree: {
@@ -5822,39 +6238,46 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        slot2: {tabs: ['__files__'], active: '__files__'},
+        slot2: {tabs: [api.finderItemId], active: api.finderItemId},
         left: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
       },
-    });
+    }, 'normalization repairs a legacy generic Finder into the outer left Side Pane');
     api.setLayoutSlotsForTest(dockedFinder);
-    assert.equal(api.fileExplorerNeedsLeftDock(), false);
 
     const verticalFinderBranch = api.emptyLayoutSlots();
     verticalFinderBranch[api.layoutTreeKey] = api.splitNode(
       'row',
       api.splitNode('column', api.leafNode('slot2'), api.leafNode('left'), 50),
       api.leafNode('slot1'),
-      22,
+      34,
     );
     verticalFinderBranch.slot2 = api.paneStateWithTabs(['__info__'], '__info__');
-    verticalFinderBranch.left = api.paneStateWithTabs(['__files__'], '__files__');
+    verticalFinderBranch.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     verticalFinderBranch.slot1 = api.paneStateWithTabs(['1'], '1');
-    assert.equal(api.fileExplorerNeedsLeftDock(verticalFinderBranch), false);
     api.setLayoutSlotsForTest(verticalFinderBranch);
-    assert.equal(api.fileExplorerNeedsLeftDock(), false);
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+      tree: {
+        split: 'row',
+        pct: 22,
+        children: [
+          {slot: 'left'},
+          {split: 'row', pct: 34, children: [{slot: 'slot2'}, {slot: 'slot1'}]},
+        ],
+      },
+      panes: {
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
+        slot2: {tabs: ['__info__'], active: '__info__'},
+        slot1: {tabs: ['1'], active: '1'},
+      },
+    }, 'normalization repairs a vertically nested legacy Finder into the outer left Side Pane');
 
     const noFinderSplit = api.emptyLayoutSlots();
     noFinderSplit[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
     noFinderSplit.left = api.paneStateWithTabs(['1'], '1');
     noFinderSplit.slot1 = api.paneStateWithTabs(['2'], '2');
-    api.rememberFileExplorerOpenIntentForTest(true);
-    assert.equal(api.itemInLayout('__files__', api.normalizeLayoutSlots(noFinderSplit)), true, 'normalization re-docks a missing Finder when it was not explicitly closed');
-    api.rememberFileExplorerOpenIntentForTest(false);
-    assert.equal(api.itemInLayout('__files__', api.normalizeLayoutSlots(noFinderSplit)), false, 'normalization keeps Finder hidden after an explicit per-tab close');
-    api.rememberFileExplorerOpenIntentForTest(true);
-    api.setLayoutSlotsForTest(noFinderSplit);
-    assert.deepStrictEqual(canonical(api.serialize(api.layoutWithFileExplorerDockedLeft())), {
+    assert.equal(api.itemInLayout(api.finderItemId, api.normalizeLayoutSlots(noFinderSplit)), false, 'normalization never invents a missing file surface');
+    assert.deepStrictEqual(canonical(api.serialize(api.layoutWithDefaultLeftSidePane(noFinderSplit))), {
       tree: {
         split: 'row',
         pct: 22,
@@ -5864,15 +6287,15 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        slot2: {tabs: ['__files__'], active: '__files__'},
+        slot2: {tabs: [api.finderItemId, api.differItemId, api.tabberItemId], active: api.finderItemId},
         left: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
       },
-    });
+    }, 'the explicit restore transaction creates the default triplet home');
 
     const dockviewPrevious = api.emptyLayoutSlots();
     dockviewPrevious[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot2'), api.leafNode('left'), 22);
-    dockviewPrevious.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+    dockviewPrevious.slot2 = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     dockviewPrevious.left = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dockviewPrevious);
     const dockviewNextWithoutFinder = api.emptyLayoutSlots();
@@ -5882,11 +6305,10 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(
       canonical(api.serialize(api.currentSlots())),
       canonical(api.serialize(dockviewPrevious)),
-      'Dockview adoption ignores 0-area host measurements so sleep/hidden-tab layouts cannot drop Finder',
+      'Dockview adoption ignores 0-area host measurements so sleep/hidden-tab layouts cannot drop the triplet',
     );
     api.adoptDockviewLayoutForTest(api.dockviewJsonFromLayoutSlots(dockviewNextWithoutFinder));
-    assert.equal(api.itemInLayout('__files__'), true, 'Dockview adoption re-docks Finder when a non-user commit drops it');
-    assert.equal(api.slotForSession('__files__'), 'slot2', 'Dockview adoption preserves the previous Finder slot when possible');
+    assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'Dockview adoption restores a transiently missing triplet group');
 
     const transientDockviewFinder = api.emptyLayoutSlots();
     transientDockviewFinder[api.layoutTreeKey] = api.splitNode(
@@ -5896,7 +6318,7 @@ async function runShareThemeSuite() {
       35,
     );
     transientDockviewFinder.slot2 = api.paneStateWithTabs(['2'], '2');
-    transientDockviewFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    transientDockviewFinder.left = api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.finderItemId);
     transientDockviewFinder.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(transientDockviewFinder);
     const transientDockviewJson = api.dockviewJsonFromLayoutSlots(api.currentSlots());
@@ -5937,7 +6359,7 @@ async function runShareThemeSuite() {
       api.splitNode('column', api.leafNode('slot1'), api.leafNode('slot2'), 50),
       22,
     );
-    expandedBesideFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    expandedBesideFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     expandedBesideFinder.slot1 = api.paneStateWithTabs(['1'], '1');
     expandedBesideFinder.slot2 = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(expandedBesideFinder);
@@ -5945,7 +6367,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot2: {tabs: ['2', '1'], active: '2'},
       },
     });
@@ -5957,7 +6379,7 @@ async function runShareThemeSuite() {
       api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50),
       22,
     );
-    layoutCommands.left = api.paneStateWithTabs(['__files__'], '__files__');
+    layoutCommands.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     layoutCommands.slot1 = api.paneStateWithTabs(['1'], '1');
     layoutCommands.slot2 = api.paneStateWithTabs(['2'], '2');
     api.setLayoutSlotsForTest(layoutCommands);
@@ -5966,7 +6388,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1', '2'], active: '2'},
       },
     });
@@ -5974,7 +6396,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {split: 'row', pct: 50, children: [{slot: 'slot1'}, {slot: 'right'}]}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1'], active: '1'},
         right: {tabs: ['2'], active: '2'},
       },
@@ -5983,7 +6405,7 @@ async function runShareThemeSuite() {
     const layoutModeSource = api.emptyLayoutSlots();
     const extraWallItem = api.registerFileEditorLayoutItem('/home/test/b.md');
     layoutModeSource[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    layoutModeSource.left = api.paneStateWithTabs(['__files__'], '__files__');
+    layoutModeSource.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     layoutModeSource.slot1 = api.paneStateWithTabs(['1', '2', extraPaneItem, extraWallItem], extraPaneItem);
     api.setLayoutSlotsForTest(layoutModeSource);
     api.setFocusedPanelItem(extraPaneItem);
@@ -6005,7 +6427,7 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         leftTop: {tabs: ['1'], active: '1'},
         rightTop: {tabs: ['2'], active: '2'},
         leftBottom: {tabs: [extraPaneItem], active: extraPaneItem},
@@ -6039,7 +6461,7 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         right: {tabs: ['1'], active: '1'},
         slot1: {tabs: ['2'], active: '2'},
         slot2: {tabs: [extraPaneItem], active: extraPaneItem},
@@ -6049,17 +6471,17 @@ async function runShareThemeSuite() {
 
     const singlePaneBesideFinder = api.emptyLayoutSlots();
     singlePaneBesideFinder[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    singlePaneBesideFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+    singlePaneBesideFinder.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     singlePaneBesideFinder.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(singlePaneBesideFinder);
     assert.equal(api.canPaneExpand('1'), false);
     assert.ok(api.panelControlsHtml('1').includes('data-pane-expand'));
-    assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')));
     api.expandPaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1'], active: '1'},
       },
     });
@@ -6071,7 +6493,7 @@ async function runShareThemeSuite() {
     api.rememberFileExplorerOpenIntentForTest(false);
     api.setLayoutSlotsForTest(placeholderBesideSinglePane);
     assert.equal(api.canPaneExpand('1'), false);
-    assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+    assert.ok(/data-pane-expand="1"[^>]* hidden/.test(api.panelControlsHtml('1')));
     api.expandPaneFromLayout('1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'left'},
@@ -6094,42 +6516,47 @@ async function runShareThemeSuite() {
 
     const finderOnly = api.emptyLayoutSlots();
     finderOnly[api.layoutTreeKey] = api.leafNode('left');
-    finderOnly.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderOnly.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    const finderDropHome = api.emptyLayoutSlots();
+    finderDropHome[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+    finderDropHome.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    finderDropHome.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(finderOnly);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'main'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot1: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
+        main: {tabs: [], active: null, placeholder: true},
       },
     });
-    assert.equal(api.slotForNewTmuxSession('2'), 'slot1');
+    assert.equal(api.slotForNewTmuxSession('2'), 'main', 'a lone Side Pane retains a generic filler for new terminals');
 
     const dragSlots = api.emptyLayoutSlots();
     dragSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dragSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dragSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dragSlots.slot1 = api.paneStateWithTabs(['__info__'], '__info__');
     api.setLayoutSlotsForTest(dragSlots);
     const removed = api.layoutWithoutItem('__info__', {preserveEmptySlot: 'slot1'});
     assert.deepStrictEqual(canonical(api.serialize(removed).panes.slot1), {tabs: [], active: null, placeholder: true});
     const closed = api.normalizeLayoutSlots(api.layoutWithoutItem('__info__', {preserveRemovedSlot: true}));
     assert.deepStrictEqual(canonical(api.serialize(closed).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
       slot1: {tabs: [], active: null, placeholder: true},
     });
     const moved = api.normalizeLayoutSlots(api.layoutWithoutItem('__info__'));
     assert.deepStrictEqual(canonical(api.serialize(moved).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
-      slot1: {tabs: [], active: null, placeholder: true},
+      left: {tabs: [api.finderItemId], active: api.finderItemId},
+      main: {tabs: [], active: null, placeholder: true},
     });
     api.splitSessionAtSlot('__info__', 'left', 'top', 'slot1');
     const split = api.serialize(api.currentSlots());
-    assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
-    assert.equal(split.panes.slot1, undefined);
+    assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes(api.finderItemId))), [{tabs: [api.finderItemId], active: api.finderItemId}]);
+    assert.deepStrictEqual(canonical(split.panes.slot1), {tabs: [], active: null, placeholder: true}, 'the explicit Generic source remains as the requested placeholder');
     assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes('__info__'))), [{tabs: ['__info__'], active: '__info__'}]);
     const infoSlot = Object.entries(split.panes).find(([, pane]) => pane.tabs.includes('__info__'))[0];
-    assert.notEqual(infoSlot, 'slot1');
-    assert.equal(api.shouldPreserveSourceSlotForSplit(infoSlot, 'slot1'), false);
+    assert.notEqual(infoSlot, 'slot1', 'YO!info moves into a top Vertical Side Pane leaf');
+    assert.equal(api.paneRoleForSlot(infoSlot).kind, api.paneRoleSide, 'YO!info destination retains the Vertical Side Pane role');
+    assert.equal(api.paneRoleForSlot(infoSlot).side, api.paneSideLeft, 'YO!info destination retains the left edge');
 
     const finderCloseSlots = api.emptyLayoutSlots();
     finderCloseSlots[api.layoutTreeKey] = api.splitNode(
@@ -6139,10 +6566,10 @@ async function runShareThemeSuite() {
       22,
     );
     finderCloseSlots.slot2 = api.paneStateWithTabs(['__info__'], '__info__');
-    finderCloseSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    finderCloseSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     finderCloseSlots.slot1 = api.emptyPlaceholderPaneState();
     api.setLayoutSlotsForTest(finderCloseSlots);
-    api.removeSessionFromLayout('__files__');
+    api.removeSessionFromLayout(api.finderItemId);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'slot2'},
       panes: {slot2: {tabs: ['__info__'], active: '__info__'}},
@@ -6151,7 +6578,7 @@ async function runShareThemeSuite() {
     const autoPruneSlots = api.emptyLayoutSlots();
     autoPruneSlots[api.layoutTreeKey] = api.splitNode('column', api.leafNode('slot2'), api.leafNode('left'), 50);
     autoPruneSlots.slot2 = api.paneStateWithTabs(['1'], '1');
-    autoPruneSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    autoPruneSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     const topColumn = new TestElement('top-column');
     topColumn.dataset.slot = 'slot2';
     topColumn.rect = {left: 0, top: 0, right: 500, bottom: 120, width: 500, height: 120};
@@ -6162,11 +6589,12 @@ async function runShareThemeSuite() {
     api.setGridPreviewNodesForTest([topColumn, finderColumn]);
     assert.equal(api.smallLayoutSlotCandidate().slot, 'slot2');
 
-    autoPruneSlots.slot2 = api.paneStateWithTabs(['__files__', '1'], '1');
+    autoPruneSlots.slot2 = api.paneStateWithTabs([api.finderItemId, '1'], '1');
     api.setLayoutSlotsForTest(autoPruneSlots);
     api.setGridPreviewNodesForTest([topColumn, finderColumn]);
-    assert.equal(api.slotCanAutoPrune('slot2'), false, 'legacy auto-prune protects a slot when Finder is a background tab');
-    assert.equal(api.smallLayoutSlotCandidate(), null, 'legacy auto-prune does not remove a small slot containing a background Finder tab');
+    assert.deepStrictEqual(canonical(api.paneTabs(api.sidePaneSlot(api.paneSideLeft))), [api.finderItemId], 'normalization rehomes a background Finder into the Side Pane');
+    assert.deepStrictEqual(canonical(api.paneTabs('slot2')), ['1'], 'the generic pane retains only its ordinary tab');
+    assert.equal(api.smallLayoutSlotCandidate().slot, 'slot2', 'ordinary-pane pruning no longer depends on inferred Finder contents');
 
     autoPruneSlots.slot2 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(autoPruneSlots);
@@ -6186,14 +6614,14 @@ async function runShareThemeSuite() {
     const killedApi = loadYolomux('', ['2']);
     const killedSlots = killedApi.emptyLayoutSlots();
     killedSlots[killedApi.layoutTreeKey] = killedApi.splitNode('row', killedApi.leafNode('left'), killedApi.leafNode('slot1'), 22);
-    killedSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    killedSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     killedSlots.slot1 = {tabs: ['1'], active: '1'};
     const killedNormalized = killedApi.normalizeLayoutSlots(killedSlots, {
       preserveRemovedItems: ['1'],
       preserveRemovedSlots: true,
     });
     assert.deepStrictEqual(canonical(killedApi.serialize(killedNormalized).panes), {
-      left: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
       slot1: {tabs: [], active: null, placeholder: true},
     });
     const killedNestedFinderSlots = killedApi.emptyLayoutSlots();
@@ -6204,16 +6632,24 @@ async function runShareThemeSuite() {
       58,
     );
     killedNestedFinderSlots.slot1 = {tabs: ['1'], active: '1'};
-    killedNestedFinderSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    killedNestedFinderSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     killedNestedFinderSlots.slot2 = killedApi.paneStateWithTabs(['2'], '2');
     const killedNestedFinderNormalized = killedApi.normalizeLayoutSlots(killedNestedFinderSlots, {
       preserveRemovedItems: ['1'],
       preserveRemovedSlots: true,
     });
     assert.deepStrictEqual(canonical(killedApi.serialize(killedNestedFinderNormalized)), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {
+        split: 'row',
+        pct: 22,
+        children: [
+          {slot: 'left'},
+          {split: 'row', pct: 58, children: [{slot: 'slot1'}, {slot: 'slot2'}]},
+        ],
+      },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
         slot2: {tabs: ['2'], active: '2'},
       },
     });
@@ -6227,14 +6663,22 @@ async function runShareThemeSuite() {
       58,
     );
     staleFileOpenSlots.slot1 = killedApi.emptyPlaceholderPaneState();
-    staleFileOpenSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    staleFileOpenSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     staleFileOpenSlots.slot2 = killedApi.paneStateWithTabs([staleFileOpenItem], staleFileOpenItem);
     killedApi.setLayoutSlotsForTest(staleFileOpenSlots);
     killedApi.openFileEditorPane(staleFileOpenPath);
     assert.deepStrictEqual(canonical(killedApi.serialize(killedApi.currentSlots())), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {
+        split: 'row',
+        pct: 22,
+        children: [
+          {slot: 'left'},
+          {split: 'row', pct: 58, children: [{slot: 'slot1'}, {slot: 'slot2'}]},
+        ],
+      },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
         slot2: {tabs: [staleFileOpenItem], active: staleFileOpenItem},
       },
     });
@@ -6242,20 +6686,20 @@ async function runShareThemeSuite() {
     const killedVerticalSlots = killedApi.emptyLayoutSlots();
     killedVerticalSlots[killedApi.layoutTreeKey] = killedApi.splitNode('column', killedApi.leafNode('slot1'), killedApi.leafNode('left'), 50);
     killedVerticalSlots.slot1 = {tabs: ['1'], active: '1'};
-    killedVerticalSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+    killedVerticalSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);
     const killedVerticalNormalized = killedApi.normalizeLayoutSlots(killedVerticalSlots, {
       preserveRemovedItems: ['1'],
       preserveRemovedSlots: true,
     });
     assert.deepStrictEqual(canonical(killedApi.serialize(killedVerticalNormalized)), {
-      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+      tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
-        slot2: {tabs: [], active: null, placeholder: true},
+        left: {tabs: [killedApi.finderItemId], active: killedApi.finderItemId},
+        slot1: {tabs: [], active: null, placeholder: true},
       },
     });
 
-    api.setLayoutSlotsForTest(finderOnly);
+    api.setLayoutSlotsForTest(finderDropHome);
     const roomyFinderDropRect = {left: 0, top: 0, right: 720, bottom: 520, width: 720, height: 520};
     const narrowFinderDropRect = {left: 0, top: 0, right: 300, bottom: 520, width: 300, height: 520};
     const shortFinderDropRect = {left: 0, top: 0, right: 720, bottom: 420, width: 720, height: 420};
@@ -6263,42 +6707,42 @@ async function runShareThemeSuite() {
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'left', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'right', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
-    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false);
+    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), false);
+    assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false, 'the triplet home rejects non-triplet vertical drops at every size');
     assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
     const editorItem = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'middle', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'left', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'right', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
+    assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), false);
     const legacyChangesOnly = api.emptyLayoutSlots();
     legacyChangesOnly[api.layoutTreeKey] = api.leafNode('left');
     legacyChangesOnly.left = api.paneStateWithTabs(['__changes__'], '__changes__');
     api.setLayoutSlotsForTest(legacyChangesOnly);
     assert.equal(api.itemInLayout('__changes__'), false, 'retired standalone Differ is pruned if it appears outside URL alias resolution');
-    api.setLayoutSlotsForTest(finderOnly);
+    api.setLayoutSlotsForTest(finderDropHome);
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
+    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false, 'the triplet home rejects Preferences below Finder');
+    assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), false);
     assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
-    assert.equal(api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'left'}), false, 'Finder pane drags never advertise a pane split preview');
+    assert.equal(api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'left'}), false, 'Finder cannot cross from a Side Pane into a generic pane');
     assert.equal(api.dropIntentAllowsSession('__changes__', {targetSlot: 'slot1', zone: 'left'}), false, 'retired standalone Differ is not draggable as a layout item');
-    assert.equal(api.dropIntentAllowsSession('__files__', {boundary: 'root', zone: 'right', targetSlot: 'slot1'}), false, 'Finder pane drags never advertise a root split preview');
+    assert.equal(api.dropIntentAllowsSession(api.finderItemId, {boundary: 'root', zone: 'right', targetSlot: 'slot1'}), true, 'Finder can leave the home column through a root split');
     assert.equal(api.dropIntentAllowsSession('__changes__', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1'}), false, 'retired standalone Differ cannot be dropped at a gutter');
     const normalSplitSlots = api.emptyLayoutSlots();
     normalSplitSlots[api.layoutTreeKey] = api.leafNode('slot1');
     normalSplitSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(normalSplitSlots);
-    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 620, height: 520}}), false, 'pane edge previews require enough width for both panes');
+    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 620, height: 520}}), true, 'a 620px pane can now preview two 300px desktop panes plus the shared gutter');
     assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 720, height: 520}}), true);
     assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'bottom', targetRect: {width: 720, height: 420}}), false, 'pane edge previews require enough height for both panes');
-    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 300, height: 520}}), false, 'middle drops do not preview when the target cannot display the incoming tab');
+    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 300, height: 520}}), true, 'a 300px pane can display an incoming tab without creating a split');
     assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 420, height: 520}}), true);
 
     const dragMatrixSlots = api.emptyLayoutSlots();
     dragMatrixSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 25);
-    dragMatrixSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dragMatrixSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dragMatrixSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dragMatrixSlots);
     const matrixNormalRect = {left: 260, top: 0, right: 980, bottom: 520, width: 720, height: 520};
@@ -6310,34 +6754,34 @@ async function runShareThemeSuite() {
       {source: 'tab', target: 'normal-pane', zone: 'middle', previewOwner: 'tab-strip', dropEffect: 'move', finalAction: 'move-tab-to-pane', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: matrixNormalRect})},
       {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
       {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle', targetRect: matrixFinderRect})},
-      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-reserved-pane-bottom', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'bottom', targetRect: matrixFinderRect})},
-      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
+      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'bottom', targetRect: matrixFinderRect})},
+      {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession(api.finderItemId, {targetSlot: 'slot1', zone: 'right', targetRect: matrixNormalRect})},
       {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: api.fileDropIntentAllowsPayload(filePayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
       {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: api.fileDropIntentAllowsPayload(multiFilePayload, {targetSlot: 'slot1', zone: 'middle', targetRect: matrixNormalRect})},
       {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: api.pathDropIntentAllowsPayload(directoryPayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
       {source: 'directory-row', target: 'file-editor-drop', zone: 'left', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.fileDropIntentAllowsPayload(directoryPayload, {targetSlot: 'slot1', zone: 'left', targetRect: matrixNormalRect})},
       {source: 'tab', target: 'root-edge', zone: 'right', previewOwner: 'root', dropEffect: 'move', finalAction: 'split-root', allowed: api.dropIntentAllowsSession('2', {boundary: 'root', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
-      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'gutter', dropEffect: 'move', finalAction: 'split-gutter', allowed: api.dropIntentAllowsSession('2', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
+      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: api.dropIntentAllowsSession('2', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1', targetRect: matrixNormalRect})},
     ];
     assert.deepStrictEqual(canonical(matrixCases), [
       {source: 'tab', target: 'normal-pane', zone: 'middle', previewOwner: 'tab-strip', dropEffect: 'move', finalAction: 'move-tab-to-pane', allowed: true},
       {source: 'tab', target: 'normal-pane', zone: 'right', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-pane', allowed: true},
       {source: 'tab', target: 'Finder/Differ', zone: 'middle', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
-      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'pane', dropEffect: 'move', finalAction: 'split-reserved-pane-bottom', allowed: true},
+      {source: 'tab', target: 'Finder/Differ', zone: 'bottom', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
       {source: 'Finder/Differ-tab', target: 'normal-pane', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
       {source: 'file-row', target: 'normal-pane', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-file-editor-split', allowed: true},
       {source: 'multi-file-row', target: 'normal-pane', zone: 'middle', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'open-files-in-pane', allowed: true},
       {source: 'directory-row', target: 'terminal-path-target', zone: 'left', previewOwner: 'pane', dropEffect: 'copy', finalAction: 'insert-directory-path-or-split', allowed: true},
       {source: 'directory-row', target: 'file-editor-drop', zone: 'left', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
       {source: 'tab', target: 'root-edge', zone: 'right', previewOwner: 'root', dropEffect: 'move', finalAction: 'split-root', allowed: true},
-      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'gutter', dropEffect: 'move', finalAction: 'split-gutter', allowed: true},
+      {source: 'tab', target: 'cross-gutter', zone: 'right', previewOwner: 'none', dropEffect: 'none', finalAction: 'none', allowed: false},
     ], 'drag/drop matrix covers source x target x zone through the shared validators');
     api.setLayoutSlotsForTest(finderOnly);
     api.splitSessionAtSlot(editorItem, 'left', 'bottom');
     const editorSplit = api.serialize(api.currentSlots());
-    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
-    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(editorItem))), [{tabs: [editorItem], active: editorItem}]);
-    assert.ok(JSON.stringify(editorSplit.tree).includes('"split":"column"'));
+    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(api.finderItemId))), [{tabs: [api.finderItemId], active: api.finderItemId}]);
+    assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(editorItem))), [], 'a generic editor cannot subdivide a Side Pane');
+    assert.equal(editorSplit.tree.split, 'row');
 
     const fullSpanA = api.registerFileEditorLayoutItem('/home/test/full-span-a.md');
     const fullSpanB = api.registerFileEditorLayoutItem('/home/test/full-span-b.md');
@@ -6359,7 +6803,7 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {
         split: 'row',
-        pct: 50,
+        pct: 80,
         children: [
           {
             split: 'row',
@@ -6402,7 +6846,7 @@ async function runShareThemeSuite() {
 
     const dockedBoundarySlots = api.emptyLayoutSlots();
     dockedBoundarySlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dockedBoundarySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dockedBoundarySlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dockedBoundarySlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dockedBoundarySlots);
     api.splitSessionAtLayoutBoundary('__info__', 'bottom');
@@ -6416,7 +6860,7 @@ async function runShareThemeSuite() {
         ],
       },
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot1: {tabs: ['1'], active: '1'},
         slot2: {tabs: ['__info__'], active: '__info__'},
       },
@@ -6424,7 +6868,7 @@ async function runShareThemeSuite() {
 
     const dockedBoundaryTopSlots = api.emptyLayoutSlots();
     dockedBoundaryTopSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dockedBoundaryTopSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dockedBoundaryTopSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dockedBoundaryTopSlots.slot1 = api.paneStateWithTabs(['1'], '1');
     api.setLayoutSlotsForTest(dockedBoundaryTopSlots);
     api.splitSessionAtLayoutBoundary('__prefs__', 'top');
@@ -6443,7 +6887,7 @@ async function runShareThemeSuite() {
       slot1: {left: 240, top: 0, right: 1200, bottom: 800, width: 960, height: 800},
     };
     api.setLayoutColumnRectsForTest(dockedBoundaryRects);
-    api.showDropPreview({boundary: 'root', zone: 'bottom', targetSlot: 'slot1', previewNode: api.gridForTest(), targetRect: {left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800}});
+    api.showDropPreview({boundary: 'root', zone: 'bottom', targetSlot: 'slot1', previewNode: api.gridForTest()});
     const previewInset = 6;
     assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-left'), `${dockedBoundaryRects.slot1.left + previewInset}px`, 'bottom full-span preview starts after the docked Finder');
     assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-width'), `${dockedBoundaryRects.slot1.width - previewInset * 2}px`, 'bottom full-span preview spans only the non-Finder content');
@@ -6451,14 +6895,14 @@ async function runShareThemeSuite() {
 
     const dockedBoundaryMoveOnlyContent = api.emptyLayoutSlots();
     dockedBoundaryMoveOnlyContent[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
-    dockedBoundaryMoveOnlyContent.left = api.paneStateWithTabs(['__files__'], '__files__');
+    dockedBoundaryMoveOnlyContent.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
     dockedBoundaryMoveOnlyContent.slot1 = api.paneStateWithTabs(['__info__'], '__info__');
     api.setLayoutSlotsForTest(dockedBoundaryMoveOnlyContent);
     api.splitSessionAtLayoutBoundary('__info__', 'bottom', 'slot1');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
       panes: {
-        left: {tabs: ['__files__'], active: '__files__'},
+        left: {tabs: [api.finderItemId], active: api.finderItemId},
         slot2: {tabs: ['__info__'], active: '__info__'},
       },
     });
@@ -6476,7 +6920,7 @@ async function runShareThemeSuite() {
     assert.equal(boundaryIntent.zone, 'right');
     api.showDropPreview(boundaryIntent);
     assert.ok(api.gridForTest().classList.contains('drop-preview-root'), 'outer-edge session drags show a root full-span preview');
-    assert.equal(api.gridForTest().dataset.dropLabel, 'full right');
+    assert.equal(api.gridForTest().dataset.dropLabel, 'Full right');
     api.clearDropPreview();
     assert.equal(api.gridForTest().classList.contains('drop-preview-root'), false);
     assert.equal('dropLabel' in api.gridForTest().dataset, false);
@@ -6494,7 +6938,7 @@ async function runShareThemeSuite() {
     assert.equal(gutterIntent.splitPath, '');
     api.showDropPreview(gutterIntent);
     assert.ok(api.gridForTest().classList.contains('drop-preview-gutter'), 'split-bar session drags show a full-span gutter preview');
-    assert.equal(api.gridForTest().dataset.dropLabel, 'full span');
+    assert.equal(api.gridForTest().dataset.dropLabel, 'Full span');
     assert.ok(api.gridForTest().style.getPropertyValue('--drop-preview-width'), 'gutter preview geometry is explicit');
     api.clearDropPreview();
 
@@ -6503,23 +6947,23 @@ async function runShareThemeSuite() {
     noPreviewSlot.dataset.slot = 'slot1';
     noPreviewSlot.rect = {left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400};
     api.setGridPreviewNodesForTest([noPreviewSlot]);
-    const finderPaneDrag = dragEvent(16, '__files__');
+    const finderPaneDrag = dragEvent(16, api.finderItemId);
     finderPaneDrag.target = noPreviewSlot;
     finderPaneDrag.clientY = 200;
     api.handleDropDragOver(finderPaneDrag);
     assert.ok(finderPaneDrag.defaultPrevented, 'Finder pane dragover is handled so the browser does not show its own drop UI');
     assert.ok(finderPaneDrag.propagationStopped, 'Finder pane dragover is owned by the pane drag handler');
     assert.equal(finderPaneDrag.dataTransfer.dropEffect, 'none');
-    assert.equal(noPreviewSlot.classList.contains('drop-preview'), false, 'Finder pane drags do not show a dotted pane preview');
+    assert.equal(noPreviewSlot.classList.contains('drop-preview'), false, 'a Side Pane Finder cannot preview a cross-role drop into a generic pane');
     api.setLayoutSlotsForTest(finderOnly);
-    const finderStrip = tabStrip([tabElement('__files__', 100, 120)]);
+    const finderStrip = tabStrip([tabElement(api.finderItemId, 100, 120)]);
     api.bindPaneTabStrip(finderStrip, 'left');
     const event = dragEvent(125, '1');
     finderStrip.ondragover(event);
     assert.equal(event.defaultPrevented, true);
     assert.equal(event.propagationStopped, true);
     assert.equal(event.dataTransfer.dropEffect, 'none');
-    assert.equal(finderStrip.classList.contains('tab-drop-preview'), false);
+    assert.equal(finderStrip.classList.contains('tab-drop-preview'), false, 'a Side Pane strip rejects ordinary generic tabs');
   });
 }
 

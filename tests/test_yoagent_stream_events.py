@@ -9,6 +9,7 @@ from yolomux_lib.yoagent.stream_events import TOOL_CALL_STARTED
 from yolomux_lib.yoagent.stream_events import TURN_DONE
 from yolomux_lib.yoagent.stream_events import ClaudeStreamJsonNormalizer
 from yolomux_lib.yoagent.stream_events import normalize_codex_app_server_message
+from yolomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_item
 from yolomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_line
 
 
@@ -49,8 +50,10 @@ def test_textless_reasoning_delta_uses_truthful_minimal_state():
     assert codex_events[0]["text"] == "reasoning..."
     assert claude_events[0]["text"] == "thinking... (~50 tokens)"
     assert claude_events[0]["metadata"] == {"estimated_tokens": 50}
-    assert yoagent_stream_event_auxiliary_line(codex_events[0]) == "thinking: reasoning..."
-    assert yoagent_stream_event_auxiliary_line(claude_events[0]) == "thinking... (~50 tokens)"
+    assert codex_events[0]["heartbeat"] is True
+    assert claude_events[0]["heartbeat"] is True
+    assert yoagent_stream_event_auxiliary_line(codex_events[0]) == "thinking"
+    assert yoagent_stream_event_auxiliary_line(claude_events[0]) == "thinking"
 
 
 def test_stream_events_preserve_long_text_without_truncation_marker():
@@ -151,3 +154,20 @@ def test_tool_auxiliary_lines_preserve_multiline_output():
     })
 
     assert line == "tool done: command: line 1\nline 2"
+
+
+def test_stream_auxiliary_label_owns_legacy_compatibility_fields():
+    item = yoagent_stream_event_auxiliary_item({
+        "kind": TOOL_CALL_STARTED,
+        "tool_name": "command",
+        "command": "python3 tools/check.py",
+    })
+
+    assert item["label"] == {
+        "key": "yoagent.stream.toolStart",
+        "params": {"tool": "command"},
+        "fallback": "tool start: command",
+    }
+    assert item["labelKey"] == item["label"]["key"]
+    assert item["labelParams"] == item["label"]["params"]
+    assert item["fallback"] == item["label"]["fallback"]

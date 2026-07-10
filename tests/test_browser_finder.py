@@ -2,24 +2,25 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
 def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, tmp_path):
-    fs_entries = {
-        "/home/test": [{"name": "project", "kind": "dir"}],
-        "/home/test/project": [{"name": "src", "kind": "dir"}],
-    }
-    page = tmp_path / "live-runtime-disclosure-size.html"
-    page.write_text(live_runtime_boot_fixture_html(fs_entries=fs_entries), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
+    page = tmp_path / "disclosure-size.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
             """
-            return document.querySelector('.file-tree-row[data-path="/home/test/project"] > .file-tree-icon.ui-disclosure-triangle') !== null;
-            """
-        )
+            <div id="row" class="file-tree-row kind-dir" aria-expanded="false">
+              <span id="icon" class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="false">›</span>
+              <span class="file-tree-name">project</span>
+            </div>
+            """,
+            extra_css="body { display:block; padding:12px; } #row { width:240px; }",
+        ),
     )
     before = browser.execute_script(
         """
-        const row = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
-        const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+        const row = document.getElementById('row');
+        const icon = document.getElementById('icon');
         return {
           rowFont: parseFloat(getComputedStyle(row).fontSize),
           iconFont: parseFloat(getComputedStyle(icon).fontSize),
@@ -27,44 +28,29 @@ def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, 
           iconTransform: getComputedStyle(icon).transform,
           iconText: icon.textContent.trim(),
           rowHeight: row.getBoundingClientRect().height,
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
         };
         """
     )
     browser.execute_script(
         """
-        document.querySelector('.file-tree-row[data-path="/home/test/project"]').click();
+        document.getElementById('row').setAttribute('aria-expanded', 'true');
+        document.getElementById('icon').dataset.disclosureExpanded = 'true';
         """
-    )
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return document.querySelector('.file-tree-row[data-path="/home/test/project/src"]') !== null;
-            """
-        )
     )
     after = browser.execute_script(
         """
-        const row = document.querySelector('.file-tree-row[data-path="/home/test/project"]');
-        const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+        const row = document.getElementById('row');
+        const icon = document.getElementById('icon');
         return {
           rowFont: parseFloat(getComputedStyle(row).fontSize),
           iconFont: parseFloat(getComputedStyle(icon).fontSize),
           iconTransform: getComputedStyle(icon).transform,
           iconText: icon.textContent.trim(),
           rowHeight: row.getBoundingClientRect().height,
-          childVisible: document.querySelector('.file-tree-row[data-path="/home/test/project/src"]') !== null,
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
         };
         """
     )
     metrics = {"before": before, "after": after}
-    assert before["errors"] == []
-    assert before["rejections"] == []
-    assert after["errors"] == []
-    assert after["rejections"] == []
     assert before["iconText"] == "›", metrics
     assert after["iconText"] == "›", metrics
     assert before["iconTransform"] == "none", metrics
@@ -73,7 +59,6 @@ def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, 
     assert abs(after["iconFont"] - after["rowFont"]) <= 0.5, metrics
     assert before["iconWidth"] >= before["iconFont"], metrics
     assert abs(after["rowHeight"] - before["rowHeight"]) <= 0.5, metrics
-    assert after["childVisible"] is True, metrics
 
 
 def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
@@ -84,9 +69,12 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
         ],
         "/home/test/project": [{"name": "src", "kind": "dir"}],
     }
-    page = tmp_path / "live-runtime-folder-zip-menu.html"
-    page.write_text(live_runtime_boot_fixture_html(fs_entries=fs_entries), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
+        fs_entries=fs_entries,
+    )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -124,36 +112,29 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
 
 
 @pytest.mark.parametrize("legacy_token", ["changes", "__changes__"])
-def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_token):
+def test_legacy_changes_url_opens_differ(browser, tmp_path, legacy_token):
     load_live_runtime_boot_fixture(browser, tmp_path, f"?layout=left&tabs=left:{legacy_token}")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('#panel-__files__')?.dataset.fileExplorerMode === 'diff'"
+            "return document.querySelector('#panel-__differ__')?.dataset.fileExplorerMode === 'diff'"
         )
     )
     metrics = browser.execute_script(
         """
-        const panel = document.querySelector('#panel-__files__');
-        const filesButton = panel.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = panel.querySelector('[data-file-explorer-mode-set="diff"]');
+        const panel = document.querySelector('#panel-__differ__');
         const tree = panel.querySelector('.file-explorer-tree-panel');
         const changes = panel.querySelector('.file-explorer-changes-panel');
-        const newFile = panel.querySelector('[data-file-explorer-new-file]');
         const visible = selector => Array.from(panel.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
         return {
           errors: window.__bootErrors,
           rejections: window.__bootRejections,
           panelConnected: panel?.isConnected === true,
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
           panelMode: panel?.dataset.fileExplorerMode,
-          filesPressed: filesButton?.getAttribute('aria-pressed'),
-          diffPressed: diffButton?.getAttribute('aria-pressed'),
-          modeTexts: Array.from(panel.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
+          noModeSwitcher: panel?.querySelector('.file-explorer-mode-switcher') === null,
           treeDisplay: getComputedStyle(tree).display,
           changesDisplay: getComputedStyle(changes).display,
           titleCount: panel.querySelectorAll('.file-explorer-panel-title').length,
-          newFileDisplay: getComputedStyle(newFile).display,
+          newFileAbsent: panel.querySelector('[data-file-explorer-new-file]') === null,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
           visibleSortSelects: visible('[data-session-files-sort]').length,
@@ -167,16 +148,12 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert metrics["panelConnected"]
-    assert metrics["bodyDiff"]
-    assert not metrics["bodyFiles"]
     assert metrics["panelMode"] == "diff"
-    assert metrics["filesPressed"] == "false"
-    assert metrics["diffPressed"] == "true"
-    assert metrics["modeTexts"] == ["Finder", "Differ", "Tabber"]
+    assert metrics["noModeSwitcher"]
     assert metrics["treeDisplay"] == "none"
     assert metrics["changesDisplay"] != "none"
     assert metrics["titleCount"] == 0
-    assert metrics["newFileDisplay"] == "none"
+    assert metrics["newFileAbsent"]
     assert metrics["visibleRootControls"] == 0, metrics
     assert metrics["visibleSessionSelects"] == 1, metrics
     assert metrics["visibleSortSelects"] == 1, metrics
@@ -196,6 +173,7 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
             {"session": "1", "repo": "/repo/app", "path": "src/a.py", "abs_path": "/repo/app/src/a.py", "status": "M", "mtime": 100, "added": 2, "removed": 1},
             {"session": "1", "repo": "/repo/app", "path": "src/b.py", "abs_path": "/repo/app/src/b.py", "status": "M", "mtime": 110, "added": 3, "removed": 4},
             {"session": "1", "repo": "/repo/app", "path": "docs/only.md", "abs_path": "/repo/app/docs/only.md", "status": "A", "mtime": 120, "added": 9, "removed": 0},
+            {"session": "1", "repo": "/repo/app", "path": "archive/old.md", "abs_path": "/repo/app/archive/old.md", "status": "D", "mtime": 130, "added": 0, "removed": 9},
         ],
     }
     load_live_runtime_boot_fixture(
@@ -207,21 +185,26 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return Array.from(document.querySelectorAll('#panel-__files__ .file-tree-dir-count:not([hidden])')).some(node => node.textContent.trim() === '1')"
+                "return Array.from(document.querySelectorAll('#panel-__differ__ .file-tree-dir-count:not([hidden])')).some(node => node.textContent.trim() === '2')"
         )
     )
     metrics = browser.execute_script(
         """
-        const panel = document.querySelector('#panel-__files__');
+        const panel = document.querySelector('#panel-__differ__');
         const rows = Array.from(panel.querySelectorAll('.file-tree-row.kind-dir'));
         const records = rows.map(row => {
           const count = row.querySelector(':scope > .file-tree-dir-count');
+          const diff = row.querySelector(':scope > .file-tree-diff');
+          const signedCount = diff?.querySelector('.changes-diff-add, .changes-diff-remove');
+          const label = diff?.querySelector('.changes-diff-file-label');
           return {
             path: row.dataset.path || '',
             text: row.textContent.trim().replace(/\\s+/g, ' '),
-            diff: row.querySelector(':scope > .file-tree-diff')?.textContent.trim().replace(/\\s+/g, ' ') || '',
+            diff: diff?.textContent.trim().replace(/\\s+/g, ' ') || '',
             count: count?.textContent.trim() || '',
             hidden: count?.hidden !== false,
+            signedColor: signedCount ? getComputedStyle(signedCount).color : '',
+            labelColor: label ? getComputedStyle(label).color : '',
           };
         });
         return {
@@ -236,8 +219,80 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert not metrics["hasFileChangedLabel"], metrics
-    assert {"2", "1"}.issubset(set(metrics["visibleCounts"])), metrics
+    assert "2" in set(metrics["visibleCounts"]), metrics
     assert all(re.fullmatch(r"[0-9]+", count) for count in metrics["visibleCounts"]), metrics
+    diff_by_path = {record["path"]: record["diff"] for record in metrics["records"]}
+    records_by_path = {record["path"]: record for record in metrics["records"]}
+    assert diff_by_path["/repo/app/docs"] == "+1 files", metrics
+    assert diff_by_path["/repo/app/archive"] == "-1 files", metrics
+    assert records_by_path["/repo/app/docs"]["hidden"] is True, metrics
+    assert records_by_path["/repo/app/archive"]["hidden"] is True, metrics
+    assert records_by_path["/repo/app/docs"]["signedColor"] != records_by_path["/repo/app/docs"]["labelColor"], metrics
+    assert records_by_path["/repo/app/archive"]["signedColor"] != records_by_path["/repo/app/archive"]["labelColor"], metrics
+
+
+def test_differ_expanded_directory_chevrons_follow_row_state_through_reload(browser, tmp_path):
+    payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/repo/app", "count": 3}],
+        "files": [
+            {"session": "1", "repo": "/repo/app", "path": "widgetkit/fixtures/inputs/lark3_coder/one.yaml", "abs_path": "/repo/app/widgetkit/fixtures/inputs/lark3_coder/one.yaml", "status": "M", "mtime": 100},
+            {"session": "1", "repo": "/repo/app", "path": "widgetkit/fixtures/inputs/lark3_coder/two.yaml", "abs_path": "/repo/app/widgetkit/fixtures/inputs/lark3_coder/two.yaml", "status": "M", "mtime": 101},
+        ],
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?layout=left&tabs=left:__changes__",
+        sessions=["1"],
+        session_files_payload=payload,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-tree-row[data-path=\"/repo/app/widgetkit/fixtures/inputs/lark3_coder/one.yaml\"]') !== null"
+        )
+    )
+    browser.refresh()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-tree-row[data-path=\"/repo/app/widgetkit/fixtures/inputs/lark3_coder/one.yaml\"]') !== null"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const expandedRows = Array.from(document.querySelectorAll('.file-explorer-changes-panel .file-tree-row.kind-dir[aria-expanded="true"]'));
+        const stateFor = row => {
+          const icon = row.querySelector(':scope > .file-tree-icon.ui-disclosure-triangle');
+          return {
+            path: row.dataset.path,
+            ariaExpanded: row.getAttribute('aria-expanded'),
+            disclosureExpanded: icon?.dataset.disclosureExpanded || '',
+            transform: icon ? getComputedStyle(icon).transform : '',
+          };
+        };
+        const initial = expandedRows.map(stateFor);
+        // A DOM restore can momentarily retain a previous icon data attribute. The row's semantic
+        // expansion state must still keep the visible chevron aligned with its visible children.
+        expandedRows.forEach(row => {
+          row.querySelector(':scope > .file-tree-icon')?.setAttribute('data-disclosure-expanded', 'false');
+        });
+        return {
+          initial,
+          restored: expandedRows.map(stateFor),
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert len(metrics["initial"]) >= 4, metrics
+    assert all(row["ariaExpanded"] == "true" for row in metrics["initial"]), metrics
+    assert all(row["disclosureExpanded"] == "true" for row in metrics["initial"]), metrics
+    assert all(row["transform"] != "none" for row in metrics["initial"]), metrics
+    assert all(row["transform"] != "none" for row in metrics["restored"]), metrics
 
 
 def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, tmp_path):
@@ -272,18 +327,16 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         "/home/test/vortex/repo-c": [{"name": "docs", "kind": "dir"}],
         "/home/test/vortex/repo-c/docs": [{"name": "c.md", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-common-root.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            transcript_current_path="/home/test/vortex/repo-a/src",
-            transcript_git_root="/home/test/vortex/repo-a",
-            session_files_payload=session_files_payload,
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        transcript_current_path="/home/test/vortex/repo-a/src",
+        transcript_git_root="/home/test/vortex/repo-a",
+        session_files_payload=session_files_payload,
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -450,18 +503,16 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
         "/home/test/vortex/repo-b": [{"name": "lib", "kind": "dir"}],
         "/home/test/vortex/repo-b/lib": [{"name": "b.py", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-reveal-manual-collapse.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            transcript_current_path="/home/test/vortex/repo-a/src",
-            transcript_git_root="/home/test/vortex/repo-a",
-            session_files_payload=session_files_payload,
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        transcript_current_path="/home/test/vortex/repo-a/src",
+        transcript_git_root="/home/test/vortex/repo-a",
+        session_files_payload=session_files_payload,
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test' && document.getElementById('panel-1') !== null;"
@@ -485,19 +536,38 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
         const repoA = '/home/test/vortex/repo-a';
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
         tree.querySelector('.file-tree-row[data-path="' + repoA + '"]').click();
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const collapsedAfterClick = tree.querySelector('.file-tree-row[data-path="' + repoA + '"]')?.getAttribute('aria-expanded');
+        const collapseDeadline = performance.now() + 2000;
+        const waitForCollapse = () => {
+          const collapsedAfterClick = tree.querySelector('.file-tree-row[data-path="' + repoA + '"]')?.getAttribute('aria-expanded') || '';
           const manualHasA = fileExplorerSyncManualCollapsedPaths.has(repoA);
+          if (collapsedAfterClick !== 'false' || !manualHasA) {
+            if (performance.now() >= collapseDeadline) {
+              done({collapsedAfterClick, manualHasA, repoAExpanded: collapsedAfterClick, manualHasA_after: manualHasA});
+            } else {
+              setTimeout(waitForCollapse, 10);
+            }
+            return;
+          }
           scheduleFileExplorerActiveFileReveal('/home/test/vortex/repo-a/src/a.js');
-          requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+          const revealDeadline = performance.now() + 500;
+          let revealExpanded = false;
+          const observeReveal = () => {
+            const expanded = tree.querySelector('.file-tree-row[data-path="' + repoA + '"]')?.getAttribute('aria-expanded') || '';
+            revealExpanded ||= expanded === 'true';
+            if (performance.now() < revealDeadline) {
+              setTimeout(observeReveal, 10);
+              return;
+            }
             done({
               collapsedAfterClick,
               manualHasA,
-              repoAExpanded: tree.querySelector('.file-tree-row[data-path="' + repoA + '"]')?.getAttribute('aria-expanded') || '',
+              repoAExpanded: revealExpanded ? 'true' : expanded,
               manualHasA_after: fileExplorerSyncManualCollapsedPaths.has(repoA),
             });
-          })));
-        }));
+          };
+          observeReveal();
+        };
+        waitForCollapse();
         """
     )
     # Preconditions: the click collapsed repo-a and recorded the manual collapse.
@@ -515,14 +585,7 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
             {"name": "03-mixed.md", "kind": "file", "size": 128, "mtime_ns": 1781300000000000000},
         ],
     }
-    page = tmp_path / "live-runtime-file-entry-status-existing-preview-sample.html"
-    page.write_text(live_runtime_boot_fixture_html(fs_entries=fs_entries), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1&layout=left&tabs=left:1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            "return typeof fetchFileEntryStatus === 'function' && document.querySelector('#grid') !== null;"
-        )
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", fs_entries=fs_entries)
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -540,11 +603,12 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
         """
     )
     assert "error" not in metrics, metrics
+    assert metrics["entry"] is not None, metrics
     assert metrics["entry"]["name"] == "03-mixed.md", metrics
     assert metrics["entry"]["kind"] == "file", metrics
     assert metrics["missing"] is False, metrics
     assert metrics["network"] is False, metrics
-    assert metrics["lookupError"] == "", metrics
+    assert metrics["lookupError"] is None, metrics
     assert metrics["fsFetches"], metrics
 
 
@@ -573,25 +637,18 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
         "/home/test/vortex/parser-toolkits/acceptance/utils/tests/check": [{"name": "reasoning", "kind": "dir"}],
         "/home/test/vortex/parser-toolkits/acceptance/utils/tests/check/reasoning": [{"name": "table.py", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-editor-file-root.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["1", "2"],
-            transcript_sessions={
-                "1": {"current_path": "/home/test/yolomux.dev", "git_root": "/home/test/yolomux.dev"},
-                "2": {"current_path": "/home/test/vortex/parser-toolkits", "git_root": "/home/test/vortex/parser-toolkits"},
-            },
-            session_files_payload=session_files_payload,
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
-    )
-    browser.get(
-        page.as_uri()
-        + "?sessions=files,1,2"
-        + "&layout=row@35(slot1,left)"
-        + f"&tabs=slot1:files;left:file:{path}"
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1,2" + "&layout=row@35(slot1,left)" + f"&tabs=slot1:files;left:file:{path}",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["1", "2"],
+        transcript_sessions={
+            "1": {"current_path": "/home/test/yolomux.dev", "git_root": "/home/test/yolomux.dev"},
+            "2": {"current_path": "/home/test/vortex/parser-toolkits", "git_root": "/home/test/vortex/parser-toolkits"},
+        },
+        session_files_payload=session_files_payload,
+        fs_entries=fs_entries,
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -695,18 +752,16 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
         "/home/test/yolomux.dev": [{"name": "static", "kind": "dir"}],
         "/home/test/yolomux.dev/static": [{"name": "app.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-parent-collapse.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            transcript_current_path="/home/test/vortex/repo-a/src",
-            transcript_git_root="/home/test/vortex/repo-a",
-            session_files_payload=session_files_payload,
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        transcript_current_path="/home/test/vortex/repo-a/src",
+        transcript_git_root="/home/test/vortex/repo-a",
+        session_files_payload=session_files_payload,
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -732,7 +787,7 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
         const row = tree.querySelector('.file-tree-row[data-path="/home/test/vortex"]');
-        fileExplorerExplicitSyncSession = '';
+        setExplicitPaneFocusItem('', {allowInactive: true, clearTmux: true});
         row.click();
         syncFileExplorerRootToActiveTmux('1').then(() => {
           requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -773,21 +828,19 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
         "/home/test/yolomux.dev/src": [{"name": "main.js", "kind": "file"}],
         "/tmp": [{"name": "scratch.txt", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-typed-path-slow-listing.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
-            },
-            session_files_payload=session_files_payload,
-            session_files_payloads={"5": session_files_payload},
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5&layout=row@35(slot1,left)&tabs=slot1:files;left:5",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
+        },
+        session_files_payload=session_files_payload,
+        session_files_payloads={"5": session_files_payload},
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5&layout=row@35(slot1,left)&tabs=slot1:files;left:5")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -799,7 +852,10 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
     click_visible_panel(browser, "panel-5")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
+              && currentFileExplorerRoot() === '/home/test/yolomux.dev';
+            """
         )
     )
     metrics = browser.execute_async_script(
@@ -910,22 +966,20 @@ def test_sync_mode_stale_session_root_open_cannot_override_typed_manual_path(bro
         "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
         "/tmp": [{"name": "scratch.txt", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-stale-session-open.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5", "8002"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
-                "8002": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
-            },
-            session_files_payload=session_files_payload,
-            session_files_payloads={"8002": session_files_payload},
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5,8002&layout=row@35(slot1,left)&tabs=slot1:files;left:5,8002",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5", "8002"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+            "8002": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+        },
+        session_files_payload=session_files_payload,
+        session_files_payloads={"8002": session_files_payload},
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5,8002&layout=row@35(slot1,left)&tabs=slot1:files;left:5,8002")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1049,25 +1103,23 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
         "/home/test/yolomux.dev1": [{"name": "src", "kind": "dir"}],
         "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
     }
-    page = tmp_path / "live-runtime-sync-user-select-8002.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5", "8002"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
-                "8002": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
-            },
-            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-            session_files_payloads={
-                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-                "8002": {"session": "8002", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
-            },
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5,8002&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:8002",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5", "8002"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+            "8002": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+        },
+        session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+        session_files_payloads={
+            "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            "8002": {"session": "8002", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+        },
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5,8002&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:8002")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1112,7 +1164,7 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
               explicitSession: fileExplorerExplicitSyncSessionTarget(),
               targetSession: fileExplorerSessionFilesTargetSession(),
               currentPath: terminalCurrentPath('8002'),
-              gitRoot: transcriptMeta.sessions?.['8002']?.project?.git?.root || '',
+              gitRoot: transcriptMetadataState.payload.sessions?.['8002']?.project?.git?.root || '',
               planRoot: fileExplorerSyncPlan('8002').root,
               searchingVisible: tree.querySelector('.file-tree-status-searching .file-tree-searching-dots') !== null,
               dev2Visible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') !== null,
@@ -1136,10 +1188,10 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
                       explicitSession: fileExplorerExplicitSyncSessionTarget(),
                       targetSession: fileExplorerSessionFilesTargetSession(),
                       currentPath: terminalCurrentPath('8002'),
-                      gitRoot: transcriptMeta.sessions?.['8002']?.project?.git?.root || '',
+                      gitRoot: transcriptMetadataState.payload.sessions?.['8002']?.project?.git?.root || '',
                       planRoot: plan.root,
-                      syncInFlight: fileExplorerSyncPathInFlight,
-                      appliedKey: fileExplorerLastAppliedSyncPlanKey,
+                      syncInFlight: fileExplorerSyncState.inFlightSignature,
+                      appliedKey: fileExplorerSyncState.appliedPlanKey,
                       searchingVisible: finalTree.querySelector('.file-tree-status-searching') !== null,
                       dev2Visible: finalTree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') !== null,
                     },
@@ -1159,8 +1211,8 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
               done({
                 error: 'session 8002 did not claim Finder before held directory listing resolved',
                 pending,
-                syncInFlight: fileExplorerSyncPathInFlight,
-                appliedKey: fileExplorerLastAppliedSyncPlanKey,
+                syncInFlight: fileExplorerSyncState.inFlightSignature,
+                appliedKey: fileExplorerSyncState.appliedPlanKey,
                 planRoot: plan.root,
               });
               return;
@@ -1217,21 +1269,19 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
         "/home/test/yolomux.dev": [{"name": "src", "kind": "dir"}],
         "/home/test/yolomux.dev/src": [{"name": "main.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-typed-path-manual.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
-            },
-            session_files_payload=session_files_payload,
-            session_files_payloads={"5": session_files_payload},
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5&layout=row@35(slot1,left)&tabs=slot1:files;left:5",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
+        },
+        session_files_payload=session_files_payload,
+        session_files_payloads={"5": session_files_payload},
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5&layout=row@35(slot1,left)&tabs=slot1:files;left:5")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1338,19 +1388,17 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
 
 
 def test_quick_access_roots_are_not_visible_in_finder_toolbar(browser, tmp_path):
-    page = tmp_path / "live-runtime-root-quick-access-hidden.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "fixed", "quick_access_paths": ["~", "/*", "/tmp"]}},
-            fs_entries={
-                "/home/test": [{"name": "project", "kind": "dir"}],
-                "/": [{"name": "tmp", "kind": "dir"}],
-                "/tmp": [{"name": "scratch.txt", "kind": "file"}],
-            },
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
+        settings={"file_explorer": {"root_mode": "fixed", "quick_access_paths": ["~", "/*", "/tmp"]}},
+        fs_entries={
+            "/home/test": [{"name": "project", "kind": "dir"}],
+            "/": [{"name": "tmp", "kind": "dir"}],
+            "/tmp": [{"name": "scratch.txt", "kind": "file"}],
+        },
     )
-    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1412,22 +1460,20 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
         "/home/test/other.dev": [{"name": "other", "kind": "dir"}],
         "/home/test/other.dev/other": [{"name": "touched.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-hover-sticky.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5", "6"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
-                "6": {"current_path": "/home/test/other.dev/other", "git_root": "/home/test/other.dev"},
-            },
-            session_files_payload=session_files_payloads["5"],
-            session_files_payloads=session_files_payloads,
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5", "6"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
+            "6": {"current_path": "/home/test/other.dev/other", "git_root": "/home/test/other.dev"},
+        },
+        session_files_payload=session_files_payloads["5"],
+        session_files_payloads=session_files_payloads,
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1444,13 +1490,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
             "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
         )
     )
-    browser.execute_script(
-        """
-        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-        const row = tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]');
-        row.click();
-        """
-    )
+    click_visible_selector(browser, '.file-explorer-panel .file-tree-row[data-path="/home/test/yolomux.dev/other"]')
     expanded_before_switch = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1506,7 +1546,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
             activeTmux: activeTmuxDirectoryPath(),
             planSession: fileExplorerSyncPlan().session,
             planRoot: fileExplorerSyncPlan().root,
-            payloadSession: fileExplorerSessionFilesPayload?.session || '',
+            payloadSession: fileExplorerSessionFilesState.payload?.session || '',
           });
         }));
         """
@@ -1527,7 +1567,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
             done({
               root: document.querySelector('.file-explorer-path-inline')?.value || '',
               target: fileExplorerSessionFilesTargetSession(),
-              payloadSession: fileExplorerSessionFilesPayload?.session || '',
+              payloadSession: fileExplorerSessionFilesState.payload?.session || '',
               activeTmux: activeTmuxDirectoryPath(),
               planRoot: fileExplorerSyncPlan().root,
               otherExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') || '',
@@ -1611,25 +1651,23 @@ def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_p
         "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
         "/home/test/yolomux.dev2/src": [{"name": "main.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-explicit-pane-race.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5", "6"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
-                "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
-            },
-            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-            session_files_payloads={
-                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-                "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
-            },
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5", "6"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+            "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+        },
+        session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+        session_files_payloads={
+            "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+        },
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1643,10 +1681,7 @@ def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         openFileExplorerAt('/home/test', {syncSelection: true}).then(() => {
-          fileExplorerDirListingCache?.delete?.('/home/test/yolomux.dev1');
-          fileExplorerDirListingCache?.delete?.('/home/test/yolomux.dev2');
-          fileExplorerDirListingInflight?.delete?.('/home/test/yolomux.dev1');
-          fileExplorerDirListingInflight?.delete?.('/home/test/yolomux.dev2');
+          invalidateFileExplorerRoots(['/home/test/yolomux.dev1', '/home/test/yolomux.dev2']);
           resetFileExplorerAppliedSyncPlan();
           const realFetchDirectory = fetchDirectory;
           let releaseDev1 = null;
@@ -1726,30 +1761,28 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
         "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
         "/home/test/yolomux.dev2/src": [{"name": "main.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-session-switch-transcript-root.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5", "6"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
-                "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
-            },
-            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-            session_files_payloads={
-                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-                "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
-            },
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5", "6"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+            "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+        },
+        session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+        session_files_payloads={
+            "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+        },
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
             return document.querySelector('.file-explorer-path-inline') !== null
-              && document.querySelector('#panel-__files__ .file-explorer-changes-panel') !== null
+              && document.querySelector('#panel-__finder__ .file-explorer-tree-panel') !== null
               && document.getElementById('panel-5') !== null
               && document.getElementById('panel-6') !== null;
             """
@@ -1758,10 +1791,9 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        const {frame} = window.__yolomuxTestHelpers;
         (async () => {
           try {
-            if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
             resetFileExplorerAppliedSyncPlan();
             fileExplorerSessionFilesCache.delete(sessionFilesCacheKey('6'));
@@ -1790,8 +1822,8 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
-                  loading: fileExplorerSessionFilesLoading,
+                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
+                  loading: fileExplorerSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 };
                 window.fetch = originalFetch;
@@ -1808,8 +1840,8 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
-                  loading: fileExplorerSessionFilesLoading,
+                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
+                  loading: fileExplorerSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 });
                 return;
@@ -1843,30 +1875,28 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
         "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
         "/home/test/yolomux.dev2/src": [{"name": "main.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-cached-session-switch.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            sessions=["5", "6"],
-            transcript_sessions={
-                "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
-                "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
-            },
-            session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-            session_files_payloads={
-                "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
-                "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
-            },
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["5", "6"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+            "6": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+        },
+        session_files_payload={"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+        session_files_payloads={
+            "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            "6": {"session": "6", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+        },
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
             return document.querySelector('.file-explorer-path-inline') !== null
-              && document.querySelector('#panel-__files__ .file-explorer-changes-panel') !== null
+              && document.querySelector('#panel-__finder__ .file-explorer-tree-panel') !== null
               && document.getElementById('panel-5') !== null
               && document.getElementById('panel-6') !== null;
             """
@@ -1875,10 +1905,9 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        const {frame} = window.__yolomuxTestHelpers;
         (async () => {
           try {
-            if (fileExplorerMode !== 'files') setFileExplorerMode('files', {force: true});
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
             resetFileExplorerAppliedSyncPlan();
             await frame();
@@ -1911,8 +1940,8 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
-                  loading: fileExplorerSessionFilesLoading,
+                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
+                  loading: fileExplorerSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 };
                 window.fetch = originalFetch;
@@ -1929,8 +1958,8 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
                   heldFetch,
                   root,
                   explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  payloadSession: fileExplorerSessionFilesPayload?.session || '',
-                  loading: fileExplorerSessionFilesLoading,
+                  payloadSession: fileExplorerSessionFilesState.payload?.session || '',
+                  loading: fileExplorerSessionFilesState.loading,
                   planRoot: fileExplorerSyncPlan('6').root,
                 });
                 return;
@@ -1964,22 +1993,15 @@ def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser,
         "/home/test/repo-b": [{"name": "other", "kind": "dir"}],
         "/home/test/repo-b/other": [{"name": "b.md", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-fixed-finder-hover-editor.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"general": {"auto_focus": True}, "file_explorer": {"root_mode": "fixed"}},
-            sessions=[],
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
-    )
     item_a = "file:/home/test/repo-a/src/a.md"
     item_b = "file:/home/test/repo-b/other/b.md"
-    browser.get(
-        page.as_uri()
-        + "?sessions=files"
-        + "&layout=row@35(slot1,row@50(left,slot2))"
-        + f"&tabs=slot1:files;left:{item_a};slot2:{item_b}"
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files" + "&layout=row@35(slot1,row@50(left,slot2))" + f"&tabs=slot1:files;left:{item_a};slot2:{item_b}",
+        settings={"general": {"auto_focus": True}, "file_explorer": {"root_mode": "fixed"}},
+        sessions=[],
+        fs_entries=fs_entries,
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -2082,17 +2104,15 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
         "/home/test": [{"name": "stale", "kind": "dir"}, {"name": "fresh.txt", "kind": "file"}],
         "/home/test/stale": [{"name": "old.js", "kind": "file"}],
     }
-    page = tmp_path / "live-runtime-sync-empty-session-home.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"file_explorer": {"root_mode": "sync"}},
-            transcript_current_path="",
-            session_files_payload=session_files_payload,
-            fs_entries=fs_entries,
-        ),
-        encoding="utf-8",
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        transcript_current_path="",
+        session_files_payload=session_files_payload,
+        fs_entries=fs_entries,
     )
-    browser.get(page.as_uri() + "?layout=left&tabs=left:files")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """

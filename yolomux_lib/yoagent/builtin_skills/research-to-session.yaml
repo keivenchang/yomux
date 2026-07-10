@@ -1,0 +1,29 @@
+name: research-to-session
+kind: workflow
+description: >-
+  Delegate a bounded research or investigation task to one known Claude/Codex tmux session. The planner only turns flexible routing language into the clean task prompt and selected known session. The target agent, not YO!agent, uses its own configured tools and permissions; YO!agent never assumes web access or executes research tools itself. The resulting wait-to-send job always requires confirmation and verifies the target is prompt-ready before sending.
+tools:
+  - read_activity
+  - preview_send_prompt
+  - execute_confirmed_send
+triggers:
+  - have session 1 research why the server is slow
+  - ask agent 2 to investigate a regression
+confirmation: required
+default_timeout_minutes: 120
+model_intent:
+  handler: wait-then-send
+  confirmation: required
+  defaults:
+    quiet_seconds: 3
+  candidate:
+    any_of:
+      - research
+      - investigate
+      - look into
+      - find out
+    min_known_sessions: 1
+    priority: 30
+  output:
+    tag: yoagent-delegated-prompt
+    schema: delegated-prompt

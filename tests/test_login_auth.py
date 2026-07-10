@@ -7,6 +7,7 @@ import threading
 import zipfile
 from http import HTTPStatus
 from http.client import HTTPConnection
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
 from urllib.parse import urlparse
@@ -21,6 +22,13 @@ from yolomux_lib.server import Handler
 from yolomux_lib.server import TmuxWebtermHTTPServer
 
 pytestmark = pytest.mark.socket
+
+SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
+
+
+def use_source_locale_catalogs(monkeypatch):
+    """Keep focused server-side locale tests independent of generated-asset build ordering."""
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
 
 
 def active_auth_yaml() -> str:
@@ -155,6 +163,29 @@ def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
         stop_server(server, thread)
 
 
+def test_login_page_uses_saved_theme_and_active_color(monkeypatch):
+    payload = {
+        "settings": {
+            "appearance": {
+                "theme": "light",
+                "active_color": "purple",
+            },
+        },
+    }
+    monkeypatch.setattr(web, "settings_payload", lambda: payload)
+
+    page = web.login_html()
+
+    assert '<body class="login-theme-light login-accent-purple">' in page
+    css = (Path(__file__).resolve().parents[1] / "static" / "login.css").read_text(encoding="utf-8")
+    assert "body.login-theme-light" in css
+    assert "body.login-theme-system" in css
+    assert "body.login-accent-purple" in css
+    assert "--brand-green: var(--accent)" in css
+    assert "--brand-primary-green: var(--accent)" in css
+    assert "--brand-yolo-bg: var(--accent)" in css
+
+
 def test_login_page_localizes_via_locale_cookie(monkeypatch, tmp_path):
     # C2: a yolomux_locale cookie localizes the pre-auth login screen regardless of the saved/forced
     # default locale — proves the localization path works (request_locale_pref's cookie branch wins) and
@@ -176,6 +207,60 @@ def test_login_page_localizes_via_locale_cookie(monkeypatch, tmp_path):
         stop_server(server, thread)
 
 
+def test_invalid_login_preserves_submitted_or_cookie_locale(monkeypatch, tmp_path):
+    use_source_locale_catalogs(monkeypatch)
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        submitted = urlencode({
+            "username": "keivenc",
+            "password": "wrong",
+            "next": "/",
+            "locale": "ru",
+        })
+        status, _headers, body = request(
+            port,
+            "POST",
+            "/login",
+            body=submitted,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept-Language": "en-US",
+            },
+        )
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert b'<html lang="ru" dir="ltr">' in body
+        assert b'name="locale" value="ru"' in body
+        assert web.server_string("ru", "login.error.invalid").encode("utf-8") in body
+        assert web.server_string("en", "login.error.invalid").encode("utf-8") not in body
+
+        # An invalid/untrusted form locale must not replace the valid locale carrier cookie. The
+        # rejected login stays in Hebrew and retains that picker selection for the next attempt.
+        invalid_locale = urlencode({
+            "username": "keivenc",
+            "password": "wrong",
+            "next": "/",
+            "locale": "../../outside",
+        })
+        status, _headers, body = request(
+            port,
+            "POST",
+            "/login",
+            body=invalid_locale,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept-Language": "en-US",
+                "Cookie": "yolomux_locale=he",
+            },
+        )
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert b'<html lang="he" dir="rtl">' in body
+        assert b'name="locale" value="he"' in body
+        assert web.server_string("he", "login.error.invalid").encode("utf-8") in body
+    finally:
+        stop_server(server, thread)
+
+
 def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path):
     server, thread = start_server(monkeypatch, tmp_path)
     port = server.server_address[1]
@@ -183,7 +268,13 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         status, headers, body = request(port, "GET", "/api/ping")
         assert status == HTTPStatus.UNAUTHORIZED
         assert "WWW-Authenticate" not in headers
-        assert json.loads(body)["login_url"] == "/login?next=%2F"
+        payload = json.loads(body)
+        assert payload["login_url"] == "/login?next=%2F"
+        assert payload["user_message"] == {
+            "key": "auth.error.authenticationRequired",
+            "params": {},
+            "fallback": "authentication required",
+        }
 
         status, headers, body = request(port, "GET", "/api/ping", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.OK
@@ -192,13 +283,23 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
 
         status, headers, body = request(port, "GET", f"/api/fs/list?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body)["error"] == "admin access required"
+        payload = json.loads(body)
+        assert payload["role"] == "readonly"
+        assert payload["user_message"] == {
+            "key": "auth.error.accessRequired",
+            "params": {"role": "admin"},
+            "fallback": "admin access required",
+        }
 
         # blame reads repository file history, so a readonly identity is forbidden — same as
         # the rest of the file/repo API (it must NOT bypass the readonly guard at /api/blame).
         status, headers, body = request(port, "GET", f"/api/blame?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body)["error"] == "admin access required"
+        assert json.loads(body)["user_message"] == {
+            "key": "auth.error.accessRequired",
+            "params": {"role": "admin"},
+            "fallback": "admin access required",
+        }
 
         # Dev-velocity #1b: the /api/dev-reload SSE channel is 404 unless the server runs with --dev, so
         # production never exposes it (the test server is constructed without dev).
@@ -236,6 +337,8 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
     handler = SimpleNamespace(
         write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
         write_json=lambda value, status=HTTPStatus.OK: written.update({"json_status": status, "json": value}),
+        request_locale_pref=lambda: "en",
+        headers={},
     )
 
     Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(target)})}"))
@@ -251,10 +354,13 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
     assert written["json"]["error"] == "path must be an HTML file"
 
 
-def test_preview_popout_placeholder_route_returns_same_origin_shell():
+def test_preview_popout_placeholder_route_returns_same_origin_shell(monkeypatch):
+    use_source_locale_catalogs(monkeypatch)
     written = {}
     handler = SimpleNamespace(
         write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
+        request_locale_pref=lambda: "en",
+        headers={},
     )
 
     Handler.handle_preview_popout_placeholder(
@@ -267,10 +373,13 @@ def test_preview_popout_placeholder_route_returns_same_origin_shell():
     assert "<body></body>" in written["html"]
 
 
-def test_pane_popout_placeholder_route_returns_same_origin_shell():
+def test_pane_popout_placeholder_route_returns_same_origin_shell(monkeypatch):
+    use_source_locale_catalogs(monkeypatch)
     written = {}
     handler = SimpleNamespace(
         write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
+        request_locale_pref=lambda: "en",
+        headers={},
     )
 
     Handler.handle_pane_popout_placeholder(
@@ -281,6 +390,38 @@ def test_pane_popout_placeholder_route_returns_same_origin_shell():
     assert written["html_status"] == HTTPStatus.OK
     assert "<title>__info__ popout</title>" in written["html"]
     assert "<body></body>" in written["html"]
+
+
+def test_auxiliary_shells_resolve_system_accept_language(monkeypatch, tmp_path):
+    use_source_locale_catalogs(monkeypatch)
+    target = tmp_path / "sample.html"
+    target.write_text("<h1>ok</h1>\n", encoding="utf-8")
+    written = {}
+    handler = SimpleNamespace(
+        write_html=lambda body, status=HTTPStatus.OK: written.update({"status": status, "html": body}),
+        write_json=lambda value, status=HTTPStatus.OK: written.update({"status": status, "json": value}),
+        request_locale_pref=lambda: "system",
+        headers={"Accept-Language": "he-IL, en;q=0.5"},
+    )
+
+    Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(target)})}"))
+    assert '<html lang="he" dir="rtl">' in written["html"]
+
+    Handler.handle_preview_popout_placeholder(
+        handler,
+        urlparse(f"/preview-popout?{urlencode({'path': '/home/test/README.md'})}"),
+    )
+    preview_title = web.server_string("he", "preview.popout.title", name="README.md")
+    assert f"<title>{preview_title}</title>" in written["html"]
+    assert '<html lang="he" dir="rtl">' in written["html"]
+
+    Handler.handle_pane_popout_placeholder(
+        handler,
+        urlparse(f"/pane-popout?{urlencode({'item': '__info__'})}"),
+    )
+    pane_title = web.server_string("he", "pane.popout.title", name="__info__")
+    assert f"<title>{pane_title}</title>" in written["html"]
+    assert '<html lang="he" dir="rtl">' in written["html"]
 
 
 def test_html_preview_route_accepts_logged_in_cookie(monkeypatch, tmp_path):
@@ -315,7 +456,15 @@ def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):
         )
 
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body) == {"error": "admin access required", "role": "readonly"}
+        assert json.loads(body) == {
+            "error": "admin access required",
+            "user_message": {
+                "key": "auth.error.accessRequired",
+                "params": {"role": "admin"},
+                "fallback": "admin access required",
+            },
+            "role": "readonly",
+        }
     finally:
         stop_server(server, thread)
 
@@ -324,6 +473,7 @@ def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
     app = SimpleNamespace(
         sessions=["6", "7"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         verify_share_token=lambda token: {"session": "6", "sessions": ["6", "7"]} if token == "valid-share-token" else None,
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app)
@@ -340,7 +490,11 @@ def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
 
         status, _headers, body = request(port, "POST", "/api/upload?token=valid-share-token")
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body)["error"] == "share token is limited to the shared page and websocket"
+        assert json.loads(body)["user_message"] == {
+            "key": "share.error.pageScope",
+            "params": {},
+            "fallback": "share token is limited to the shared page and websocket",
+        }
 
         status, _headers, body = request(port, "GET", "/api/ping?token=wrong")
         assert status == HTTPStatus.UNAUTHORIZED
@@ -371,7 +525,15 @@ def test_share_token_allows_only_shared_editor_file_reads(monkeypatch, tmp_path)
 
         status, _headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': str(private_file), 'token': 'valid-share-token'})}")
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body) == {"error": "admin access required", "role": "readonly"}
+        assert json.loads(body) == {
+            "error": "admin access required",
+            "user_message": {
+                "key": "auth.error.accessRequired",
+                "params": {"role": "admin"},
+                "fallback": "admin access required",
+            },
+            "role": "readonly",
+        }
     finally:
         stop_server(server, thread)
 
@@ -394,6 +556,7 @@ def test_share_short_id_shell_boots_without_login(monkeypatch, tmp_path):
     app = SimpleNamespace(
         sessions=["6", "7"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app)
@@ -424,6 +587,7 @@ def test_share_short_id_shell_rejects_when_viewer_cap_is_full(monkeypatch, tmp_p
     app = SimpleNamespace(
         sessions=["6"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app)
@@ -432,7 +596,7 @@ def test_share_short_id_shell_rejects_when_viewer_cap_is_full(monkeypatch, tmp_p
         status, _headers, body = request(port, "GET", "/share/share123")
 
         assert status == HTTPStatus.FORBIDDEN
-        assert body == b"share viewer limit reached\n"
+        assert body == (web.server_string("en", "share.error.viewerLimitReached") + "\n").encode("utf-8")
     finally:
         stop_server(server, thread)
 
@@ -443,15 +607,23 @@ class FakeTlsContext:
 
 
 def test_plaintext_on_tls_server_redirects_non_share_requests(monkeypatch, tmp_path):
+    use_source_locale_catalogs(monkeypatch)
     app = SimpleNamespace(sessions=["6"], dangerously_yolo=False)
     server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())
     port = server.server_address[1]
     try:
-        status, headers, body = request(port, "GET", "/api/ping")
+        status, headers, body = request(
+            port,
+            "GET",
+            "/api/ping",
+            headers={"Accept-Language": "he-IL, en;q=0.5"},
+        )
 
         assert status == HTTPStatus.PERMANENT_REDIRECT
         assert headers["Location"] == f"https://127.0.0.1:{port}/api/ping"
-        assert b"Use HTTPS" in body
+        expected = web.server_string("he", "server.useHttps", location=f"https://127.0.0.1:{port}/api/ping")
+        assert body == (expected + "\n").encode("utf-8")
+        assert b"Use HTTPS" not in body
     finally:
         stop_server(server, thread)
 
@@ -470,6 +642,7 @@ def test_plaintext_on_tls_server_serves_http_share_shell(monkeypatch, tmp_path):
     app = SimpleNamespace(
         sessions=["6"],
         dangerously_yolo=False,
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
         http_allowed_share_is_active=lambda: True,
     )

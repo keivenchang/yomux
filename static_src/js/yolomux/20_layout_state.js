@@ -2,12 +2,31 @@ function emptyLayoutSlots() {
   return {[layoutTreeKey]: null};
 }
 
-function emptyPaneState() {
-  return {active: null, tabs: []};
+function paneRoleStateFields(value = null) {
+  const definition = paneRoleDefinition(value?.kind || value?.paneRole, value?.side);
+  return definition.kind === paneRoleSide ? {paneRole: paneRoleSide, side: definition.side} : {};
 }
 
-function emptyPlaceholderPaneState() {
-  return {active: null, tabs: [], placeholder: true};
+function paneRoleForState(value = null) {
+  return paneRoleDefinition(value?.kind || value?.paneRole, value?.side);
+}
+
+function paneRoleForSlot(slot, slots = layoutSlots) {
+  return paneRoleForState(slots?.[slot]);
+}
+
+function emptyPaneState(role = null) {
+  return {active: null, tabs: [], ...paneRoleStateFields(role)};
+}
+
+function emptyPlaceholderPaneState(role = null, options = {}) {
+  return {
+    active: null,
+    tabs: [],
+    placeholder: true,
+    ...(options.legacy === true ? {legacyPlaceholder: true} : {}),
+    ...paneRoleStateFields(role),
+  };
 }
 
 function emptyPlaceholderLayoutSlots(slot = 'left') {
@@ -35,6 +54,155 @@ function splitPercent(value) {
 function splitPercentForDisplay(value) {
   const rounded = Math.round(splitPercent(value) * 10) / 10;
   return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
+// Finder, Differ, and Tabber are independent tabs.  Keep every layout decision that treats them
+// as a family here; callers must not infer the "Finder pane" from the currently active tab.
+function layoutFileSurfaceItems() {
+  if (typeof fileSurfaceItems === 'function') return fileSurfaceItems().filter(isLayoutItem);
+  if (Array.isArray(fileExplorerItemIds)) return fileExplorerItemIds.filter(isLayoutItem);
+  return [fileExplorerItemId].filter(isLayoutItem);
+}
+
+function layoutIsFileSurfaceItem(item) {
+  if (typeof isFileSurfaceItem === 'function') return isFileSurfaceItem(item);
+  return isFileExplorerItem(item);
+}
+
+function sidePaneSlots(slots = layoutSlots) {
+  return layoutSlotKeys(slots).filter(slot => paneRoleForSlot(slot, slots).kind === paneRoleSide);
+}
+
+function sidePaneSlotsForSide(side, slots = layoutSlots) {
+  const normalizedSide = paneSideValues.includes(side) ? side : null;
+  if (!normalizedSide) return [];
+  return sidePaneSlots(slots).filter(slot => paneRoleForSlot(slot, slots).side === normalizedSide);
+}
+
+function sidePaneSlot(side, slots = layoutSlots) {
+  return sidePaneSlotsForSide(side, slots)[0] || null;
+}
+
+function slotIsSidePane(slot, slots = layoutSlots) {
+  return Boolean(slot && paneRoleForSlot(slot, slots).kind === paneRoleSide);
+}
+
+function sidePaneMinimumViewportWidthPx() {
+  return minSplitPaneWidthPx() / sidePaneRoleDefinition.maxViewportFraction;
+}
+
+function sidePanesAvailable(viewport = nativeViewport()) {
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  return width >= sidePaneMinimumViewportWidthPx();
+}
+
+function sidePaneConstrainedMode(viewport = nativeViewport()) {
+  return !sidePanesAvailable(viewport);
+}
+
+function paneRoleAllowsItemTransfer(item, sourceSlot = null, targetSlot = null, slots = layoutSlots, options = {}) {
+  const targetRole = options.targetRole
+    ? paneRoleForState(options.targetRole)
+    : paneRoleForSlot(targetSlot, slots);
+  const sourceRole = options.sourceRole
+    ? paneRoleForState(options.sourceRole)
+    : (sourceSlot ? paneRoleForSlot(sourceSlot, slots) : null);
+  if (sourceRole && sourceSlot !== targetSlot && sourceRole.kind !== targetRole.kind
+      && panePlacementForItem(item) !== panePlacementSideAllowed) return false;
+  return paneRoleAllowsItem(targetRole, item, {
+    allowRequiredInGeneric: options.allowRequiredInGeneric === true,
+    allowCandidate: options.allowCandidate === true,
+  });
+}
+
+function layoutNodeContainsSidePane(node, slots = layoutSlots) {
+  return layoutLeafSlots(node).some(slot => slotIsSidePane(slot, slots));
+}
+
+function legacyUntypedFileSurfaceHomeLeaves(slots = layoutSlots) {
+  const root = slots?.[layoutTreeKey];
+  if (!root || root.split !== 'row' || !root.children?.length) return [];
+  // The home is deliberately the *left* root branch.  A triplet the user dragged elsewhere is
+  // ordinary content and must never be mistaken for a home pane during normalization.
+  const left = root.children[0];
+  const leaves = layoutLeafSlots(left);
+  const populated = leaves.filter(slot => paneTabs(slot, slots).length > 0);
+  if (!populated.length || !populated.every(slot => {
+    const tabs = paneTabs(slot, slots);
+    return tabs.every(layoutIsFileSurfaceItem);
+  })) return [];
+  return populated;
+}
+
+function layoutHasSidePane(side, slots = layoutSlots) {
+  return Boolean(sidePaneSlot(side, slots));
+}
+
+function layoutWithSidePaneItems(slots = layoutSlots, items = layoutFileSurfaceItems(), options = {}) {
+  const next = cloneLayoutSlots(slots);
+  const side = paneSideValues.includes(options.side) ? options.side : paneSideLeft;
+  const sideRole = paneRoleDefinition(paneRoleSide, side);
+  const widthPercent = Number.isFinite(Number(options.widthPercent))
+    ? clampSidePaneWidthPercent(options.widthPercent)
+    : sidePaneDefaultWidthPercent;
+  const requested = items.filter(item => isLayoutItem(item) && paneRoleAllowsItem(sideRole, item));
+  const present = new Set(paneItems(next));
+  const missing = requested.filter(item => !present.has(item));
+  let targetSlot = sidePaneSlot(side, next);
+  if (targetSlot) {
+    if (missing.length) {
+      const tabs = [...paneTabs(targetSlot, next), ...missing];
+      next[targetSlot] = paneStateWithTabsForSlot(targetSlot, tabs, options.active || activeItemForSide(targetSlot, next) || tabs[0], next);
+    }
+    return compactLayoutSlots(next, {preservePlaceholderSlots: true});
+  }
+  if (!missing.length && !options.forceCreate) return next;
+  const sideItems = options.forceCreate ? requested : missing;
+  if (!sideItems.length) return next;
+  const sideSlotName = side === paneSideLeft && !next.left ? 'left' : nextLayoutSlot(next);
+  next[sideSlotName] = paneStateWithTabs(
+    sideItems,
+    options.active || sideItems[0],
+    sideRole,
+  );
+  const existingTree = next[layoutTreeKey];
+  if (existingTree) {
+    next[layoutTreeKey] = side === paneSideLeft
+      ? splitNode('row', leafNode(sideSlotName), existingTree, widthPercent)
+      : splitNode('row', existingTree, leafNode(sideSlotName), 100 - widthPercent);
+  } else {
+    const fillerSlot = nextLayoutSlot(next);
+    next[fillerSlot] = emptyPlaceholderPaneState();
+    next[layoutTreeKey] = side === paneSideLeft
+      ? splitNode('row', leafNode(sideSlotName), leafNode(fillerSlot), widthPercent)
+      : splitNode('row', leafNode(fillerSlot), leafNode(sideSlotName), 100 - widthPercent);
+  }
+  return compactLayoutSlots(next, {preservePlaceholderSlots: true});
+}
+
+function layoutWithPreservedSidePanes(contentSlots, sourceSlots = layoutSlots) {
+  let next = cloneLayoutSlots(contentSlots);
+  for (const side of paneSideValues) {
+    const sourceSlot = sidePaneSlot(side, sourceSlots);
+    const tabs = sourceSlot ? paneTabs(sourceSlot, sourceSlots) : [];
+    if (!tabs.length) continue;
+    next = layoutWithSidePaneItems(next, tabs, {
+      side,
+      forceCreate: true,
+      active: activeItemForSide(sourceSlot, sourceSlots),
+      widthPercent: sidePaneWidthPercent(side, sourceSlots),
+    });
+  }
+  return next;
+}
+
+function layoutWithDefaultLeftSidePane(slots = layoutSlots) {
+  const finder = typeof finderItemId === 'string' ? finderItemId : fileExplorerItemId;
+  return layoutWithSidePaneItems(slots, layoutFileSurfaceItems(), {
+    side: paneSideLeft,
+    forceCreate: true,
+    active: finder,
+  });
 }
 
 function layoutLeafSlots(node) {
@@ -67,12 +235,26 @@ function cloneLayoutSlots(slots = layoutSlots) {
 }
 
 function layoutSlotsSignature(slots = layoutSlots) {
-  return JSON.stringify(normalizeLayoutSlots(cloneLayoutSlots(slots)));
+  // Intentional empty peers are part of the rendered topology. Dropping them from the renderer
+  // signature makes Dockview skip the load that creates a directional Move placeholder, after
+  // which its unchanged old layout is adopted back over the requested split.
+  return JSON.stringify(normalizeLayoutSlotsForViewport(cloneLayoutSlots(slots), {preservePlaceholderSlots: true}));
+}
+
+function layoutSlotsExactSignature(slots = layoutSlots) {
+  return JSON.stringify(cloneLayoutSlots(slots));
 }
 
 function compactCurrentLayoutSlots(options = {}) {
-  const normalized = normalizeLayoutSlots(layoutSlots);
-  if (layoutSlotsSignature(normalized) === layoutSlotsSignature(layoutSlots)) return false;
+  // A rendered placeholder is a user-requested disposable pane, not compaction debris. Preserve it
+  // through the viewport normalization pass; the measured small-pane pruning that follows can still
+  // remove a pane when the current viewport truly cannot fit it.
+  const normalized = normalizeLayoutSlotsForViewport(layoutSlots, {preservePlaceholderSlots: true});
+  // layoutSlotsSignature intentionally normalizes both inputs for renderer comparisons. That makes
+  // it unable to detect a newly narrowed viewport: the old multi-pane layout is normalized before
+  // comparison too. Responsive compaction instead compares the actual stored layout to the shared
+  // viewport-normalized result.
+  if (layoutSlotsExactSignature(normalized) === layoutSlotsExactSignature(layoutSlots)) return false;
   applyLayoutSlots(normalized, {
     focusSession: options.focusSession || focusedPanelItem || undefined,
     prune: false,
@@ -114,19 +296,20 @@ function layoutModeBaseSlots(mode) {
 }
 
 function layoutModeSlotNames(mode, count, options = {}) {
-  const finderSlot = options.finderSlot || null;
+  const reservedSlots = new Set(options.reservedSlots || []);
+  if (options.finderSlot) reservedSlots.add(options.finderSlot);
   const used = {[layoutTreeKey]: null};
-  if (finderSlot) used[finderSlot] = emptyPaneState();
+  for (const slot of reservedSlots) used[slot] = emptyPaneState();
   const slots = [];
   for (const slot of options.preferredSlots || []) {
     if (slots.length >= count) break;
-    if (!slot || slot === finderSlot || used[slot]) continue;
+    if (!slot || reservedSlots.has(slot) || used[slot]) continue;
     slots.push(slot);
     used[slot] = emptyPaneState();
   }
   for (const slot of layoutModeBaseSlots(normalizeLayoutMode(mode))) {
     if (slots.length >= count) break;
-    if (slot === finderSlot || used[slot]) continue;
+    if (reservedSlots.has(slot) || used[slot]) continue;
     slots.push(slot);
     used[slot] = emptyPaneState();
   }
@@ -188,7 +371,7 @@ function layoutSlotsForItems(items, mode, options = {}) {
 }
 
 function normalizePaneState(raw, seen, options = {}) {
-  const state = emptyPaneState();
+  const state = emptyPaneState(raw);
   const items = Array.isArray(raw) ? raw : Array.isArray(raw?.tabs) ? raw.tabs : [];
   const preserveRemovedItems = new Set(options.preserveRemovedItems || []);
   let hadPreservedRemovedItem = false;
@@ -204,7 +387,10 @@ function normalizePaneState(raw, seen, options = {}) {
   state.tabs = orderPaneTabs(state.tabs);
   const active = resolveLayoutItem(raw?.active);
   state.active = state.tabs.includes(active) ? active : state.tabs[0] || null;
-  if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) state.placeholder = true;
+  if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) {
+    state.placeholder = true;
+    if (raw?.legacyPlaceholder === true) state.legacyPlaceholder = true;
+  }
   if (!state.tabs.length && options.preserveRemovedSlots === true && hadPreservedRemovedItem) state.placeholder = true;
   return state;
 }
@@ -214,15 +400,210 @@ function normalizeLayoutSlots(value, options = {}) {
   if (!value || typeof value !== 'object') normalized = emptyPlaceholderLayoutSlots();
   else if (value[layoutTreeKey]) normalized = normalizeTreeLayout(value, options);
   else normalized = normalizeLegacyLayoutSlots(value, options);
-  if (options.preserveMissingFileExplorer === true && !itemInLayout(fileExplorerItemId, normalized)) return normalized;
-  return normalizeFileExplorerDock(normalized);
+  return normalized;
+}
+
+function repairRedundantLegacyPlaceholders(slots) {
+  if (!slots?.[layoutTreeKey] || !sidePaneSlots(slots).length) return slots;
+  const genericContentExists = layoutSlotKeys(slots).some(slot => (
+    !slotIsSidePane(slot, slots) && paneTabs(slot, slots).length > 0
+  ));
+  if (!genericContentExists) return slots;
+  const removed = new Set(layoutSlotKeys(slots).filter(slot => (
+    !slotIsSidePane(slot, slots)
+      && paneIsPlaceholder(slot, slots)
+      && slots[slot]?.legacyPlaceholder === true
+  )));
+  if (!removed.size) return slots;
+  const next = cloneLayoutSlots(slots);
+  for (const slot of removed) delete next[slot];
+  next[layoutTreeKey] = layoutTreeWithoutSlots(next[layoutTreeKey], removed);
+  return next;
+}
+
+function migrateLegacyUntypedSidePane(slots, options = {}) {
+  if (sidePaneSlots(slots).length) return slots;
+  const legacyLeaves = legacyUntypedFileSurfaceHomeLeaves(slots);
+  if (!legacyLeaves.length) return slots;
+  const root = slots?.[layoutTreeKey];
+  if (!root || root.split !== 'row' || !root.children?.length) return slots;
+  const next = cloneLayoutSlots(slots);
+  const targetSlot = legacyLeaves[0];
+  const tabs = [];
+  for (const slot of legacyLeaves) {
+    for (const item of paneTabs(slot, slots)) if (!tabs.includes(item)) tabs.push(item);
+  }
+  const active = legacyLeaves.map(slot => activeItemForSide(slot, slots)).find(item => tabs.includes(item)) || tabs[0];
+  next[targetSlot] = paneStateWithTabs(tabs, active, paneRoleDefinition(paneRoleSide, paneSideLeft));
+  for (const slot of legacyLeaves.slice(1)) delete next[slot];
+  next[layoutTreeKey] = splitNode('row', leafNode(targetSlot), root.children[1], root.pct);
+  return options.compact === false ? next : compactLayoutSlots(next, {preservePlaceholderSlots: true});
+}
+
+function layoutTreeWithoutSlots(node, removedSlots) {
+  if (!node) return null;
+  if (node.slot) return removedSlots.has(node.slot) ? null : leafNode(node.slot);
+  const children = (node.children || []).map(child => layoutTreeWithoutSlots(child, removedSlots)).filter(Boolean);
+  if (!children.length) return null;
+  if (children.length === 1) return children[0];
+  return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
+}
+
+function clampSidePaneWidthPercent(value) {
+  const maxPercent = sidePaneRoleDefinition.maxViewportFraction * 100;
+  return Math.min(maxPercent, Math.max(minSplitPercent, Number(value) || sidePaneDefaultWidthPercent));
+}
+
+function layoutLeafWidthPercent(node, targetSlot, availablePercent = 100) {
+  if (!node) return null;
+  if (node.slot) return node.slot === targetSlot ? availablePercent : null;
+  const direction = node.split === 'column' ? 'column' : 'row';
+  const pct = splitPercent(node.pct);
+  const childAvailable = direction === 'row'
+    ? [availablePercent * pct / 100, availablePercent * (100 - pct) / 100]
+    : [availablePercent, availablePercent];
+  for (let index = 0; index < 2; index += 1) {
+    const width = layoutLeafWidthPercent(node.children?.[index], targetSlot, childAvailable[index]);
+    if (width !== null) return width;
+  }
+  return null;
+}
+
+function sidePaneWidthPercent(side, slots) {
+  const slot = sidePaneSlot(side, slots);
+  const root = slots?.[layoutTreeKey];
+  if (!slot || !root) return sidePaneDefaultWidthPercent;
+  return clampSidePaneWidthPercent(layoutLeafWidthPercent(root, slot) ?? sidePaneDefaultWidthPercent);
+}
+
+function sidePaneColumnTree(slotsForSide, originalTree = null) {
+  const slotSet = new Set(slotsForSide);
+  const removed = new Set(layoutLeafSlots(originalTree).filter(slot => !slotSet.has(slot)));
+  const preserved = layoutTreeWithoutSlots(originalTree, removed);
+  const onlyVertical = node => !node || node.slot || (
+    node.split === 'column'
+    && (node.children || []).every(onlyVertical)
+  );
+  if (preserved && onlyVertical(preserved) && layoutLeafSlots(preserved).length === slotsForSide.length) return preserved;
+  return columnTreeForSlots(slotsForSide);
+}
+
+function nextAvailableLayoutSlot(slots, preferred = null) {
+  if (preferred && preferred !== layoutTreeKey && !Object.hasOwn(slots, preferred)) return preferred;
+  return nextLayoutSlot(slots);
+}
+
+function canonicalizeSidePaneLayout(slots, options = {}) {
+  if (!slots?.[layoutTreeKey]) return slots;
+  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+    return narrowSingleColumnLayoutSlots(slots, {focusSession: options.focusSession});
+  }
+
+  const original = cloneLayoutSlots(slots);
+  const originalSideSlots = sidePaneSlots(original);
+  const sideGroups = {[paneSideLeft]: [], [paneSideRight]: []};
+  const displacedGenericItems = [];
+  const removedSlots = new Set(originalSideSlots);
+  const next = emptyLayoutSlots();
+
+  for (const slot of originalSideSlots) {
+    const role = paneRoleForSlot(slot, original);
+    const tabs = paneTabs(slot, original);
+    const accepted = [];
+    for (const item of tabs) {
+      if (paneRoleAllowsItem(role, item)) {
+        if (!sideGroups[role.side].some(group => group.tabs.includes(item))) accepted.push(item);
+      } else if (!displacedGenericItems.includes(item)) {
+        displacedGenericItems.push(item);
+      }
+    }
+    if (accepted.length || paneIsPlaceholder(slot, original)) {
+      sideGroups[role.side].push({
+        slot,
+        tabs: accepted,
+        active: accepted.includes(activeItemForSide(slot, original)) ? activeItemForSide(slot, original) : accepted[0] || null,
+        placeholder: !accepted.length,
+      });
+    }
+  }
+
+  for (const slot of layoutSlotKeys(original)) {
+    if (originalSideSlots.includes(slot)) continue;
+    const tabs = paneTabs(slot, original);
+    const required = tabs.filter(item => panePlacementForItem(item) === panePlacementSideRequired);
+    for (const item of required) {
+      if (sideGroups[paneSideLeft].some(group => group.tabs.includes(item))) continue;
+      if (!sideGroups[paneSideLeft].length) sideGroups[paneSideLeft].push({slot: null, tabs: [], active: null, placeholder: false});
+      sideGroups[paneSideLeft][0].tabs.push(item);
+      if (!sideGroups[paneSideLeft][0].active) sideGroups[paneSideLeft][0].active = item;
+    }
+    const genericTabs = tabs.filter(item => !required.includes(item));
+    if (genericTabs.length) {
+      next[slot] = paneStateWithTabs(genericTabs, activeItemForSide(slot, original), paneRoleDefinition(paneRoleGeneric));
+    } else if (paneIsPlaceholder(slot, original)) {
+      next[slot] = emptyPlaceholderPaneState();
+    } else {
+      removedSlots.add(slot);
+    }
+  }
+
+  next[layoutTreeKey] = layoutTreeWithoutSlots(original[layoutTreeKey], removedSlots);
+  let genericSlots = layoutLeafSlots(next[layoutTreeKey]);
+  if (!genericSlots.length) {
+    const fillerSlot = nextAvailableLayoutSlot(next, 'main');
+    next[fillerSlot] = displacedGenericItems.length
+      ? paneStateWithTabs(displacedGenericItems, displacedGenericItems[0], paneRoleDefinition(paneRoleGeneric))
+      : emptyPlaceholderPaneState();
+    next[layoutTreeKey] = leafNode(fillerSlot);
+    genericSlots = [fillerSlot];
+  } else if (displacedGenericItems.length) {
+    const targetSlot = genericSlots.find(slot => !paneIsPlaceholder(slot, next)) || genericSlots[0];
+    const tabs = [...paneTabs(targetSlot, next), ...displacedGenericItems.filter(item => !paneTabs(targetSlot, next).includes(item))];
+    next[targetSlot] = paneStateWithTabs(tabs, activeItemForSide(targetSlot, next) || tabs[0], paneRoleDefinition(paneRoleGeneric));
+  }
+
+  const attachSide = side => {
+    const groups = sideGroups[side];
+    if (!groups.length) return null;
+    const slotsForSide = [];
+    for (const group of groups) {
+      const preferred = group.slot || (side === paneSideLeft && !slotsForSide.length ? 'left' : null);
+      const slot = nextAvailableLayoutSlot(next, preferred);
+      next[slot] = group.placeholder
+        ? emptyPlaceholderPaneState(paneRoleDefinition(paneRoleSide, side))
+        : paneStateWithTabs(group.tabs, group.active || group.tabs[0], paneRoleDefinition(paneRoleSide, side));
+      slotsForSide.push(slot);
+    }
+    return {slots: slotsForSide, tree: sidePaneColumnTree(slotsForSide, original[layoutTreeKey])};
+  };
+  const leftSide = attachSide(paneSideLeft);
+  const rightSide = attachSide(paneSideRight);
+  const contentTree = next[layoutTreeKey];
+  const leftWidth = sidePaneWidthPercent(paneSideLeft, original);
+  const rightWidth = sidePaneWidthPercent(paneSideRight, original);
+  if (leftSide && rightSide) {
+    const remainingWidth = Math.max(minSplitPercent, 100 - leftWidth);
+    const rightRelativeWidth = Math.min(maxSplitPercent, Math.max(minSplitPercent, rightWidth * 100 / remainingWidth));
+    const contentAndRight = splitNode('row', contentTree, rightSide.tree, 100 - rightRelativeWidth);
+    next[layoutTreeKey] = splitNode('row', leftSide.tree, contentAndRight, leftWidth);
+  } else if (leftSide) {
+    next[layoutTreeKey] = splitNode('row', leftSide.tree, contentTree, leftWidth);
+  } else if (rightSide) {
+    next[layoutTreeKey] = splitNode('row', contentTree, rightSide.tree, 100 - rightWidth);
+  }
+  const hasSidePane = Boolean(leftSide || rightSide);
+  return compactLayoutSlots(next, {
+    preservePlaceholderSlots: options.preservePlaceholderSlots === true || hasSidePane,
+    preserveMissingSidePane: hasSidePane,
+  });
 }
 
 function normalizeTreeLayout(value, options = {}) {
   const next = emptyLayoutSlots();
   const seen = new Set();
   next[layoutTreeKey] = normalizeLayoutNode(value[layoutTreeKey], value, next, seen, options);
-  return compactLayoutSlots(next, options);
+  const migrated = migrateLegacyUntypedSidePane(next, {compact: false});
+  return canonicalizeSidePaneLayout(migrated, options);
 }
 
 function normalizeLayoutNode(node, value, next, seen, options = {}) {
@@ -244,7 +625,8 @@ function normalizeLegacyLayoutSlots(value, options = {}) {
     next[side] = normalizePaneState(value[side], seen, options);
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
-  return compactLayoutSlots(next);
+  const migrated = migrateLegacyUntypedSidePane(next, {compact: false});
+  return canonicalizeSidePaneLayout(migrated, options);
 }
 
 function legacyLayoutTree(slots) {
@@ -266,7 +648,8 @@ function legacyColumnTree(column, slots) {
 function compactLayoutSlots(slots, options = {}) {
   const next = emptyLayoutSlots();
   for (const key of layoutSlotKeys(slots)) next[key] = paneStateForLayoutSlot(key, slots);
-  next[layoutTreeKey] = compactLayoutNode(slots[layoutTreeKey], next, options);
+  const sideSlots = new Set(sidePaneSlots(slots));
+  next[layoutTreeKey] = compactLayoutNode(slots[layoutTreeKey], next, {...options, sideSlots});
   const keys = layoutSlotKeys(next);
   if (keys.length && keys.every(key => paneIsPlaceholder(key, next))) return emptyPlaceholderLayoutSlots(keys[0] || 'left');
   return next[layoutTreeKey] ? next : emptyPlaceholderLayoutSlots();
@@ -281,11 +664,12 @@ function compactLayoutNodeInfo(node, slots, options = {}) {
   if (node.slot) {
     if (!paneHasLayoutContent(node.slot, slots)) return null;
     const placeholderOnly = paneIsPlaceholder(node.slot, slots);
-    const containsFileExplorer = paneTabs(node.slot, slots).includes(fileExplorerItemId);
+    const tabs = paneTabs(node.slot, slots);
+    const containsSidePane = options.sideSlots?.has(node.slot) === true;
     return {
       node: leafNode(node.slot),
-      containsFileExplorer,
-      directFileExplorerLeaf: containsFileExplorer,
+      containsSidePane,
+      directSidePaneLeaf: containsSidePane,
       placeholderOnly,
     };
   }
@@ -293,35 +677,26 @@ function compactLayoutNodeInfo(node, slots, options = {}) {
   const children = (node.children || []).map(child => compactLayoutNodeInfo(child, slots, options)).filter(Boolean);
   if (!children.length) return null;
   if (children.length === 1) return children[0];
-  const hasFileExplorer = children.some(child => child.containsFileExplorer);
-  const hasDirectFileExplorerLeaf = children.some(child => child.directFileExplorerLeaf);
-  const kept = direction === 'row' && hasDirectFileExplorerLeaf
+  const hasDirectSidePaneLeaf = children.some(child => child.directSidePaneLeaf);
+  // Most mutations prune a now-empty peer. Directional tab split and temporary Fill/Restore are
+  // deliberately different: their empty peer is a user-visible placement target, not stale debris.
+  const kept = options.preservePlaceholderSlots === true || (direction === 'row' && hasDirectSidePaneLeaf)
     ? children
     : children.filter(child => !child.placeholderOnly);
   const compacted = kept.length ? kept : [children[0]];
   if (compacted.length < 2) return compacted[0];
-  const pct = splitPercentForCompactedLayoutNode(direction, node.pct, compacted, {
-    preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
-  });
+  const pct = splitPercentForCompactedLayoutNode(node.pct);
   const nextNode = splitNode(direction, compacted[0].node, compacted[1].node, pct);
   return {
     node: nextNode,
-    containsFileExplorer: compacted.some(child => child.containsFileExplorer),
-    directFileExplorerLeaf: false,
+    containsSidePane: compacted.some(child => child.containsSidePane),
+    directSidePaneLeaf: false,
     placeholderOnly: compacted.every(child => child.placeholderOnly),
   };
 }
 
-function splitPercentForCompactedLayoutNode(direction, pct, children, options = {}) {
-  const value = splitPercent(pct);
-  if (direction === 'row'
-    && options.preserveMissingFileExplorer !== true
-    && value >= fileExplorerSplitPercent
-    && value < minNonFileExplorerSplitPercent
-    && !children?.[0]?.containsFileExplorer) {
-    return defaultSplitPercent;
-  }
-  return value;
+function splitPercentForCompactedLayoutNode(pct) {
+  return splitPercent(pct);
 }
 
 function layoutNodeHasContent(node, slots = layoutSlots) {
@@ -356,12 +731,20 @@ function layoutHasHorizontalContentBeforeItem(node, item, slots = layoutSlots) {
 }
 
 function fileExplorerNeedsLeftDock(slots = layoutSlots) {
+  if (fileExplorerUsesNormalTabMovement()) return false;
   return layoutHasHorizontalContentBeforeItem(slots?.[layoutTreeKey], fileExplorerItemId, slots);
 }
 
 function normalizeFileExplorerDock(slots) {
+  if (fileExplorerUsesNormalTabMovement()) return slots;
   let next = slots;
-  if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
+  const finderSlot = slotForItem(fileExplorerItemId, slots);
+  const finderSharesPane = Boolean(finderSlot && paneTabs(finderSlot, slots).some(item => item !== fileExplorerItemId));
+  if (tabletUsesDesktopLayout() && finderSharesPane) {
+    // Rotating a compact tablet back to wide landscape restores the same dedicated Finder pane
+    // that a laptop uses; otherwise its portrait tab would remain mixed into terminal tabs.
+    next = layoutWithFileExplorerDockedLeft(slots);
+  } else if (!itemInLayout(fileExplorerItemId, slots) && !fileExplorerClosedByUser() && paneItems(slots).length) {
     next = layoutWithFileExplorerDockedLeft(slots);
   } else if (fileExplorerNeedsLeftDock(slots)) {
     next = layoutWithFileExplorerDockedLeft(slots);
@@ -378,12 +761,13 @@ function soleFileExplorerSlot(slots) {
 }
 
 function layoutWithFileExplorerPeerPane(slots) {
+  if (fileExplorerUsesNormalTabMovement()) return slots;
   const finderSlot = soleFileExplorerSlot(slots);
   if (!finderSlot) return slots;
   const next = cloneLayoutSlots(slots);
   const peerSlot = fileExplorerPeerSlot(slots, finderSlot);
   next[peerSlot] = emptyPlaceholderPaneState();
-  next[layoutTreeKey] = splitNode('row', leafNode(finderSlot), leafNode(peerSlot), fileExplorerSplitPercent);
+  next[layoutTreeKey] = splitNode('row', leafNode(finderSlot), leafNode(peerSlot), sidePaneDefaultWidthPercent);
   return compactLayoutSlots(next);
 }
 
@@ -403,7 +787,7 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
+  return layoutWithDefaultLeftSidePane(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
 }
 
 function layoutFromParam(raw, tabsRaw = '', options = {}) {
@@ -440,7 +824,7 @@ function namedSlotLayoutFromParam(raw, tabsRaw, options = {}) {
   if (!tabStates.size) return null;
   const slotNames = String(raw || '')
     .split(',')
-    .map(value => layoutSlotName(readableParamComponentDecode(value.trim())))
+    .map(value => layoutSlotName(safeDecodeURIComponent(value.trim())))
     .filter(Boolean);
   if (!slotNames.length) return null;
   const next = emptyLayoutSlots();
@@ -456,7 +840,7 @@ function namedSlotLayoutFromParam(raw, tabsRaw, options = {}) {
   }
   if (!leaves.length) return null;
   next[layoutTreeKey] = leaves.reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
-  const normalized = normalizeLayoutSlots(next, options);
+  const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
@@ -473,10 +857,10 @@ function treeLayoutFromParam(raw, options = {}) {
       const tabs = Array.isArray(rawState?.tabs) ? rawState.tabs : Array.isArray(rawState) ? rawState : [];
       const active = resolveLayoutItem(rawState?.active);
       next[slot] = rawState?.placeholder === true && !tabs.length
-        ? emptyPlaceholderPaneState()
-        : paneStateWithTabs(tabs.map(resolveLayoutItem), active);
+        ? emptyPlaceholderPaneState(rawState)
+        : paneStateWithTabs(tabs.map(resolveLayoutItem), active, rawState);
     }
-    const normalized = normalizeLayoutSlots(next, options);
+    const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
     return layoutHasRestorableContent(normalized) ? normalized : null;
   } catch (_) {
     return null;
@@ -498,7 +882,7 @@ function compactTreeLayoutFromParam(raw, tabsRaw, options = {}) {
   for (const slot of layoutLeafSlots(tree)) {
     next[slot] = tabStates.get(slot) || emptyPlaceholderPaneState();
   }
-  const normalized = normalizeLayoutSlots(next, options);
+  const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
@@ -529,7 +913,7 @@ function parseCompactLayoutNode(parser) {
     if (children.length < 2) return children[0] || null;
     return splitNode(splitMatch[1] === 'row' ? 'row' : 'column', children[0], children[1], splitMatch[2]);
   }
-  const slot = layoutSlotName(readableParamComponentDecode(name));
+  const slot = layoutSlotName(safeDecodeURIComponent(name));
   return slot ? leafNode(slot) : null;
 }
 
@@ -575,8 +959,10 @@ function compactLayoutTreeParam(node) {
 function layoutTabsParamValue(slots) {
   const slotValues = [];
   for (const slot of layoutSlotKeys(slots)) {
+    const role = paneRoleForSlot(slot, slots);
+    const roleMarker = role.kind === paneRoleSide ? `${paneRoleParamPrefix}${role.side}` : '';
     if (paneIsPlaceholder(slot, slots)) {
-      slotValues.push(`${readableParamComponent(slot)}:${emptyPaneParam}`);
+      slotValues.push(`${readableParamComponent(slot)}:${[roleMarker, intentionalEmptyPaneParam].filter(Boolean).join(',')}`);
       continue;
     }
     const active = activeItemForSide(slot, slots);
@@ -584,7 +970,8 @@ function layoutTabsParamValue(slots) {
       const marker = item === active && index > 0 ? '*' : '';
       return `${readableItemParam(item)}${marker}`;
     });
-    if (tabs.length) slotValues.push(`${readableParamComponent(slot)}:${tabs.join(',')}`);
+    const values = [roleMarker, ...tabs].filter(Boolean);
+    if (values.length) slotValues.push(`${readableParamComponent(slot)}:${values.join(',')}`);
   }
   return slotValues.join(';');
 }
@@ -595,19 +982,27 @@ function layoutTabStatesFromParam(raw) {
     if (!part.trim()) continue;
     const separator = part.indexOf(':');
     if (separator <= 0) continue;
-    const slot = layoutSlotName(readableParamComponentDecode(part.slice(0, separator)));
+    const slot = layoutSlotName(safeDecodeURIComponent(part.slice(0, separator)));
     if (!slot) continue;
     const tabs = [];
     let active = null;
     let placeholder = false;
+    let legacyPlaceholder = false;
+    let role = null;
     for (const rawItem of part.slice(separator + 1).split(',')) {
       let token = rawItem.trim();
       if (!token) continue;
       const activeToken = token.endsWith('*');
       if (activeToken) token = token.slice(0, -1);
-      const decoded = readableParamComponentDecode(token);
-      if (decoded === emptyPaneParam) {
+      const decoded = safeDecodeURIComponent(token);
+      if (decoded.startsWith(paneRoleParamPrefix)) {
+        const side = decoded.slice(paneRoleParamPrefix.length);
+        role = paneRoleDefinition(paneRoleSide, side);
+        continue;
+      }
+      if (decoded === emptyPaneParam || decoded === intentionalEmptyPaneParam) {
         placeholder = true;
+        if (decoded === emptyPaneParam) legacyPlaceholder = true;
         continue;
       }
       const item = resolveLayoutItem(decoded);
@@ -616,7 +1011,9 @@ function layoutTabStatesFromParam(raw) {
         if (activeToken) active = item;
       }
     }
-    result.set(slot, placeholder && !tabs.length ? emptyPlaceholderPaneState() : paneStateWithTabs(tabs, active));
+    result.set(slot, placeholder && !tabs.length
+      ? emptyPlaceholderPaneState(role, {legacy: legacyPlaceholder})
+      : paneStateWithTabs(tabs, active, role));
   }
   return result;
 }
@@ -627,14 +1024,6 @@ function readableItemParam(item) {
 
 function readableParamComponent(value) {
   return encodeURIComponent(String(value)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-function readableParamComponentDecode(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
 }
 
 // Legacy compatibility: old share snapshots may still carry the merged-pane sub-tab marker. New
@@ -656,6 +1045,30 @@ function maybeAdoptFileExplorerModeDeepLink(params) {
   if (!mode) return;
   fileExplorerMode = mode;
   writeStoredFileExplorerMode(fileExplorerMode);
+}
+
+function legacyFileSurfaceSelection(params) {
+  const raw = [params?.get?.('layout') || '', params?.get?.('tabs') || '', params?.get?.('sessions') || ''].join(',');
+  const hasLegacySurface = /(^|[,;:|])(?:__files__|files|changes|__changes__)(?=$|[,;:|])/.test(raw);
+  if (!hasLegacySurface) return '';
+  return fileExplorerItemForView(fileExplorerModeFromUrlParam(params?.get?.('finder')) || (/(^|[,;:|])(?:changes|__changes__)(?=$|[,;:|])/.test(raw) ? 'differ' : 'finder'));
+}
+
+function migrateLegacyFileSurfaceLayout(slots, params) {
+  const selected = legacyFileSurfaceSelection(params);
+  if (!selected) return slots;
+  if (sidePaneConstrainedMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
+  const legacySlot = slotForItem(finderItemId, slots) || slotForItem(differItemId, slots) || slotForItem(tabberItemId, slots);
+  if (!legacySlot) return layoutWithSidePaneItems(slots, fileSurfaceItems, {
+    side: paneSideLeft,
+    forceCreate: true,
+    active: selected,
+  });
+  const next = cloneLayoutSlots(slots);
+  const tabs = paneTabs(legacySlot, next);
+  for (const item of fileSurfaceItems) if (!tabs.includes(item)) tabs.push(item);
+  next[legacySlot] = paneStateWithTabsForSlot(legacySlot, tabs, selected, next);
+  return next;
 }
 
 function layoutUrlStateFromParams(params) {
@@ -697,7 +1110,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
     fileExplorerChangesSelectedSession = String(finder.session || '').trim();
-    fileExplorerExplicitSyncSession = fileExplorerChangesSelectedSession;
+    setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
@@ -719,7 +1132,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('tabberCollapsed' in finder) layoutUrlReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
 }
 
-function applyLayoutUrlEditorSeed(editor = {}) {
+function applyEditorStateFields(editor = {}, {applyModeEntry = null} = {}) {
   if (!editor || typeof editor !== 'object') return;
   if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
   if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
@@ -730,16 +1143,15 @@ function applyLayoutUrlEditorSeed(editor = {}) {
   if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
   if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
   if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
-  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) {
-    if (typeof shareApplyEditorModeEntry === 'function') shareApplyEditorModeEntry(entry);
-  }
+  for (const entry of (Array.isArray(editor.modes) ? editor.modes : [])) applyModeEntry?.(entry);
 }
 
-function applyLayoutUrlPreferencesSeed(preferences = {}) {
+function applyLayoutUrlPreferencesSeed(preferences = {}, options = {}) {
   if (!preferences || typeof preferences !== 'object') return;
   if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
   if (Array.isArray(preferences.collapsedSections)) {
-    collapsedPreferenceSections = new Set(layoutUrlStringArray(preferences.collapsedSections, 200));
+    const sections = options.includeLocalizedSections === true ? preferenceSections() : [];
+    setCollapsedPreferenceSections(layoutUrlStringArray(preferences.collapsedSections, 200), {sections});
   }
   if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
 }
@@ -747,10 +1159,10 @@ function applyLayoutUrlPreferencesSeed(preferences = {}) {
 function applyLayoutUrlStateSeed(state) {
   if (!state || typeof state !== 'object') return false;
   applyLayoutUrlFinderSeed(state.finder || {});
-  applyLayoutUrlEditorSeed(state.editor || {});
+  applyEditorStateFields(state.editor || {}, {applyModeEntry: typeof shareApplyEditorModeEntry === 'function' ? shareApplyEditorModeEntry : null});
   applyLayoutUrlPreferencesSeed(state.preferences || {});
-  layoutUrlStateFromQuery = state;
-  layoutUrlStateApplied = false;
+  layoutUrlState.pending = state;
+  layoutUrlState.applied = false;
   return true;
 }
 
@@ -797,34 +1209,37 @@ function layoutUrlStateParamValue() {
 }
 
 function applyPendingLayoutUrlState() {
-  if (layoutUrlStateApplied) return false;
-  const state = layoutUrlStateFromQuery;
+  if (layoutUrlState.applied) return false;
+  const state = layoutUrlState.pending;
   if (!state || typeof state !== 'object') {
-    layoutUrlStateApplied = true;
+    layoutUrlState.applied = true;
     return false;
   }
+  applyLayoutUrlPreferencesSeed(state.preferences || {}, {includeLocalizedSections: true});
   if (Array.isArray(state.scroll) && typeof applyShareScrollSnapshot === 'function') {
     applyShareScrollSnapshot(state.scroll);
     requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));
     setTimeout(() => applyShareScrollSnapshot(state.scroll), 0);
   }
-  layoutUrlStateApplied = true;
+  layoutUrlState.applied = true;
   return true;
 }
 
 function schedulePendingLayoutUrlStateApply() {
-  if (!layoutUrlStateFromQuery || layoutUrlStateApplied) return;
+  if (!layoutUrlState.pending || layoutUrlState.applied) return;
   requestAnimationFrame(applyPendingLayoutUrlState);
   setTimeout(applyPendingLayoutUrlState, 0);
 }
 
 function scheduleLayoutUrlStateRefresh() {
   if (shareViewMode) return;
-  if (layoutUrlStateRefreshTimer) return;
-  layoutUrlStateRefreshTimer = setTimeout(() => {
-    layoutUrlStateRefreshTimer = null;
+  if (layoutUrlState.refreshTimer) return;
+  const timer = setTimeout(() => {
+    if (layoutUrlState.refreshTimer !== timer) return;
+    layoutUrlState.refreshTimer = null;
     updateActiveSessionParam();
   }, 250);
+  layoutUrlState.refreshTimer = timer;
 }
 
 function refreshLayoutUrlStateSoon() {
@@ -845,6 +1260,105 @@ function shareBootstrapLayoutParams() {
   return layout || tabs || sharedSessions.length ? params : null;
 }
 
+function mobileRecentTmuxItems() {
+  const source = Array.isArray(bootstrap.recentSessions) && bootstrap.recentSessions.length
+    ? bootstrap.recentSessions
+    : visibleSessions;
+  const items = [];
+  for (const value of source) {
+    const item = resolveLayoutItem(value);
+    if (isTmuxSession(item) && !items.includes(item)) items.push(item);
+    if (items.length >= mobileSinglePaneTabLimit) break;
+  }
+  return items;
+}
+
+function narrowFileSurfaceSelection(items, preferred = null) {
+  const surfaces = items.filter(layoutIsFileSurfaceItem);
+  if (!surfaces.length) return {items, selected: null};
+  const selected = layoutIsFileSurfaceItem(preferred) ? preferred : surfaces[0];
+  return {items: items.filter(item => !layoutIsFileSurfaceItem(item) || item === selected), selected};
+}
+
+function mobileSinglePaneLayoutSlots(slots = null, options = {}) {
+  const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
+  // A URL can restore several desktop panes into one phone pane. Its visible active tabs carry
+  // the only durable selection signal at boot, so retain the final one instead of discarding it
+  // and always selecting the first recent session.
+  const restoredActive = requested.length ? activePaneItems(slots).at(-1) : null;
+  const explicitFocus = resolveLayoutItem(options.focusSession);
+  const preferred = explicitFocus || resolveLayoutItem(restoredActive);
+  // Seed a fresh phone view from the three most-recent tmux sessions, but once it has a concrete
+  // layout, treat that list as the user's selection. Otherwise closing a tab immediately adds it
+  // back on the next one-column normalization.
+  // A created or explicitly selected tab must win the three-tab phone budget. Without putting it
+  // first, launching another terminal successfully creates tmux state but normalization retains
+  // older tabs and makes the launch look like a no-op.
+  const candidates = requested.length
+    ? (explicitFocus ? [explicitFocus, ...requested] : requested)
+    : [preferred, ...mobileRecentTmuxItems()];
+  const tmuxItems = [];
+  for (const item of candidates) {
+    if (isTmuxSession(item) && !tmuxItems.includes(item)) tmuxItems.push(item);
+    if (tmuxItems.length >= mobileSinglePaneTabLimit) break;
+  }
+  const supplementary = [];
+  for (const item of candidates) {
+    if (isLayoutItem(item) && !isTmuxSession(item) && !supplementary.includes(item)) supplementary.push(item);
+  }
+  const selected = narrowFileSurfaceSelection([...tmuxItems, ...supplementary], preferred);
+  const active = selected.items.includes(preferred) ? preferred : selected.selected || selected.items[0] || null;
+  return layoutSlotsForItems(selected.items, 'single', {active, emptySlot: 'left'});
+}
+
+function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
+  if (mobileSinglePaneMode()) return mobileSinglePaneLayoutSlots(slots, options);
+  const requested = slots && typeof slots === 'object' ? paneItems(slots) : [];
+  const preferred = resolveLayoutItem(options.focusSession);
+  const visibleActive = activePaneItems(slots || layoutSlots);
+  const active = [
+    preferred,
+    ...visibleActive.filter(item => !isFileExplorerItem(item)),
+    ...visibleActive,
+    ...requested,
+  ]
+    .find(item => requested.includes(item)) || requested[0] || null;
+  const selected = narrowFileSurfaceSelection(requested, preferred || active);
+  return layoutSlotsForItems(selected.items, 'single', {
+    active: selected.items.includes(active) ? active : selected.selected || selected.items[0] || null,
+    emptySlot: 'left',
+  });
+}
+
+function normalizeLayoutSlotsForViewport(value, options = {}) {
+  const constrained = sidePaneConstrainedMode();
+  let source = constrained
+    ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
+    : value;
+  if (!constrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
+    const hasFileSurface = layoutFileSurfaceItems().some(item => itemInLayout(item, source));
+    if (hasFileSurface) {
+      source = canonicalizeSidePaneLayout(source, {...options, allowSidePanes: true});
+      source = layoutWithDefaultLeftSidePane(source);
+    }
+  }
+  sidePaneLayoutWasConstrained = constrained;
+  return normalizeLayoutSlots(source, {
+    ...options,
+    allowSidePanes: !constrained,
+    preserveMissingSidePane: constrained || options.preserveMissingSidePane === true,
+  });
+}
+
+function rememberInitialConstrainedLayout(value) {
+  sidePaneLayoutWasConstrained = true;
+  return value;
+}
+
+function availableLayoutModes() {
+  return sidePaneConstrainedMode() ? ['single'] : layoutModeValues;
+}
+
 function initialLayoutSlots() {
   const shareParams = shareBootstrapLayoutParams();
   const params = shareParams || new URLSearchParams(location.search);
@@ -852,9 +1366,10 @@ function initialLayoutSlots() {
   if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
-    preserveMissingFileExplorer: shareParams !== null,
+    preserveMissingSidePane: shareParams !== null,
   });
-  if (layoutFromUrl) return layoutFromUrl;
+  if (layoutFromUrl) return normalizeLayoutSlotsForViewport(migrateLegacyFileSurfaceLayout(layoutFromUrl, params));
+  if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {
@@ -863,43 +1378,50 @@ function initialLayoutSlots() {
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
   }
-  if (selected.length) return layoutFromSessionList(selected);
+  if (selected.length) {
+    const selectedLayout = layoutFromSessionList(selected);
+    return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout)) : selectedLayout;
+  }
   return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
+  if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  return layoutWithFileExplorerDockedLeft(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()), {
-    preservePlaceholders: false,
-  });
+  const standard = layoutWithDefaultLeftSidePane(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()));
+  return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard)) : standard;
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
-  const next = normalizeLayoutSlots(value);
+  let next = normalizeLayoutSlots(value);
   const present = new Set(paneItems(next));
   const missing = items.filter(item => isLayoutItem(item) && !present.has(item));
   if (!missing.length) return next;
-  let slot = preferredSlot && layoutSlotKeys(next).includes(preferredSlot) ? preferredSlot : firstEmptyPane(next) || layoutSlotKeys(next)[0];
+  const sideRequired = sidePaneConstrainedMode()
+    ? []
+    : missing.filter(item => panePlacementForItem(item) === panePlacementSideRequired);
+  if (sideRequired.length) {
+    next = layoutWithSidePaneItems(next, sideRequired, {side: paneSideLeft});
+  }
+  const ordinary = missing.filter(item => !sideRequired.includes(item));
+  if (!ordinary.length) return next;
+  const slotAllowsAll = slot => Boolean(slot && ordinary.every(item => paneRoleAllowsItemTransfer(item, null, slot, next, {
+    allowRequiredInGeneric: sidePaneConstrainedMode(),
+  })));
+  let slot = preferredSlot && layoutSlotKeys(next).includes(preferredSlot) && slotAllowsAll(preferredSlot)
+    ? preferredSlot
+    : layoutSlotKeys(next).find(candidate => paneIsPlaceholder(candidate, next) && slotAllowsAll(candidate))
+      || layoutSlotKeys(next).find(candidate => slotAllowsAll(candidate));
   if (!slot) {
-    slot = 'left';
-    next[layoutTreeKey] = leafNode(slot);
+    slot = nextAvailableLayoutSlot(next, next[layoutTreeKey] ? 'main' : 'left');
+    next[layoutTreeKey] = next[layoutTreeKey]
+      ? splitNode('row', next[layoutTreeKey], leafNode(slot), defaultSplitPercent)
+      : leafNode(slot);
     next[slot] = emptyPlaceholderPaneState();
   }
-  if (!preferredSlot
-    && activeItemForSide(slot, next) === fileExplorerItemId
-    && paneTabs(slot, next).length === 1
-    && missing.some(isTmuxSession)) {
-    const sessionTabs = missing.filter(isTmuxSession);
-    const otherTabs = missing.filter(item => !isTmuxSession(item));
-    const newSlot = nextLayoutSlot(next);
-    next[newSlot] = paneStateWithTabs(sessionTabs, sessionTabs[0] || null);
-    next[slot] = paneStateWithTabs([...paneTabs(slot, next), ...otherTabs], activeItemForSide(slot, next));
-    next[layoutTreeKey] = splitNode('row', leafNode(slot), leafNode(newSlot), fileExplorerSplitPercent);
-    return compactLayoutSlots(next);
-  }
-  const tabs = [...paneTabs(slot, next), ...missing];
+  const tabs = [...paneTabs(slot, next), ...ordinary];
   const active = activeItemForSide(slot, next) || tabs.find(isTmuxSession) || tabs[0] || null;
-  next[slot] = paneStateWithTabs(tabs, active);
+  next[slot] = paneStateWithTabsForSlot(slot, tabs, active, next);
   return compactLayoutSlots(next);
 }
 
@@ -924,8 +1446,8 @@ function layoutHasRestorableContent(slots = layoutSlots) {
 
 function paneStateForLayoutSlot(side, slots = layoutSlots) {
   return paneIsPlaceholder(side, slots)
-    ? emptyPlaceholderPaneState()
-    : paneStateWithTabs(paneTabs(side, slots), activeItemForSide(side, slots));
+    ? emptyPlaceholderPaneState(paneRoleForSlot(side, slots))
+    : paneStateWithTabs(paneTabs(side, slots), activeItemForSide(side, slots), paneRoleForSlot(side, slots));
 }
 
 function slotColumn(slot) {
@@ -973,9 +1495,13 @@ function orderPaneTabs(tabs) {
   ];
 }
 
-function paneStateWithTabs(tabs, active = null) {
+function paneStateWithTabs(tabs, active = null, role = null) {
   const ordered = orderPaneTabs(tabs);
-  return {tabs: ordered, active: ordered.includes(active) ? active : ordered[0] || null};
+  return {tabs: ordered, active: ordered.includes(active) ? active : ordered[0] || null, ...paneRoleStateFields(role)};
+}
+
+function paneStateWithTabsForSlot(slot, tabs, active = null, slots = layoutSlots) {
+  return paneStateWithTabs(tabs, active, paneRoleForSlot(slot, slots));
 }
 
 function pinnedTabIconHtml(item) {
@@ -996,7 +1522,7 @@ function setTabPinned(item, pinned) {
   writeStoredPinnedTabs();
   const next = cloneLayoutSlots(layoutSlots);
   for (const slot of layoutSlotKeys(next)) {
-    next[slot] = paneStateWithTabs(paneTabs(slot, next), activeItemForSide(slot, next));
+    next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);
   }
   applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
   statusEl.textContent = pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)});
@@ -1319,15 +1845,24 @@ function registerImageViewerLayoutItem(path) {
   return imageViewerItemFor(path);
 }
 
+function registerDynamicVirtualLayoutItem(item) {
+  const text = String(item || '');
+  if (!tabTypeForItem(text)?.prefix) return null;
+  dynamicVirtualLayoutItems.add(text);
+  layoutItems = computeLayoutItems();
+  return text;
+}
+
 function resolveLayoutItem(value) {
   const text = String(value || '');
   if (text === 'changes' || text === '__changes__') {
     fileExplorerMode = 'diff';
     writeStoredFileExplorerMode(fileExplorerMode);
-    return fileExplorerItemId;
+    return differItemId;
   }
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
+  if (type?.prefix === chatMediaItemPrefix) return chatMediaUrlForItem(text) ? registerDynamicVirtualLayoutItem(text) : null;
   if (type?.key === 'file-editor') {
     const path = fileItemPath(text);
     return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
@@ -1359,16 +1894,16 @@ function itemParam(item) {
 }
 
 const stateDefs = {
-  [STATE_KEY.needsApproval]: {label: 'Needs approval', short: '', priority: 0, attention: true},
-  'yolo-approval': {label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false},
-  [STATE_KEY.needsInput]: {label: 'Needs input', short: '', priority: 1, attention: true},
-  [STATE_KEY.blocked]: {label: 'Blocked', short: 'Blocked', priority: 2, attention: true},
-  disconnected: {label: 'Disconnected', short: 'OFF', priority: 3, attention: true},
-  'tests-running': {label: 'Tests running', short: 'TEST', priority: 4, attention: false},
-  'ready-review': {label: 'Ready for review', short: 'PR', priority: 5, attention: false},
-  [STATE_KEY.working]: {label: 'Working', short: '', priority: 6, attention: false},
-  [STATE_KEY.idle]: {label: 'Idle', short: '', priority: 7, attention: false},
-  done: {label: 'Done', short: '', priority: 8, attention: false},
+  [STATE_KEY.needsApproval]: {hasShort: false, priority: 0, attention: true},
+  'yolo-approval': {hasShort: true, priority: 0, attention: false},
+  [STATE_KEY.needsInput]: {hasShort: false, priority: 1, attention: true},
+  [STATE_KEY.blocked]: {hasShort: true, priority: 2, attention: true},
+  disconnected: {hasShort: true, priority: 3, attention: true},
+  'tests-running': {hasShort: true, priority: 4, attention: false},
+  'ready-review': {hasShort: true, priority: 5, attention: false},
+  [STATE_KEY.working]: {hasShort: false, priority: 6, attention: false},
+  [STATE_KEY.idle]: {hasShort: false, priority: 7, attention: false},
+  done: {hasShort: false, priority: 8, attention: false},
 };
 const ATTENTION_SCREEN_KEYS = new Set([STATE_KEY.approval, STATE_KEY.needsApproval, STATE_KEY.needsInput]);
 const AGENT_WINDOW_ATTENTION_STATES = new Set([...ATTENTION_SCREEN_KEYS, STATE_KEY.interrupted]);
@@ -1383,11 +1918,60 @@ function stateDef(key) {
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
   const resolvedKey = stateDefs[key] ? key : STATE_KEY.idle;
   const base = stateDefs[resolvedKey];
-  return {...base, label: t(`state.${resolvedKey}`), short: base.short ? t(`state.short.${resolvedKey}`) : ''};
+  return {...base, label: t(`state.${resolvedKey}`), short: base.hasShort ? t(`state.short.${resolvedKey}`) : ''};
 }
 
 function attentionAcknowledgementKey(parts = []) {
   return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
+}
+
+function attentionAcknowledgementKeySession(key) {
+  try {
+    const parts = JSON.parse(String(key || ''));
+    return Array.isArray(parts) && parts.length > 1 ? String(parts[1] || '') : '';
+  } catch (_error) {
+    return '';
+  }
+}
+
+function attentionAcknowledgementRecord(key, create = false) {
+  const value = String(key || '');
+  if (!value) return null;
+  let record = attentionAcknowledgementRecords.get(value) || null;
+  if (!record && create) {
+    record = {recordedAt: null, timer: null, pending: false};
+    attentionAcknowledgementRecords.set(value, record);
+  }
+  return record;
+}
+
+function pruneAttentionAcknowledgementRecords() {
+  while (attentionAcknowledgementRecords.size > attentionAcknowledgementRecordLimit) {
+    let removed = false;
+    for (const [key, record] of attentionAcknowledgementRecords) {
+      if (record?.timer !== null || record?.pending === true) continue;
+      attentionAcknowledgementRecords.delete(key);
+      removed = true;
+      break;
+    }
+    if (!removed) break;
+  }
+}
+
+function releaseIdleAttentionAcknowledgementRecord(key, record = attentionAcknowledgementRecord(key)) {
+  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true) return false;
+  attentionAcknowledgementRecords.delete(String(key || ''));
+  return true;
+}
+
+function clearSessionAttentionAcknowledgementRecords(session) {
+  const value = String(session || '');
+  if (!value) return;
+  for (const [key, record] of attentionAcknowledgementRecords) {
+    if (attentionAcknowledgementKeySession(key) !== value) continue;
+    if (record?.timer !== null) clearTimeout(record.timer);
+    attentionAcknowledgementRecords.delete(key);
+  }
 }
 
 function attentionAcknowledgementKeysFromPayload(payload = {}) {
@@ -1395,10 +1979,24 @@ function attentionAcknowledgementKeysFromPayload(payload = {}) {
   return Array.isArray(keys) ? keys.map(key => String(key || '')).filter(Boolean) : [];
 }
 
+function attentionAcknowledgementKeyIsGeneratedWindowKey(key) {
+  // The server adds a per-window generation to every generated agent-window key. That generation
+  // changes before a genuinely later prompt can reuse a key, so a delayed pre-ack snapshot must
+  // not resurrect a red/yellow marker that the shared ledger has already acknowledged.
+  const value = String(key || '');
+  return value.startsWith('["agent-window",') && value.split(',').length >= 7;
+}
+
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   const value = String(key || '');
   if (!value) return false;
-  if (promptAttentionClears.has(value)) return true;
+  const record = attentionAcknowledgementRecord(value);
+  // Legacy/fallback keys have no server-owned generation, so an explicit later false may re-arm
+  // them. Generated keys do have one; keeping their shared ledger record prevents a stale cached
+  // auto-status response from re-adding the ball after the user has clicked or typed in its pane.
+  const explicitlyUnacknowledged = payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false;
+  if (explicitlyUnacknowledged && record?.pending !== true && !attentionAcknowledgementKeyIsGeneratedWindowKey(value)) return false;
+  if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
 }
@@ -1406,26 +2004,78 @@ function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
 function recordAttentionAcknowledgementKey(key) {
   const value = String(key || '');
   if (!value) return false;
-  setLimitedMapEntry(promptAttentionClears, value, Date.now(), 1024);
+  const record = attentionAcknowledgementRecord(value, true);
+  record.recordedAt = Date.now();
+  attentionAcknowledgementRecords.delete(value);
+  attentionAcknowledgementRecords.set(value, record);
+  pruneAttentionAcknowledgementRecords();
   return true;
 }
 
 function applyAttentionAcknowledgementResponse(payload = {}) {
-  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged : [];
+  const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged.map(key => String(key || '')).filter(Boolean) : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
+  const changedSessions = new Set();
+  for (const [session, current] of autoApproveStates) {
+    if (!current || typeof current !== 'object') continue;
+    const next = {...current};
+    let changed = false;
+    if (keys.includes(String(next.prompt_attention_key || next.prompt?.attention_key || '')) && next.prompt_attention_acknowledged !== true) {
+      next.prompt_attention_acknowledged = true;
+      if (next.prompt && typeof next.prompt === 'object') next.prompt = {...next.prompt, attention_acknowledged: true};
+      changed = true;
+    }
+    if (Array.isArray(next.agent_windows)) {
+      next.agent_windows = next.agent_windows.map(agent => {
+        if (!agent || typeof agent !== 'object') return agent;
+        if (keys.includes(String(agent.attention_key || '')) && agent.attention_acknowledged !== true) {
+          changed = true;
+          return {...agent, attention_acknowledged: true};
+        }
+        if (keys.includes(String(agent.cooldown_attention_key || '')) && agent.cooldown_acknowledged !== true) {
+          changed = true;
+          return {...agent, cooldown_acknowledged: true};
+        }
+        return agent;
+      });
+    }
+    if (changed) {
+      autoApproveStates.set(session, next);
+      changedSessions.add(session);
+    }
+  }
   if (payload?.auto_approve && typeof applyAutoApprovePayload === 'function') {
     applyAutoApprovePayload(payload.auto_approve);
   } else {
-    const sessionsToRefresh = new Set();
-    for (const key of keys) {
-      try {
-        const parts = JSON.parse(String(key || ''));
-        if (Array.isArray(parts) && parts[1]) sessionsToRefresh.add(String(parts[1]));
-      } catch (_) {}
-    }
-    for (const session of sessionsToRefresh) refreshTrackedSessionChrome(session);
+    for (const session of changedSessions) refreshTrackedSessionChrome(session);
+    if (!changedSessions.size) return false;
     updateTopbarActivityStatus();
     syncTerminalAttentionHighlights();
+  }
+  return true;
+}
+
+async function submitAttentionAcknowledgementKeys(keys) {
+  try {
+    const payload = await apiFetchJson('/api/attention-ack', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({keys}),
+    });
+    const acknowledged = (Array.isArray(payload?.acknowledged) ? payload.acknowledged : [])
+      .map(key => String(key || ''))
+      .filter(key => attentionAcknowledgementRecord(key)?.pending === true);
+    applyAttentionAcknowledgementResponse({...payload, acknowledged});
+  } catch (error) {
+    console.warn('attention acknowledgement failed', error);
+  } finally {
+    for (const key of keys) {
+      const record = attentionAcknowledgementRecord(key);
+      if (!record) continue;
+      record.pending = false;
+      releaseIdleAttentionAcknowledgementRecord(key, record);
+    }
+    pruneAttentionAcknowledgementRecords();
   }
 }
 
@@ -1436,15 +2086,11 @@ function postAttentionAcknowledgementKeys(keys, options = {}) {
     applyAttentionAcknowledgementResponse({acknowledged: unique});
     return true;
   }
-  apiFetchJson('/api/attention-ack', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({keys: unique}),
-  })
-    .then(applyAttentionAcknowledgementResponse)
-    .catch(error => {
-      console.warn('attention acknowledgement failed', error);
-    });
+  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true && !attentionAcknowledgementKeyIsRecorded(key));
+  if (!pending.length) return true;
+  for (const key of pending) attentionAcknowledgementRecord(key, true).pending = true;
+  pruneAttentionAcknowledgementRecords();
+  submitAttentionAcknowledgementKeys(pending);
   return true;
 }
 
@@ -1454,14 +2100,18 @@ function acknowledgeAttentionKeys(keys, options = {}) {
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
   if (delayMs > 0) {
     for (const key of unique) {
-      const existing = attentionAcknowledgementTimers.get(key);
-      if (existing) clearTimeout(existing);
+      const record = attentionAcknowledgementRecord(key, true);
+      if (record.timer !== null) continue;
       const timer = setTimeout(() => {
-        attentionAcknowledgementTimers.delete(key);
+        const current = attentionAcknowledgementRecord(key);
+        if (!current || current.timer !== timer) return;
+        current.timer = null;
         postAttentionAcknowledgementKeys([key], {...options, delayMs: 0});
+        releaseIdleAttentionAcknowledgementRecord(key, current);
       }, delayMs);
-      attentionAcknowledgementTimers.set(key, timer);
+      record.timer = timer;
     }
+    pruneAttentionAcknowledgementRecords();
     return true;
   }
   return postAttentionAcknowledgementKeys(unique, options);
@@ -1516,7 +2166,7 @@ function terminalDisconnected(session) {
   return item.socket?.readyState === WebSocket.CLOSED || item.socket?.readyState === WebSocket.CLOSING;
 }
 
-function sessionState(session, info = transcriptMeta.sessions?.[session]) {
+function sessionState(session, info = transcriptMetadataState.payload.sessions?.[session]) {
   if (!isTmuxSession(session)) return {key: STATE_KEY.idle, ...stateDef(STATE_KEY.idle), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
@@ -1528,6 +2178,13 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   const approvalPromptText = String(approvalPrompt.text || stateReason('approvalPromptVisible'));
   const screenKey = String(screen.key || '');
   const screenText = String(screen.text || '');
+  const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
+    ? sessionAgentWindowStatusSummary(session, info, auto)
+    : null;
+  const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
+  const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
+    ? agentWindowStatusToneForItem(agentWindowSummary?.item)
+    : '';
   const agents = Array.isArray(info?.agents) ? info.agents : [];
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const agentText = agents
@@ -1540,7 +2197,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     .toLowerCase();
   const pr = info?.project?.pull_request;
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
-  const checksState = String(pr?.checks?.state || '').toLowerCase();
+  const checksState = pullRequestCiState(pr);
 
   if (terminalDisconnected(session) || (!info && terminals.has(session))) {
     return stateValue('disconnected', stateReason('terminalConnectionClosed'));
@@ -1554,35 +2211,47 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (/blocked|denied|rejected/.test(lastAction)) {
     return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
   }
-  if (approvalPromptVisible && approvalYesSelected) {
+  if (!hasAttributedAgentWindows && approvalPromptVisible && approvalYesSelected) {
     return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
-  if (approvalPromptVisible) {
+  if (!hasAttributedAgentWindows && approvalPromptVisible) {
     return stateValue(STATE_KEY.needsInput, stateReason('approvalYesNotSelected'), promptAttentionExtra(session, auto));
   }
-  if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
+  if (!hasAttributedAgentWindows && !autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
     return stateValue(STATE_KEY.needsApproval, approvalPromptText || stateReason('approvalPromptVisible'));
   }
-  if (screenKey === STATE_KEY.approval) {
+  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.approval) {
     return stateValue(STATE_KEY.needsApproval, screenText || approvalPromptText || stateReason('approvalPromptVisible'), promptAttentionExtra(session, auto));
   }
-  const agentWindowAttention = agentWindowAttentionState(session, info, auto);
-  if (agentWindowAttention) return agentWindowAttention;
+  if (agentWindowTone === 'attention') {
+    const agent = agentWindowSummary.agent;
+    const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent?.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
+    const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    const reasonText = String(agent?.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
+    return stateValue(stateKey, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
+      agentWindowState: 'attention',
+      attentionAgent: agent,
+      attentionAgentItem: agentWindowSummary.item,
+    });
+  }
   const tmuxSignalStateForSession = tmuxSignalAgentStateForSession(session);
   if (tmuxSignalStateForSession) {
     return tmuxSignalStateForSession;
   }
-  if (screenKey === STATE_KEY.working) {
+  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.working) {
     return stateValue(STATE_KEY.working, screenText || stateReason('agentWorking'));
   }
-  if (screenKey === STATE_KEY.needsInput) {
+  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.needsInput) {
     return stateValue(STATE_KEY.needsInput, screenText || stateReason('agentWaitingInput'), promptAttentionExtra(session, auto));
   }
   if (screenKey === 'error') {
     return stateValue(STATE_KEY.blocked, screenText || stateReason('agentScreenFailed'));
   }
-  const agentWindowCooldown = agentWindowCooldownState(session, info, auto);
-  if (agentWindowCooldown) return agentWindowCooldown;
+  if (agentWindowTone === 'cooldown') {
+    const agent = agentWindowSummary.agent;
+    const label = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
+    return stateValue('cooldown', label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown'), {agentWindowState: 'cooldown'});
+  }
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
     return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
@@ -1592,7 +2261,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
     return stateValue('tests-running', stateReason('testsActive'));
   }
-  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && (prStatus.includes('passing') || checksState === 'success')) {
+  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && checksState === 'passing') {
     return stateValue('ready-review', stateReason('prChecksPassing'));
   }
   if (/done|completed|complete|finished|success/.test(agentText)) {
@@ -1602,42 +2271,6 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue(STATE_KEY.working, stateReason('agentActivePaneDetected'));
   }
   return stateValue(STATE_KEY.idle, stateReason('noActiveAgent'));
-}
-
-function agentWindowCooldownState(session, info = null, auto = autoApproveStates.get(session) || {}) {
-  if (
-    typeof sessionAgentWindowStatusPayloads !== 'function'
-    || typeof agentWindowActivityIconForStatusItem !== 'function'
-    || typeof agentWindowActivityOptionsForStatus !== 'function'
-    || typeof agentWindowActivityTone !== 'function'
-  ) return null;
-  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
-  if (!windows.length) return null;
-  let cooldownWindow = null;
-  for (const agent of windows) {
-    const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
-    const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
-    if (!item || item.acknowledged === true) continue;
-    const tone = agentWindowActivityTone(item.state);
-    if (tone === 'attention' || tone === STATE_KEY.working) return null;
-    if (tone === 'cooldown') cooldownWindow = cooldownWindow || {agent, item};
-  }
-  if (!cooldownWindow) return null;
-  const label = String(cooldownWindow.agent?.window_label || cooldownWindow.agent?.window || cooldownWindow.agent?.kind || '').trim();
-  const reason = label ? `${label}: ${stateReason('agentCooldown')}` : stateReason('agentCooldown');
-  return stateValue('cooldown', reason, {agentWindowState: 'cooldown'});
-}
-
-function agentWindowAttentionState(session, info = null, auto = autoApproveStates.get(session) || {}) {
-  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
-  const windows = sessionAgentWindowStatusPayloads(session, info, auto);
-  const agent = windows.find(item => AGENT_WINDOW_ATTENTION_STATES.has(String(item?.state || '')));
-  if (!agent) return null;
-  const stateKey = AGENT_WINDOW_APPROVAL_STATES.has(String(agent.state || '')) ? STATE_KEY.needsApproval : STATE_KEY.needsInput;
-  const windowLabel = String(agent.window_label || agent.window || agent.kind || '').trim();
-  const reasonText = String(agent.screen_text || '').trim() || (stateKey === STATE_KEY.needsApproval ? stateReason('approvalPromptVisible') : stateReason('agentWaitingInput'));
-  const reason = windowLabel ? `${windowLabel}: ${reasonText}` : reasonText;
-  return stateValue(stateKey, reason, promptAttentionExtra(session, auto));
 }
 
 function agentErrorIsBlocking(error) {
@@ -1664,26 +2297,29 @@ function autoApproveEnabledForSession(payload) {
 }
 
 function autoApproveScreenIsWorking(payload) {
-  return String(payload?.screen?.key || '') === STATE_KEY.working;
+  return typeof sessionAgentWindowScreenIsWorking === 'function'
+    ? sessionAgentWindowScreenIsWorking(payload)
+    : String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
-function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMeta.sessions?.[session]) {
-  if (typeof sessionAgentWindowStatusPayloads !== 'function') return false;
-  return sessionAgentWindowStatusPayloads(session, info, payload)
-    .some(agent => String(agent?.state || '').toLowerCase() === STATE_KEY.working);
+function sessionHasWorkingAgentWindow(session, payload = autoApproveStates.get(session), info = transcriptMetadataState.payload.sessions?.[session]) {
+  return typeof sessionAgentWindowHasWorkingSignal === 'function'
+    ? sessionAgentWindowHasWorkingSignal(session, info, payload)
+    : false;
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  // Spin the YO ball whenever any Claude/Codex tmux sub-window is working, even when that sub-window is hidden.
-  return sessionHasWorkingAgentWindow(session, payload) || autoApproveScreenIsWorking(payload);
+  // The shared model resolves both live window rows and the screen-capture proxy before any UI
+  // surface asks whether this session is working.
+  return sessionHasWorkingAgentWindow(session, payload);
 }
 
 function yoloWorkingSessions() {
   return sessions.filter(session => sessionYoloIsWorking(session));
 }
 
-function runningAgentCount() {
-  return yoloWorkingSessions().length;
+function runningAgentCount(counts = globalActivityCounts()) {
+  return Math.max(0, Number(counts?.running || 0));
 }
 
 function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.get(session) || {}) {
@@ -1691,7 +2327,7 @@ function autoApprovePayloadCountsInTopbar(session, payload = autoApproveStates.g
   const key = String(payload?.screen?.key || '');
   if (key && key !== STATE_KEY.idle) return true;
   if (autoApproveEnabledForSession(payload)) return true;
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   return typeof sessionAgentWindowStatusPayloads === 'function' && sessionAgentWindowStatusPayloads(session, info, payload).length > 0;
 }
 
@@ -1804,6 +2440,14 @@ function tmuxSignalWindowsForSession(session) {
   return tmuxSignalWindows().filter(windowRecord => tmuxSignalWindowSession(windowRecord) === sessionText);
 }
 
+function tmuxSignalSnapshotAuthoritativeForSession(session) {
+  const sessionText = String(session || '').trim();
+  if (!sessionText || tmuxSignalState?.ok !== true || !Array.isArray(tmuxSignalState.windows)) return false;
+  const sessionRecords = tmuxSignalState.sessions;
+  return Boolean(sessionRecords && typeof sessionRecords === 'object' && sessionRecords[sessionText])
+    || tmuxSignalWindowsForSession(sessionText).length > 0;
+}
+
 function tmuxSignalWindowForSessionIndex(session, windowIndex) {
   const sessionText = String(session || '').trim();
   const windowText = String(windowIndex ?? '').trim();
@@ -1857,8 +2501,8 @@ function tmuxSignalAgentPanesForSession(session) {
 function tmuxSignalPaneModeLabels(pane) {
   const labels = [];
   if (pane?.in_mode === true || String(pane?.mode || '').trim()) labels.push(String(pane?.mode || 'copy-mode'));
-  if (pane?.input_off === true) labels.push('read-only');
-  if (pane?.synchronized === true) labels.push('sync');
+  if (pane?.input_off === true) labels.push(t('common.readOnly'));
+  if (pane?.synchronized === true) labels.push(t('tmux.mode.sync'));
   return labels;
 }
 
@@ -1872,16 +2516,16 @@ function tmuxSignalWindowClientNames(windowRecord) {
 function tmuxSignalWindowPresenceText(windowRecord) {
   const count = Math.max(0, Math.round(Number(windowRecord?.active_clients ?? tmuxSignalWindowClientNames(windowRecord).length) || 0));
   if (count <= 0) return '';
-  return `${count} ${count === 1 ? 'viewer' : 'viewers'}`;
+  return tPlural('tmux.viewer', count);
 }
 
 function tmuxSignalDeadText(pane) {
   if (pane?.dead !== true) return '';
   const status = pane?.dead_status;
   const signal = pane?.dead_signal;
-  if (status !== null && status !== undefined && status !== '') return `agent exited (status ${status})`;
-  if (signal !== null && signal !== undefined && signal !== '') return `agent exited (signal ${signal})`;
-  return 'agent exited';
+  if (status !== null && status !== undefined && status !== '') return stateReason('tmuxAgentExitedStatus', {status});
+  if (signal !== null && signal !== undefined && signal !== '') return stateReason('tmuxAgentExitedSignal', {signal});
+  return stateReason('tmuxAgentExited');
 }
 
 function tmuxSignalPaneTitle(pane) {
@@ -1897,7 +2541,7 @@ function tmuxSignalAgentStateForSession(session) {
   const sessionPanes = tmuxSignalPanes().filter(pane => tmuxSignalPaneSession(pane) === sessionText);
   const actionRequiredPane = sessionPanes.find(pane => pane?.dead !== true && tmuxSignalPaneActionRequired(pane));
   if (actionRequiredPane) {
-    return stateValue(STATE_KEY.needsInput, 'tmux agent action required', {tmuxSignal: 'action-required'});
+    return stateValue(STATE_KEY.needsInput, stateReason('tmuxActionRequired'), {tmuxSignal: 'action-required'});
   }
   const panes = sessionPanes.filter(tmuxSignalPaneIsAgent);
   if (!panes.length) return null;
@@ -1906,11 +2550,11 @@ function tmuxSignalAgentStateForSession(session) {
   const windows = panes.map(tmuxSignalWindowForPane).filter(Boolean);
   const bellWindow = windows.find(windowRecord => windowRecord?.bell_flag === true);
   if (bellWindow) {
-    return stateValue(STATE_KEY.needsInput, 'tmux bell alert', {tmuxSignal: 'bell'});
+    return stateValue(STATE_KEY.needsInput, stateReason('tmuxBellAlert'), {tmuxSignal: 'bell'});
   }
   const quietWindow = windows.find(windowRecord => windowRecord?.silence_flag === true && !tmuxSignalWindowIsRecentlyActive(windowRecord));
   if (quietWindow && livePanes.length) {
-    return stateValue('done', 'tmux silence alert: agent quiet', {tmuxSignal: 'silence', showBadge: true});
+    return stateValue('done', stateReason('tmuxSilenceAlert'), {tmuxSignal: 'silence', showBadge: true});
   }
   if (!livePanes.length && deadPanes.length) {
     return stateValue('done', tmuxSignalDeadText(deadPanes[0]), {tmuxSignal: 'agent-exited', showBadge: true});
@@ -1918,8 +2562,8 @@ function tmuxSignalAgentStateForSession(session) {
   const runningPane = livePanes.find(pane => tmuxSignalAgentCommands.has(tmuxSignalPaneCommand(pane)) && (pane?.alternate_on === true || Number(pane?.pid || 0) > 0));
   if (runningPane) {
     const command = tmuxSignalPaneCommand(runningPane);
-    const mode = runningPane?.alternate_on === true ? 'alternate screen' : 'process';
-    return stateValue(STATE_KEY.working, `tmux reports ${command} running (${mode})`, {tmuxSignal: 'agent-running'});
+    const mode = t(runningPane?.alternate_on === true ? 'tmux.mode.alternateScreen' : 'tmux.mode.process');
+    return stateValue(STATE_KEY.working, stateReason('tmuxAgentRunning', {command, mode}), {tmuxSignal: 'agent-running'});
   }
   return null;
 }
@@ -1961,38 +2605,51 @@ function browserFaviconAccentColors() {
   }
 }
 
-function renderBrowserFaviconDataUrl(count) {
+function renderBrowserAppIconDataUrl(options = {}) {
+  const logicalSize = 64;
+  const size = Math.max(logicalSize, Math.round(Number(options.size) || logicalSize));
+  const showBadge = options.showBadge === true;
+  const count = Math.max(0, Math.floor(Number(options.count) || 0));
   const canvas = document.createElement('canvas');
-  canvas.width = 64;
-  canvas.height = 64;
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext?.('2d');
   if (!ctx || typeof canvas.toDataURL !== 'function') return '';
 
   const faviconAccent = browserFaviconAccentColors();
-  ctx.clearRect(0, 0, 64, 64);
+  ctx.clearRect(0, 0, size, size);
+  ctx.save();
+  ctx.scale(size / logicalSize, size / logicalSize);
   browserFaviconRoundedRect(ctx, 2, 2, 60, 60, 10);
   ctx.fillStyle = faviconAccent.bg;
   ctx.fill();
 
-  const label = browserFaviconBadgeLabel(count);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
   ctx.fillStyle = faviconAccent.text;
   ctx.font = '900 86px Arial, sans-serif';
   ctx.save();
-  ctx.translate(25, 39);
+  ctx.translate(showBadge ? 25 : 32, 39);
   ctx.scale(1.22, 1);
   ctx.fillText('Y', 0, 0);
   ctx.restore();
 
-  ctx.textAlign = 'right';
-  ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif';
-  ctx.lineWidth = 5;
-  ctx.strokeStyle = '#f9fafb';
-  ctx.strokeText(label, 62, 50);
-  ctx.fillStyle = count > 0 ? '#d92d20' : '#374151';
-  ctx.fillText(label, 62, 50);
+  if (showBadge) {
+    const label = browserFaviconBadgeLabel(count);
+    ctx.textAlign = 'right';
+    ctx.font = label.length > 2 ? '900 24px Arial, sans-serif' : label.length > 1 ? '900 32px Arial, sans-serif' : '900 42px Arial, sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = '#f9fafb';
+    ctx.strokeText(label, 62, 50);
+    ctx.fillStyle = count > 0 ? '#d92d20' : '#374151';
+    ctx.fillText(label, 62, 50);
+  }
+  ctx.restore();
   return canvas.toDataURL('image/png');
+}
+
+function renderBrowserFaviconDataUrl(count) {
+  return renderBrowserAppIconDataUrl({count, showBadge: true});
 }
 
 let browserFaviconLastBadge = null;
@@ -2014,7 +2671,7 @@ function browserFaviconLink() {
 }
 
 function updateBrowserFavicon(options = {}) {
-  const count = browserFaviconBadgeCount();
+  const count = browserFaviconBadgeCount(options.counts);
   // Include the accent in the dedupe signature so a theme/active-color change re-renders
   // on the next refresh tick even when the badge count is unchanged.
   const accent = browserFaviconAccentColors();
@@ -2030,17 +2687,20 @@ function updateBrowserFavicon(options = {}) {
 }
 
 function updateDocumentTitle() {
-  updateBrowserFavicon();
-  const count = runningAgentCount();
+  const counts = globalActivityCounts();
+  updateBrowserFavicon({counts});
+  const count = runningAgentCount(counts);
   if (count > 0) {
     documentTitleIdleSinceMs = null;
-    document.title = `YOLOmux [${count} running]`;
+    document.title = t('document.title.running', {count});
     return;
   }
   const now = documentTitleNowMs();
   if (documentTitleIdleSinceMs === null) documentTitleIdleSinceMs = now;
   const idleMinutes = documentTitleIdleMinutes(now);
-  document.title = idleMinutes ? `YOLOmux (idle for ${idleMinutes} min)` : 'YOLOmux [idle]';
+  document.title = idleMinutes
+    ? t('document.title.idleFor', {minutes: idleMinutes})
+    : t('document.title.idle');
 }
 
 // Cross-session YOLO screen-state rollup for the always-visible top-bar status line. It intentionally
@@ -2110,8 +2770,8 @@ function globalActivityCounts() {
 
 function globalActivityCountSessions() {
   if (typeof tabberOrderedSessions === 'function') return tabberOrderedSessions();
-  const order = Array.isArray(transcriptMeta.session_order) ? transcriptMeta.session_order : [];
-  const all = transcriptMeta.sessions && typeof transcriptMeta.sessions === 'object' ? Object.keys(transcriptMeta.sessions) : [];
+  const order = Array.isArray(transcriptMetadataState.payload.session_order) ? transcriptMetadataState.payload.session_order : [];
+  const all = transcriptMetadataState.payload.sessions && typeof transcriptMetadataState.payload.sessions === 'object' ? Object.keys(transcriptMetadataState.payload.sessions) : [];
   const seen = new Set();
   const sessions = [];
   for (const value of [...order, ...all]) {
@@ -2135,7 +2795,7 @@ function globalActivityCountsFromAgentWindows() {
   let blocked = 0;
   let total = 0;
   for (const session of globalActivityCountSessions()) {
-    const info = transcriptMeta.sessions?.[session] || {};
+    const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const autoPayload = autoApproveStates.get(session) || {};
     const rows = sessionAgentWindowStatusPayloads(session, info, autoPayload);
     for (const agent of rows) {
@@ -2161,31 +2821,68 @@ function globalActivityStatusLineHtml() {
   parts.push(topbarActivityCountBallHtml(counts.running, STATE_KEY.working, 'topbar-activity-working'));
   parts.push(topbarActivityCountBallHtml(counts.ask, 'attention', 'topbar-activity-ask'));
   parts.push(topbarActivityCountBallHtml(counts.blocked, 'cooldown', 'topbar-activity-blocked'));
-  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${counts.idle} idle</span>`);
+  parts.push(`<span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-idle'))}">${esc(t('topbar.activity.idle', {count: counts.idle}))}</span>`);
   return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
+}
+
+function topbarActivityUsesMobileCountBalls() {
+  return typeof topbarPackingHasStep === 'function' && topbarPackingHasStep('compact-activity');
+}
+
+// The activity rail is useful before phone-only Menus mode: compact balls keep their status
+// visible while leaving the menu row and its Cmd-P launcher room to shrink naturally.
+function topbarActivityUsesActionsRail() {
+  return topbarActivityUsesMobileCountBalls();
+}
+
+function syncTopbarActionCapacity() {
+  return typeof syncTopbarPacking === 'function' ? syncTopbarPacking() : [];
+}
+
+function scheduleTopbarActionCapacity() {
+  if (typeof scheduleTopbarPacking === 'function') scheduleTopbarPacking();
+}
+
+function syncTopbarActivityPlacement() {
+  const activity = document.getElementById('topbarActivity');
+  const normalHost = document.querySelector('.topbar-right-tools');
+  const actions = document.querySelector('.actions');
+  if (!activity || !normalHost || !actions) return false;
+  if (topbarActivityUsesActionsRail()) {
+    if (activity.parentElement !== actions || activity !== actions.firstElementChild) actions.prepend(activity);
+    scheduleTopbarActionCapacity();
+    return true;
+  }
+  if (activity.parentElement !== normalHost) normalHost.append(activity);
+  scheduleTopbarActionCapacity();
+  return true;
+}
+
+function topbarActivityVisibleCount(counts = {}) {
+  return Math.max(0, Number(counts.running) || 0) + Math.max(0, Number(counts.ask) || 0) + Math.max(0, Number(counts.blocked) || 0);
 }
 
 function topbarActivityCountBallHtml(count, tone, extraClass = '') {
   const activityToneClass = typeof agentWindowActivityToneWrapperClass === 'function' ? agentWindowActivityToneWrapperClass(tone) : '';
+  const dotHtml = agentWindowStatusDotHtmlForTone(tone, {surface: 'topbar', pulse: false});
   return `
     <span class="${esc(statusIndicatorInlineClasses('', 'topbar-activity-count', extraClass, count ? 'active' : ''))}">
       <span class="topbar-activity-count-number">${esc(String(count))}</span>
       <span class="${esc(['agent-window-activity', 'agent-window-activity--status-only', activityToneClass, 'topbar-activity-ball'].join(' '))}" aria-hidden="true">
-        <span class="${esc(statusIndicatorDotClasses(tone, 'agent-window-status-dot', {pulse: false}))}">●</span>
+        ${dotHtml}
       </span>
     </span>
   `;
 }
 
 function createTopbarActivityStatus() {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarActivity';
-  button.className = 'topbar-activity';
-  button.title = 'Open the cross-session AI activity summary';
-  button.setAttribute('aria-label', 'AI activity summary across all sessions');
-  button.onclick = () => selectSession(yoagentItemId, {userInitiated: true});
-  return button;
+  return makeButton({
+    id: 'topbarActivity',
+    className: 'topbar-activity topbar-status-surface',
+    title: t('topbar.activity.title'),
+    ariaLabel: t('topbar.activity.aria'),
+    onClick: () => openTabberActivityOverview(),
+  });
 }
 
 function updateTopbarActivityStatus() {
@@ -2194,8 +2891,12 @@ function updateTopbarActivityStatus() {
   const counts = globalActivityCounts();
   const html = globalActivityStatusLineHtml();
   node.innerHTML = html;
-  node.hidden = !html;
+  const mobileCountBalls = topbarActivityUsesMobileCountBalls();
+  node.hidden = !html || (mobileCountBalls && !topbarActivityVisibleCount(counts));
+  node.classList.toggle('topbar-activity--mobile-count-balls', mobileCountBalls);
   node.classList.toggle('has-attention', counts.attention > 0);
+  syncTopbarActivityPlacement();
+  scheduleTopbarActionCapacity();
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
 }
 
@@ -2204,24 +2905,24 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
   if (!activeSummaries.length) return '';
   const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
   const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
-  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(state)}</span></span>`;
+  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(t(`backgroundOwner.role.${state}`))}</span></span>`;
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
   const lines = [
-    `Connected server: ${indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || 'this server'}`,
-    indexSummary.ownerLabel ? `IDX leader: ${indexSummary.ownerLabel}` : '',
-    statsSummary.ownerLabel ? `STATS leader: ${statsSummary.ownerLabel}` : '',
-    sessionSummary.ownerLabel ? `SESS leader: ${sessionSummary.ownerLabel}` : '',
-    indexSummary.status ? `Index status: ${indexSummary.status}` : '',
-    statsSummary.status ? `YO!stats status: ${statsSummary.status}` : '',
-    sessionSummary.status ? `Session files status: ${sessionSummary.status}` : '',
+    t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
+    indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
+    statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
+    sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
+    indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
+    statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
+    sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
     indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');
 }
 
-function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
+function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusState.payload) {
   if (!payload || typeof payload !== 'object' || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return [];
   return [
     {...backgroundOwnerSearchIndexSummary(payload), label: 'IDX'},
@@ -2230,12 +2931,12 @@ function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusPayload) {
   ];
 }
 
-function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusState.payload) {
   const summaries = topbarOwnerStatusSummaries(payload).filter(item => item && typeof item === 'object');
   return Boolean(summaries.length) && summaries.every(item => item.ownsRole === true || item.ownsIndex === true);
 }
 
-function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusPayload, nowSeconds = Date.now() / 1000) {
+function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusState.payload, nowSeconds = Date.now() / 1000) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : {};
   const latest = data.latest_generation && typeof data.latest_generation === 'object' ? data.latest_generation : {};
@@ -2273,7 +2974,7 @@ function showBackgroundOwnerContextMenu(event) {
     appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
   } else {
     appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
-      const payload = backgroundOwnerStatusPayload && typeof backgroundOwnerStatusPayload === 'object' ? backgroundOwnerStatusPayload : {};
+      const payload = backgroundOwnerStatusState.payload && typeof backgroundOwnerStatusState.payload === 'object' ? backgroundOwnerStatusState.payload : {};
       const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
       if (backgroundOwnerCurrentOwnerLive(payload)) {
         const label = backgroundServerLabel(owner, t('common.unknown'));
@@ -2288,29 +2989,28 @@ function showBackgroundOwnerContextMenu(event) {
 
 function topbarOwnerStatusHtml() {
   if (shareViewMode) return '';
-  if (backgroundOwnerStatusLoading && !backgroundOwnerStatusLoaded) {
+  if (backgroundOwnerStatusState.loading && !backgroundOwnerStatusState.payload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="loading"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">...</span></span>';
   }
-  if (backgroundOwnerStatusError && !backgroundOwnerStatusPayload) {
+  if (backgroundOwnerStatusState.error && !backgroundOwnerStatusState.payload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
   }
-  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusPayload));
+  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload));
 }
 
 function createTopbarOwnerStatus() {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarOwnerStatus';
-  button.className = 'topbar-owner-status';
-  button.title = 'Refresh connected server ownership status';
-  button.setAttribute('aria-label', 'Connected server ownership status');
-  button.onclick = () => {
-    if (typeof refreshBackgroundOwnerStatus === 'function') {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
-    }
-  };
-  button.addEventListener('contextmenu', showBackgroundOwnerContextMenu);
-  return button;
+  return makeButton({
+    id: 'topbarOwnerStatus',
+    className: 'topbar-owner-status topbar-status-surface',
+    title: t('backgroundOwner.refresh'),
+    ariaLabel: t('backgroundOwner.aria'),
+    onClick: () => {
+      if (typeof refreshBackgroundOwnerStatus === 'function') {
+        refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+      }
+    },
+    events: {contextmenu: showBackgroundOwnerContextMenu},
+  });
 }
 
 function updateTopbarOwnerStatus() {
@@ -2321,18 +3021,23 @@ function updateTopbarOwnerStatus() {
   node.hidden = !html;
   node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
   node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
-  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusPayload);
+  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload);
   if (summaries.length) {
     const [indexSummary, statsSummary, sessionSummary] = summaries;
-    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || 'Refresh connected server ownership status';
-  } else if (backgroundOwnerStatusError) {
-    node.title = backgroundOwnerStatusError;
+    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || t('backgroundOwner.refresh');
+  } else if (backgroundOwnerStatusState.error) {
+    node.title = userMessageText(backgroundOwnerStatusState.error, t('common.requestFailed'));
   } else {
-    node.title = 'Refresh connected server ownership status';
+    node.title = t('backgroundOwner.refresh');
   }
+  // The owner label grows after the background status request resolves. Route that dynamic
+  // content change through the same measured packer as activity updates so it cannot overlap
+  // the adjacent action rail at a narrow CSS viewport or high browser zoom.
+  if (typeof scheduleTopbarPacking === 'function') scheduleTopbarPacking();
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
+let attentionAnimationClockDurationMs = 0;
 
 function attentionAnimationDurationMs(durationMs = agentStatusPulsePeriodMs) {
   const duration = Math.max(1, Number(durationMs) || Number(agentStatusPulsePeriodMs) || 1);
@@ -2354,20 +3059,24 @@ function attentionAnimationDelay(now = Date.now(), durationMs = agentStatusPulse
 }
 
 function attentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
+  const duration = attentionAnimationDurationMs(durationMs);
   const current = document?.documentElement?.style?.getPropertyValue?.(attentionAnimationDelayProperty)?.trim();
-  return current || setAttentionAnimationClockDelay(now, durationMs);
+  return current && attentionAnimationClockDurationMs === duration ? current : setAttentionAnimationClockDelay(now, duration);
 }
 
 function attentionAnimationStyle(now = Date.now(), durationMs = agentStatusPulsePeriodMs, property = attentionAnimationDelayProperty) {
-  const value = property === attentionAnimationDelayProperty
-    ? attentionAnimationClockDelay(now, durationMs)
-    : attentionAnimationDelay(now, durationMs);
+  // This style is stamped into newly rendered status markup. Derive it from the current wall-clock
+  // phase instead of copying the root's older delay: renderers can replace a ball without going
+  // through the explicit animation synchronizer, and reusing that old delay restarts its pulse.
+  const value = attentionAnimationDelay(now, durationMs);
   return `${property}: ${value}`;
 }
 
 function setAttentionAnimationClockDelay(now = Date.now(), durationMs = agentStatusPulsePeriodMs) {
-  const delay = attentionAnimationDelay(now, durationMs);
+  const duration = attentionAnimationDurationMs(durationMs);
+  const delay = attentionAnimationDelay(now, duration);
   document?.documentElement?.style?.setProperty?.(attentionAnimationDelayProperty, delay);
+  attentionAnimationClockDurationMs = duration;
   return delay;
 }
 
@@ -2476,7 +3185,7 @@ function sessionStateHtml(state) {
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
   if ([STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state?.key)) return '';
-  if (!state || [STATE_KEY.working, 'done'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
+  if (!state || [STATE_KEY.idle, STATE_KEY.working, 'done', 'cooldown'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
     clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
     session: state.session,
@@ -2489,63 +3198,135 @@ function inactiveTabItems() {
   return sortTabItems(allTabItems().filter(item => !inPane.has(item)));
 }
 
+function readNotificationDelivery() {
+  try {
+    const stored = JSON.parse(storageGet(notificationDeliveryStorageKey, ''));
+    if (!stored || typeof stored !== 'object') return {...notificationDeliveryDefaults};
+    return {inApp: stored.inApp !== false, system: stored.system === true};
+  } catch (_) {
+    return {...notificationDeliveryDefaults};
+  }
+}
+
+function notificationDeliveryEnabled(channel) {
+  if (channel === 'inApp') return notificationDelivery.inApp === true;
+  if (channel === 'system') return notificationDelivery.system === true;
+  return notificationDelivery.inApp === true || notificationDelivery.system === true;
+}
+
+function notificationSystemPermission() {
+  return 'Notification' in window ? Notification.permission : 'unsupported';
+}
+
+function notificationDeliveryDescriptors() {
+  const permission = notificationSystemPermission();
+  const permissionLabel = t(`notify.permission.${permission}`);
+  return [
+    {
+      channel: 'inApp',
+      label: t('notify.delivery.inApp.label'),
+      help: t('notify.delivery.inApp.help'),
+      className: 'notification-delivery-in-app',
+      disabled: false,
+    },
+    {
+      channel: 'system',
+      label: t('notify.delivery.system.label', {platform: isMacPlatform() ? 'macOS' : 'PC'}),
+      help: t('notify.delivery.system.help', {permission: permissionLabel}),
+      className: 'notification-delivery-system',
+      disabled: permission === 'unsupported',
+    },
+  ];
+}
+
+function notificationDeliveryItems() {
+  return notificationDeliveryDescriptors().map(descriptor => menuCommand(
+    descriptor.label,
+    () => setNotificationDelivery(descriptor.channel, !notificationDeliveryEnabled(descriptor.channel)),
+    {
+      checked: notificationDeliveryEnabled(descriptor.channel),
+      keepOpen: true,
+      renderMenu: false,
+      className: descriptor.className,
+      detail: descriptor.help,
+      disabled: descriptor.disabled,
+    },
+  ));
+}
+
+let notificationDeliveryPopover = null;
+
+function closeNotificationDeliveryPopover() {
+  if (!notificationDeliveryPopover) return;
+  notificationDeliveryPopover.hidden = true;
+  notifyToggle?.setAttribute('aria-expanded', 'false');
+}
+
+function openNotificationDeliveryPopover() {
+  if (!notifyToggle) return;
+  if (!notificationDeliveryPopover) {
+    notificationDeliveryPopover = document.createElement('div');
+    notificationDeliveryPopover.className = 'app-menu-popover notification-delivery-popover';
+    notificationDeliveryPopover.hidden = true;
+    notificationDeliveryPopover.setAttribute('role', 'menu');
+    document.body.appendChild(notificationDeliveryPopover);
+    document.addEventListener('pointerdown', event => {
+      if (!notificationDeliveryPopover.hidden && !notificationDeliveryPopover.contains(event.target) && event.target !== notifyToggle) closeNotificationDeliveryPopover();
+    });
+  }
+  notificationDeliveryPopover.replaceChildren(...notificationDeliveryItems().map(createAppMenuItem));
+  notificationDeliveryPopover.hidden = false;
+  const rect = notifyToggle.getBoundingClientRect();
+  const width = notificationDeliveryPopover.getBoundingClientRect().width;
+  notificationDeliveryPopover.style.top = `${rect.bottom + 4}px`;
+  notificationDeliveryPopover.style.left = `${Math.max(8, rect.right - width)}px`;
+  notifyToggle.setAttribute('aria-expanded', 'true');
+}
+
 function renderNotifyToggle() {
   if (!notifyToggle) return;
-  const supported = 'Notification' in window;
-  notifyToggle.disabled = readOnlyMode;
-  syncPressedButton(notifyToggle, notificationsEnabled, {
-    labelOn: 'Notify',
-    labelOff: 'Notify',
+  const label = t('pref.section.notifications');
+  syncPressedButton(notifyToggle, notificationDeliveryEnabled(), {labelOn: label, labelOff: label});
+  notifyToggle.title = t('notify.delivery.summary', {
+    inApp: t(notificationDeliveryEnabled('inApp') ? 'notify.state.on' : 'state.off'),
+    system: t(notificationDeliveryEnabled('system') ? 'notify.state.on' : 'state.off'),
   });
-  const browserState = supported ? Notification.permission : 'unsupported';
-  notifyToggle.title = readOnlyMode
-    ? t('notify.adminOnlyTitle')
-    : t('notify.toggleTitle', {state: browserState});
+  notifyToggle.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (notificationDeliveryPopover && !notificationDeliveryPopover.hidden) closeNotificationDeliveryPopover();
+    else openNotificationDeliveryPopover();
+  };
+  if (notificationDeliveryPopover && !notificationDeliveryPopover.hidden) openNotificationDeliveryPopover();
 }
 
-async function toggleNotifications() {
-  if (readOnlyMode) {
-    statusErr(localizedHtml('status.readOnlyChangeNotify'));
-    return;
-  }
-  const nextEnabled = !notificationsEnabled;
-  let browserPermission = 'unsupported';
-  if (nextEnabled && 'Notification' in window && Notification.permission === 'default') {
-    const permission = await Notification.requestPermission();
-    browserPermission = permission;
-  } else if ('Notification' in window) {
-    browserPermission = Notification.permission;
-  }
-  try {
-    const response = await apiFetch(`/api/notify?enabled=${nextEnabled ? '1' : '0'}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${response.status}`);
-    notificationsEnabled = payload.enabled === true;
-  } catch (error) {
-    statusErr(localizedHtml('status.notifyRequestFailed', {error}));
-    return;
-  }
-  renderNotifyToggle();
-  renderSessionButtons();
-  if (notificationsEnabled) {
-    if (browserPermission !== 'granted') {
-      statusOk(`in-page alerts on; browser notifications ${esc(browserPermission)}`);
+function refreshNotificationDeliveryMenuChecks() {
+  for (const [className, channel] of [['notification-delivery-in-app', 'inApp'], ['notification-delivery-system', 'system']]) {
+    for (const node of document.querySelectorAll(`.${className}`)) {
+      const checked = notificationDeliveryEnabled(channel);
+      node.dataset.checked = checked ? 'true' : 'false';
+      node.setAttribute('aria-checked', checked ? 'true' : 'false');
     }
-    sendTestNotification();
-    notifyCurrentAttentionStates();
-  } else {
-    statusOk(`${esc(t('status.notifyOff'))}`);
   }
 }
 
-async function loadNotifyStatus() {
-  try {
-    const response = await apiFetch('/api/notify', {cache: 'no-store'});
-    const payload = await response.json();
-    notificationsEnabled = response.ok && payload.enabled === true;
-  } catch (_) {
-    notificationsEnabled = false;
+async function setNotificationDelivery(channel, enabled) {
+  let system = notificationDelivery.system === true;
+  if (channel === 'system') {
+    system = enabled === true;
+    if (system && notificationSystemPermission() === 'default') system = await Notification.requestPermission() === 'granted';
+    if (system && notificationSystemPermission() !== 'granted') system = false;
   }
+  notificationDelivery = {inApp: channel === 'inApp' ? enabled === true : notificationDelivery.inApp === true, system};
+  storageSet(notificationDeliveryStorageKey, JSON.stringify(notificationDelivery));
+  renderNotifyToggle();
+  refreshNotificationDeliveryMenuChecks();
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
+  if (notificationDeliveryEnabled(channel)) sendTestNotification({[channel]: true});
+}
+
+function loadNotificationDelivery() {
+  notificationDelivery = readNotificationDelivery();
   renderNotifyToggle();
 }
 
@@ -2583,31 +3364,32 @@ async function openProjectReadme() {
 function keyboardShortcutCatalog() {
   return [
     {section: t('shortcuts.section.app'), items: [
-      {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
+      {label: t('common.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
-      {label: t('share.title'), keys: appShortcutText('K')},
-      {label: 'Open YO!agent in a right pane', keys: appShortcutText('B', {alt: true})},
+      {label: t('brand.share'), keys: appShortcutText('K')},
+      {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
-      {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
+      {label: t('common.keyboardShortcuts'), keys: '?'},
       {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
     {section: t('shortcuts.section.terminal'), items: [
-      {label: 'Copy visible terminal selection', keys: appShortcutText('C')},
-      {label: t('shortcuts.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
+      {label: t('shortcuts.copyVisibleTerminalSelection'), keys: appShortcutText('C')},
+      {label: t('common.copyTmuxSelection'), keys: appShortcutText('C', {alt: true})},
       {label: t('shortcuts.switchTmuxWindow'), keys: `${metaShortcutText('←')} / ${metaShortcutText('→')}`},
+      {label: t('shortcuts.pageTmuxScrollback'), keys: `${appShortcutText('↑')} / ${appShortcutText('↓')}`},
     ]},
     {section: t('shortcuts.section.editor'), items: [
       {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},
-      {label: t('shortcuts.find'), keys: appShortcutText('F')},
-      {label: t('shortcuts.replace'), keys: appShortcutText('H')},
+      {label: t('common.find'), keys: appShortcutText('F')},
+      {label: t('common.replace'), keys: appShortcutText('H')},
       {label: t('shortcuts.goToLine'), keys: appShortcutText('G')},
       {label: t('shortcuts.toggleComment'), keys: appShortcutText('/')},
       {label: t('shortcuts.indentOutdent'), keys: 'Tab / Shift+Tab'},
       {label: t('shortcuts.undoRedo'), keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
       {label: t('shortcuts.editorNav'), keys: `${appShortcutText('[', {alt: true})} / ${appShortcutText(']', {alt: true})}`},
     ]},
-    {section: t('shortcuts.section.diff'), items: [
+    {section: t('common.diff'), items: [
       {label: t('shortcuts.undoChunk'), keys: appShortcutText('Z')},
       {label: t('shortcuts.redoChunk'), keys: appShortcutText('Z', {shift: true})},
     ]},
@@ -2615,61 +3397,75 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.pinTab'), keys: t('shortcuts.keys.pinTab', {k: appShortcutText('K', {shift: true})})},
       {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}`})},
       {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
-      {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
+      {label: t('common.sessionActions'), keys: t('shortcuts.keys.rightClick')},
     ]},
-    {section: `${fileExplorerLabel()} / Differ`, items: [
-      {label: 'Move selection', keys: '↑ / ↓ / Home / End'},
-      {label: 'Extend selection', keys: 'Shift+↑ / ↓ / Home / End'},
-      {label: 'Expand / collapse folders', keys: '→ / ←'},
-      {label: 'Rename selected file', keys: 'Return'},
-      {label: 'Open selected file or folder', keys: appShortcutText('↓')},
-      {label: 'Open enclosing folder', keys: appShortcutText('↑')},
-      {label: 'Quick preview', keys: 'Space'},
-      {label: 'Select all rows', keys: appShortcutText('A')},
-      {label: 'Delete selected rows', keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
+    {section: t('shortcuts.section.finderDiffer', {finder: fileExplorerLabel(), differ: t('brand.tab.changes')}), items: [
+      {label: t('shortcuts.finderDiffer.moveSelection'), keys: '↑ / ↓ / Home / End'},
+      {label: t('shortcuts.finderDiffer.extendSelection'), keys: 'Shift+↑ / ↓ / Home / End'},
+      {label: t('shortcuts.finderDiffer.expandCollapseFolders'), keys: '→ / ←'},
+      {label: t('shortcuts.finderDiffer.renameSelectedFile'), keys: 'Return'},
+      {label: t('shortcuts.finderDiffer.openSelected'), keys: appShortcutText('↓')},
+      {label: t('shortcuts.finderDiffer.openEnclosingFolder'), keys: appShortcutText('↑')},
+      {label: t('shortcuts.finderDiffer.quickPreview'), keys: 'Space'},
+      {label: t('shortcuts.finderDiffer.selectAllRows'), keys: appShortcutText('A')},
+      {label: t('shortcuts.finderDiffer.deleteSelectedRows'), keys: isMacPlatform() ? `${appShortcutText('Backspace')} / ${appShortcutText('Delete')}` : 'Delete'},
     ]},
-    {section: 'Menus, palettes, and pickers', items: [
-      {label: 'Move through menus or results', keys: '↑ / ↓'},
-      {label: 'Open submenu or move across menu bar', keys: '← / →'},
-      {label: 'Run focused command', keys: 'Enter / Space'},
-      {label: 'Open selected quick-open file in a split', keys: appShortcutText('Enter')},
-      {label: 'Close menu, palette, or picker', keys: 'Esc'},
-      {label: 'Choose numbered Tabber, drop, or paste item', keys: '1-9'},
+    {section: t('shortcuts.section.menus'), items: [
+      {label: t('shortcuts.menus.move'), keys: '↑ / ↓'},
+      {label: t('shortcuts.menus.openSubmenu'), keys: '← / →'},
+      {label: t('shortcuts.menus.runFocused'), keys: 'Enter / Space'},
+      {label: t('shortcuts.menus.openSplit'), keys: appShortcutText('Enter')},
+      {label: t('shortcuts.menus.close'), keys: 'Esc'},
+      {label: t('shortcuts.menus.chooseNumbered'), keys: '1-9'},
     ]},
   ];
 }
 
-function keyboardLegendStatusSample(kind, text = '●') {
-  if (kind === 'working') return `<span class="status-indicator status-indicator--dot status-indicator--working">${esc(text)}</span>`;
-  if (kind === 'cooldown') return `<span class="status-indicator status-indicator--dot status-indicator--cooldown">${esc(text)}</span>`;
-  if (kind === 'attention') return `<span class="status-indicator status-indicator--dot status-indicator--attention">${esc(text)}</span>`;
+function keyboardLegendStatusSample(kind, text = '●', options = {}) {
+  if (agentWindowVisibleTone(kind)) {
+    const subwindow = options.glyph === true;
+    const dotHtml = agentWindowStatusDotHtmlForTone(kind, {
+      surface: subwindow ? 'subwindow' : 'legend',
+      pulse: options.pulse === true,
+      icon: text,
+    });
+    if (!subwindow) return dotHtml;
+    const toneClass = agentWindowActivityToneWrapperClass(kind);
+    return `<span class="tmux-window-button keyboard-legend-status-glyph" aria-hidden="true"><span class="${esc(['agent-window-activity', 'agent-window-activity--status-only', 'agent-window-activity--subwindow', toneClass].join(' '))}">${dotHtml}</span></span>`;
+  }
   if (kind === 'idle') return `<span class="status-indicator status-indicator--dot status-indicator--idle">${esc(text)}</span>`;
   return `<span class="keyboard-legend-swatch keyboard-legend-swatch-${esc(kind)}" aria-hidden="true"></span>`;
 }
 
 function keyboardLegendCatalog() {
+  const yoMarker = esc(t('brand.marker'));
   return [
-    {section: 'Color meanings', items: [
-      {sampleHtml: keyboardLegendStatusSample('working'), label: 'Green', detail: 'Working, passing, healthy, or active. Agent balls use green for active work.'},
-      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: 'Yellow', detail: 'Recent attention transition or cooldown glow. It is less urgent than red.'},
-      {sampleHtml: keyboardLegendStatusSample('attention'), label: 'Red', detail: 'Needs input, needs approval, blocked, disconnected, failing CI, or another user-visible problem.'},
-      {sampleHtml: keyboardLegendStatusSample('merged'), label: 'Purple', detail: 'Merged GitHub PR. Purple is reserved for merged state.'},
-      {sampleHtml: keyboardLegendStatusSample('closed'), label: 'Gray', detail: 'Closed, done, idle, inactive, or unavailable state.'},
-      {sampleHtml: '<span class="keyboard-legend-meta keyboard-legend-meta-branch">Git BRANCH</span>', label: 'Metadata colors', detail: 'YO!info and Info Bars tint Path, Git BRANCH, Linear, GitHub PR, Tab, and AI fields so repeated rows scan by type.'},
+    {section: t('legend.section.agentStatus'), items: [
+      {sampleHtml: keyboardLegendStatusSample('working', '●', {glyph: true}), label: t('legend.shape.working.label'), detail: t('legend.shape.working.detail')},
+      {sampleHtml: keyboardLegendStatusSample('cooldown', '●', {glyph: true}), label: t('legend.shape.cooldown.label'), detail: t('legend.shape.cooldown.detail')},
+      {sampleHtml: keyboardLegendStatusSample('attention', '●', {glyph: true}), label: t('legend.shape.attention.label'), detail: t('legend.shape.attention.detail')},
     ]},
-    {section: 'Icon meanings', items: [
-      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: 'YO!info branch, PR, Linear, Tab, AI, and path map.'},
-      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: 'YO!agent chat, skills, jobs, waits, and handoffs.'},
-      {sampleHtml: appMenuUiIcon('gear'), label: 'Gear', detail: 'Preferences and configurable settings.'},
-      {sampleHtml: appMenuUiIcon('tab-meta'), label: 'Tab metadata', detail: 'Metadata/debug surfaces and the tab metadata toggle.'},
-      {sampleHtml: appMenuUiIcon('share'), label: 'Share', detail: 'YO!share link and viewer controls.'},
-      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: 'Pin', detail: 'Pinned tabs stay at the front and are protected from tab eviction.'},
+    {section: t('legend.section.colors'), items: [
+      {sampleHtml: keyboardLegendStatusSample('working'), label: t('legend.color.green.label'), detail: t('legend.color.green.detail')},
+      {sampleHtml: keyboardLegendStatusSample('cooldown'), label: t('legend.color.yellow.label'), detail: t('legend.color.yellow.detail')},
+      {sampleHtml: keyboardLegendStatusSample('attention'), label: t('legend.color.red.label'), detail: t('legend.color.red.detail')},
+      {sampleHtml: keyboardLegendStatusSample('merged'), label: t('legend.color.purple.label'), detail: t('legend.color.purple.detail')},
+      {sampleHtml: keyboardLegendStatusSample('closed'), label: t('legend.color.gray.label'), detail: t('legend.color.gray.detail')},
+      {sampleHtml: `<span class="keyboard-legend-meta keyboard-legend-meta-branch">${esc(t('info.field.gitBranch'))}</span>`, label: t('legend.color.metadata.label'), detail: t('legend.color.metadata.detail')},
     ]},
-    {section: 'YO button meanings', items: [
-      {sampleHtml: '<span class="session-yolo-marker inactive">YO</span>', label: 'Inactive YO', detail: 'YOLO auto-approval is off for this tmux session, or not owned here.'},
-      {sampleHtml: '<span class="session-yolo-marker active">YO</span>', label: 'Active YO', detail: 'YOLO auto-approval is enabled for this session.'},
-      {sampleHtml: '<span class="session-yolo-marker active working">YO</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>', label: 'Working YO', detail: 'YOLO is enabled while an agent window is working.'},
-      {sampleHtml: '<span class="session-yolo-marker locked">YO</span>', label: 'Locked YO', detail: 'Another YOLOmux process owns the auto-approval lock for that target.'},
+    {section: t('legend.section.icons'), items: [
+      {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
+      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
+      {sampleHtml: appMenuUiIcon('gear'), label: t('legend.icon.gear.label'), detail: t('legend.icon.gear.detail')},
+      {sampleHtml: appMenuUiIcon('tab-meta'), label: t('legend.icon.tabMetadata.label'), detail: t('legend.icon.tabMetadata.detail')},
+      {sampleHtml: appMenuUiIcon('share'), label: t('legend.icon.share.label'), detail: t('legend.icon.share.detail')},
+      {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: t('legend.icon.pin.label'), detail: t('legend.icon.pin.detail')},
+    ]},
+    {section: t('legend.section.yo'), items: [
+      {sampleHtml: `<span class="session-yolo-marker inactive">${yoMarker}</span>`, label: t('legend.yo.inactive.label'), detail: t('legend.yo.inactive.detail')},
+      {sampleHtml: `<span class="session-yolo-marker active">${yoMarker}</span>`, label: t('legend.yo.active.label'), detail: t('legend.yo.active.detail')},
+      {sampleHtml: `<span class="session-yolo-marker active working">${yoMarker}</span><span class="status-indicator status-indicator--dot status-indicator--working" aria-hidden="true">●</span>`, label: t('legend.yo.working.label'), detail: t('legend.yo.working.detail')},
+      {sampleHtml: `<span class="session-yolo-marker locked">${yoMarker}</span>`, label: t('legend.yo.locked.label'), detail: t('legend.yo.locked.detail')},
     ]},
   ];
 }
@@ -2740,9 +3536,9 @@ function ensureKeyboardShortcutsOverlay() {
   node.className = 'app-modal-overlay keyboard-shortcuts-overlay';
   node.hidden = true;
   node.innerHTML = `
-    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('shortcuts.title'))}">
+    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('common.keyboardShortcuts'))}">
       <div class="keyboard-shortcuts-head">
-        <h2>${esc(t('shortcuts.title'))}</h2>
+        <h2>${esc(t('common.keyboardShortcuts'))}</h2>
         <button type="button" class="keyboard-shortcuts-close" aria-label="${esc(t('shortcuts.close'))}">×</button>
       </div>
       <div class="keyboard-shortcuts-body"></div>
@@ -2756,12 +3552,28 @@ function ensureKeyboardShortcutsOverlay() {
   return node;
 }
 
+function renderKeyboardShortcutsOverlay(node = keyboardShortcutsNode) {
+  if (!node) return false;
+  const dialog = node.querySelector('.keyboard-shortcuts-dialog');
+  const heading = node.querySelector('.keyboard-shortcuts-head h2');
+  const close = node.querySelector('.keyboard-shortcuts-close');
+  const body = node.querySelector('.keyboard-shortcuts-body');
+  if (dialog) dialog.setAttribute('aria-label', t('common.keyboardShortcuts'));
+  if (heading) heading.textContent = t('common.keyboardShortcuts');
+  if (close) close.setAttribute('aria-label', t('shortcuts.close'));
+  if (body) body.innerHTML = keyboardShortcutsHtml();
+  return true;
+}
+
+function relocalizeKeyboardShortcutsOverlay() {
+  return renderKeyboardShortcutsOverlay(keyboardShortcutsNode);
+}
+
 function openKeyboardShortcutsOverlay() {
   const node = ensureKeyboardShortcutsOverlay();
   closeAppMenus();
   closeCommandPalette();
-  const body = node.querySelector('.keyboard-shortcuts-body');
-  if (body) body.innerHTML = keyboardShortcutsHtml();
+  renderKeyboardShortcutsOverlay(node);
   node.hidden = false;
   node.classList.add(CLS.open);
   node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
@@ -2777,12 +3589,19 @@ function commandPaletteAllTabItems() {
   return Array.from(new Set([...activePaneItems(), ...backgroundTabItems(), ...inactiveTabItems()]));
 }
 
-const commandPaletteMissingFileTabPaths = new Set();
 const commandPaletteFileTabValidationInflight = new Set();
 
 function commandPaletteFilePathKnownMissing(path) {
   const normalized = normalizeDirectoryPath(path || '');
-  return Boolean(normalized && (openFileIsMissing(normalized) || commandPaletteMissingFileTabPaths.has(normalized)));
+  const state = normalized ? fileStateFor(normalized) : null;
+  return Boolean(state?.externalMissing === true && state?.dirty !== true);
+}
+
+function commandPaletteFilePathValidationDue(path, now = Date.now()) {
+  const state = fileStateFor(path);
+  if (state?.externalMissing !== true) return true;
+  const checkedAt = Math.max(0, Number(state.externalMissingCheckedAt) || 0);
+  return now - checkedAt >= commandPaletteMissingPathRetryMs;
 }
 
 function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems()) {
@@ -2790,17 +3609,20 @@ function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems())
   for (const item of items) {
     const path = fileItemPath(item);
     const normalized = normalizeDirectoryPath(path || '');
-    if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || openFileIsMissing(normalized)) continue;
+    if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || !commandPaletteFilePathValidationDue(normalized)) continue;
     commandPaletteFileTabValidationInflight.add(normalized);
     fetchFilePathInfo(normalized, {user: true})
-      .then(info => {
-        if (info?.kind) commandPaletteMissingFileTabPaths.delete(normalized);
+      .then(async info => {
+        if (info?.kind === 'file') {
+          await recoverOpenFileAfterMissing(normalized, info);
+        } else if (info?.kind) {
+          markOpenFileMissing(normalized);
+        }
       })
       .catch(error => {
         if (Number(error?.status) === 404) {
-          commandPaletteMissingFileTabPaths.add(normalized);
           markOpenFileMissing(normalized);
-          if (commandPaletteNode && !commandPaletteNode.hidden) renderCommandPaletteResults();
+          if (commandPaletteState.node && !commandPaletteState.node.hidden) renderCommandPaletteResults();
         }
       })
       .finally(() => {
@@ -2857,10 +3679,10 @@ function commandPaletteKeybinding(label, detail = '') {
 
 // a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
 function commandPaletteViewModeLabel(mode) {
-  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'preview') return t('common.preview');
   if (mode === 'split') return t('editor.mode.split');
-  if (mode === 'diff') return t('editor.diff');
-  return t('editor.mode.edit');
+  if (mode === 'diff') return t('common.diff');
+  return t('common.edit');
 }
 
 function commandPaletteNumericTime(value) {
@@ -2883,7 +3705,7 @@ function commandPaletteCommandItems() {
   // Group FILE items by path and emit ONE row per file; non-file tabs (sessions, Finder/Info/Prefs)
   // stay one row each.
   const tabRow = (item, extra = {}) => ({
-    group: t('palette.group.tabs'),
+    group: t('common.tabsLabel'),
     category: 'pane',
     label: itemLabel(item),
     detail: commandPaletteTabDetail(item),
@@ -2936,7 +3758,7 @@ function commandPaletteCommandItems() {
     keybinding: 'Enter',
     run: () => {
       preferencesSearchText = item.label;
-      collapsedPreferenceSections.delete(section.title);
+      collapsedPreferenceSections.delete(section.id);
       writeStoredCollapsedPreferenceSections();
       selectSession(prefsItemId);
       requestAnimationFrame(() => {
@@ -2983,15 +3805,16 @@ function commandPaletteDropActionItems() {
   return dropActionsFor(category, agentKind, paths.length, {pathInserted: false, includeShellForAgents: true})
     .map(action => {
       const needsTerminal = action.kind !== 'server';
+      const label = dropActionDisplayLabel(action);
       return {
-        group: 'File Actions',
+        group: t('palette.group.fileActions'),
         category: 'command',
-        label: action.label,
+        label,
         detail: compactHomePath(path),
         key: `drop-action:${action.id}:${path}`,
         keybinding: 'Enter',
         disabled: needsTerminal && !session,
-        searchFields: ['do something with file', 'file action', action.label, path, compactHomePath(path)],
+        searchFields: [t('palette.group.fileActions'), label, path, compactHomePath(path)],
         run: () => runDropAction(action, dropActionContext(action, paths, category, agentKind, {session, kind, pathInserted: false})),
       };
     });
@@ -3025,7 +3848,7 @@ function fileQuickOpenDoitNeedle(query = commandPaletteSearchQuery()) {
 }
 
 function fileQuickOpenRepoFamilyBase() {
-  return normalizeDirectoryPath(fileQuickOpenRoot || repoRoot || '');
+  return normalizeDirectoryPath(fileQuickOpenState.root || repoRoot || '');
 }
 
 function fileQuickOpenRepoFamilyPrefix() {
@@ -3081,17 +3904,17 @@ function fileQuickOpenRootForSearch() {
   return repoRoot || homePath || '/';
 }
 
-function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
+function fileQuickOpenRootsForSearch(root = fileQuickOpenState.root || fileQuickOpenRootForSearch(), query = commandPaletteSearchQuery()) {
   return fileExplorerIndexedSearchRoots(root, fileQuickOpenExtraRootsForSearchQuery(query));
 }
 
-function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
+function fileQuickOpenScopeLabel(root = fileQuickOpenState.root || fileQuickOpenRootForSearch()) {
   const roots = fileQuickOpenRootsForSearch(root);
   if (roots.length <= 1) return compactHomePath(roots[0] || root || '/');
-  return `${compactHomePath(roots[0])} + ${roots.length - 1} indexed`;
+  return tPlural('palette.scope.indexedRoot', roots.length - 1, {path: compactHomePath(roots[0])});
 }
 
-function fileQuickOpenQueryParts(query = commandPaletteQuery) {
+function fileQuickOpenQueryParts(query = commandPaletteState.query) {
   const raw = String(query || '').trim();
   const match = raw.match(/^(.*?)(?::(\d+))?$/);
   return {
@@ -3102,11 +3925,11 @@ function fileQuickOpenQueryParts(query = commandPaletteQuery) {
   };
 }
 
-function fileQuickOpenSearchText(query = commandPaletteQuery) {
+function fileQuickOpenSearchText(query = commandPaletteState.query) {
   return fileQuickOpenQueryParts(query).query.replace(/[:.]+$/g, '').trim();
 }
 
-function fileQuickOpenPathQuery(query = commandPaletteQuery) {
+function fileQuickOpenPathQuery(query = commandPaletteState.query) {
   const text = fileQuickOpenQueryParts(query).query;
   if (!text.startsWith('/') && !text.startsWith('~')) return {active: false, directory: '', filter: ''};
   if (text === '~') return {active: true, directory: '~', filter: ''};
@@ -3125,12 +3948,12 @@ function joinDirectoryPath(directory, name) {
 
 function descendFileQuickOpenDirectory(path) {
   const directory = normalizeDirectoryPath(path);
-  commandPaletteQuery = `${directory}${directory.endsWith('/') ? '' : '/'}`;
-  commandPaletteIndex = 0;
-  const input = commandPaletteNode?.querySelector?.('.command-palette-input');
-  if (input) input.value = commandPaletteQuery;
+  commandPaletteState.query = `${directory}${directory.endsWith('/') ? '' : '/'}`;
+  commandPaletteState.index = 0;
+  const input = commandPaletteState.node?.querySelector?.('.command-palette-input');
+  if (input) input.value = commandPaletteState.query;
   renderCommandPaletteResults();
-  refreshFileQuickOpenCandidates(commandPaletteQuery);
+  refreshFileQuickOpenCandidates(commandPaletteState.query);
 }
 
 function revealOpenFileLineSoon(path, line) {
@@ -3143,6 +3966,8 @@ function revealOpenFileLineSoon(path, line) {
 }
 
 function fileQuickOpenTargetSlot() {
+  const requested = String(commandPaletteState.targetSlot || '');
+  if (requested && layoutSlotKeys().includes(requested)) return requested;
   return focusedActivationSlot();
 }
 
@@ -3188,7 +4013,7 @@ function fileQuickOpenItem(path, options = {}) {
   const cursorReference = cursorStyleFileReference(path, options);
   const detail = cursorReference?.detail || compactHomePath(path);
   return {
-    group: options.group || 'Files',
+    group: options.group || t('palette.group.files'),
     category: 'file',
     label: cursorReference?.label || (isDir ? `${label}/` : label),
     detail,
@@ -3196,7 +4021,7 @@ function fileQuickOpenItem(path, options = {}) {
     path,
     mtime: commandPaletteNumericTime(options.mtime || options.mtimeNs || 0),
     iconText: isDir ? disclosureTriangleCollapsedGlyph : fileIconFor(label),
-    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
+    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} ${t('editor.mode.split')}`,
     searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
     run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
@@ -3222,7 +4047,7 @@ function fileQuickOpenExactPathItem() {
   if (!name || !fileExtensionOf(name)) return null;
   return {
     ...fileQuickOpenItem(path, {group: t('palette.group.files')}),
-    label: previewMediaKindForPath(path) === 'image' ? `Open image ${name}` : `Open ${name}`,
+    label: t(previewMediaKindForPath(path) === 'image' ? 'palette.openImage' : 'palette.openFile', {name}),
     detail: compactHomePath(path),
     key: `exact-file:${path}`,
     keybinding: appShortcutText('Enter'),
@@ -3241,7 +4066,7 @@ function fileQuickOpenOpenFolderItem() {
   let target = normalizeDirectoryPath(pathQuery.directory);
   if (pathQuery.filter) {
     const filter = String(pathQuery.filter).toLowerCase();
-    const match = fileQuickOpenCandidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
+    const match = fileQuickOpenState.candidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
     if (match?.path) target = match.path;
   }
   if (!target) return null;
@@ -3253,7 +4078,7 @@ function fileQuickOpenOpenFolderItem() {
     iconText: disclosureTriangleCollapsedGlyph,
     keybinding: appShortcutText('Enter'),
     pinTop: true,
-    searchFields: ['open folder', target],
+    searchFields: [t('palette.openFolder', {name: fileExplorerLabel()}), target],
     run: async () => { await openFileExplorerPane(); await openFileExplorerAt(target); },
   };
 }
@@ -3291,7 +4116,7 @@ function fileQuickOpenItems() {
   const openFolder = fileQuickOpenOpenFolderItem();
   if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
-  for (const file of fileQuickOpenCandidates) {
+  for (const file of fileQuickOpenState.candidates) {
     const path = file.path || '';
     if (!path) continue;
     if (!fileQuickOpenDoitCandidateAllowed(file)) continue;
@@ -3299,13 +4124,13 @@ function fileQuickOpenItems() {
     // listing entries have none. Guard the empty case — normalizeStoredFileExplorerIndexedDir('') returns
     // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
-    const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
+    const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenState.root || '');
     const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
     if (externalIndexed && !fileQuickOpenExternalIndexedMatchAllowed(file)) continue;
     const isImage = (file.kind || 'file') !== 'dir' && previewMediaKindForPath(path) === 'image';
     if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {
-      group: externalIndexed ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
+      group: externalIndexed ? t('common.indexedPath', {path: compactHomePath(indexedRoot)}) : t('palette.group.files'),
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
       imageIndex,
@@ -3314,21 +4139,22 @@ function fileQuickOpenItems() {
       sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
-  if (fileQuickOpenError) {
+  if (fileQuickOpenState.error) {
+    const errorText = userMessageText(fileQuickOpenState.error, t('common.searchFailed'));
     items.push({
       group: t('palette.group.files'),
-      label: t('search.failed'),
-      detail: fileQuickOpenError,
-      searchFields: ['search failed', fileQuickOpenError],
+      label: t('common.searchFailed'),
+      detail: errorText,
+      searchFields: [t('common.searchFailed'), errorText],
       disabled: true,
       run: null,
     });
   }
-  if (fileQuickOpenLoading) {
+  if (fileQuickOpenState.loading) {
     items.push({
       group: t('palette.group.files'),
       label: t('palette.searchingFiles'),
-      detail: compactHomePath(fileQuickOpenRoot),
+      detail: compactHomePath(fileQuickOpenState.root),
       loading: true,
       searchFields: ['searching'],
       disabled: true,
@@ -3348,7 +4174,7 @@ function commandPaletteMergedItems() {
   return [...dedupedFileItems, ...commandPaletteCommandItems()];
 }
 
-function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteQuery) {
+function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteState.query) {
   // Unified palette provider. `mode` is a priority flag: Cmd-P and Shift-Cmd-P draw from the same
   // candidate universe and differ only in searchRankWeights.domainPrior.
   const parts = fileQuickOpenQueryParts(rawQuery);
@@ -3366,7 +4192,7 @@ function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = comm
 }
 
 function commandPaletteItems() {
-  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteQuery);
+  return commandPaletteCandidateItems(commandPaletteMode, commandPaletteState.query);
 }
 
 function commandPaletteRankItems(items, query, options = {}) {
@@ -3498,6 +4324,7 @@ function commandPaletteItemScore(item, query, options = {}) {
     + Number(item.sortBonus || 0)
     + commandPaletteRecentBonus(item)
     + commandPalettePaneExactIdentifierBonus(item, query)
+    + commandPalettePaneNameContiguousBonus(item, query, options)
     + commandPaletteFinderAliasBonus(item, query, options)
     + commandPaletteFileNameBonus(item, query)
     + commandPaletteRecencyBonus(item, options)
@@ -3505,6 +4332,15 @@ function commandPaletteItemScore(item, query, options = {}) {
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPalettePaneNameContiguousBonus(item, query, options = {}) {
+  if (commandPaletteItemDomain(item) !== 'pane') return 0;
+  const tokens = String(query || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const label = String(item.label || '').toLowerCase();
+  if (!tokens.length || !label || !tokens.every(token => label.includes(token))) return 0;
+  const surface = commandPaletteSurface(options);
+  return searchRankWeights.paneNameContiguous[surface] || 0;
 }
 
 function commandPaletteIdentifierKey(value) {
@@ -3546,7 +4382,9 @@ function commandPaletteFinderAliasBonus(item, query, options = {}) {
   if (item?.targetItem !== fileExplorerItemId) return 0;
   const text = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (text.length < 3) return 0;
-  const aliases = ['file', 'files', 'finder', 'file explorer'];
+  const aliases = [t('palette.group.files'), fileExplorerLabel(), 'file', 'files', 'finder', 'file explorer']
+    .map(alias => String(alias || '').trim().toLowerCase().replace(/\s+/g, ' '))
+    .filter(Boolean);
   if (!aliases.some(alias => alias === text || alias.startsWith(text))) return 0;
   return commandPaletteSurface(options) === 'files'
     ? searchRankWeights.finderAliasFilesMode
@@ -3569,7 +4407,7 @@ function commandPaletteEffectiveMode() {
   return commandPaletteMode === 'files' && !fileQuickOpenQueryParts().commandMode ? 'files' : 'command';
 }
 
-function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPaletteMode) {
+function commandPaletteSearchQuery(query = commandPaletteState.query, mode = commandPaletteMode) {
   if (mode !== 'files') return String(query || '').trim();
   const parts = fileQuickOpenQueryParts(query);
   if (parts.commandMode) return String(query || '').replace(/^>\s*/, '').trim();
@@ -3581,7 +4419,7 @@ function commandPaletteSearchQuery(query = commandPaletteQuery, mode = commandPa
 
 function commandPalettePlaceholder() {
   // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
-  const q = commandPaletteQuery.trim();
+  const q = commandPaletteState.query.trim();
   if (q.startsWith('>')) return t('palette.placeholderCommand');
   if (q.startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.placeholderWithFiles');
@@ -3593,13 +4431,13 @@ function commandPaletteLabel() {
 }
 
 function commandPaletteEmptyText() {
-  if (fileQuickOpenLoading) return t('search.searching');
-  if (commandPaletteQuery.trim().startsWith('@')) return t('palette.symbolUnavailable');
+  if (fileQuickOpenState.loading) return t('search.searching');
+  if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenLoading ? t('palette.searchingFiles') : '';
+  return fileQuickOpenState.loading ? t('palette.searchingFiles') : '';
 }
 
 function commandPaletteLoadingTextHtml(text) {
@@ -3607,12 +4445,12 @@ function commandPaletteLoadingTextHtml(text) {
 }
 
 function commandPaletteStatusHtml() {
-  return fileQuickOpenLoading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+  return fileQuickOpenState.loading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
 }
 
 function commandPaletteResultsHtml(items, query) {
   return items.map((item, index) => `
-    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
+    <button type="button" class="command-palette-row${index === commandPaletteState.index ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteState.index ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
       <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
@@ -3625,12 +4463,12 @@ function commandPaletteItemLabelHtml(item, query) {
 }
 
 function ensureCommandPalette() {
-  if (commandPaletteNode) return commandPaletteNode;
+  if (commandPaletteState.node) return commandPaletteState.node;
   const node = document.createElement('div');
   node.className = 'app-modal-overlay command-palette';
   node.hidden = true;
   node.innerHTML = `
-    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('palette.aria'))}">
+    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('common.commandPalette'))}">
       <input type="search" class="command-palette-input" placeholder="${esc(t('palette.placeholder'))}" aria-label="${esc(t('palette.placeholder'))}">
       <div class="command-palette-status" aria-live="polite" hidden></div>
       <div class="command-palette-results" role="listbox"></div>
@@ -3640,8 +4478,8 @@ function ensureCommandPalette() {
   });
   const input = node.querySelector('.command-palette-input');
   input.addEventListener('input', () => {
-    commandPaletteQuery = input.value || '';
-    commandPaletteIndex = 0;
+    commandPaletteState.query = input.value || '';
+    commandPaletteState.index = 0;
     renderCommandPaletteResults();
     // Both entry points fetch files on type so a typed query can blend files into either ordering.
     scheduleFileQuickOpenSearch();
@@ -3652,11 +4490,11 @@ function ensureCommandPalette() {
       closeCommandPalette();
     } else if (event.key === 'ArrowDown') {
       event.preventDefault();
-      commandPaletteIndex = commandPaletteItemsCache.length ? (commandPaletteIndex + 1) % commandPaletteItemsCache.length : 0;
+      commandPaletteState.index = commandPaletteState.items.length ? (commandPaletteState.index + 1) % commandPaletteState.items.length : 0;
       renderCommandPaletteResults();
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
-      commandPaletteIndex = commandPaletteItemsCache.length ? (commandPaletteIndex - 1 + commandPaletteItemsCache.length) % commandPaletteItemsCache.length : 0;
+      commandPaletteState.index = commandPaletteState.items.length ? (commandPaletteState.index - 1 + commandPaletteState.items.length) % commandPaletteState.items.length : 0;
       renderCommandPaletteResults();
     } else if (event.key === 'Enter') {
       event.preventDefault();
@@ -3675,11 +4513,11 @@ function ensureCommandPalette() {
     }
     const row = event.target.closest('[data-command-index]');
     if (!row || !node.contains(row)) return;
-    commandPaletteIndex = Number(row.dataset.commandIndex || 0);
+    commandPaletteState.index = Number(row.dataset.commandIndex || 0);
     invokeCommandPaletteSelection();
   });
   appOverlayRootElement().appendChild(node);
-  commandPaletteNode = node;
+  commandPaletteState.node = node;
   return node;
 }
 
@@ -3694,7 +4532,7 @@ function renderCommandPaletteResults() {
   if (input) {
     input.placeholder = commandPalettePlaceholder();
     input.setAttribute('aria-label', commandPaletteLabel());
-    input.setAttribute('aria-busy', fileQuickOpenLoading ? 'true' : 'false');
+    input.setAttribute('aria-busy', fileQuickOpenState.loading ? 'true' : 'false');
   }
   if (status) {
     const text = commandPaletteStatusText();
@@ -3703,31 +4541,33 @@ function renderCommandPaletteResults() {
     status.setAttribute('aria-label', text);
     status.innerHTML = html;
   }
-  commandPaletteItemsCache = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
-  commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
-  if (!commandPaletteItemsCache.length) {
+  commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
+  commandPaletteState.index = Math.min(commandPaletteState.index, Math.max(0, commandPaletteState.items.length - 1));
+  if (!commandPaletteState.items.length) {
     results.innerHTML = `<div class="command-palette-empty">${esc(commandPaletteEmptyText())}</div>`;
     return;
   }
-  results.innerHTML = commandPaletteResultsHtml(commandPaletteItemsCache, query);
+  results.innerHTML = commandPaletteResultsHtml(commandPaletteState.items, query);
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
 }
 
 function openCommandPalette(options = {}) {
   const node = ensureCommandPalette();
   closeAppMenus();
+  abortFileQuickOpenSearch();
   commandPaletteMode = options.mode === 'files' ? 'files' : 'command';
-  commandPaletteQuery = '';
-  commandPaletteIndex = 0;
+  commandPaletteState.targetSlot = String(options.targetSlot || '');
+  commandPaletteState.query = '';
+  commandPaletteState.index = 0;
   node.hidden = false;
   node.classList.add(CLS.open);
   const input = node.querySelector('.command-palette-input');
   input.value = '';
   // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
-  fileQuickOpenRoot = fileQuickOpenRootForSearch();
-  fileQuickOpenCandidates = [];
-  fileQuickOpenLoading = false;
-  fileQuickOpenError = '';
+  fileQuickOpenState.root = fileQuickOpenRootForSearch();
+  fileQuickOpenState.candidates = [];
+  fileQuickOpenState.loading = false;
+  fileQuickOpenState.error = '';
   // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
   // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
   if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch({immediate: true});
@@ -3740,11 +4580,12 @@ function openFileQuickOpen() {
 }
 
 function closeCommandPalette() {
-  if (!commandPaletteNode) return;
-  commandPaletteNode.hidden = true;
-  commandPaletteNode.classList.remove(CLS.open);
-  if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
-  fileQuickOpenDebounce = null;
+  if (!commandPaletteState.node) return;
+  commandPaletteState.node.hidden = true;
+  commandPaletteState.node.classList.remove(CLS.open);
+  if (fileQuickOpenState.debounce) clearTimeout(fileQuickOpenState.debounce);
+  fileQuickOpenState.debounce = null;
+  abortFileQuickOpenSearch();
 }
 
 function focusCommandPaletteTarget(item) {
@@ -3756,7 +4597,7 @@ function focusCommandPaletteTarget(item) {
 }
 
 async function invokeCommandPaletteSelection(event = null) {
-  const item = commandPaletteItemsCache[commandPaletteIndex];
+  const item = commandPaletteState.items[commandPaletteState.index];
   if (!item || item.disabled) return;
   rememberCommandPaletteItem(item);
   closeCommandPalette();
@@ -3766,22 +4607,23 @@ async function invokeCommandPaletteSelection(event = null) {
 }
 
 function scheduleFileQuickOpenSearch(options = {}) {
-  if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
+  if (fileQuickOpenState.debounce) clearTimeout(fileQuickOpenState.debounce);
   const run = () => {
-    const q = commandPaletteQuery.trim();
-    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteQuery);
+    fileQuickOpenState.debounce = null;
+    const q = commandPaletteState.query.trim();
+    if (!q.startsWith('>') && !q.startsWith('@')) refreshFileQuickOpenCandidates(commandPaletteState.query);
   };
   if (options.immediate) run();
-  else fileQuickOpenDebounce = setTimeout(run, fileQuickOpenDebounceMs);
+  else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
 function abortFileQuickOpenSearch() {
-  if (fileQuickOpenAbortController) {
-    try { fileQuickOpenAbortController.abort(); } catch (_) {}
+  if (fileQuickOpenState.abortController) {
+    try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
-  fileQuickOpenAbortController = null;
-  fileQuickOpenRequestId += 1;
-  fileQuickOpenLoading = false;
+  fileQuickOpenState.abortController = null;
+  fileQuickOpenState.requestId += 1;
+  fileQuickOpenState.loading = false;
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -3803,24 +4645,22 @@ function dedupeFileSearchResults(files) {
 }
 
 async function refreshFileQuickOpenCandidates(query = '') {
-  const root = fileQuickOpenRoot || fileQuickOpenRootForSearch();
+  const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
   abortFileQuickOpenSearch();
-  const requestId = ++fileQuickOpenRequestId;
-  fileQuickOpenAbortController = typeof AbortController === 'function' ? new AbortController() : null;
-  const fetchOptions = fileQuickOpenAbortController ? {signal: fileQuickOpenAbortController.signal} : {};
-  fileQuickOpenLoading = true;
+  const requestId = ++fileQuickOpenState.requestId;
+  fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
+  const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
+  fileQuickOpenState.loading = true;
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
     if (pathQuery.active) {
-      const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || response.status);
-      if (requestId !== fileQuickOpenRequestId) return;
-      fileQuickOpenRoot = payload.path || pathQuery.directory || root;
+      const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`, fetchOptions);
+      if (requestId !== fileQuickOpenState.requestId) return;
+      fileQuickOpenState.root = payload.path || pathQuery.directory || root;
       const filter = String(pathQuery.filter || '').toLowerCase();
-      fileQuickOpenCandidates = (Array.isArray(payload.entries) ? payload.entries : [])
+      fileQuickOpenState.candidates = (Array.isArray(payload.entries) ? payload.entries : [])
         .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
         .filter(entry => !filter || String(entry.name || '').toLowerCase().includes(filter))
         .map(entry => ({
@@ -3837,35 +4677,40 @@ async function refreshFileQuickOpenCandidates(query = '') {
         try {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
           const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
-          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
-          const payload = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(payload.error || response.status);
+          const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           return {ok: true, root: normalizeStoredFileExplorerIndexedDir(payload.root || payload.root_realpath || searchRoot) || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
         }
       }));
-      if (requestId !== fileQuickOpenRequestId) return;
+      if (requestId !== fileQuickOpenState.requestId) return;
       const successful = results.filter(result => result.ok);
       if (!successful.length) {
-        const firstError = results.find(result => result.error)?.error || 'search failed';
-        throw new Error(firstError);
+        const firstError = results.find(result => result.error)?.error;
+        if (firstError) throw firstError;
+        const fallback = t('common.searchFailed');
+        fileQuickOpenState.error = userMessageSnapshot('', {key: 'common.searchFailed', params: {}, fallback});
+        return;
       }
-      fileQuickOpenRoot = root;
-      fileQuickOpenCandidates = dedupeFileSearchResults(
+      fileQuickOpenState.root = root;
+      fileQuickOpenState.candidates = dedupeFileSearchResults(
         successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
       );
     }
-    fileQuickOpenError = '';
+    fileQuickOpenState.error = '';
   } catch (error) {
-    if (requestId !== fileQuickOpenRequestId) return;
+    if (requestId !== fileQuickOpenState.requestId) return;
     if (error?.name === 'AbortError') return;
-    fileQuickOpenCandidates = [];
-    fileQuickOpenError = String(error);
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.error = userMessageSnapshot(error, {
+      key: 'common.searchFailed',
+      params: {},
+      fallback: t('common.searchFailed'),
+    });
   } finally {
-    if (requestId === fileQuickOpenRequestId) {
-      fileQuickOpenAbortController = null;
-      fileQuickOpenLoading = false;
+    if (requestId === fileQuickOpenState.requestId) {
+      fileQuickOpenState.abortController = null;
+      fileQuickOpenState.loading = false;
       renderCommandPaletteResults();
     }
   }
@@ -3883,13 +4728,30 @@ function shouldNotifyState(state) {
 }
 
 function sendBrowserNotification(title, options = {}) {
-  const notification = new Notification(title, options);
+  const targetItem = String(options.targetItem || options.session || '').trim();
+  if (targetItem && notificationTargetIsFocused(targetItem)) return null;
+  const {onClick, session, targetItem: _targetItem, url, ...notificationOptions} = options;
+  const icon = notificationOptions.icon === undefined
+    ? renderBrowserAppIconDataUrl({size: 192, showBadge: false})
+    : '';
+  const notification = new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions);
+  if (targetItem) {
+    if (!browserNotificationsByTarget.has(targetItem)) browserNotificationsByTarget.set(targetItem, new Set());
+    browserNotificationsByTarget.get(targetItem).add(notification);
+    notification.onclose = () => {
+      const notifications = browserNotificationsByTarget.get(targetItem);
+      notifications?.delete(notification);
+      if (!notifications?.size) browserNotificationsByTarget.delete(targetItem);
+    };
+  }
   notification.onclick = () => {
     window.focus();
-    if (options.session) selectSession(options.session, {userInitiated: true});
+    notification.close?.();
+    if (typeof onClick === 'function') onClick();
+    else if (session) selectSession(session, {userInitiated: true});
     // a watched-PR notification opens the PR (no session to focus); safe blank-target open.
-    else if (options.url) {
-      try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
+    else if (url) {
+      try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {}
     }
   };
   return notification;
@@ -3902,6 +4764,105 @@ function setToastCountdown(node, durationMs) {
     return;
   }
   node.style.setProperty('--toast-countdown-duration', `${Math.max(1, durationMs)}ms`);
+}
+
+// This is the sole product-policy owner for transient notifications.  Producers supply content
+// and an optional target/action; they do not decide whether an event is pane-local, global, OS
+// deliverable, suppressible, or coalesced.  That separation keeps a new notification from quietly
+// becoming a third routing model.
+const notificationEventDefinitions = Object.freeze({
+  sessionAttention: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'attention', coalesce: true}),
+  agentAttention: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'attention', coalesce: true, persistent: true}),
+  agentDone: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'done', coalesce: true}),
+  terminalConnection: Object.freeze({scope: 'global', target: 'session', system: false, suppressFocused: true, priority: 'connection', coalesce: true}),
+  chatMessage: Object.freeze({scope: 'global', target: 'chat', system: true, suppressFocused: true, priority: 'message', coalesce: true}),
+  yoagentJob: Object.freeze({scope: 'global', target: 'session', system: true, suppressFocused: true, priority: 'job', coalesce: true}),
+  watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
+  update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
+  indexCoverage: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true, dismissOnly: true}),
+  startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
+  notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
+  // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
+  // through this policy row so its pane scope cannot become a second routing decision.
+  uploadResult: Object.freeze({scope: 'pane', target: 'session', system: false, priority: 'operation', deliver: ({target, payload}) => deliverUploadResultNotification(target, payload.uploadPayload, payload.inserted === true)}),
+  fileTransfer: Object.freeze({scope: 'pane', target: 'operation', system: false, priority: 'operation'}),
+  fileOpen: Object.freeze({scope: 'pane', target: 'finder', system: false, priority: 'operation'}),
+  yoloRules: Object.freeze({scope: 'pane', target: 'preferences', system: false, priority: 'operation'}),
+  previewOpen: Object.freeze({scope: 'pane', target: 'operation', system: false, priority: 'operation'}),
+});
+
+function notificationEventDefinition(type) {
+  return notificationEventDefinitions[type] || null;
+}
+
+function notificationEventTarget(definition, payload = {}) {
+  if (definition?.target === 'chat') return chatItemId;
+  if (definition?.target === 'finder') return fileExplorerItemId;
+  if (definition?.target === 'preferences') return prefsItemId;
+  return String(payload.targetItem || payload.session || payload.item || '').trim();
+}
+
+function notificationEventContainer(definition, target) {
+  return definition?.scope === 'pane' ? displayToastContainer(target) : attentionAlerts;
+}
+
+function notificationEventKey(type, definition, target, payload = {}) {
+  if (payload.coalesceKey) return String(payload.coalesceKey);
+  if (definition?.coalesce !== true) return '';
+  return `${type}:${target || String(payload.key || '')}`;
+}
+
+function dismissCoalescedToast(key) {
+  if (!key) return;
+  for (const [id, record] of toastRecords.entries()) {
+    if (record.node?.dataset?.toastCoalesceKey === key) removeAttentionAlert(id);
+  }
+}
+
+function emitNotification(type, payload = {}) {
+  const definition = notificationEventDefinition(type);
+  if (!definition) throw new Error(`unknown notification event: ${type}`);
+  const target = notificationEventTarget(definition, payload);
+  const key = notificationEventKey(type, definition, target, payload);
+  if (definition.deliver) return {inApp: definition.deliver({target, payload}), system: null, suppressed: false};
+  const targetItem = definition.suppressFocused === true ? target : '';
+  if (targetItem && notificationTargetIsFocused(targetItem)) {
+    dismissNotificationsForTarget(targetItem);
+    return {inApp: null, system: null, suppressed: true};
+  }
+  let inApp = null;
+  if (payload.inApp !== false && notificationDeliveryEnabled('inApp')) {
+    dismissCoalescedToast(key);
+    inApp = showToast(payload.title || '', payload.lines || payload.body || '', {
+      container: notificationEventContainer(definition, target),
+      targetItem,
+      onClick: payload.onClick,
+      onClose: payload.onClose,
+      actions: payload.actions,
+      className: payload.className,
+      countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
+      persistent: definition.dismissOnly === true || payload.persistent === true,
+    });
+    if (inApp) {
+      inApp.dataset.toastEvent = type;
+      inApp.dataset.toastPriority = definition.priority;
+      if (target) inApp.dataset.toastTargetItem = target;
+      if (key) inApp.dataset.toastCoalesceKey = key;
+    }
+  }
+  let system = null;
+  if (definition.system === true && payload.system !== false && notificationDeliveryEnabled('system') && 'Notification' in window && Notification.permission === 'granted') {
+    system = sendBrowserNotification(payload.systemTitle || payload.title || '', {
+      body: payload.systemBody || payload.body || toastTextLines(payload.lines || '').join('\n'),
+      tag: payload.systemTag || key || `${type}:${Date.now()}`,
+      renotify: payload.renotify === true,
+      targetItem,
+      session: payload.session,
+      onClick: payload.onClick,
+      url: payload.url,
+    });
+  }
+  return {inApp, system, suppressed: false};
 }
 
 // Upload and attention/status messages share this renderer. Keep visual differences out of call sites.
@@ -3954,7 +4915,8 @@ function renderToastLines(bodyNode, lines, options = {}) {
     const line = document.createElement('div');
     line.className = 'toast-line';
     setToastCountdown(line, countdownMs || toastDurationMs);
-    line.textContent = lineText;
+    if (typeof item?.render === 'function') item.render(line);
+    else line.textContent = lineText;
     bodyNode.appendChild(line);
   }
 }
@@ -3965,6 +4927,7 @@ function normalizeToastLine(item, options = {}) {
   return {
     text: compactToastText(text),
     countdownMs: objectItem ? item.countdownMs : options.countdownMs,
+    render: objectItem && typeof item.render === 'function' ? item.render : null,
   };
 }
 
@@ -3992,23 +4955,72 @@ function toastTextLines(text) {
   return lines.length ? lines : [''];
 }
 
+function clearToastRemovalTimer(id) {
+  const record = toastRecords.get(id);
+  if (!record?.timer) return;
+  clearTimeout(record.timer);
+  record.timer = null;
+}
+
+function scheduleToastRemoval(id, node, remainingMs) {
+  const delay = Math.max(1, Number(remainingMs) || 1);
+  let record = toastRecords.get(id);
+  if (!record) {
+    record = {node, timer: null};
+    toastRecords.set(id, record);
+  } else {
+    record.node = node;
+  }
+  clearToastRemovalTimer(id);
+  node.dataset.toastRemainingMs = String(delay);
+  node.dataset.toastRemovalStartedAt = String(Date.now());
+  record.timer = window.setTimeout(() => removeAttentionAlert(id), delay);
+}
+
+function pauseToastRemoval(id, node, reason) {
+  if (!node || node.classList.contains('kept')) return;
+  node.dataset[`toastPause${reason}`] = 'true';
+  if (node.classList.contains('toast-countdown-paused')) return;
+  const remainingMs = Number(node.dataset.toastRemainingMs);
+  const startedAt = Number(node.dataset.toastRemovalStartedAt);
+  const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : 0;
+  node.dataset.toastRemainingMs = String(Math.max(1, (Number.isFinite(remainingMs) ? remainingMs : toastDurationMs) - elapsedMs));
+  clearToastRemovalTimer(id);
+  node.classList.add('toast-countdown-paused');
+}
+
+function resumeToastRemoval(id, node, reason) {
+  if (!node || node.classList.contains('kept')) return;
+  delete node.dataset[`toastPause${reason}`];
+  if (node.dataset.toastPausePointer || node.dataset.toastPauseFocus || !node.classList.contains('toast-countdown-paused')) return;
+  node.classList.remove('toast-countdown-paused');
+  scheduleToastRemoval(id, node, Number(node.dataset.toastRemainingMs));
+}
+
 function showToast(title, lines, options = {}) {
+  const targetItem = String(options.targetItem || '').trim();
+  if (targetItem && notificationTargetIsFocused(targetItem)) {
+    dismissNotificationsForTarget(targetItem);
+    return null;
+  }
   const container = options.container || attentionAlerts;
   if (!container) return null;
   const id = ++attentionAlertSequence;
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
+  if (options.persistent === true) {
+    node.dataset.toastPersistent = 'true';
+    node.classList.add('kept');
+  }
+  if (targetItem) node.dataset.toastTargetItem = targetItem;
   const bodyNode = ensureToastShell(node, {
     title,
     closeLabel: options.closeLabel,
     keepLabel: options.keepLabel,
     actions: options.actions,
     onKeep: () => {
-      if (attentionAlertTimers.has(id)) {
-        clearTimeout(attentionAlertTimers.get(id));
-        attentionAlertTimers.delete(id);
-      }
+      clearToastRemovalTimer(id);
       options.onKeep?.();
     },
     onClose: () => {
@@ -4016,22 +5028,33 @@ function showToast(title, lines, options = {}) {
       removeAttentionAlert(id);
     },
   });
-  renderToastLines(bodyNode, Array.isArray(lines) ? lines : toastTextLines(lines), {
-    countdownMs: options.countdownMs || toastDurationMs,
+  const toastLines = Array.isArray(lines) ? lines : (lines && typeof lines === 'object' ? [lines] : toastTextLines(lines));
+  renderToastLines(bodyNode, toastLines, {
+    countdownMs: options.persistent === true ? Infinity : (options.countdownMs || toastDurationMs),
   });
+  if (options.persistent === true) {
+    const keepButton = node.querySelector('[data-toast-keep]');
+    if (keepButton) keepButton.hidden = true;
+  }
   node.addEventListener('click', event => {
     if (event.target.closest('[data-toast-close], .toast-actions')) return;
     options.onClick?.();
   });
+  node.addEventListener('pointerenter', () => pauseToastRemoval(id, node, 'Pointer'));
+  node.addEventListener('pointerleave', () => resumeToastRemoval(id, node, 'Pointer'));
+  node.addEventListener('focusin', () => pauseToastRemoval(id, node, 'Focus'));
+  node.addEventListener('focusout', event => {
+    if (!node.contains(event.relatedTarget)) resumeToastRemoval(id, node, 'Focus');
+  });
   container.appendChild(node);
   while (container.children.length > 5) {
-    const first = container.firstElementChild;
+    const first = Array.from(container.children).find(child => child.dataset.toastPersistent !== 'true');
     if (!first) break;
     removeAttentionAlert(Number(first.dataset.alertId || 0));
   }
   // remove the toast when its countdown bar finishes — honor options.countdownMs (the
   // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
-  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), options.countdownMs || toastDurationMs));
+  if (options.persistent !== true) scheduleToastRemoval(id, node, options.countdownMs || toastDurationMs);
   return node;
 }
 
@@ -4050,7 +5073,7 @@ function startupHelperCatalog() {
     {title: t('startupHelper.tip.watchedPrs.title'), lines: [t('startupHelper.tip.watchedPrs.body')]},
     {title: t('startupHelper.tip.quickOpen.title'), lines: [t('startupHelper.tip.quickOpen.body')]},
     {title: t('startupHelper.tip.markdownPreview.title'), lines: [t('startupHelper.tip.markdownPreview.body')]},
-    {title: t('startupHelper.tip.largeUpload.title'), lines: [t('startupHelper.tip.largeUpload.body')]},
+    {title: t('common.rsyncLargeFiles'), lines: [t('startupHelper.tip.largeUpload.body')]},
   ];
 }
 
@@ -4069,35 +5092,31 @@ function startupHelperWrappedIndex(index, count) {
   return ((Math.floor(Number(index)) % count) + count) % count;
 }
 
-function startupHelperAction(label, onClick, options = {}) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = label;
-  if (options.className) button.className = options.className;
-  if (options.title) button.title = options.title;
-  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    onClick?.();
-  });
-  return button;
-}
-
 function startupHelperNavigationGroup(index, total, showRelativeTip) {
   const group = document.createElement('span');
   group.className = 'startup-helper-nav';
   group.setAttribute('role', 'group');
-  group.setAttribute('aria-label', 'Tip navigation');
+  group.setAttribute('aria-label', t('startupHelper.navigation'));
   group.append(
-    startupHelperAction('<', () => showRelativeTip(-1), {
+    makeButton({
+      label: '<',
       className: 'startup-helper-nav-button',
-      title: 'Previous tip',
-      ariaLabel: 'Previous tip',
+      title: t('startupHelper.action.previous'),
+      ariaLabel: t('startupHelper.action.previous'),
+      onClick: event => {
+        event.stopPropagation();
+        showRelativeTip(-1);
+      },
     }),
-    startupHelperAction('>', () => showRelativeTip(1), {
+    makeButton({
+      label: '>',
       className: 'startup-helper-nav-button',
       title: t('startupHelper.action.next'),
       ariaLabel: t('startupHelper.action.next'),
+      onClick: event => {
+        event.stopPropagation();
+        showRelativeTip(1);
+      },
     }),
   );
   return group;
@@ -4135,19 +5154,24 @@ function showStartupHelperTip(options = {}) {
     showStartupHelperTip({manual: true});
   };
   const navAction = startupHelperNavigationGroup(index, tips.length, showRelativeTip);
-  const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
-    startupHelpersEnabled = false;
-    closeStartupHelperToast(node);
-    saveSettingsPatch(settingPatch('general.startup_tips', false))
-      .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+  const offAction = makeButton({
+    label: t('startupHelper.action.offForever'),
+    onClick: event => {
+      event.stopPropagation();
+      startupHelpersEnabled = false;
+      closeStartupHelperToast(node);
+      saveSettingsPatch(settingPatch('general.startup_tips', false))
+        .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
+        .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
+    },
   });
-  node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
+  node = emitNotification('startupTip', {
+    title: startupHelperPromptTitle(index, tips.length, tip), lines: tip.lines,
     className: 'attention-alert toast startup-helper-toast',
-    container: displayToastContainer(focusedPanelItem),
     actions: [navAction, offAction],
     countdownMs: 45000,
-  });
+    coalesceKey: 'startup-tip',
+  }).inApp;
   if (node) node.dataset.toastKind = 'startup-helper';
   return node;
 }
@@ -4171,86 +5195,219 @@ function displayToastContainer(session) {
   return document.querySelector('.panel-toast-stack') || attentionAlerts;
 }
 
-function compactNotificationTitle(scope, message) {
+function notificationTargetIsFocused(item) {
+  const target = String(item || '').trim();
+  if (!target || document.visibilityState !== 'visible' || !itemIsActivePaneTab(target)) return false;
+  // A status render can briefly blur xterm even though the user remains on this pane. The shared
+  // logical active item survives that DOM churn, so notifications about the pane being viewed are
+  // already acknowledged and must not appear inside that same pane.
+  return focusedPanelItem === target || focusedTerminal === target;
+}
+
+function compactNotificationTitle(scope, message, options = {}) {
   const suffix = String(message || '').trim();
   const label = String(scope || '').trim();
-  if (!label) return suffix ? `YOLOmux ${suffix}` : 'YOLOmux';
-  return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
+  const product = t('app.documentTitle');
+  if (options.inApp === true) return suffix || label;
+  if (!label) return suffix ? `${product} ${suffix}` : product;
+  return suffix ? `${product}[${label}] ${suffix}` : `${product}[${label}]`;
 }
 
 function sessionNotificationScope(session) {
   const label = sessionLabel(session);
-  const desc = sessionTabDescription(session, transcriptMeta.sessions?.[session]);
+  const desc = sessionTabDescription(session, transcriptMetadataState.payload.sessions?.[session]);
   return desc ? `${label} ${desc}` : label;
 }
 
-function sessionNotificationTitle(session, state) {
-  return compactNotificationTitle(sessionNotificationScope(session), state?.label || '');
+function sessionNotificationTitle(session, state, options = {}) {
+  return compactNotificationTitle(sessionNotificationScope(session), state?.label || '', options);
 }
 
-function hostNotificationTitle(message) {
-  return compactNotificationTitle(serverHostname, message);
+function hostNotificationTitle(message, options = {}) {
+  return compactNotificationTitle(serverHostname, message, options);
+}
+
+function attentionToastAgent(session, state) {
+  const agent = state?.attentionAgent;
+  if (agentWindowIsAttentionState(agent?.state)) {
+    return {agent, item: state?.attentionAgentItem || null};
+  }
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const summary = typeof sessionAgentWindowStatusSummary === 'function'
+    ? sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session))
+    : null;
+  return agentWindowIsAttentionState(summary?.agent?.state) ? summary : null;
+}
+
+function attentionToastReason(state, agent) {
+  const reason = String(state?.reason || '').trim();
+  const label = String(agent?.window_label || agent?.window || '').trim();
+  const prefix = label ? `${label}:` : '';
+  return prefix && reason.startsWith(prefix) ? reason.slice(prefix.length).trim() : reason;
+}
+
+function attentionToastTitle(session, state) {
+  const attention = attentionToastAgent(session, state);
+  const agent = attention?.agent;
+  const windowLabel = String(agent?.window_label || agent?.window || '').trim();
+  return windowLabel ? `[${sessionLabel(session)}] ${windowLabel}: ${state?.label || ''}` : sessionNotificationTitle(session, state, {inApp: true});
+}
+
+async function focusAgentToastTarget(session, agent) {
+  await selectSession(session, {userInitiated: true});
+  const windowIndex = agentWindowIndex(agent);
+  if (windowIndex === null) return;
+  activateTmuxWindowFromUserAction(session, windowIndex, t('terminal.window.title', {name: windowIndex}));
+}
+
+function agentToastTargetLine(session, agent, options = {}) {
+  const reason = String(options.reason || '').trim();
+  if (!agent || typeof tmuxWindowButtonHtml !== 'function' || typeof tmuxPaneTabTokenHtml !== 'function') return reason;
+  const visibleName = String(agent.window_label || agentWindowCanonicalLabel(agent.window_index ?? agent.window, agent.kind, agent.kind)).trim();
+  if (!visibleName) return reason;
+  return {
+    text: reason,
+    render: line => {
+      line.classList.add('toast-line--attention');
+      const marker = document.createElement('span');
+      marker.className = 'attention-toast-controls';
+      const info = transcriptMetadataState.payload.sessions?.[session];
+      const auto = autoApproveStates.get(session)?.enabled === true;
+      const status = options.state || sessionState(session, info);
+      const tabHtml = tmuxPaneTabTokenHtml(session, {
+        tag: 'span',
+        action: false,
+        active: true,
+        info,
+        state: status,
+        auto,
+        classes: ['attention-toast-session-tab'],
+      });
+      const windowHtml = tmuxWindowButtonHtml({
+        tag: 'span',
+        visibleName,
+        showNumberLabel: false,
+        active: true,
+        ariaPressed: false,
+        attrs: ['role="img"'],
+        classes: ['attention-toast-agent-button'],
+        agentStatus: agent,
+        agentKey: agent.kind,
+        session,
+        activityAnimate: false,
+        activityIconHtml: agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
+          ...agentWindowActivityOptionsForStatus(agent, session),
+          item: options.item || undefined,
+          animate: false,
+          statusBeforeAgent: true,
+        }),
+      });
+      marker.innerHTML = `${tabHtml}${windowHtml}`;
+      const text = document.createElement('span');
+      text.className = 'attention-toast-reason';
+      text.textContent = reason;
+      line.append(marker, text);
+    },
+  };
+}
+
+function attentionToastLine(session, state) {
+  const attention = attentionToastAgent(session, state);
+  return agentToastTargetLine(session, attention?.agent, {
+    reason: attentionToastReason(state, attention?.agent),
+    item: attention?.item,
+  });
+}
+
+function workingAgentTransitionNotificationTarget(agentKey, tone, options = {}) {
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : String(agentKey || '').trim().toLowerCase();
+  const state = tone === 'attention' ? STATE_KEY.needsInput : STATE_KEY.idle;
+  return {
+    ...options,
+    kind,
+    state,
+    window_index: options.window_index ?? options.windowIndex ?? options.window,
+    window_label: options.window_label || options.windowLabel || '',
+  };
 }
 
 function showAttentionAlert(session, state) {
-  const node = showToast(
-    sessionNotificationTitle(session, state),
-    state.reason,
-    {
-      container: displayToastContainer(session),
-      onClick: () => selectSession(session, {userInitiated: true}),
+  const node = emitNotification('sessionAttention', {
+    session,
+    title: attentionToastTitle(session, state),
+    lines: attentionToastLine(session, state),
+    body: state.reason || state.label || '',
+    systemTitle: sessionNotificationTitle(session, state),
+    systemTag: `yolomux:session:${session}:state:${stateSignature(state)}`,
+    coalesceKey: `session-attention:${session}`,
+    system: false,
+    onClick: () => {
+      dismissSessionToasts(session);
+      void focusAgentToastTarget(session, attentionToastAgent(session, state)?.agent);
     },
-  );
+  }).inApp;
   if (node) {
     node.dataset.toastSession = session;
     node.dataset.toastKind = 'attention';
   }
 }
 
-function dismissAttentionAlertsForSession(session) {
-  for (const node of document.querySelectorAll('.toast[data-toast-kind="attention"]')) {
-    if (node.dataset.toastSession !== session) continue;
-    removeAttentionAlert(Number(node.dataset.alertId || 0));
+function dismissNotificationsForTarget(item, options = {}) {
+  const target = String(item || '').trim();
+  if (!target) return;
+  const kind = String(options.kind || '');
+  for (const [id, record] of toastRecords.entries()) {
+    const node = record.node;
+    if (node.dataset.toastTargetItem !== target && node.dataset.toastSession !== target) continue;
+    if (!kind || node.dataset.toastKind === kind) removeAttentionAlert(id);
   }
+  const notifications = browserNotificationsByTarget.get(target);
+  if (notifications) {
+    for (const notification of [...notifications]) notification.close?.();
+    browserNotificationsByTarget.delete(target);
+  }
+}
+
+// Opening a notification's target is an acknowledgement, not merely a visual dismissal.  Producers
+// own their durable cursor/state update; this shared hook keeps every route into that target aligned.
+function acknowledgeNotificationTarget(item) {
+  if (String(item || '').trim() === chatItemId && typeof chatAcknowledge === 'function') {
+    void chatAcknowledge();
+  }
+}
+
+function dismissSessionToasts(session, options = {}) {
+  dismissNotificationsForTarget(session, options);
+}
+
+function dismissAttentionAlertsForSession(session) {
+  dismissSessionToasts(session, {kind: 'attention'});
 }
 
 function attentionAlreadyVisible(session) {
-  if (document.visibilityState !== 'visible') return false;
-  if (!activeSessions.includes(session)) return false;
-  const panel = document.getElementById(panelDomId(session));
-  if (!panel || !panel.isConnected) return false;
-  return focusedPanelItem === session || focusedTerminal === session || activeSessions.length === 1;
+  return notificationTargetIsFocused(session);
 }
 
 function removeAttentionAlert(id) {
-  if (attentionAlertTimers.has(id)) {
-    clearTimeout(attentionAlertTimers.get(id));
-    attentionAlertTimers.delete(id);
-  }
-  document.querySelector(`[data-alert-id="${id}"]`)?.remove();
+  const node = toastRecords.get(id)?.node || null;
+  clearToastRemovalTimer(id);
+  node?.remove();
+  toastRecords.delete(id);
 }
 
-function sendTestNotification() {
-  showToast(t('notify.testTitle', {host: serverHostname}), t('notify.testBody'), {
-    container: displayToastContainer(focusedPanelItem),
-  });
-  if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+function sendTestNotification(options = {}) {
+  const inApp = options.inApp === true || (options.inApp === undefined && notificationDeliveryEnabled('inApp'));
+  const system = options.system === true || (options.system === undefined && notificationDeliveryEnabled('system'));
   try {
-    sendBrowserNotification(t('notify.testTitle', {host: serverHostname}), {
-      body: t('notify.browserTestBody'),
-      tag: `yolomux:test:${Date.now()}`,
+    emitNotification('notificationTest', {
+      title: hostNotificationTitle(t('notify.testToastTitle'), {inApp: true}),
+      body: t('notify.testBody'), systemTitle: t('notify.testTitle', {host: serverHostname}),
+      systemBody: t('notify.browserTestBody'), coalesceKey: 'notification-test', inApp, system,
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});
   } catch (error) {
     statusErr(localizedHtml('status.notificationFailed', {error}));
     postEvent(null, 'notification_error', `notification test failed: ${error}`, {hostname: serverHostname});
-  }
-}
-
-function notifyCurrentAttentionStates() {
-  for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMeta.sessions?.[session]);
-    if (shouldNotifyState(state)) maybeNotifyState(session, state, {force: true});
   }
 }
 
@@ -4264,10 +5421,11 @@ function stateSignature(state) {
 
 function trackSessionStateChanges() {
   for (const session of sessions.filter(isTmuxSession)) {
-    const state = sessionState(session, transcriptMeta.sessions?.[session]);
-    const previous = sessionStateKeys.get(session);
+    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
+    const record = sessionStatusRecord(session, true);
+    const previous = record?.state || null;
     const signature = stateSignature(state);
-    sessionStateKeys.set(session, {key: state.key, reason: state.reason, signature});
+    if (record) record.state = {key: state.key, reason: state.reason, signature};
     if (!stateTrackingReady || previous == null || previous.signature === signature) continue;
     postEvent(session, 'state_changed', eventMessageForState(session, state), {
       from: previous.key,
@@ -4275,59 +5433,218 @@ function trackSessionStateChanges() {
       to: state.key,
       reason: state.reason,
     });
-    maybeNotifyState(session, state);
   }
   stateTrackingReady = true;
 }
 
-function maybeNotifyState(session, state, options = {}) {
-  if (!notificationsEnabled) return;
-  if (!shouldNotifyState(state)) return;
-  const key = `${session}:${stateSignature(state)}`;
+const workingAgentTransitionNotificationDescriptors = Object.freeze({
+  attention: Object.freeze({settingPath: 'notifications.notify_working_attention', defaultEnabled: true, copyKey: 'attention'}),
+  cooldown: Object.freeze({settingPath: 'notifications.notify_working_done', defaultEnabled: false, copyKey: 'done'}),
+});
+const workingAgentTransitionNotificationConfirmMs = 5000;
+
+function workingAgentTransitionNotificationDescriptor(tone) {
+  return workingAgentTransitionNotificationDescriptors[tone] || null;
+}
+
+function workingAgentTransitionNotificationEnabled(tone) {
+  const descriptor = workingAgentTransitionNotificationDescriptor(tone);
+  return descriptor ? boolSetting(descriptor.settingPath, descriptor.defaultEnabled) : false;
+}
+
+function workingAgentTransitionNotificationPendingMap(session, create = false) {
+  return sessionStatusRecord(session, create)?.workingAgentTransitionNotificationPending || null;
+}
+
+function clearWorkingAgentTransitionNotificationPending(session, key) {
+  const pendingMap = workingAgentTransitionNotificationPendingMap(session);
+  const pending = pendingMap?.get(key);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingMap.delete(key);
+  return true;
+}
+
+function clearWorkingAgentTransitionNotificationSession(session) {
+  const record = sessionStatusRecord(session);
+  if (!record) return;
+  for (const pending of record.workingAgentTransitionNotificationPending.values()) clearTimeout(pending.timer);
+  record.workingAgentTransitionNotificationPending.clear();
+  record.workingAgentNotificationTones.clear();
+}
+
+function confirmWorkingAgentTransitionNotification(key, pending) {
+  const session = pending.session;
+  const record = sessionStatusRecord(session);
+  if (record?.workingAgentTransitionNotificationPending.get(key) !== pending) return false;
+  record.workingAgentTransitionNotificationPending.delete(key);
+  if (record.workingAgentNotificationTones.get(key) !== pending.tone) return false;
+  return maybeNotifyWorkingAgentTransition(pending.session, pending.kind, pending.tone, pending.options);
+}
+
+function scheduleWorkingAgentTransitionNotification(session, kind, key, tone, options = {}) {
+  const pendingMap = workingAgentTransitionNotificationPendingMap(session, true);
+  if (!pendingMap) return false;
+  if (!workingAgentTransitionNotificationEnabled(tone) || !notificationDeliveryEnabled()) {
+    clearWorkingAgentTransitionNotificationPending(session, key);
+    return false;
+  }
+  const existing = pendingMap.get(key);
+  if (existing?.tone === tone) return false;
+  clearWorkingAgentTransitionNotificationPending(session, key);
+  const pending = {session, kind, tone, options: {...options}, timer: 0};
+  pending.timer = setTimeout(
+    () => confirmWorkingAgentTransitionNotification(key, pending),
+    workingAgentTransitionNotificationConfirmMs,
+  );
+  pendingMap.set(key, pending);
+  return true;
+}
+
+function rekeyWorkingAgentTransitionNotificationSession(oldSession, newSession) {
+  const record = sessionStatusRecord(oldSession);
+  if (!record) return;
+  for (const pending of record.workingAgentTransitionNotificationPending.values()) pending.session = newSession;
+}
+
+function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}) {
+  const descriptor = workingAgentTransitionNotificationDescriptor(tone);
+  if (!session || !descriptor || !workingAgentTransitionNotificationEnabled(tone) || !notificationDeliveryEnabled()) return false;
+  const marker = tone === 'attention'
+    ? String(options.attentionKey || options.attentionSignature || '').trim()
+    : String(options.stoppedAt || '').trim();
+  if (!marker) return false;
+  const target = workingAgentTransitionNotificationTarget(agentKey, tone, options);
+  const targetKey = typeof agentWindowActivityTransitionKey === 'function'
+    ? agentWindowActivityTransitionKey(agentKey, {...target, session: ''})
+    : `${target.window_index ?? target.window ?? ''}:${agentKey}`;
+  const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
   const now = Date.now();
-  if (attentionAlreadyVisible(session)) {
-    setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
-    dismissAttentionAlertsForSession(session);
-    postEvent(session, 'alert_suppressed_visible', eventMessageForState(session, state), {
-      state: state.key,
-      reason: state.reason,
-    });
-    return;
+  if (notificationTargetIsFocused(session)) {
+    recordSessionNotificationSent(session, key, now);
+    dismissNotificationsForTarget(session);
+    postEvent(session, 'agent_window_transition_notification_suppressed_visible', '', {agent: target.kind, tone});
+    return false;
   }
-  const lastSent = notificationLastSent.get(key) || 0;
-  if (options.force !== true && now - lastSent < 60_000) return;
-  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
-  const body = `${state.reason} · ${projectDirName(session, transcriptMeta.sessions?.[session])}`;
-  showAttentionAlert(session, state);
-  postEvent(session, 'alert_shown', eventMessageForState(session, state), {
-    state: state.key,
-    reason: state.reason,
-  });
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
+  const lastSent = sessionNotificationLastSentAt(session, key);
+  if (now - lastSent < throttleMs) return false;
+  recordSessionNotificationSent(session, key, now);
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agentKey) : '';
+  const agent = kind ? agentLabel(kind) : t('common.agentLabel');
+  const title = t(`notify.working.${descriptor.copyKey}.title`);
+  const body = t(`notify.working.${descriptor.copyKey}.body`, {agent, session: sessionLabel(session)});
+  if (notificationDeliveryEnabled('inApp')) {
+    const node = emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {
+      session, title, lines: agentToastTargetLine(session, target, {reason: body}), body,
+      systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true,
+      coalesceKey: `agent-${tone}:${session}:${targetKey}`,
+      onClick: () => {
+        dismissSessionToasts(session);
+        void focusAgentToastTarget(session, target);
+      },
+      system: false,
+    }).inApp;
+    if (node) {
+      node.dataset.toastSession = session;
+      node.dataset.toastKind = 'working-agent-transition';
+    }
+  }
+  postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
+  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
   try {
-    sendBrowserNotification(sessionNotificationTitle(session, state), {
-      body,
-      tag: key,
-      renotify: true,
-      session,
-    });
-    postEvent(session, 'notification_sent', eventMessageForState(session, state), {
-      state: state.key,
-      reason: state.reason,
-    });
+    emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {session, title, body, systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true, inApp: false});
+    postEvent(session, 'notification_sent', body, {agent: kind, tone});
   } catch (error) {
-    postEvent(session, 'notification_error', `notification failed: ${error}`, {
-      state: state.key,
-    });
+    postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
   }
+  return true;
+}
+
+function workingAgentNotificationTone(agent) {
+  const state = String(agent?.state || '').trim();
+  if (typeof agentWindowIsWorkingState === 'function' && agentWindowIsWorkingState(state)) return STATE_KEY.working;
+  if (typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state)) return 'attention';
+  const stoppedAt = Number(agent?.working_stopped_ts || agent?.workingStoppedTs || 0);
+  return Number.isFinite(stoppedAt) && stoppedAt > 0 ? 'cooldown' : '';
+}
+
+function workingAgentFinishedRecently(agent, nowSeconds = Date.now() / 1000) {
+  const stoppedAt = Number(agent?.working_stopped_ts || agent?.workingStoppedTs || 0);
+  if (!Number.isFinite(stoppedAt) || stoppedAt <= 0) return false;
+  const freshnessSeconds = Math.max(1, Number(workflowTransitionGlowSeconds) || 0);
+  return nowSeconds >= stoppedAt && nowSeconds - stoppedAt <= freshnessSeconds;
+}
+
+function workingAgentTransitionSnapshot(session, agent) {
+  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : '';
+  if (!session || !kind || typeof agentWindowActivityTransitionKey !== 'function') return null;
+  const options = typeof agentWindowActivityOptionsForStatus === 'function'
+    ? agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false})
+    : {...agent, session};
+  const key = agentWindowActivityTransitionKey(kind, {...options, session: ''});
+  if (!key) return null;
+  const tone = workingAgentNotificationTone(agent);
+  const toneMap = sessionStatusRecord(session, true)?.workingAgentNotificationTones;
+  return {agent, kind, options, key, tone, previousTone: toneMap?.get(key) || ''};
+}
+
+// Notifications are driven by one authoritative auto-approve payload, never by a surface renderer.
+// A hidden tab, a rebuilt Info Bar, or a late popover must not change whether a live green->red/yellow
+// transition notifies the user. Both exit tones share one confirmation timer so detector flicker and
+// auto-approve turnarounds return to working without producing a false popup.
+function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
+  if (!session || typeof agentWindowActivityTransitionKey !== 'function') return 0;
+  const record = sessionStatusRecord(session, true);
+  const toneMap = record?.workingAgentNotificationTones;
+  const pendingMap = record?.workingAgentTransitionNotificationPending;
+  if (!toneMap || !pendingMap) return 0;
+  const rows = typeof sessionAgentWindowStatusPayloads === 'function'
+    ? sessionAgentWindowStatusPayloads(session, transcriptMetadataState.payload.sessions?.[session], payload)
+    : typeof agentWindowPayloadRows === 'function'
+      ? agentWindowPayloadRows(payload.agent_windows)
+      : [];
+  const nextKeys = new Set();
+  let notified = 0;
+  for (const agent of rows) {
+    const transition = workingAgentTransitionSnapshot(session, agent);
+    if (!transition) continue;
+    const {kind, options, key, tone, previousTone} = transition;
+    nextKeys.add(key);
+    const shouldNotify = (previousTone === STATE_KEY.working && (tone === 'attention' || tone === 'cooldown'))
+      // `working_stopped_ts` is written by the server only after it observes working->idle. Use that
+      // durable transition proof when a browser refresh missed its transient green snapshot.
+      || (tone === 'cooldown' && previousTone === '' && workingAgentFinishedRecently(agent));
+    if (shouldNotify) {
+      const attentionKey = tone === 'attention' && typeof agentWindowActivityAcknowledgementKey === 'function'
+        ? agentWindowActivityAcknowledgementKey(kind, agent.state, options, options.attention_signature || options.screen_text)
+        : '';
+      notified += Number(scheduleWorkingAgentTransitionNotification(session, kind, key, tone, {
+        ...agent,
+        ...options,
+        attentionKey,
+        attentionSignature: options.attention_signature || options.screen_text,
+        stoppedAt: Number(options.working_stopped_ts || 0),
+      }));
+    } else if (pendingMap.get(key)?.tone !== tone) {
+      clearWorkingAgentTransitionNotificationPending(session, key);
+    }
+    toneMap.set(key, tone);
+  }
+  for (const key of toneMap.keys()) {
+    if (nextKeys.has(key)) continue;
+    toneMap.delete(key);
+    clearWorkingAgentTransitionNotificationPending(session, key);
+  }
+  return notified;
 }
 
 // a stable snapshot of the watched-PR status dimensions we diff for notifications.
 function watchedPrStatusSnapshot(pr) {
   return {
-    merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
-    ci: String(pr?.checks?.state || '').toLowerCase(),
-    review: String(pr?.review_decision || '').toUpperCase(),
+    merged: pullRequestIsMerged(pr),
+    ci: pullRequestCiState(pr),
+    review: pullRequestReviewDecision(pr),
   };
 }
 
@@ -4363,28 +5680,21 @@ function notifyWatchedPrTransitions(prs) {
 
 // Fire a watched-PR transition through the shared notification channel: an in-page toast (clicks open
 // the PR) + a browser Notification, gated by notificationsEnabled + notify_transitions, deduped and
-// throttled by notifications.throttle_seconds via the shared notificationLastSent map.
+// throttled by notifications.throttle_seconds via the bounded watched-PR throttle map.
 function maybeNotifyWatchedPr(ref, key, message, url) {
-  if (!notificationsEnabled) return;
+  if (!notificationDeliveryEnabled()) return;
   if (!shouldNotifyTransitionKey(key)) return;
   const signature = `watched-pr:${ref}:${key}`;
   const now = Date.now();
   const throttleMs = Math.max(0, (Number(initialSetting('notifications.throttle_seconds', 60)) || 0) * 1000);
-  const lastSent = notificationLastSent.get(signature) || 0;
+  const lastSent = watchedPrNotificationLastSent.get(signature) || 0;
   if (now - lastSent < throttleMs) return;
-  setLimitedMapEntry(notificationLastSent, signature, now, notificationLastSentLimit);
-  showToast(message, [ref], {
-    onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} },
-  });
+  setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);
+  if (notificationDeliveryEnabled('inApp')) emitNotification('watchedPullRequest', {title: message, lines: [ref], body: ref, url, coalesceKey: signature, onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} }, system: false});
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(hostNotificationTitle(message), {
-      body: ref,
-      tag: signature,
-      renotify: true,
-      url,
-    });
+    emitNotification('watchedPullRequest', {title: message, body: ref, systemTitle: hostNotificationTitle(message), systemTag: signature, renotify: true, url, inApp: false});
     postEvent(null, 'watched_pr_notification', message, {ref, transition: key});
   } catch (error) {
     postEvent(null, 'watched_pr_notification_error', `notification failed: ${error}`, {ref, transition: key});
@@ -4395,6 +5705,7 @@ function updateTopbarMetrics() {
   if (!topbar) return;
   const height = Math.ceil(topbar.getBoundingClientRect().height || 38);
   document.documentElement?.style?.setProperty('--topbar-height', `${height}px`);
+  scheduleTopbarActionCapacity();
 }
 
 function scheduleTopbarMetricsUpdate() {
@@ -4467,7 +5778,7 @@ function updateSessionList(nextSessions, options = {}) {
   }
   const removedSessions = visibleSessions.filter(session => !effectiveNext.includes(session));
   setSessionOrder(effectiveNext);
-  layoutSlots = normalizeLayoutSlots(layoutSlots, {
+  layoutSlots = normalizeLayoutSlotsForViewport(layoutSlots, {
     preserveRemovedItems: removedSessions,
     preserveRemovedSlots: true,
   });
@@ -4479,11 +5790,16 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
+  // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
+  // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
+  if (options.preserveFilledWorkspaceLayout !== true) filledWorkspaceLayout = null;
   // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
-  layoutSlots = normalizeLayoutSlots(nextSlots, {
-    preserveMissingFileExplorer: options.preserveMissingFileExplorer === true,
+  layoutSlots = normalizeLayoutSlotsForViewport(nextSlots, {
+    focusSession: options.focusSession,
+    preserveMissingSidePane: options.preserveMissingSidePane === true,
+    preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
@@ -4506,7 +5822,8 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
   updatePanelInactiveOverlays();
-  if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
+  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: true});
+  if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
     statusEl.textContent = options.message;
@@ -4542,7 +5859,7 @@ function mergePendingLayoutRender(current, next) {
 function layoutRenderCanUseCheap(request) {
   return !request.forceFull
     && request.prevShape === request.nextShape
-    && grid.querySelector('.drop-slot[data-slot]');
+    && (grid.querySelector('.drop-slot[data-slot]') || dockviewLayoutActive());
 }
 
 function performLayoutRender(request = {}) {
@@ -4551,9 +5868,13 @@ function performLayoutRender(request = {}) {
   if (layoutRenderCanUseCheap(renderRequest)) {
     // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
     // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
-    syncActivePanelsInPlace();
-    renderPaneTabStrips();
-    syncPanelVisibility(previousActive);
+    syncActivePanelsInPlace(previousActive);
+    // Dockview's in-place sync already refreshes its tab renderers and mounted panels. Running the
+    // generic strip pass again repeats that same work during every active-tab adoption.
+    if (!dockviewLayoutActive()) {
+      renderPaneTabStrips();
+      syncPanelVisibility(previousActive);
+    }
     return;
   }
   renderSessionButtons();
@@ -4562,7 +5883,7 @@ function performLayoutRender(request = {}) {
 
 function requestLayoutRender(request = {}) {
   const renderRequest = layoutRenderRequest(request);
-  if (dragSession != null) {
+  if (dragState.item != null) {
     pendingLayoutRender = mergePendingLayoutRender(pendingLayoutRender, renderRequest);
     return;
   }
@@ -4593,9 +5914,6 @@ function updateActiveSessionParam() {
     queryParts.push(`layout=${layoutParamValue(layoutSlots)}`);
     const tabs = layoutTabsParamValue(layoutSlots);
     if (tabs) queryParts.push(`tabs=${tabs}`);
-    if (paneItems(layoutSlots).some(isFileExplorerItem)) {
-      queryParts.push(`finder=${readableParamComponent(normalizeFileExplorerMode(fileExplorerMode))}`);
-    }
     const state = layoutUrlStateParamValue();
     if (state) queryParts.push(`state=${state}`);
   }

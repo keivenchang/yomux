@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import ast
 from contextlib import contextmanager
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
+
+from yolomux_lib.background_owner import pid_is_alive as background_owner_pid_is_alive
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +24,60 @@ def load_check_module():
     return module
 
 
+def test_python_imports_are_module_scoped():
+    roots = [
+        REPO_ROOT / "yolomux.py",
+        REPO_ROOT / "tmux_wall.py",
+        REPO_ROOT / "auto_approve_tmux.py",
+        REPO_ROOT / "yolomux_lib",
+        REPO_ROOT / "tools",
+        REPO_ROOT / "tests",
+    ]
+    paths = []
+    for root in roots:
+        paths.extend(sorted(root.rglob("*.py")) if root.is_dir() else [root])
+    violations = []
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            parent = parents.get(node)
+            while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parent = parents.get(parent)
+            if parent is not None:
+                violations.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}: {ast.unparse(node)}")
+    assert violations == []
+
+
+def test_runtime_and_tool_function_bodies_are_not_exact_duplicates():
+    functions = {}
+    duplicates = []
+    for root in (REPO_ROOT / "yolomux_lib", REPO_ROOT / "tools"):
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(node.body) < 2:
+                    continue
+                body = ast.dump(ast.Module(body=node.body, type_ignores=[]), include_attributes=False)
+                location = f"{path.relative_to(REPO_ROOT)}:{node.lineno}:{node.name}"
+                if body in functions:
+                    duplicates.append((functions[body], location))
+                else:
+                    functions[body] = location
+    assert duplicates == []
+
+
+def test_check_runner_reuses_background_owner_process_liveness():
+    check = load_check_module()
+    assert check.pid_is_alive is background_owner_pid_is_alive
+
+
 def test_default_check_lanes_keep_full_pytest_gate():
     check = load_check_module()
     lanes = check.lanes()
@@ -32,9 +90,13 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
     assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e and not browser", "-q"]
+    boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
+    assert boot_lane.default is False
+    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
-    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e", "-q"]
+    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot", "-q"]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]
@@ -70,11 +132,64 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "-m",
         "pytest",
         "tests",
+        "-m",
+        "boot",
+        "-q",
+    ]
+    assert lanes["pytest-browser"].steps[1].args == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
         "-n",
         "auto",
+        "--dist",
+        "worksteal",
         "-m",
-        "browser and not e2e",
+        "browser and not e2e and not boot",
         "-q",
+    ]
+    assert lanes["pytest-boot"].steps[0].args == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-m",
+        "boot",
+        "-q",
+    ]
+
+
+def test_every_slowest_first_base_node_id_resolves_in_collection():
+    test_config = sys.modules["conftest"]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    collected = {
+        line.split("[", 1)[0]
+        for line in result.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    }
+    missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid not in collected]
+    assert missing == []
+
+
+def test_non_drag_browser_actions_use_the_shared_fast_pointer_helper():
+    paths = [
+        REPO_ROOT / "tests" / "test_browser_layout.py",
+        REPO_ROOT / "tests" / "test_browser_dockview.py",
+        REPO_ROOT / "tests" / "test_browser_share.py",
+    ]
+    direct_uses = []
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        direct_uses.extend((path.name, line) for line in source.splitlines() if "ActionChains(browser)" in line)
+    assert direct_uses == [
+        ("test_browser_layout.py", "    ActionChains(browser).move_to_element(slider).click_and_hold().move_by_offset("),
     ]
 
 
@@ -107,14 +222,14 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
     monkeypatch.setattr(check, "expensive_tool_lock", fake_expensive_tool_lock)
-    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [{"port": 8002}, {"port": 7777}])
+    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [{"port": 7772}, {"port": 7770}])
     monkeypatch.setattr(check, "lower_current_process_priority", lambda records: events.append(("nice", records)) or True)
     monkeypatch.setattr(check, "run_parallel", fake_run_parallel)
 
     assert check.main([]) == 0
 
     assert events[0] == ("lock", True, check.DEFAULT_TOOL_LOCK_PATH)
-    assert events[1] == ("nice", [{"port": 8002}, {"port": 7777}])
+    assert events[1] == ("nice", [{"port": 7772}, {"port": 7770}])
     assert events[2][0] == "run"
     assert events[2][1] == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
     output = capsys.readouterr().out

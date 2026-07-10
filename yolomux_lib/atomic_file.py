@@ -49,6 +49,9 @@ def file_lock(path: Path, dir_mode: int | None = None) -> Any:
         with lock_path.open("a+", encoding="utf-8") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
+                # Keep the persistent lock's timestamp meaningful: it records the last process
+                # that acquired exclusive ownership without changing the lock's contents.
+                os.utime(lock_path, None)
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

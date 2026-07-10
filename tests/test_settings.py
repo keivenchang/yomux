@@ -1,5 +1,7 @@
+import json
 import os
 from pathlib import Path
+import re
 import threading
 
 
@@ -14,6 +16,12 @@ from yolomux_lib.settings import sanitize_settings
 from yolomux_lib.settings import settings_catalog
 from yolomux_lib.settings import settings_payload
 from yolomux_lib.settings import write_settings_file
+from yolomux_lib.activity_summary import deterministic_yoagent_reply
+from yolomux_lib.web import current_language_pref
+from yolomux_lib.web import html_lang_dir_attrs
+from yolomux_lib.web import LOGIN_LOCALE_CHOICES
+from yolomux_lib.web import login_html
+from yolomux_lib.web import save_login_locale
 from yolomux_lib.yoagent.actions import parse_yoagent_action_intent
 from yolomux_lib.yoagent.preferences import parse_settings_write
 
@@ -43,6 +51,20 @@ def test_stale_agent_window_cooldown_default_migrates_to_workflow_transition_glo
     custom = sanitize_settings({"performance": {"agent_window_cooldown_seconds": 45}})
     assert custom["performance"]["workflow_transition_glow_seconds"] == 45
     assert "agent_window_cooldown_seconds" not in custom["performance"]
+
+
+def test_legacy_badge_pulse_migrates_to_the_shared_notification_duration():
+    defaults = default_settings()
+
+    migrated_default = sanitize_settings({"appearance": {"metadata_badge_pulse_seconds": 20}})
+    assert migrated_default["performance"]["workflow_transition_glow_seconds"] == 60
+    assert "metadata_badge_pulse_seconds" not in migrated_default["appearance"]
+
+    migrated_custom = sanitize_settings({"appearance": {"metadata_badge_pulse_seconds": 45}})
+    assert migrated_custom["performance"]["workflow_transition_glow_seconds"] == 45
+
+    explicit_shared = sanitize_settings({"appearance": {"metadata_badge_pulse_seconds": 45}, "performance": {"workflow_transition_glow_seconds": 90}})
+    assert explicit_shared["performance"]["workflow_transition_glow_seconds"] == 90
 
 
 def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp_path):
@@ -155,6 +177,15 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["share"]["scheme"] == "http"
     assert sanitize_settings({"share": {"scheme": "https"}})["share"]["scheme"] == "https"
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
+    assert settings["notifications"]["notify_working_attention"] is True
+    assert settings["notifications"]["notify_working_done"] is False
+    assert sanitize_settings({"notifications": {"notify_working_attention": False, "notify_working_done": True}})["notifications"] == {
+        "toast_duration_ms": 10000,
+        "notify_transitions": ["needs-input", "needs-approval", "blocked"],
+        "notify_working_attention": False,
+        "notify_working_done": True,
+        "throttle_seconds": 60,
+    }
     assert settings["updates"]["notify_level"] == "patch"
     assert sanitize_settings({"updates": {"notify_level": "minor"}})["updates"]["notify_level"] == "minor"
     assert settings["file_explorer"]["dir_cache_ms"] == 5000
@@ -208,7 +239,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["general"]["auto_focus"] is False
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
-    assert payload["settings"]["appearance"]["tab_width"] == 180
+    assert payload["settings"]["appearance"]["tab_width"] == 172
     assert payload["settings"]["general"]["default_layout"] == "split"
     assert payload["choices"]["general.default_layout"] == ["single", "split", "grid"]
     assert payload["catalog"]["general.default_layout"]["choices"] == ["single", "split", "grid"]
@@ -218,6 +249,8 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["choices"]["share.view_fit"] == ["cover", "contain"]
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
+    assert {".git", ".ssh", ".uploads", "__pycache__", "node_modules"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
+    assert {"~/.config/gh", "~/.config/git", "~/.cache/huggingface"} <= set(payload["settings"]["file_explorer"]["index_exclude_paths"])
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["catalog"]["general.default_sessions"]["gui"]["visible"] is False
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
@@ -294,6 +327,13 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["appearance.tab_width"]["units"] == "pixels"
     assert catalog["performance.workflow_transition_glow_seconds"]["default"] == 60
     assert catalog["performance.workflow_transition_glow_seconds"]["limits"] == {"min": 0, "max": 300}
+    assert catalog["chat.retention_days"] == {
+        **catalog["chat.retention_days"],
+        "default": 7,
+        "limits": {"min": 1, "max": 365},
+        "units": "days",
+        "gui": {"section": "YO!chat", "section_locale_key": "brand.tab.chat", "visible": True},
+    }
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
     assert catalog["uploads.subdir"]["empty_allowed"] is True
     assert catalog["uploads.image_action_order"]["list_limit"] == 9
@@ -323,8 +363,12 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
     assert catalog["summary.timeout_seconds"]["limits"] == {"min": 30, "max": 3600}
     assert catalog["yoagent.system_prompt"]["requires_confirmation"] is True
     assert catalog["yoagent.system_prompt"]["sensitivity"] == "prompt"
-    assert catalog["appearance.theme"]["gui"] == {"section": "Appearance", "visible": True}
-    assert catalog["share.view_fit"]["gui"] == {"section": "", "visible": False}
+    assert catalog["appearance.theme"]["gui"] == {
+        "section": "Appearance",
+        "section_locale_key": "pref.section.appearance",
+        "visible": True,
+    }
+    assert catalog["share.view_fit"]["gui"] == {"section": "", "section_locale_key": "", "visible": False}
 
 
 def test_stale_yoagent_model_settings_revert_to_valid_defaults():
@@ -338,6 +382,23 @@ def test_stale_yoagent_model_settings_revert_to_valid_defaults():
     assert sanitized["yoagent"]["codex_model"] == "gpt-5.3-codex-spark"
     assert sanitized["yoagent"]["claude_model"] == "claude-fable-5"
     assert sanitize_settings({"yoagent": {"claude_model": "claude-fable-6"}})["yoagent"]["claude_model"] == "claude-haiku-4-5"
+
+
+def test_chat_retention_setting_defaults_clamps_and_rejects_stale_values(tmp_path):
+    assert default_settings()["chat"]["retention_days"] == 7
+    assert sanitize_settings({"chat": {"retention_days": 0}})["chat"]["retention_days"] == 1
+    assert sanitize_settings({"chat": {"retention_days": 999}})["chat"]["retention_days"] == 365
+    assert sanitize_settings({"chat": {"retention_days": "stale"}})["chat"]["retention_days"] == 7
+
+    payload = save_settings({"chat": {"retention_days": 30}}, tmp_path / "settings.yaml")
+    assert payload["settings"]["chat"]["retention_days"] == 30
+
+
+def test_every_locale_has_chat_retention_catalog_keys():
+    required = {"brand.tab.chat", "pref.chat.retention_days.label", "pref.chat.retention_days.help"}
+    for path in sorted((REPO_ROOT / "static_src/locales").glob("*.json")):
+        catalog = json.loads(path.read_text(encoding="utf-8"))
+        assert required <= set(catalog), path.name
 
 
 def test_summary_settings_reject_invalid_backend_defaults():
@@ -362,23 +423,27 @@ def test_summary_settings_reject_invalid_backend_defaults():
 
 def test_preferences_source_paths_are_in_backend_catalog():
     source = (REPO_ROOT / "static_src/js/yolomux/82_preferences_panel.js").read_text(encoding="utf-8")
-    paths = set()
-    for line in source.splitlines():
-        if "{path:" not in line:
-            continue
-        for part in line.split("{path:")[1:]:
-            quote = "'" if "'" in part[:2] else '"'
-            if quote not in part:
-                continue
-            value = part.split(quote, 2)[1]
-            if "." in value:
-                paths.add(value)
+    paths = set(re.findall(r"preferenceSettingItem\(['\"]([^'\"]+)['\"]", source))
 
     catalog = settings_catalog(default_settings())
     assert paths, "Preferences source should declare setting paths"
     assert paths <= set(catalog), sorted(paths - set(catalog))
     assert "general.default_layout" in paths
     assert "wall" not in catalog["general.default_layout"]["choices"]
+    assert "function preferenceSettingLocaleKeys(path)" in source
+    assert "settingCatalogEntry(path).locale_keys" in source
+    assert re.search(r"\{\s*path\s*:", source) is None, "path-backed Preferences rows must use preferenceSettingItem()"
+    assert "t(`common.effort.${value}`)" in source
+    assert "pref.yoagent.codex_effort.${value}" not in source
+    assert "pref.yoagent.claude_effort.${value}" not in source
+    english = json.loads((REPO_ROOT / "static_src/locales/en.json").read_text(encoding="utf-8"))
+    for path in paths:
+        for locale_key in catalog[path]["locale_keys"].values():
+            assert locale_key in english, (path, locale_key)
+    assert catalog["general.language"]["locale_keys"]["label"] == "common.language"
+    assert catalog["appearance.preview_font_size"]["locale_keys"]["label"] == "common.previewFontSize"
+    assert catalog["file_explorer.quick_access_paths"]["locale_keys"]["label"] == "common.quickPaths"
+    assert catalog["github.watched_prs"]["locale_keys"]["label"] == "common.watchedPrs"
 
 
 def test_startup_helpers_setting_migrates_to_startup_tips():
@@ -397,7 +462,7 @@ def test_yoagent_deterministic_preference_alias_write_fixtures():
     cases = [
         ("change background to white", "appearance.theme", "light"),
         ("change background to black", "appearance.theme", "dark"),
-        ("make tabs wider", "appearance.tab_width", 200),
+        ("make tabs wider", "appearance.tab_width", 192),
         ("tab width 220", "appearance.tab_width", 220),
         ("make UI smaller", "appearance.ui_font_size", 12),
         ("terminal font bigger", "appearance.terminal_font_size", 14),
@@ -509,11 +574,6 @@ def test_save_settings_reports_coerced_keys(tmp_path):
 def test_login_locale_picker_writes_general_language():
     # Phase 1: the login-screen language picker (entry point #1) renders endonym options and a
     # successful pick is persisted to general.language (the same setting topbar/Preferences write).
-    from yolomux_lib.web import LOGIN_LOCALE_CHOICES
-    from yolomux_lib.web import current_language_pref
-    from yolomux_lib.web import login_html
-    from yolomux_lib.web import save_login_locale
-
     assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr"]
     page = login_html()
     assert 'name="locale"' in page
@@ -524,7 +584,6 @@ def test_login_locale_picker_writes_general_language():
     for label in ["Tiếng Việt", "ไทย", "Türkçe", "Nederlands", "Polski", "Italiano"]:
         assert label in page
     # Phase 2: the <html> shell carries lang + dir; Arabic is rendered right-to-left.
-    from yolomux_lib.web import html_lang_dir_attrs
     assert html_lang_dir_attrs("en") == 'lang="en" dir="ltr"'
     assert html_lang_dir_attrs("ar") == 'lang="ar" dir="rtl"'
     assert 'dir="rtl"' in login_html(current_locale="ar")
@@ -556,10 +615,7 @@ def test_login_locale_picker_writes_general_language():
 
 
 def test_deterministic_yoagent_reply_localizes_framing():
-    # Phase 3: the no-agent fallback localizes its fixed framing (prefix + no-activity headline)
-    # via the saved/active locale. The generated per-session prose stays English (LLM backends localize).
-    from yolomux_lib.activity_summary import deterministic_yoagent_reply
-
+    # The no-agent fallback resolves both framing and per-session facts through the active locale.
     en_reply = deterministic_yoagent_reply("status?", {}, {}, "en")
     assert "No AI backend is answering" in en_reply
     assert "No AI agent activity is available yet." in en_reply
@@ -640,6 +696,8 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
     stale_share = sanitize_settings({"share": {"max_viewers": 5}})
     assert stale_share["share"]["max_viewers"] == defaults["share"]["max_viewers"]
+    stale_index_refresh = sanitize_settings({"file_explorer": {"index_refresh_seconds": 120}})
+    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 1800
 
     custom = sanitize_settings({
         "performance": {

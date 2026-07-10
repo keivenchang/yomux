@@ -2,6 +2,17 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Shared Claude/Codex tmux-window activity state for pane tabs, Tabber, Info Bar, and popovers.
 
+const AGENT_WINDOW_VISIBLE_TONES = Object.freeze([STATE_KEY.working, 'attention', 'cooldown']);
+const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'cooldown', STATE_KEY.working]);
+const AGENT_WINDOW_METADATA_FIELDS = Object.freeze([
+  'pane', 'pane_target', 'pid', 'window_name', 'label', 'window_label', 'current', 'window_active',
+  'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id',
+]);
+
+function agentWindowVisibleTone(value) {
+  return AGENT_WINDOW_VISIBLE_TONES.includes(value);
+}
+
 function agentWindowPathEntries(agent) {
   const entries = [];
   const seen = new Set();
@@ -36,10 +47,37 @@ function agentWindowPrimaryPath(agent) {
   return entry?.path || String(agent?.path || '').trim();
 }
 
+function agentWindowIndex(agent) {
+  const value = agent?.window_index ?? agent?.window;
+  return value === null || value === undefined || String(value).trim() === '' ? null : tmuxWindowIndexKey(value);
+}
+
 function agentWindowPayloadKey(agent) {
-  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const index = agentWindowIndex(agent);
   const kind = agentWindowKind(agent?.kind);
   return index !== null && kind ? `${index}:${kind}` : '';
+}
+
+function agentWindowInfoPane(info, agent) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const paneTarget = String(agent?.pane_target || agent?.pane || '').trim();
+  if (paneTarget) {
+    const exact = panes.find(item => [item?.target, item?.pane_id].some(value => String(value || '').trim() === paneTarget));
+    if (exact) return exact;
+  }
+  const index = agentWindowIndex(agent);
+  if (index === null) return null;
+  const windowPanes = panes.filter(item => tmuxWindowIndexKey(item?.window_index ?? item?.window) === index);
+  return windowPanes.length === 1 ? windowPanes[0] : null;
+}
+
+function agentWindowPhysicalKey(agent, info = null) {
+  const infoPane = agentWindowInfoPane(info, agent);
+  const pane = String(infoPane?.target || infoPane?.pane_id || agent?.pane_target || agent?.pane || '').trim();
+  if (pane) return `pane:${pane}`;
+  const index = agentWindowIndex(agent);
+  if (index === null) return agentWindowPayloadKey(agent);
+  return `window:${index}`;
 }
 
 function agentWindowStateKey(state) {
@@ -71,8 +109,10 @@ function agentWindowStateRank(state) {
 function agentWindowActivityVisualRank(state) {
   const tone = agentWindowActivityTone(state);
   if (tone === 'attention') return 0;
-  if (tone === 'cooldown') return 1;
-  if (tone === STATE_KEY.working) return 2;
+  // A live worker wins over a completed worker. Otherwise a yellow child can make the session
+  // look stopped while another child is still doing work.
+  if (tone === STATE_KEY.working) return 1;
+  if (tone === 'cooldown') return 2;
   if (tone === 'active') return 3;
   return 9;
 }
@@ -119,50 +159,63 @@ function agentWindowPayloadRows(value) {
   return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
 }
 
-function agentWindowObservedTs(agent) {
-  for (const key of ['observed_ts', 'observedTs', 'captured_ts', 'updated_ts']) {
-    const value = Number(agent?.[key] || 0);
-    if (Number.isFinite(value) && value > 0) return value;
+function agentWindowLiveKindFromInfo(info, agent) {
+  const pane = agentWindowInfoPane(info, agent);
+  for (const value of [pane?.process_label, pane?.window_name, pane?.command]) {
+    const kind = agentWindowKind(value);
+    if (kind) return kind;
   }
-  return 0;
+  return '';
 }
 
-function agentWindowStateMergeRank(state) {
-  const key = agentWindowStateKey(state);
-  if (agentWindowIsAttentionState(key)) return 0;
-  if (key === STATE_KEY.working) return 1;
-  if (key === 'cooldown') return 2;
-  if (key === 'active') return 3;
-  if (key === STATE_KEY.idle) return 4;
-  return 9;
-}
-
-function agentWindowPayloadIsPreferred(candidate, current) {
-  if (!current) return true;
-  const candidateTs = agentWindowObservedTs(candidate);
-  const currentTs = agentWindowObservedTs(current);
-  if (candidateTs > 0 || currentTs > 0) {
-    if (candidateTs !== currentTs) return candidateTs > currentTs;
+function agentWindowMetadataPayload(agent) {
+  const metadata = {};
+  for (const field of AGENT_WINDOW_METADATA_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(agent || {}, field)) metadata[field] = agent[field];
   }
-  const candidateRank = agentWindowStateMergeRank(candidate?.state);
-  const currentRank = agentWindowStateMergeRank(current?.state);
-  if (candidateRank !== currentRank) return candidateRank < currentRank;
-  return true;
+  return metadata;
 }
 
-function mergedAgentWindowBaseRows(stateRows, activityRows, infoRows) {
+function mergedAgentWindowMetadataRows(activityRows, infoRows, info = null) {
   const rowsByKey = new Map();
   const looseRows = [];
-  for (const row of [...infoRows, ...activityRows, ...stateRows]) {
-    const key = agentWindowPayloadKey(row);
-    if (!key) {
-      looseRows.push(row);
-      continue;
+  const sources = [
+    {rows: infoRows, priority: 1},
+    {rows: activityRows, priority: 2},
+  ];
+  for (const source of sources) {
+    for (const row of source.rows) {
+      const key = agentWindowPhysicalKey(row, info);
+      if (!key) {
+        looseRows.push(row);
+        continue;
+      }
+      const current = rowsByKey.get(key);
+      const liveKind = agentWindowLiveKindFromInfo(info, row);
+      const rowKind = agentWindowKind(row?.kind);
+      const currentKind = agentWindowKind(current?.row?.kind);
+      const liveKindDecision = liveKind && rowKind !== currentKind
+        ? rowKind === liveKind
+        : null;
+      const preferred = !current
+        || liveKindDecision === true
+        || (liveKindDecision === null && source.priority > current.priority);
+      if (preferred) rowsByKey.set(key, {row, priority: source.priority});
     }
-    const current = rowsByKey.get(key);
-    if (agentWindowPayloadIsPreferred(row, current)) rowsByKey.set(key, row);
   }
-  return [...rowsByKey.values(), ...looseRows];
+  return [...rowsByKey.values()].map(item => ({
+    kind: item.row.kind,
+    window: item.row.window,
+    window_index: item.row.window_index,
+    state: '',
+    ...agentWindowMetadataPayload(item.row),
+  })).concat(looseRows.map(row => ({
+    kind: row.kind,
+    window: row.window,
+    window_index: row.window_index,
+    state: '',
+    ...agentWindowMetadataPayload(row),
+  })));
 }
 
 function agentWindowStatusVisualSignature(payload = {}) {
@@ -170,7 +223,7 @@ function agentWindowStatusVisualSignature(payload = {}) {
     .map(agent => normalizedAgentWindowPayload(agent))
     .map(agent => ({
       kind: agent.kind,
-      window_index: tmuxWindowIndexKey(agent.window_index ?? agent.window),
+      window_index: agentWindowIndex(agent),
       state: agentWindowStateKey(agent.state),
       current: agentWindowPayloadCurrent(agent) === true,
       window_active: agent.window_active === true,
@@ -178,6 +231,10 @@ function agentWindowStatusVisualSignature(payload = {}) {
       working_stopped_ts: Number.isFinite(Number(agent.working_stopped_ts)) ? Number(agent.working_stopped_ts) : null,
       last_active_ts: Number.isFinite(Number(agent.last_active_ts)) ? Number(agent.last_active_ts) : null,
       idle_since: Number.isFinite(Number(agent.idle_since)) ? Number(agent.idle_since) : null,
+      attention_key: String(agent.attention_key || ''),
+      attention_acknowledged: agent.attention_acknowledged === true,
+      cooldown_attention_key: String(agent.cooldown_attention_key || ''),
+      cooldown_acknowledged: agent.cooldown_acknowledged === true,
     }))
     .sort((a, b) => String(a.window_index ?? '').localeCompare(String(b.window_index ?? '')) || a.kind.localeCompare(b.kind));
   return JSON.stringify(rows);
@@ -188,7 +245,11 @@ function mergeAgentWindowPayload(base, candidates) {
   const enrich = candidates
     .map(rows => rows.find(row => agentWindowPayloadKey(row) === key))
     .find(Boolean) || {};
-  const merged = {...enrich, ...base};
+  const merged = {...base};
+  const metadata = agentWindowMetadataPayload(enrich);
+  for (const [field, value] of Object.entries(metadata)) {
+    if (merged[field] === undefined || merged[field] === null || merged[field] === '') merged[field] = value;
+  }
   if (!agentWindowPathEntries(merged).length && agentWindowPathEntries(enrich).length) {
     merged.path = enrich.path;
     merged.paths = enrich.paths;
@@ -224,14 +285,18 @@ function activeTmuxWindowIndexFromInfo(info = null) {
 
 function agentWindowWithInfoActiveWindow(agent, activeIndex = null) {
   if (activeIndex === null) return agent;
-  const agentIndex = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const agentIndex = agentWindowIndex(agent);
   if (agentIndex === null) return agent;
   const active = agentIndex === activeIndex;
   if (agent?.current === active && agent?.window_active === active) return agent;
   return {...agent, current: active, window_active: active};
 }
 
-function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
+function sessionAgentWindowScreenIsWorking(payload) {
+  return String(payload?.screen?.key || '') === STATE_KEY.working;
+}
+
+function sessionAgentWindowStatusModel(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
     ? tabberActivityPayload.agent_windows[String(session || '')]
@@ -239,11 +304,16 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  const source = mergedAgentWindowBaseRows(stateRows, activityRows, infoRows);
+  // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
+  // metadata can identify a window and enrich its path/git details, but never provide a
+  // color, transition, or acknowledgement when the canonical status is unavailable.
+  const source = stateRows.length
+    ? stateRows
+    : mergedAgentWindowMetadataRows(activityRows, infoRows, info);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
-      state: STATE_KEY.idle,
+      state: '',
       pane_target: agent?.pane_target || '',
       window_label: agent?.window_label || '',
       transcript: agent?.transcript || '',
@@ -253,24 +323,106 @@ function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = nu
       idle_since: null,
     }));
   const activeIndex = activeTmuxWindowIndexFromInfo(info);
-  return fallback
-    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows, stateRows]))
+  const agents = fallback
+    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
+  for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
+    if (agents.some(agent => agentWindowPhysicalKey(agent, info) === agentWindowPhysicalKey(visualAgent, info))) continue;
+    agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
+  }
+  const hasAttributedWindows = agents.some(agent => agentWindowIndex(agent) !== null);
+  const screenWorking = sessionAgentWindowScreenIsWorking(statePayload);
+  const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent.state));
+  // The screen capture is authoritative for a current working turn even before the per-window
+  // activity poll catches up. Promote one non-attention window here, at the shared model boundary,
+  // so the window bar, parent tab, Tabber, and session working count all see the same row.
+  const screenProxyIndex = screenWorking && !hasWorkingWindow
+    ? agents.findIndex(agent => agentWindowPayloadCurrent(agent) === true && !agentWindowIsAttentionState(agent.state))
+    : -1;
+  const fallbackProxyIndex = screenWorking && !hasWorkingWindow && screenProxyIndex < 0
+    ? agents.findIndex(agent => !agentWindowIsAttentionState(agent.state))
+    : -1;
+  const proxyIndex = screenProxyIndex >= 0 ? screenProxyIndex : fallbackProxyIndex;
+  const effectiveAgents = proxyIndex >= 0
+    ? agents.map((agent, index) => (index === proxyIndex ? {...agent, state: STATE_KEY.working, screen_working_proxy: true} : agent))
+    : agents;
+  return {agents: effectiveAgents, hasAttributedWindows, screenWorking, screenProxyIndex: proxyIndex};
+}
+
+function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
+  return sessionAgentWindowStatusModel(session, info, autoPayload).agents;
+}
+
+function sessionAgentWindowHasWorkingSignal(session, info = null, autoPayload = null) {
+  const model = sessionAgentWindowStatusModel(session, info, autoPayload);
+  return model.screenWorking || model.agents.some(agent => agentWindowIsWorkingState(agent.state));
+}
+
+function sessionAgentWindowStatusSummary(session, info = null, autoPayload = null) {
+  const model = sessionAgentWindowStatusModel(session, info, autoPayload);
+  const {agents, hasAttributedWindows} = model;
+  if (!agents.length) return {agents, hasAttributedWindows, agent: null, item: null, acknowledgement: null};
+  let selected = null;
+  let acknowledging = null;
+  let acknowledgement = null;
+  const visibleItems = [];
+  for (const agent of agents) {
+    const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session);
+    const tone = agentWindowStatusToneForItem(item);
+    if (!item || (tone !== 'acknowledged' && !agentWindowVisibleTone(tone))) continue;
+    const rank = agentWindowStatusItemVisualRank(item);
+    const selectedRank = selected ? agentWindowStatusItemVisualRank(selected.item) : 99;
+    const current = agentWindowPayloadCurrent(agent) === true;
+    const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
+    visibleItems.push({agent, item, tone});
+    if (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent)) selected = {agent, item};
+    if (tone === 'acknowledged') acknowledging = {agent, item};
+    if (['attention', 'cooldown'].includes(tone)) {
+      const acknowledgementRank = acknowledgement ? agentWindowStatusItemVisualRank(acknowledgement.item) : 99;
+      const acknowledgementCurrent = acknowledgement ? agentWindowPayloadCurrent(acknowledgement.agent) === true : false;
+      if (!acknowledgement || rank < acknowledgementRank || (rank === acknowledgementRank && current && !acknowledgementCurrent)) acknowledgement = {agent, item};
+    }
+  }
+  if (!selected) return {agents, hasAttributedWindows, agent: null, item: null, acknowledgement: null};
+  // A parent tab briefly mirrors the gray acknowledgement of the child the user just acted on.
+  // This feedback must not be hidden by a sibling that remains green and working.
+  if (acknowledging) selected = acknowledging;
+  const allAggregateTones = AGENT_WINDOW_AGGREGATE_TONES
+    .filter(tone => visibleItems.some(entry => entry.tone === tone));
+  const item = {
+    ...selected.item,
+    pulseActive: visibleItems.some(({item: child}) => child.pulseActive === true),
+    transitionPulseActive: visibleItems.some(({item: child}) => child.transitionPulseActive === true),
+    aggregateTones: allAggregateTones,
+    allAggregateTones,
+  };
+  return {
+    agents,
+    hasAttributedWindows,
+    ...selected,
+    acknowledgement,
+    item,
+    label: item.label || agentLabel(selected.agent?.kind),
+  };
 }
 
 function windowViewModel(session, windowIndex, info = null, autoPayload = null) {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (indexKey === null) return null;
   return sessionAgentWindowStatusPayloads(session, info, autoPayload)
-    .find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
+    .find(agent => agentWindowIndex(agent) === indexKey) || null;
 }
 
 function agentWindowStatusForRecord(session, record, info = null) {
   const indexKey = tmuxWindowIndexKey(record?.index ?? record?.indexText);
   if (indexKey === null) return null;
   const rows = sessionAgentWindowStatusPayloads(session, info);
-  return rows.find(agent => tmuxWindowIndexKey(agent.window_index ?? agent.window) === indexKey) || null;
+  return rows.find(agent => agentWindowIndex(agent) === indexKey) || null;
+}
+
+function agentWindowStatusForSessionWindow(session, windowIndex, info = null, autoPayload = null) {
+  return windowViewModel(session, windowIndex, info, autoPayload);
 }
 
 function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
@@ -278,21 +430,45 @@ function agentWindowIdleSeconds(agent, nowSeconds = Date.now() / 1000) {
   return Number.isFinite(lastActive) && lastActive > 0 ? Math.max(0, nowSeconds - lastActive) : null;
 }
 
-const agentWindowActivityStates = new Map();
-const agentWindowStoppedTimers = new Map();
-const agentWindowTransitionPulseTimers = new Map();
-const agentWindowAcknowledgedStops = new Map();
+const agentWindowActivityRecords = new Map();
+
+function createAgentWindowActivityRecord() {
+  return {
+    activity: null,
+    stoppedRefresh: null,
+    transitionPulseRefresh: null,
+    acknowledgedStoppedAt: 0,
+    acknowledgementVisual: null,
+  };
+}
+
+function agentWindowActivityRecord(key, create = false) {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return null;
+  let record = agentWindowActivityRecords.get(normalizedKey) || null;
+  if (!record && create) {
+    record = createAgentWindowActivityRecord();
+    agentWindowActivityRecords.set(normalizedKey, record);
+  }
+  return record;
+}
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
 const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
 const agentWindowActivityPulseAnimationNames = new Set([
   'attention-ring-fade',
-  'working-ball-hard-flash',
-  'agent-status-transition-pulse',
+  'agent-status-acknowledgement-fade',
+  'agent-status-opacity-pulse',
   'red-pill-fill-fade',
   'agent-symbol-glow-cadence',
 ]);
+
+function agentWindowAcknowledgementVisualDurationMs() {
+  return typeof attentionAnimationDurationMs === 'function'
+    ? attentionAnimationDurationMs(agentStatusPulsePeriodMs)
+    : Math.max(1, Number(agentStatusPulsePeriodMs) || 1);
+}
 
 function agentWindowTransitionGlowDurationSeconds() {
   return Math.max(0, Number(workflowTransitionGlowSeconds) || 0);
@@ -311,7 +487,10 @@ function agentWindowTransitionPulseActive(startedAt, nowSeconds = Date.now() / 1
 
 function agentWindowTransitionStartedAt(previous = {}, tone, nowSeconds) {
   const previousStartedAt = Number(previous.transitionStartedAt || 0);
-  return previous.visualTone === tone && previousStartedAt > 0 ? previousStartedAt : nowSeconds;
+  if (previous.visualTone === tone && previousStartedAt > 0) return previousStartedAt;
+  // Red/yellow are transition notifications only when work begins or ends. Moving between two
+  // already-settled notification colors must not restart their opacity pulse.
+  return !previous.visualTone || previous.visualTone === STATE_KEY.working ? nowSeconds : 0;
 }
 
 function scheduleAgentWindowStatusGlowRefresh(key, startedAt, options = {}) {
@@ -330,22 +509,25 @@ function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {})
   if (durationSeconds <= 0) return;
   const untilMs = (start + durationSeconds) * 1000;
   if (untilMs <= Date.now()) return;
-  const previous = agentWindowTransitionPulseTimers.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const previous = record.transitionPulseRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
   const timer = setTimeout(() => {
-    const current = agentWindowTransitionPulseTimers.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const current = currentRecord?.transitionPulseRefresh;
     if (!current || current.untilMs !== untilMs) return;
-    agentWindowTransitionPulseTimers.delete(key);
+    currentRecord.transitionPulseRefresh = null;
     refreshAgentWindowActivityDisplays();
   }, Math.max(0, untilMs - Date.now()));
-  agentWindowTransitionPulseTimers.set(key, {timer, untilMs});
+  record.transitionPulseRefresh = {timer, untilMs};
 }
 
 function clearAgentWindowTransitionPulseRefresh(key) {
-  const previous = agentWindowTransitionPulseTimers.get(key);
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.transitionPulseRefresh;
   if (previous?.timer) clearTimeout(previous.timer);
-  agentWindowTransitionPulseTimers.delete(key);
+  if (record) record.transitionPulseRefresh = null;
 }
 
 function mutationTouchesAgentWindowActivity(mutation) {
@@ -373,11 +555,20 @@ function disconnectAgentWindowActivityMutationObserver() {
   agentWindowActivityMutationObserver = null;
 }
 
+function agentWindowActivityAnimationUsesGlobalPhase(node, name) {
+  if (!agentWindowActivityPulseAnimationNames.has(name)) return false;
+  if (name !== 'agent-status-acknowledgement-fade') return true;
+  // Live acknowledgements begin fully opaque at the click and fade once. Only the looping
+  // Preferences sample joins the global phase shared by the colored pulse examples.
+  return node?.classList?.contains?.('agent-window-status-dot--acknowledgement-preview')
+    || Boolean(node?.querySelector?.('.agent-window-status-dot--acknowledgement-preview'));
+}
+
 function syncAgentWindowPulseAnimationCurrentTime(node, nowMs = Date.now()) {
   const animations = typeof node?.getAnimations === 'function' ? node.getAnimations({subtree: true}) : [];
   for (const animation of animations) {
     const name = String(animation?.animationName || '').trim();
-    if (!agentWindowActivityPulseAnimationNames.has(name)) continue;
+    if (!agentWindowActivityAnimationUsesGlobalPhase(node, name)) continue;
     const timing = animation.effect?.getTiming?.() || {};
     const duration = Number(timing.duration) || attentionAnimationDurationMs();
     if (!Number.isFinite(duration) || duration <= 0) continue;
@@ -397,9 +588,23 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
     if (!node?.style) continue;
     if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
-    if (localDelay && localDelay !== delay) node.style.removeProperty('--attention-animation-delay');
+    if (localDelay) node.style.removeProperty('--attention-animation-delay');
     syncAgentWindowPulseAnimationCurrentTime(node, nowMs);
   }
+}
+
+function restartAgentWindowActivityPulseAnimations(root = document) {
+  const scope = root?.querySelectorAll ? root : document;
+  const nodes = Array.from(scope?.querySelectorAll?.(agentWindowActivityPulseSelector) || []);
+  for (const node of nodes) {
+    const animations = typeof node?.getAnimations === 'function' ? node.getAnimations({subtree: true}) : [];
+    for (const animation of animations) {
+      if (!agentWindowActivityAnimationUsesGlobalPhase(node, String(animation?.animationName || '').trim())) continue;
+      animation.cancel?.();
+      animation.play?.();
+    }
+  }
+  syncAgentWindowActivityAnimationDelays(scope);
 }
 
 function scheduleAgentWindowActivityAnimationSync(root = document) {
@@ -424,36 +629,122 @@ function agentWindowActivityTransitionKey(agentKey, options = {}) {
   const session = String(options.session || '').trim();
   const windowIndex = tmuxWindowIndexKey(options.window_index ?? options.window);
   const pane = String(options.pane_target || options.pane || '').trim();
-  return [session, windowIndex ?? '', pane, kind].join(':');
+  // A tmux window index is stable across selection, while pane_target may arrive only in the
+  // async readback. Use the pane only when no window identity exists so the acknowledgment visual
+  // does not move to a different key immediately after the click.
+  return [session, windowIndex ?? '', windowIndex === null ? pane : '', kind].join(':');
 }
 
 function scheduleAgentWindowStoppedRefresh(key, untilMs) {
   if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
-  const previous = agentWindowStoppedTimers.get(key);
+  const record = agentWindowActivityRecord(key, true);
+  const previous = record.stoppedRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
   const delay = Math.max(0, untilMs - Date.now());
   const timer = setTimeout(() => {
-    const current = agentWindowStoppedTimers.get(key);
+    const currentRecord = agentWindowActivityRecord(key);
+    const current = currentRecord?.stoppedRefresh;
     if (!current || current.untilMs !== untilMs) return;
-    agentWindowStoppedTimers.delete(key);
+    currentRecord.stoppedRefresh = null;
     if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
       renderPanels(activePaneItems());
     }
   }, delay);
-  agentWindowStoppedTimers.set(key, {timer, untilMs});
+  record.stoppedRefresh = {timer, untilMs};
 }
 
 function clearAgentWindowStoppedRefresh(key) {
-  const previous = agentWindowStoppedTimers.get(key);
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.stoppedRefresh;
   if (previous?.timer) clearTimeout(previous.timer);
-  agentWindowStoppedTimers.delete(key);
+  if (record) record.stoppedRefresh = null;
 }
 
 function agentWindowStoppedIsAcknowledged(key, stoppedAt) {
   const stoppedAtNumber = Number(stoppedAt || 0);
-  const acknowledged = Number(agentWindowAcknowledgedStops.get(key) || 0);
+  const acknowledged = Number(agentWindowActivityRecord(key)?.acknowledgedStoppedAt || 0);
   return Boolean(key && stoppedAtNumber > 0 && acknowledged > 0 && Math.abs(acknowledged - stoppedAtNumber) < 0.001);
+}
+
+function agentWindowAcknowledgementVisualActive(key, nowMs = Date.now()) {
+  const record = agentWindowActivityRecord(key);
+  const visual = record?.acknowledgementVisual;
+  if (!visual) return false;
+  if (visual.untilMs > nowMs) return true;
+  if (visual.timer) clearTimeout(visual.timer);
+  record.acknowledgementVisual = null;
+  return false;
+}
+
+function agentWindowAcknowledgementVisualAgents(session) {
+  const sessionKey = String(session || '').trim();
+  const agents = [];
+  for (const [key, record] of agentWindowActivityRecords.entries()) {
+    const visual = record.acknowledgementVisual;
+    if (!agentWindowAcknowledgementVisualActive(key) || !visual.agent) continue;
+    if (String(visual.agent.session || '') !== sessionKey) continue;
+    agents.push(visual.agent);
+  }
+  return agents;
+}
+
+function clearAgentWindowAcknowledgementVisual(key) {
+  const record = agentWindowActivityRecord(key);
+  const visual = record?.acknowledgementVisual;
+  if (visual?.timer) clearTimeout(visual.timer);
+  if (record) record.acknowledgementVisual = null;
+}
+
+function clearAgentWindowActivityRecordsForSession(session) {
+  const prefix = `${String(session || '').trim()}:`;
+  if (prefix === ':') return;
+  for (const key of Array.from(agentWindowActivityRecords.keys())) {
+    if (!key.startsWith(prefix)) continue;
+    clearAgentWindowStoppedRefresh(key);
+    clearAgentWindowTransitionPulseRefresh(key);
+    clearAgentWindowAcknowledgementVisual(key);
+    agentWindowActivityRecords.delete(key);
+  }
+}
+
+function showAgentWindowAcknowledgementVisual(key, options = {}) {
+  if (!key) return false;
+  const acknowledgementKey = String(options.acknowledgementKey || '');
+  const record = agentWindowActivityRecord(key, true);
+  const current = record.acknowledgementVisual;
+  if (agentWindowAcknowledgementVisualActive(key) && String(current?.acknowledgementKey || '') === acknowledgementKey) {
+    if (options.refresh !== false && current?.refreshed !== true) {
+      current.refreshed = true;
+      refreshAgentWindowActivityDisplays();
+    }
+    return true;
+  }
+  const durationMs = agentWindowAcknowledgementVisualDurationMs();
+  const startedAtMs = Date.now();
+  const untilMs = startedAtMs + durationMs;
+  clearAgentWindowAcknowledgementVisual(key);
+  const timer = setTimeout(() => {
+    const currentRecord = agentWindowActivityRecord(key);
+    const visual = currentRecord?.acknowledgementVisual;
+    if (!visual || visual.untilMs !== untilMs) return;
+    currentRecord.acknowledgementVisual = null;
+    // The browser must retire the gray marker at the promised time even if the acknowledgement
+    // request is slow; a later explicit server false still re-arms a genuinely new prompt.
+    if (acknowledgementKey && typeof recordAttentionAcknowledgementKey === 'function') recordAttentionAcknowledgementKey(acknowledgementKey);
+    refreshAgentWindowActivityDisplays();
+  }, durationMs);
+  const sourceAgent = options.agent && typeof options.agent === 'object' ? options.agent : null;
+  const visualAgent = sourceAgent ? {
+    ...sourceAgent,
+    session: String(options.session || sourceAgent.session || ''),
+    window_index: options.windowIndex ?? sourceAgent.window_index ?? sourceAgent.window,
+    state: options.visualState === 'attention' ? (sourceAgent.state || STATE_KEY.needsInput) : (sourceAgent.state || STATE_KEY.idle),
+    working_stopped_ts: Number(options.stoppedAt || sourceAgent.working_stopped_ts || sourceAgent.workingStoppedTs || 0),
+  } : null;
+  record.acknowledgementVisual = {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent};
+  if (options.refresh !== false) refreshAgentWindowActivityDisplays();
+  return true;
 }
 
 function agentWindowActivityAcknowledgementKey(kind, state, options = {}, signature = '') {
@@ -479,7 +770,9 @@ function agentWindowActivityAcknowledgementKeyIsRecorded(key, options = {}) {
   if (!key) return false;
   if (options.attention_acknowledged === true || options.cooldown_acknowledged === true) return true;
   return typeof attentionAcknowledgementKeyIsRecorded === 'function'
-    ? attentionAcknowledgementKeyIsRecorded(key)
+    // A live per-window snapshot is more recent than the browser's optimistic acknowledgement
+    // cache. Passing it through prevents an identical later ASK from inheriting the old ACK.
+    ? attentionAcknowledgementKeyIsRecorded(key, options)
     : false;
 }
 
@@ -488,21 +781,29 @@ function refreshAgentWindowActivityDisplays() {
     renderPanels(activePaneItems(), {reason: 'agent-window-activity'});
   }
   if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+  if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
+    for (const session of activePaneItems()) {
+      if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
+      updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
+    }
+  }
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof refreshTabberPanels === 'function' && typeof fileExplorerMode !== 'undefined' && fileExplorerMode === 'tabber') refreshTabberPanels();
+  if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
 }
 
 function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null, options = {}) {
   const key = String(transitionKey || '').trim();
   if (!key) return false;
-  const previous = agentWindowActivityStates.get(key) || {};
+  const record = agentWindowActivityRecord(key);
+  const previous = record?.activity || {};
   const stoppedAtNumber = Number(stoppedAt ?? previous.stoppedAt ?? 0);
   if (!Number.isFinite(stoppedAtNumber) || stoppedAtNumber <= 0) return false;
   const currentStoppedAt = Number(previous.stoppedAt || 0);
   if (!Number.isFinite(currentStoppedAt) || currentStoppedAt <= 0 || Math.abs(currentStoppedAt - stoppedAtNumber) >= 0.001) return false;
   if (agentWindowStoppedIsAcknowledged(key, stoppedAtNumber)) return false;
-  agentWindowAcknowledgedStops.set(key, stoppedAtNumber);
+  record.acknowledgedStoppedAt = stoppedAtNumber;
   clearAgentWindowStoppedRefresh(key);
   clearAgentWindowTransitionPulseRefresh(key);
   if (options.refresh !== false) refreshAgentWindowActivityDisplays();
@@ -512,14 +813,12 @@ function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null
 function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, options = {}) {
   const sessionKey = String(session || '').trim();
   if (!sessionKey || !isTmuxSession(sessionKey)) return null;
-  const info = transcriptMeta.sessions?.[sessionKey] || null;
+  const info = transcriptMetadataState.payload.sessions?.[sessionKey] || null;
   const explicitIndex = windowIndex === null || windowIndex === undefined ? null : tmuxWindowIndexKey(windowIndex);
   let summaryIndex = null;
-  if (explicitIndex === null && options.preferSummary === true && typeof sessionStatusAgentWindowSummaryForTab === 'function') {
-    const summary = sessionStatusAgentWindowSummaryForTab(sessionKey, info, autoApproveStates.get(sessionKey));
-    if (['attention', 'cooldown'].includes(summary?.item?.state)) {
-      summaryIndex = tmuxWindowIndexKey(summary?.agent?.window_index ?? summary?.agent?.window);
-    }
+  if (explicitIndex === null && options.preferSummary === true) {
+    const summary = sessionAgentWindowStatusSummary(sessionKey, info, autoApproveStates.get(sessionKey));
+    summaryIndex = tmuxWindowIndexKey(summary?.acknowledgement?.agent?.window_index ?? summary?.acknowledgement?.agent?.window);
   }
   const activeIndex = explicitIndex !== null
     ? explicitIndex
@@ -538,18 +837,27 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   if (item?.acknowledged === true) return null;
   if (!['attention', 'cooldown'].includes(item?.state)) return null;
   const transitionKey = agentWindowActivityTransitionKey(agent.kind, itemOptions);
-  const previous = transitionKey ? agentWindowActivityStates.get(transitionKey) : null;
+  const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);
   const ackKey = item.state === 'cooldown'
     ? agentWindowActivityAcknowledgementKey(agent.kind, 'cooldown', itemOptions, stoppedAt)
     : agentWindowActivityAcknowledgementKey(agent.kind, agentWindowStateKey(agent.state), itemOptions, itemOptions.attention_signature || itemOptions.screen_text || agentWindowStateKey(agent.state));
-  if (ackKey) return {ackKey, transitionKey, stoppedAt, state: item.state};
-  return transitionKey && stoppedAt > 0 ? {transitionKey, stoppedAt, state: item.state} : null;
+  if (ackKey) return {ackKey, transitionKey, stoppedAt, state: item.state, agent};
+  return transitionKey && stoppedAt > 0 ? {transitionKey, stoppedAt, state: item.state, agent} : null;
 }
 
 function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {}) {
   const target = agentWindowActivityAcknowledgementTarget(session, windowIndex, options);
   if (!target) return false;
+  showAgentWindowAcknowledgementVisual(target.transitionKey, {
+    ...options,
+    acknowledgementKey: target.ackKey,
+    agent: target.agent,
+    session,
+    windowIndex,
+    visualState: target.state,
+    stoppedAt: target.stoppedAt,
+  });
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
   const acknowledgeStoppedTransition = () => (
     target.state === 'cooldown'
@@ -576,58 +884,94 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
   return acknowledgeStoppedTransition();
 }
 
+function agentWindowActivityLabel(agentKey, state, acknowledged = false) {
+  const kind = agentWindowKind(agentKey);
+  const stateKey = agentWindowStateKey(state);
+  const status = stateKey === 'cooldown'
+    ? t('state.cooldown')
+    : stateKey === 'active'
+      ? t('state.active')
+      : stateDef(stateKey).label;
+  return t('state.agentStatus', {
+    agent: agentLabel(kind),
+    status: acknowledged ? t('state.statusAcknowledged', {status}) : status,
+  });
+}
+
 function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return null;
   const nowSeconds = Number.isFinite(Number(options.nowSeconds)) ? Number(options.nowSeconds) : Date.now() / 1000;
   const transitionKey = agentWindowActivityTransitionKey(kind, options);
-  const previous = transitionKey ? (agentWindowActivityStates.get(transitionKey) || {}) : {};
+  const record = transitionKey ? agentWindowActivityRecord(transitionKey, true) : null;
+  const previous = record?.activity || {};
   const stateKey = agentWindowStateKey(state);
   const current = options.current === true || options.window_active === true;
+  const acknowledgementVisualActive = transitionKey ? agentWindowAcknowledgementVisualActive(transitionKey) : false;
+  const acknowledgementVisual = acknowledgementVisualActive ? record.acknowledgementVisual : null;
+  const acknowledgementTiming = acknowledgementVisual ? {
+    acknowledgementDurationMs: acknowledgementVisual.durationMs,
+    acknowledgementElapsedMs: Math.max(0, Date.now() - acknowledgementVisual.startedAtMs),
+  } : {};
+  const acknowledgementVisualTone = ['attention', 'cooldown'].includes(previous.visualTone) ? previous.visualTone : '';
+  // Switching the clicked tmux window can immediately promote its screen capture to `working`.
+  // Preserve the acknowledged red/yellow state during its promised gray interval instead of
+  // replacing it with a green play before the user can see the acknowledgement.
+  if (acknowledgementVisualActive && acknowledgementVisualTone) {
+    return {
+      state: acknowledgementVisualTone,
+      icon: '●',
+      label: agentWindowActivityLabel(kind, acknowledgementVisualTone === 'attention' ? STATE_KEY.needsInput : 'cooldown', true),
+      pulseActive: false,
+      transitionPulseActive: false,
+      acknowledged: false,
+      acknowledging: true,
+      ...acknowledgementTiming,
+    };
+  }
   if (agentWindowIsAttentionState(stateKey)) {
     const ackKey = agentWindowActivityAcknowledgementKey(kind, stateKey, options, options.attention_signature || options.screen_text || stateKey);
-    const acknowledged = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
-    const previousAttentionStartedAt = Number(previous.attentionStartedAt || 0);
-    const attentionStartedAt = previous.state === stateKey && previous.attentionKey === ackKey && previousAttentionStartedAt > 0
-      ? previousAttentionStartedAt
-      : nowSeconds;
+    const recordedAcknowledgement = agentWindowActivityAcknowledgementKeyIsRecorded(ackKey, {...options, cooldown_acknowledged: false});
+    const acknowledging = acknowledgementVisualActive;
+    const acknowledged = recordedAcknowledgement && !acknowledging;
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, 'attention', nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {
+      record.activity = {
         state: stateKey,
         visualTone: 'attention',
         seenWorking: previous.seenWorking === true,
         stoppedAt: Number(previous.stoppedAt) || 0,
         attentionKey: ackKey,
-        attentionStartedAt,
         transitionStartedAt,
-      });
-      scheduleAgentWindowStatusGlowRefresh(transitionKey, attentionStartedAt, options);
+      };
+      scheduleAgentWindowStatusGlowRefresh(transitionKey, transitionStartedAt, options);
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
     }
     return {
       state: 'attention',
       icon: '●',
-      label: `${agentLabel(kind)} ${acknowledged ? 'acknowledged' : t('state.needs-input')}`,
-      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(attentionStartedAt, nowSeconds),
+      label: agentWindowActivityLabel(kind, STATE_KEY.needsInput, acknowledged),
+      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(transitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(transitionStartedAt, nowSeconds),
       acknowledged,
+      acknowledging,
+      ...(acknowledging ? acknowledgementTiming : {}),
     };
   }
   if (agentWindowIsWorkingState(stateKey)) {
     const transitionStartedAt = agentWindowTransitionStartedAt(previous, STATE_KEY.working, nowSeconds);
     if (transitionKey) {
       clearAgentWindowStoppedRefresh(transitionKey);
-      agentWindowAcknowledgedStops.delete(transitionKey);
-      agentWindowActivityStates.set(transitionKey, {state: STATE_KEY.working, visualTone: STATE_KEY.working, seenWorking: true, stoppedAt: 0, transitionStartedAt});
+      record.acknowledgedStoppedAt = 0;
+      record.activity = {state: STATE_KEY.working, visualTone: STATE_KEY.working, seenWorking: true, stoppedAt: 0, transitionStartedAt};
       scheduleAgentWindowTransitionPulseRefresh(transitionKey, transitionStartedAt, options);
     }
     return {
       state: STATE_KEY.working,
       icon: '●',
-      label: `${agentLabel(kind)} ${t('state.working')}`,
+      label: agentWindowActivityLabel(kind, STATE_KEY.working),
       pulseActive: true,
       transitionPulseActive: true,
     };
@@ -635,14 +979,14 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
   let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
   const seenWorking = previous.seenWorking === true || stoppedAt > 0;
-  if (!stoppedAt && previous.state === STATE_KEY.working) stoppedAt = nowSeconds;
-  if (!stoppedAt && Number(previous.stoppedAt) > 0) stoppedAt = Number(previous.stoppedAt);
   const cooldownTransitionStartedAt = agentWindowTransitionStartedAt(previous, 'cooldown', nowSeconds);
-  if (transitionKey) agentWindowActivityStates.set(transitionKey, {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt});
+  if (transitionKey) record.activity = {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt};
   if (seenWorking && stoppedAt > 0) {
     const cooldownAckKey = agentWindowActivityAcknowledgementKey(kind, 'cooldown', options, stoppedAt);
-    const acknowledged = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
-    scheduleAgentWindowStatusGlowRefresh(transitionKey, stoppedAt, options);
+    const recordedAcknowledgement = agentWindowStoppedIsAcknowledged(transitionKey, stoppedAt) || agentWindowActivityAcknowledgementKeyIsRecorded(cooldownAckKey, {...options, attention_acknowledged: false});
+    const acknowledging = acknowledgementVisualActive;
+    const acknowledged = recordedAcknowledgement && !acknowledging;
+    scheduleAgentWindowStatusGlowRefresh(transitionKey, cooldownTransitionStartedAt, options);
     if (transitionKey) {
       if (!acknowledged) scheduleAgentWindowTransitionPulseRefresh(transitionKey, cooldownTransitionStartedAt, options);
       else clearAgentWindowTransitionPulseRefresh(transitionKey);
@@ -650,13 +994,15 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
     return {
       state: 'cooldown',
       icon: '●',
-      label: `${agentLabel(kind)} stopped${acknowledged ? ' acknowledged' : ''}`,
-      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(stoppedAt, nowSeconds),
+      label: agentWindowActivityLabel(kind, 'cooldown', acknowledged),
+      pulseActive: acknowledged ? false : agentWindowTransitionGlowActive(cooldownTransitionStartedAt, nowSeconds),
       transitionPulseActive: acknowledged ? false : agentWindowTransitionPulseActive(cooldownTransitionStartedAt, nowSeconds),
       acknowledged,
+      acknowledging,
+      ...(acknowledging ? acknowledgementTiming : {}),
     };
   }
-  if (current) return {state: 'active', icon: '', label: `${agentLabel(kind)} active`};
+  if (current) return {state: 'active', icon: '', label: agentWindowActivityLabel(kind, 'active')};
   return null;
 }
 
@@ -685,66 +1031,109 @@ function agentWindowActivityIconForStatusItem(agent, agentKey = agent?.kind, ses
   return agentWindowActivityIcon(agentKey, agent?.state, agentWindowIdleSeconds(agent, itemOptions.nowSeconds), itemOptions);
 }
 
-function agentWindowStatusToneOrder(tones = []) {
-  const toneSet = new Set((Array.isArray(tones) ? tones : [])
-    .map(tone => agentWindowActivityTone(tone))
-    .filter(tone => ['attention', 'cooldown', STATE_KEY.working].includes(tone)));
-  return ['attention', 'cooldown', STATE_KEY.working].filter(tone => toneSet.has(tone));
-}
-
 function agentWindowStatusToneClass(tone) {
   return tone === STATE_KEY.working ? 'working' : String(tone || '');
 }
 
 function agentWindowStatusToneForItem(item) {
+  if (item?.acknowledging === true) return 'acknowledged';
+  if (item?.acknowledged === true) return '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  return ['attention', 'cooldown', STATE_KEY.working].includes(tone) ? tone : '';
+  return agentWindowVisibleTone(tone) ? tone : '';
+}
+
+function agentWindowStatusItemVisualRank(item) {
+  const tone = agentWindowStatusToneForItem(item);
+  if (tone === 'acknowledged') return 8;
+  return agentWindowVisibleTone(tone) ? agentWindowActivityVisualRank(tone) : 9;
 }
 
 function agentWindowActivityToneWrapperClass(tone) {
   const normalizedTone = agentWindowActivityTone(tone);
-  return ['attention', 'cooldown', STATE_KEY.working].includes(normalizedTone)
+  return agentWindowVisibleTone(normalizedTone)
     ? `agent-window-activity--${agentWindowStatusToneClass(normalizedTone)}`
     : '';
 }
 
+function agentWindowStatusSampleItem(tone, options = {}) {
+  const state = agentWindowActivityTone(tone);
+  const pulse = options.pulse === true;
+  return {
+    state,
+    icon: String(options.icon || '●'),
+    label: String(options.label || ''),
+    pulseActive: pulse,
+    transitionPulseActive: pulse,
+    acknowledged: false,
+    acknowledging: options.acknowledging === true,
+  };
+}
+
+function agentWindowStatusDotHtmlForTone(tone, options = {}) {
+  const subwindow = options.surface === 'subwindow';
+  return agentWindowStatusDotHtml(agentWindowStatusSampleItem(tone, options), {
+    animate: options.pulse === true,
+    subwindowGlyphPulse: subwindow,
+    acknowledgementPreview: options.acknowledging === true,
+    label: options.label,
+  });
+}
+
 function agentWindowStatusDotHtml(item, options = {}) {
-  if (!item) return '';
+  if (!item || item.acknowledged === true) return '';
+  const acknowledging = item.acknowledging === true;
   const tone = agentWindowStatusToneForItem(item);
   if (!tone) return '';
-  const statusTones = agentWindowStatusToneOrder(options.statusTones || [tone]);
-  const segmented = statusTones.length > 1;
-  const segmentKey = statusTones.map(agentWindowStatusToneClass).join('-');
   const animate = options.animate !== false;
-  const pulse = animate && item.pulseActive !== false;
+  const pulse = !acknowledging && animate && item.pulseActive !== false;
   const subwindowPulse = pulse;
-  const transitionPulse = animate && item.transitionPulseActive === true && item.acknowledged !== true;
-  const transitionGlow = pulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
-  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && !segmented && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const transitionPulse = !acknowledging && animate && item.transitionPulseActive === true && item.acknowledged !== true;
+  const transitionGlow = pulse && agentWindowVisibleTone(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
+  // Acknowledged is the temporary gray color/timing tone, not a new shape. Keep the original
+  // play/stop/pause modifier so live feedback and the Preferences example use the same renderer.
+  const acknowledgementShapeClass = acknowledging && agentWindowVisibleTone(item.state)
+    ? `status-indicator--${item.state}`
+    : '';
+  const aggregateTones = Array.isArray(item.aggregateTones)
+    ? item.aggregateTones.filter(agentWindowVisibleTone).slice(0, AGENT_WINDOW_VISIBLE_TONES.length)
+    : [];
+  const allAggregateTones = Array.isArray(item.allAggregateTones)
+    ? item.allAggregateTones.filter(agentWindowVisibleTone)
+    : aggregateTones;
+  const aggregateToneClasses = aggregateTones.length > 1
+    ? [
+      'agent-window-status-dot--segmented',
+      `agent-window-status-dot--${aggregateTones.join('-')}`,
+      ...allAggregateTones.map(value => `agent-window-status-dot--tone-${value}`),
+    ]
+    : [];
   const classes = statusIndicatorDotClasses(
     tone,
     'agent-window-activity-icon',
     'agent-window-status-dot',
     `agent-window-activity-icon--${item.state}`,
-    item.acknowledged === true ? 'agent-window-status-dot--acknowledged' : '',
+    acknowledging ? 'status-indicator--acknowledged' : '',
+    acknowledging ? 'agent-window-status-dot--acknowledging' : '',
+    acknowledging && options.acknowledgementPreview === true ? 'agent-window-status-dot--acknowledgement-preview' : '',
+    acknowledgementShapeClass,
     transitionGlow ? 'agent-window-status-dot--transition-glow' : '',
     transitionPulse ? 'agent-window-status-dot--transition-pulse' : '',
     subwindowGlyphPulse ? 'agent-window-status-dot--subwindow-pulse' : '',
-    segmented ? 'agent-window-status-dot--segmented' : '',
-    segmented ? `agent-window-status-dot--${segmentKey}` : '',
-    segmented ? `agent-window-status-dot--segments-${statusTones.length}` : '',
-    segmented ? statusTones.map(itemTone => `agent-window-status-dot--tone-${agentWindowStatusToneClass(itemTone)}`) : '',
+    aggregateToneClasses,
     {pulse},
   );
-  return `<span class="${esc(classes)}" aria-hidden="true">${esc(item.icon)}</span>`;
+  const label = String(options.label || '').trim();
+  const accessibility = label ? ` role="img" aria-label="${esc(label)}"` : ' aria-hidden="true"';
+  return `<span class="${esc(classes)}"${accessibility}>${esc(item.icon)}</span>`;
 }
 
 function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
-  if (![STATE_KEY.working, 'active', 'attention', 'cooldown'].includes(tone)) return '';
+  if (tone !== 'active' && !agentWindowVisibleTone(tone)) return '';
   const styles = [];
   const pulseEnabled = item?.pulseActive !== false && typeof statusPulseAnimationEnabled === 'function' && statusPulseAnimationEnabled();
   const subwindowPulse = item?.pulseActive !== false;
-  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && [STATE_KEY.working, 'attention', 'cooldown'].includes(tone);
+  const subwindowGlyphPulse = options.subwindowGlyphPulse === true && subwindowPulse && agentWindowVisibleTone(tone);
   const hasAnimationDelayStyle = pulseEnabled || subwindowGlyphPulse;
   if (hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle());
   if (item?.transitionPulseActive === true && item?.acknowledged !== true) {
@@ -752,16 +1141,33 @@ function agentWindowActivityStyleAttribute(tone, item = {}, options = {}) {
     styles.push(`--agent-status-transition-pulse-duration: ${durationMs / 1000}s`);
     if (!hasAnimationDelayStyle && typeof attentionAnimationStyle === 'function') styles.push(attentionAnimationStyle(Date.now(), durationMs));
   }
+  if (item?.acknowledging === true && options.acknowledgementPreview !== true) {
+    const durationMs = Math.max(1, Number(item.acknowledgementDurationMs) || agentWindowAcknowledgementVisualDurationMs());
+    const elapsedMs = Math.max(0, Math.min(durationMs, Number(item.acknowledgementElapsedMs) || 0));
+    styles.push(`--agent-status-acknowledgement-duration: ${durationMs / 1000}s`);
+    styles.push(`--agent-status-acknowledgement-delay: ${-elapsedMs / 1000}s`);
+  }
   return styles.length ? ` style="${esc(styles.join('; '))}"` : '';
+}
+
+function agentWindowActivityMarkupSignature(value) {
+  // A new ball needs a fresh wall-clock phase, but phase alone is not a semantic DOM change. Ignore
+  // only this property when a renderer decides whether an existing window bar can stay mounted.
+  return String(value || '').replace(/--attention-animation-delay:\s*-?[0-9.]+s;?\s*/g, '');
 }
 
 function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {}) {
   const kind = agentWindowKind(agentKey);
   if (!kind) return '';
   const item = options.item || agentWindowActivityIcon(kind, state, idleSeconds, options);
+  const acknowledged = item?.acknowledged === true;
+  const acknowledging = item?.acknowledging === true;
   const stateKey = item?.state || 'idle-recent';
   const label = options.label || item?.label || agentLabel(kind);
   const statusOnly = options.statusOnly === true || options.hideAgentIcon === true;
+  // Acknowledgement clears the transient state glyph, never the stable Claude/Codex identity on a
+  // sub-window. Parent Tab circles are status-only, so they still disappear entirely.
+  if (acknowledged && statusOnly) return '';
   const subwindowGlyphPulse = options.subwindowGlyphPulse === true || (options.subwindowGlyphPulse !== false && statusOnly !== true);
   const agentClasses = [
     'agent-window-activity-icon',
@@ -770,19 +1176,33 @@ function agentWindowActivityIconHtml(agentKey, state, idleSeconds, options = {})
     `agent-window-agent-icon--${stateKey}`,
     item?.state === 'active' ? 'heartbeat-pulse' : '',
   ].filter(Boolean).join(' ');
-  const markerHtml = agentWindowStatusDotHtml(item, {statusTones: options.statusTones, animate: options.animate !== false, subwindowGlyphPulse});
+  const markerHtml = acknowledged ? '' : agentWindowStatusDotHtml(item, {
+    animate: options.animate !== false,
+    subwindowGlyphPulse,
+    acknowledgementPreview: options.acknowledgementPreview === true,
+  });
   if (statusOnly && !markerHtml) return '';
+  const placeholderHtml = options.reserveStatusSlot === true && !statusOnly && !markerHtml
+    ? '<span class="agent-window-status-placeholder" aria-hidden="true"></span>'
+    : '';
   const tone = item?.state ? agentWindowActivityTone(item.state) : '';
-  const style = agentWindowActivityStyleAttribute(tone, item, {subwindowGlyphPulse});
+  const style = agentWindowActivityStyleAttribute(tone, item, {
+    subwindowGlyphPulse,
+    acknowledgementPreview: options.acknowledgementPreview === true,
+  });
   const toneWrapperClass = agentWindowActivityToneWrapperClass(item?.state);
   const wrapperClasses = [
     'agent-window-activity',
+    subwindowGlyphPulse ? 'agent-window-activity--subwindow' : '',
     toneWrapperClass || `agent-window-activity--${stateKey}`,
-    item?.acknowledged === true ? 'agent-window-activity--acknowledged' : '',
+    acknowledging ? 'agent-window-activity--acknowledging' : '',
+    acknowledged ? 'agent-window-activity--acknowledged' : '',
     statusOnly ? 'agent-window-activity--status-only' : '',
   ].filter(Boolean).join(' ');
   const agentHtml = statusOnly ? '' : agentIcon(kind, {label, className: agentClasses});
-  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${agentHtml}${markerHtml}</span>`;
+  const statusHtml = `${markerHtml}${placeholderHtml}`;
+  const contentHtml = options.statusBeforeAgent === true ? `${statusHtml}${agentHtml}` : `${agentHtml}${statusHtml}`;
+  return `<span class="${esc(wrapperClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${contentHtml}</span>`;
 }
 
 function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, session = '', extraOptions = {}) {

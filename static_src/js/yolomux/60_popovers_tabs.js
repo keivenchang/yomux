@@ -85,10 +85,10 @@ if (fileExplorerHiddenToggle) {
 }
 
 function updateSessionButtonStates() {
-  // Top navigation is menu-based now; per-session state lives in pane tabs
-  // and menu rows, which are rebuilt by their normal render paths.
-  // Keep the top-bar cross-session activity line live as states change (poll-driven).
+  // YO ownership is rendered into pane-tab markup, so a restored/changed worker state must
+  // rebuild the shared tab strip as well as the popovers that describe it.
   updateTopbarActivityStatus();
+  renderPaneTabStrips();
   refreshPaneTabSessionPopovers();
 }
 
@@ -131,7 +131,7 @@ function refreshPaneTabSessionPopovers() {
       ? paneTabPopoverForAnchor(tab)
       : tab?.querySelector?.(':scope > .session-popover');
     if (!popover || popover.classList?.contains?.('file-popover')) return;
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const auto = autoApproveStates.get(session)?.enabled === true;
     const state = sessionState(session, info);
     const agentKind = sessionAgentKind(session);
@@ -224,23 +224,37 @@ function bindPopoverHover(anchor, popover, handlers) {
   const queueOpen = handlers.queueOpen || handlers.keepOpen;
   const keepOpen = handlers.keepOpen || queueOpen;
   const closeSoon = handlers.closeSoon;
+  const closeNow = handlers.closeNow;
   const closeIfOutside = event => {
     const next = event?.relatedTarget;
     if (next && (anchor.contains(next) || popover?.contains(next))) return;
     closeSoon(event);
   };
 
-  anchor.addEventListener('pointerenter', queueOpen);
+  anchor.addEventListener('pointerenter', event => {
+    if (browserHasCursorHover(event)) queueOpen(event);
+  });
   anchor.addEventListener('pointerleave', closeIfOutside);
-  anchor.addEventListener('focusin', queueOpen);
+  anchor.addEventListener('focusin', event => {
+    // Touching a tab may focus it, but a keyboard-visible focus is the only focus state that
+    // should expose a hover-only popover when no cursor is present.
+    if (anchor.matches?.(':focus-visible')) queueOpen(event);
+  });
   anchor.addEventListener('focusout', closeIfOutside);
+  anchor.addEventListener('pointerdown', event => {
+    if (!browserHasCursorHover(event)) closeNow?.(event);
+  });
   if (!popover) return;
-  popover.addEventListener('pointerenter', keepOpen);
+  popover.addEventListener('pointerenter', event => {
+    if (browserHasCursorHover(event)) keepOpen(event);
+  });
   popover.addEventListener('pointerleave', closeIfOutside);
   popover.addEventListener('click', stopPopoverEvent);
   popover.addEventListener('dragstart', stopPopoverEvent);
   popover.querySelectorAll('a').forEach(link => {
-    link.addEventListener('pointerenter', keepOpen);
+    link.addEventListener('pointerenter', event => {
+      if (browserHasCursorHover(event)) keepOpen(event);
+    });
     link.addEventListener('click', stopPopoverEvent);
   });
 }
@@ -248,6 +262,7 @@ function bindPopoverHover(anchor, popover, handlers) {
 function createHoverPopover(options) {
   const anchor = options.anchor;
   if (!anchor) return null;
+  if (typeof options.onPointerMove === 'function') anchor.addEventListener('pointermove', options.onPointerMove);
   const stateClass = options.stateClass === undefined ? 'popover-open' : options.stateClass;
   let showTimer = null;
   let hideTimer = null;
@@ -292,7 +307,7 @@ function createHoverPopover(options) {
     if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
     const activePopover = popover();
     if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
-      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon});
+      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
       activePopover.dataset.hoverPopoverBound = 'true';
     }
   };
@@ -336,9 +351,169 @@ function createHoverPopover(options) {
     }, Math.max(0, delay));
   }
   const initialPopover = popover();
-  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon});
+  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
   if (initialPopover) initialPopover.dataset.hoverPopoverBound = 'true';
   return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
+}
+
+function tabInteractionControllerForApp() {
+  if (tabInteractionController) return tabInteractionController;
+  let touchPress = null;
+  let suppressContextUntil = 0;
+  const cancelCurrentTouchPress = event => {
+    if (!touchPress) return;
+    const opened = touchPress.opened;
+    clearTimer(touchPress.timer);
+    touchPress = null;
+    // A tab activation may replace its anchor before pointerup reaches that anchor. Own the
+    // terminal touch event at document capture so a short tap cannot leave its long-press timer
+    // behind to open the action sheet after the selected panel has rendered.
+    if (opened && event?.cancelable) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  };
+  document.addEventListener('pointerup', event => {
+    if (event.pointerType === 'touch') cancelCurrentTouchPress(event);
+  }, true);
+  document.addEventListener('pointercancel', event => {
+    if (event.pointerType === 'touch') cancelCurrentTouchPress(event);
+  }, true);
+  const currentDescriptor = descriptor => descriptor?.anchor?.__yolomuxTabInteractionDescriptor || descriptor;
+  const close = () => {
+    touchPress = null;
+    closeOtherSessionPopovers(null, {force: true});
+    closeSessionContextMenu();
+  };
+  const pointForAnchor = anchor => {
+    const rect = anchor?.getBoundingClientRect?.();
+    return {
+      x: Math.round((rect?.left || 0) + (rect?.width || 0) / 2),
+      y: Math.round((rect?.bottom || 0) + 6),
+    };
+  };
+  const showActions = (descriptor, event = null, options = {}) => {
+    descriptor = currentDescriptor(descriptor);
+    const item = String(descriptor?.item || '').trim();
+    if (!item || !isLayoutItem(item)) return false;
+    const eventPoint = event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      ? {x: event.clientX, y: event.clientY}
+      : pointForAnchor(descriptor.anchor);
+    // A touch long press is an anchored tab action, not a global bottom sheet. Use the tab's
+    // lower edge so the compact action surface opens beside the tab that owns it.
+    const point = options.presentation === 'sheet' ? pointForAnchor(descriptor.anchor) : eventPoint;
+    closeOtherSessionPopovers(null, {force: true});
+    showTabContextMenu(item, point.x, point.y, {
+      tab: descriptor.anchor,
+      sourceSlot: descriptor.sourceSlot?.() || slotForItem(item),
+      presentation: options.presentation || 'context',
+    });
+    return true;
+  };
+  const bindDetail = descriptor => {
+    const {anchor} = descriptor;
+    const detailPopover = () => {
+      const current = currentDescriptor(descriptor);
+      return typeof current?.popover === 'function' ? current.popover() : current?.popover;
+    };
+    if (!detailPopover()) return null;
+    return createHoverPopover({
+      anchor,
+      popover: detailPopover,
+      showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+      hideDelay: () => popoverHideDelayMs,
+      canOpen: () => !appMenuIsOpen() && !contextMenuIsOpen() && !topbar?.matches?.(':hover'),
+      onQueue: event => currentDescriptor(descriptor)?.positionDetail?.(event),
+      onOpen: event => {
+        currentDescriptor(descriptor)?.onDetailOpen?.(event);
+      },
+      onClose: event => currentDescriptor(descriptor)?.onDetailClose?.(event),
+      position: event => currentDescriptor(descriptor)?.positionDetail?.(event),
+      closeOthers: () => closeOtherSessionPopovers(anchor),
+    });
+  };
+  const bind = descriptor => {
+    const anchor = descriptor?.anchor;
+    if (!anchor) return null;
+    anchor.__yolomuxTabInteractionDescriptor = descriptor;
+    if (anchor.dataset?.tabInteractionBound === 'true') return {showActions: event => showActions(descriptor, event), close};
+    if (anchor.dataset) anchor.dataset.tabInteractionBound = 'true';
+    const detail = bindDetail(descriptor);
+    const cancelTouchPress = () => {
+      if (!touchPress || touchPress.anchor !== anchor) return;
+      cancelCurrentTouchPress();
+    };
+    const movedBeyondThreshold = event => {
+      if (!touchPress || touchPress.anchor !== anchor) return false;
+      return Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > tabTouchLongPressMoveThresholdPx;
+    };
+    anchor.addEventListener('contextmenu', event => {
+      if (Date.now() < suppressContextUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      showActions(descriptor, event);
+    });
+    anchor.addEventListener('keydown', event => {
+      if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      showActions(descriptor);
+    }, true);
+    anchor.addEventListener('pointerdown', event => {
+      if (event.pointerType !== 'touch' || event.button !== 0) return;
+      cancelTouchPress();
+      const current = currentDescriptor(descriptor);
+      const item = String(current?.item || '');
+      const sourceSlot = current?.sourceSlot?.() || slotForItem(item);
+      const record = {
+        anchor,
+        x: event.clientX,
+        y: event.clientY,
+        timer: null,
+        opened: false,
+        sourceSlot,
+        priorActiveItem: sourceSlot ? activeItemForSide(sourceSlot) : '',
+      };
+      record.timer = setTimeout(() => {
+        if (touchPress !== record || movedBeyondThreshold({clientX: record.x, clientY: record.y})) return;
+        record.opened = showActions(descriptor, {clientX: record.x, clientY: record.y}, {presentation: 'sheet'});
+        if (record.opened) {
+          // Dockview activates a tab on touch pointer-down before the browser can know this is a
+          // long press. Put the prior visible tab back before opening the sheet; a long press is
+          // an action gesture, never an activation or keyboard-focus gesture.
+          if (record.sourceSlot && record.priorActiveItem && record.priorActiveItem !== item) {
+            activatePaneTab(record.sourceSlot, record.priorActiveItem);
+          }
+          suppressContextUntil = Date.now() + tabTouchLongPressDelayMs;
+        }
+      }, tabTouchLongPressDelayMs);
+      touchPress = record;
+    }, true);
+    anchor.addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch' && movedBeyondThreshold(event)) cancelTouchPress();
+    }, true);
+    anchor.addEventListener('pointerup', event => {
+      if (event.pointerType !== 'touch' || !touchPress || touchPress.anchor !== anchor) return;
+      const opened = touchPress.opened;
+      cancelTouchPress();
+      if (!opened) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+    anchor.addEventListener('pointercancel', cancelTouchPress, true);
+    anchor.addEventListener('dragstart', cancelTouchPress, true);
+    return {detail, showActions: event => showActions(descriptor, event), close};
+  };
+  tabInteractionController = {bind, close, showActions};
+  return tabInteractionController;
+}
+
+function bindTabInteraction(descriptor) {
+  return tabInteractionControllerForApp().bind(descriptor);
 }
 
 function cssEscape(value) {
@@ -405,15 +580,20 @@ function bindTabActivation(node, activate, options = {}) {
 }
 
 // Tabs, headers, and popovers all use these helpers so badge precedence stays consistent.
+function metaSeparatorHtml(classes = '') {
+  const extraClasses = String(classes || '').trim();
+  return `<span class="meta-sep${extraClasses ? ` ${extraClasses}` : ''}" aria-hidden="true">|</span>`;
+}
+
 function metaJoin(parts) {
-  return parts.filter(Boolean).join('<span class="meta-sep"> · </span>');
+  return parts.filter(Boolean).join(metaSeparatorHtml());
 }
 
 function sessionNumberNameHtml(session, options = {}) {
   const label = sessionLabel(session);
   const className = numericSessionName(label) !== null ? 'session-button-number' : 'session-button-name';
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml) : esc(label);
-  return `<span class="${className}">${labelHtml}</span>`;
+  return `<strong class="${className} session-button-identifier">[${labelHtml}]</strong>`;
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {
@@ -428,7 +608,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
-  const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
+  const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('state.off'));
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
     : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
@@ -442,66 +622,14 @@ function sessionShouldOfferYoloMarker(session, info, payload, auto, state = null
   return [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(tabState?.key) && tabState?.promptAttentionCleared !== true;
 }
 
-function sessionStatusAgentWindowSummaryForTab(session, info, payload = autoApproveStates.get(session)) {
-  // The tab's AI status indicator summarizes every visible agent-window ball as one segmented ball.
-  // Its symbol and glow follow the most urgent state: red attention, then yellow stopped cooldown, then
-  // green working. A screen-only working signal still falls back to the current/first agent window.
-  if (typeof sessionAgentWindowStatusPayloads !== 'function') return null;
-  const agents = sessionAgentWindowStatusPayloads(session, info, payload);
-  if (!agents.length) return null;
-  let selected = null;
-  const byTone = new Map();
-  const screenWorking = sessionYoloIsWorking(session, payload);
-  const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent?.state));
-  for (const agent of agents) {
-    const item = typeof agentWindowActivityIconForStatusItem === 'function'
-      ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
-      : null;
-    const tone = typeof agentWindowStatusToneForItem === 'function'
-      ? agentWindowStatusToneForItem(item)
-      : (item?.state ? agentWindowActivityTone(item.state) : '');
-    if (!item || !['attention', 'cooldown', STATE_KEY.working].includes(tone)) continue;
-    const explicitStopped = Number.isFinite(Number(agent?.working_stopped_ts)) && Number(agent.working_stopped_ts) > 0;
-    if (screenWorking && !hasWorkingWindow && tone === 'cooldown' && !explicitStopped) continue;
-    const rank = typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(item.state) : 9;
-    const selectedRank = selected ? (typeof agentWindowActivityVisualRank === 'function' ? agentWindowActivityVisualRank(selected.item.state) : 9) : 99;
-    const current = agentWindowPayloadCurrent(agent) === true;
-    const selectedCurrent = selected ? agentWindowPayloadCurrent(selected.agent) === true : false;
-    const toneCurrent = byTone.get(tone);
-    const toneCurrentIsActive = toneCurrent ? agentWindowPayloadCurrent(toneCurrent.agent) === true : false;
-    if (!toneCurrent || current && !toneCurrentIsActive) byTone.set(tone, {agent, item});
-    if (item.acknowledged !== true && (!selected || rank < selectedRank || (rank === selectedRank && current && !selectedCurrent))) selected = {agent, item};
-  }
-  if (!selected && byTone.size) {
-    const statusTones = typeof agentWindowStatusToneOrder === 'function'
-      ? agentWindowStatusToneOrder([...byTone.keys()])
-      : [...byTone.keys()];
-    selected = byTone.get(statusTones[0]) || null;
-  }
-  if (!selected && screenWorking) {
-    const candidate = agents.find(agent => agentWindowPayloadCurrent(agent) === true) || agents[0];
-    if (candidate && !agentWindowIsAttentionState(candidate.state)) {
-      const agent = {...candidate, state: STATE_KEY.working};
-      const item = typeof agentWindowActivityIconForStatusItem === 'function'
-        ? agentWindowActivityIconForStatusItem(agent, agent.kind, session)
-        : {state: STATE_KEY.working, icon: '●', label: `${agentLabel(agent.kind)} ${t('state.working')}`};
-      selected = {agent, item};
-      byTone.set(STATE_KEY.working, selected);
-    }
-  }
-  if (!selected) return null;
-  const statusTones = typeof agentWindowStatusToneOrder === 'function'
-    ? agentWindowStatusToneOrder([...byTone.keys()])
-    : [...byTone.keys()];
-  const label = statusTones
-    .map(tone => byTone.get(tone)?.item?.label || '')
-    .filter(Boolean)
-    .join('; ') || selected.item?.label || agentLabel(selected.agent?.kind);
-  return {...selected, statusTones, label};
+function sessionStatusBallPlaceholderHtml() {
+  // Every session Tab reserves the same ball column. Keeping the placeholder inside the canonical
+  // activity wrapper makes its geometry follow the real red/yellow/green status ball exactly.
+  return '<span class="session-agent-activity-marker session-agent-activity-marker--placeholder" aria-hidden="true"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span>';
 }
 
-function sessionStatusAgentWindowForTab(session, info, payload = autoApproveStates.get(session)) {
-  return sessionStatusAgentWindowSummaryForTab(session, info, payload)?.agent || null;
+function sessionTabLeadingActivityContainerHtml(session, info, auto, options = {}) {
+  return `<span class="session-tab-leading-activity">${sessionTabLeadingActivityHtml(session, info, auto, options)}</span>`;
 }
 
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
@@ -511,27 +639,49 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const yoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
     : '';
-  const statusSummary = sessionStatusAgentWindowSummaryForTab(session, info, payload);
+  const statusSummary = sessionAgentWindowStatusSummary(session, info, payload);
   if (statusSummary?.agent) {
     const statusAgent = statusSummary.agent;
     const iconHtml = agentWindowActivityIconHtml(statusAgent.kind, statusAgent.state, agentWindowIdleSeconds(statusAgent), {
       ...agentWindowActivityOptionsForStatus(statusAgent, session),
       item: statusSummary.item,
       label: statusSummary.label,
-      statusTones: statusSummary.statusTones,
       statusOnly: true,
     });
     if (iconHtml) {
       return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
     }
   }
-  if (!offerYolo) return '';
-  return yoloMarkerHtml(session, auto, {
-    ...options,
-    enabledOnly: false,
-    yoloWorking: sessionYoloIsWorking(session, payload),
-    payload,
-  });
+  const fallbackYoloHtml = offerYolo
+    ? yoloMarkerHtml(session, auto, {
+      ...options,
+      enabledOnly: false,
+      yoloWorking: sessionYoloIsWorking(session, payload),
+      payload,
+    })
+    : '';
+  return `${fallbackYoloHtml}${sessionStatusBallPlaceholderHtml()}`;
+}
+
+// Hovering a tab keeps its popover DOM mounted. Do not let that presentation concern freeze the
+// status marker: its color is shared live state and must agree with the Tabber row immediately.
+function syncSessionTabLeadingActivityChrome() {
+  if (typeof document === 'undefined') return 0;
+  let updated = 0;
+  for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]')) {
+    const session = String(tab.dataset?.paneTab || '').trim();
+    if (!session || !isTmuxSession(session)) continue;
+    const leading = tab.querySelector?.(':scope > .session-tab-leading-activity, .pane-tab-core > .session-tab-leading-activity');
+    if (!leading) continue;
+    const info = transcriptMetadataState.payload.sessions?.[session];
+    const auto = autoApproveStates.get(session)?.enabled === true;
+    const state = sessionState(session, info);
+    const html = sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: !readOnlyMode, state});
+    if (leading.innerHTML === html) continue;
+    leading.innerHTML = html;
+    updated += 1;
+  }
+  return updated;
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
@@ -582,6 +732,14 @@ function githubPullRequestUrlFromGit(git, number) {
   return repoUrl && number ? `${repoUrl}/pull/${number}` : '';
 }
 
+function pullRequestWithUrl(git, pr) {
+  if (!pr?.number) return null;
+  return {
+    ...pr,
+    url: pr.url || githubPullRequestUrlFromGit(git, pr.number),
+  };
+}
+
 function defaultBranchHeadPullRequestForGit(info, git) {
   const project = info?.project || {};
   if (!isDefaultBranch(git)) return null;
@@ -601,8 +759,8 @@ function defaultBranchHeadPullRequestForGit(info, git) {
     url: existing.url || githubPullRequestUrlFromGit(git, number),
     checks: existing.checks || {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
-    // (it is in main's history) — so label it MERGED even though we only inferred it from the subject.
-    status_label: existing.status_label || 'merged',
+    // (it is in main's history). Keep that fact semantic; shared lifecycle rendering localizes it.
+    merged: true,
     source_only: true,
   };
 }
@@ -634,13 +792,9 @@ function displayPullRequest(info) {
   return displayPullRequestForGit(info, info?.project?.git);
 }
 
-function metadataBadgeKey(session, badge) {
-  return `${session}:${badge}`;
-}
-
 function metadataBadgePulseClass(session, badge) {
   if (!session) return '';
-  const until = metadataBadgePulseUntil.get(metadataBadgeKey(session, badge));
+  const until = sessionStatusRecord(session)?.metadataBadgePulseUntil.get(badge);
   if (!until || until <= Date.now()) return '';
   return ' metadata-pulse';
 }
@@ -651,15 +805,19 @@ function metadataBadgeClasses(session, badge, classes) {
 
 function updateMetadataBadgePulses(meta) {
   const now = Date.now();
-  for (const [key, until] of metadataBadgePulseUntil.entries()) {
-    if (until <= now) metadataBadgePulseUntil.delete(key);
+  for (const record of sessionStatusRecords.values()) {
+    for (const [badge, until] of record.metadataBadgePulseUntil.entries()) {
+      if (until <= now) record.metadataBadgePulseUntil.delete(badge);
+    }
   }
   for (const [session, info] of Object.entries(meta?.sessions || {})) {
     const pulses = info?.metadata_badge_pulse_remaining_ms || {};
+    const pulseMap = sessionStatusRecord(session, true)?.metadataBadgePulseUntil;
+    if (!pulseMap) continue;
     for (const badge of ['main', 'pr', 'status', 'ci']) {
       const remaining = Number(pulses[badge] || 0);
       if (remaining > 0) {
-        metadataBadgePulseUntil.set(metadataBadgeKey(session, badge), now + remaining);
+        pulseMap.set(badge, now + remaining);
       }
     }
   }
@@ -670,25 +828,34 @@ function defaultBranchBadgeHtml(session, info) {
   return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
 }
 
-function sessionWorkDescription(session, info, limit = 96) {
+function sessionWorkDescriptionSource(session, info) {
   const project = info?.project || {};
   const git = project.git;
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     const prefix = pullRequestLinkLabel(pr);
-    return shortText(title ? `${prefix}: ${title}` : prefix, limit);
+    return title ? `${prefix}: ${title}` : prefix;
   }
   const linear = project.linear || [];
   const issue = linear.find(item => item.title);
-  if (issue) return shortText(`${issue.identifier}: ${issue.title}`, limit);
+  if (issue) return `${issue.identifier}: ${issue.title}`;
   const subject = currentBranchSubject(git);
-  if (subject) return shortText(subject, limit);
-  if (git?.branch) return shortText(shortBranch(git.branch), limit);
-  return shortText(projectDirName(session, info), limit);
+  if (subject) return subject;
+  if (git?.branch) return shortBranch(git.branch);
+  return projectDirName(session, info);
+}
+
+function sessionWorkDescription(session, info, limit = 96) {
+  const description = sessionWorkDescriptionSource(session, info);
+  return Number.isFinite(limit) && limit > 0 ? shortText(description, limit) : description;
 }
 
 function sessionTabDescription(session, info) {
+  // A fresh Xterm can be fully interactive before transcript/repository metadata exists. Its tab
+  // already identifies the session and tmux window, so a generic "Loading..." description implies
+  // the terminal itself is blocked. Omit only this tab-local metadata until a real description arrives.
+  if (!info) return '';
   const pr = displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
@@ -697,7 +864,7 @@ function sessionTabDescription(session, info) {
   return sessionWorkDescription(session, info, 72);
 }
 
-function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
+function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item]) {
   if (isInfoItem(item)) return t('tab.info.detail');
   const project = info?.project || {};
   const git = project.git;
@@ -721,7 +888,7 @@ function projectDirName(session, info) {
   const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
   const repo = selectedSessionRepo(session, info);
   const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath;
-  return pathBasename(path) || 'no path';
+  return pathBasename(path) || t('info.missing.path');
 }
 
 function pathBasename(path) {
@@ -747,9 +914,9 @@ function filePopoverHtml(item) {
 
 function filePopoverRows(path, state = {}) {
   const kind = state.kind === 'image' ? t('popover.kind.image') : state.kind === 'text' ? t('popover.kind.text') : state.kind || t('popover.kind.file');
-  const status = state.dirty ? t('filetab.modified') : state.loading ? t('common.loading') : state.error ? String(state.error) : kind;
+  const status = state.dirty ? t('state.modified') : state.loading ? t('common.loading') : state.error ? String(state.error) : kind;
   const rows = [
-    popoverRow(t('popover.path'), filePopoverPathHtml(path)),
+    popoverRow(t('common.field.path'), filePopoverPathHtml(path)),
   ];
   if (status && status !== kind) rows.push(popoverPairRow(t('popover.type'), esc(kind), t('popover.status'), esc(status)));
   else rows.push(popoverRow(t('popover.type'), esc(kind)));
@@ -760,14 +927,15 @@ function filePopoverRows(path, state = {}) {
 function pathCopyButtonHtml(path, options = {}) {
   const className = ['path-copy-button', options.className || ''].filter(Boolean).join(' ');
   const dataAttr = options.dataAttr || 'data-copy-path';
-  const title = options.title || 'Copy path';
+  const title = options.title || t('contextmenu.copyPath');
   return `<button type="button" class="${esc(className)}" ${dataAttr}="${esc(path)}" title="${esc(title)}" aria-label="${esc(options.ariaLabel || title)}"></button>`;
 }
 
 function popoverCopyValueHtml(value, options = {}) {
   const text = String(value || '').trim();
   if (!text) return '';
-  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: options.title || 'Copy', ariaLabel: options.ariaLabel || options.title || 'Copy'})}`;
+  const copyLabel = options.title || t('common.copy');
+  return `<span class="popover-copy-value">${esc(text)}</span>${pathCopyButtonHtml(text, {className: options.className || 'popover-copy-button', title: copyLabel, ariaLabel: options.ariaLabel || copyLabel})}`;
 }
 
 function filePopoverPathHtml(path) {
@@ -777,10 +945,10 @@ function filePopoverPathHtml(path) {
 function sessionPopoverSubtitleHtml(session, info, fallback = '') {
   const project = info?.project || {};
   const git = project.git;
-  const pr = displayPullRequest(info);
+  const pr = pullRequestWithUrl(git, displayPullRequest(info));
   const chips = [];
   if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
-  if (pr?.number) chips.push(pullRequestNumberIndicatorHtml(session, pr));
+  if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
   const text = pr?.number
     ? shortText(pr.title || pr.description || '', 220)
     : String(fallback || '');
@@ -798,7 +966,7 @@ function sessionBranchValueHtml(session, info) {
 }
 
 function pullRequestPopoverRowHtml(session, pr) {
-  const prParts = [pullRequestNumberIndicatorHtml(session, pr), pullRequestAuthorHtml(pr)].filter(Boolean);
+  const prParts = [pullRequestNumberChipLinkHtml(session, pr), pullRequestAuthorHtml(pr)].filter(Boolean);
   const checks = pullRequestChecksHtml(pr);
   if (checks) prParts.push(checks);
   const review = pullRequestReviewInlineHtml(pr);
@@ -825,14 +993,6 @@ function gitHeadValueHtml(git) {
   return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
 }
 
-function sessionPopoverAgentStateRank(state) {
-  return typeof agentWindowStateRank === 'function' ? agentWindowStateRank(state) : 9;
-}
-
-function agentStatusIsAttentionState(state) {
-  return typeof agentWindowIsAttentionState === 'function' && agentWindowIsAttentionState(state);
-}
-
 function sessionPopoverAgentRecencyText(agent, nowSeconds = Date.now() / 1000, options = {}) {
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
   let timestamp = Number.isFinite(lastActive) && lastActive > 0 ? lastActive : nowSeconds;
@@ -844,11 +1004,13 @@ function sessionPopoverAgentStateText(agent, nowSeconds = Date.now() / 1000) {
   const state = String(agent?.state || STATE_KEY.idle);
   if (agentWindowIsWorkingState(state)) {
     const elapsed = Number(agent?.working_elapsed_seconds);
-    return Number.isFinite(elapsed) && elapsed >= 0 ? `working for ${compactElapsedDurationText(elapsed)}` : STATE_KEY.working;
+    return Number.isFinite(elapsed) && elapsed >= 0
+      ? t('state.workingFor', {duration: compactElapsedDurationText(elapsed)})
+      : stateDef(STATE_KEY.working).label;
   }
   if (agentWindowIsAttentionState(state)) return sessionPopoverAgentRecencyText(agent, nowSeconds, {forceAgo: true});
   const lastActive = Number(agent?.idle_since || agent?.last_active_ts || 0);
-  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : STATE_KEY.idle;
+  return Number.isFinite(lastActive) && lastActive > 0 ? sessionPopoverAgentRecencyText(agent, nowSeconds) : stateDef(STATE_KEY.idle).label;
 }
 
 function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, className = 'session-agent-status') {
@@ -860,7 +1022,7 @@ function sessionPopoverAgentStatusHtml(agent, nowSeconds = Date.now() / 1000, cl
 function tmuxSessionDescriptorLabel(label) {
   const text = String(label || '').trim();
   if (/^tmux\s+session\b/i.test(text)) return text;
-  return t('popover.tmuxSession', {label: text});
+  return t('common.tmuxSession', {label: text});
 }
 
 function tmuxWindowDescriptorLabel(label) {
@@ -879,7 +1041,7 @@ function sessionPopoverWindowPidByIndex(info) {
 function sessionPopoverAgentWindowPid(agent, pidByIndex) {
   const directPid = Number(agent?.pid || agent?.process_label_pid || 0);
   if (Number.isFinite(directPid) && directPid > 0) return Math.floor(directPid);
-  const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+  const index = agentWindowIndex(agent);
   const sharedPid = index !== null ? Number(pidByIndex.get(index)) : null;
   if (Number.isFinite(sharedPid) && sharedPid > 0) return Math.floor(sharedPid);
   return null;
@@ -905,11 +1067,11 @@ function sessionPopoverSortedAgentWindows(session, info, autoPayload) {
       state: String(agent?.state || STATE_KEY.idle),
       current: typeof agentWindowPayloadCurrent === 'function' && agentWindowPayloadCurrent(agent) !== null
         ? agentWindowPayloadCurrent(agent) === true
-        : activeWindowIndex !== null && tmuxWindowIndexKey(agent.window_index ?? agent.window) === activeWindowIndex,
+        : activeWindowIndex !== null && agentWindowIndex(agent) === activeWindowIndex,
       pid: sessionPopoverAgentWindowPid(agent, pidByIndex),
     }))
     .filter(agent => ['claude', 'codex'].includes(agent.kind))
-    .sort((left, right) => sessionPopoverAgentStateRank(left.state) - sessionPopoverAgentStateRank(right.state)
+    .sort((left, right) => agentWindowStateRank(left.state) - agentWindowStateRank(right.state)
       || Number(left.window_index ?? 9999) - Number(right.window_index ?? 9999)
       || left._index - right._index);
 }
@@ -923,9 +1085,11 @@ function sessionPopoverAgentWindowRowHtml(agent, nowSeconds = Date.now() / 1000)
   if (working) classes.push('working');
   if (attention) classes.push('attention');
   if (agent.current === true) classes.push('current');
-  const activityHtml = agentWindowActivityIconHtmlForStatus(agent, agent.kind, agent._session || '');
+  // Match the tmux-window button and attention toast: the state glyph (play/stop/pause)
+  // comes before the stable Claude/Codex identity everywhere a sub-window is shown.
+  const activityHtml = agentWindowActivityIconHtmlForStatus(agent, agent.kind, agent._session || '', {statusBeforeAgent: true});
   return `<div class="${esc(classes.join(' '))}">
-    <span class="session-agent-kind">${activityHtml}${esc(label)}</span>
+    <span class="session-agent-kind">${activityHtml}</span>${esc(label)}
     <span class="session-agent-sep">—</span>
     ${sessionPopoverAgentStatusHtml(agent, nowSeconds)}
   </div>`;
@@ -941,7 +1105,7 @@ function sessionPopoverWindowMetadataItems(session, info, agentRows) {
     const path = paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || ''));
     const meta = {
       window: String(agent?.window ?? ''),
-      window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
+      window_index: agentWindowIndex(agent),
       window_name: String(agent?.window_name || ''),
       path,
       paths,
@@ -956,15 +1120,15 @@ function sessionPopoverWindowMetadataItems(session, info, agentRows) {
 function sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows = null, metadataItems = null) {
   const agents = Array.isArray(agentRows) ? agentRows : sessionPopoverSortedAgentWindows(session, info, autoPayload);
   if (!agents.length) {
-    return `<div class="session-agent-list empty"><div class="session-agent-empty">no AI agents in this tab</div></div>`;
+    return `<div class="session-agent-list empty"><div class="session-agent-empty">${esc(t('yoagent.emptyPerSession'))}</div></div>`;
   }
   const nowSeconds = Date.now() / 1000;
   const items = Array.isArray(metadataItems) ? metadataItems : sessionPopoverWindowMetadataItems(session, info, agents);
-  const metadataByWindow = new Map(items.map(item => [tmuxWindowIndexKey(item.agent.window_index ?? item.agent.window), item]));
+  const metadataByWindow = new Map(items.map(item => [agentWindowIndex(item.agent), item]));
   const sharedMetadata = items.length > 1 && items.length === agents.length && new Set(items.map(item => sessionWindowMetadataSignature(item.meta))).size === 1;
   const rows = agents.map(agent => {
     const row = sessionPopoverAgentWindowRowHtml(agent, nowSeconds);
-    const item = metadataByWindow.get(tmuxWindowIndexKey(agent.window_index ?? agent.window));
+    const item = metadataByWindow.get(agentWindowIndex(agent));
     const transcriptHtml = agentTranscriptRowsHtml(agent);
     if ((!item || sharedMetadata) && !transcriptHtml) return row;
     const metadataHtml = item && !sharedMetadata ? item.html : '';
@@ -986,16 +1150,20 @@ function windowMetadataBranchHtml(git) {
   return `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
 }
 
+function worktreePopoverValueHtml(worktree) {
+  return esc(worktreeDisplayText(worktree));
+}
+
 function windowMetadataRowsHtml(row) {
   if (!row) return '';
   const git = row.git || {};
   const rows = [];
   const paths = Array.isArray(row.paths) ? row.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
   const displayPaths = paths.length ? paths : (row.path ? [String(row.path)] : []);
-  for (const path of displayPaths) rows.push(popoverRow(t('popover.path'), filePopoverPathHtml(path)));
-  if (git.branch) rows.push(popoverRow(t('popover.branch'), windowMetadataBranchHtml(git)));
+  for (const path of displayPaths) rows.push(popoverRow(t('common.field.path'), filePopoverPathHtml(path)));
+  if (git.branch) rows.push(popoverRow(t('common.field.branch'), windowMetadataBranchHtml(git)));
   if (git.root && !displayPaths.includes(git.root)) rows.push(popoverRow(t('popover.repo'), git.root));
-  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (git.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (git.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return rows.join('');
@@ -1014,15 +1182,15 @@ function agentTranscriptRowsHtml(agent) {
   if (!transcript) return '';
   const transcriptId = agentTranscriptId(agent);
   const rows = [];
-  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: 'Copy session ID'})));
-  rows.push(popoverRow(t('tab.transcript'), popoverCopyValueHtml(transcript, {title: 'Copy transcript path'})));
+  if (transcriptId) rows.push(popoverRow(t('popover.sessionId'), popoverCopyValueHtml(transcriptId, {title: t('popover.copySessionId')})));
+  rows.push(popoverRow(t('common.transcript'), popoverCopyValueHtml(transcript, {title: t('common.copyTranscriptPath')})));
   return rows.join('');
 }
 
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
-  const pr = displayPullRequest(info);
+  const pr = pullRequestWithUrl(git, displayPullRequest(info));
   const linear = project.linear || [];
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
@@ -1034,35 +1202,37 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const autoPayload = autoApproveStates.get(session);
   const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
   const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
-  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
+  const agentValue = agentKind
+    ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}`
+    : (autoText || `<span data-locale-text-key="agent.notDetected">${esc(t('agent.notDetected'))}</span>`);
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   const agentRows = sessionPopoverSortedAgentWindows(session, info, autoPayload);
   const windowMetadataItems = sessionPopoverWindowMetadataItems(session, info, agentRows);
   const agentWindowsHtml = sessionPopoverAgentWindowHtml(session, info, autoPayload, agentRows, windowMetadataItems);
   const perWindowMetadata = Boolean(windowMetadataItems.length);
-  if (!perWindowMetadata) rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
+  if (!perWindowMetadata) rows.push(popoverPairRow(t('common.stateLabel'), stateValue, t('common.agentLabel'), agentValue));
   const activityText = popoverActivityText(session, git);
   if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
   if (!perWindowMetadata) {
-    rows.push(popoverRow(t('popover.path'), displayPath));
-    if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
+    rows.push(popoverRow(t('common.field.path'), displayPath));
+    if (git?.branch) rows.push(popoverRow(t('common.field.branch'), sessionBranchValueHtml(session, info)));
   }
   let linearValue = '';
   let linearDesc = '';
   if (linear.length) {
     linearValue = linearInlineHtml(linear);
     linearDesc = linearDescriptionsInlineHtml(linear);
-    if (linearValue) rows.push(popoverRow('Linear', linearValue));
-    if (linearDesc) rows.push(popoverRow(t('popover.details'), linearDesc));
+    if (linearValue) rows.push(popoverRow(t('info.field.linear'), linearValue));
+    if (linearDesc) rows.push(popoverRow(t('common.details'), linearDesc));
   }
   if (pr?.number) {
-    rows.push(popoverRow('PR', pullRequestPopoverRowHtml(session, pr)));
+    rows.push(popoverRow(t('common.pullRequestShort'), pullRequestPopoverRowHtml(session, pr)));
   }
   const subject = currentBranchSubject(git);
-  if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
+  if (subject && !pr?.number) rows.push(popoverRow(t('common.descriptionShort'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (!perWindowMetadata && git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   // S7: name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
-  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
+  if (!perWindowMetadata && git?.worktree) rows.push(popoverRow(t('popover.worktree'), worktreePopoverValueHtml(git.worktree)));
   if (!perWindowMetadata && git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (!perWindowMetadata && gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
@@ -1163,11 +1333,7 @@ function pullRequestNumberChipLinkHtml(session, pr) {
 
 function pullRequestForBranch(git, branch, info) {
   const pr = branch?.current ? displayPullRequest(info) || branch.pull_request : branch?.pull_request;
-  if (!pr?.number) return null;
-  return {
-    ...pr,
-    url: pr.url || githubPullRequestUrlFromGit(git, pr.number),
-  };
+  return pullRequestWithUrl(git, pr);
 }
 
 function branchListBranchHtml(session, git, branch) {
@@ -1199,7 +1365,7 @@ function branchPullRequestMetaHtml(session, pr) {
   if (!pr?.number) return '';
   const parts = [pullRequestNumberChipLinkHtml(session, pr)];
   const status = pullRequestInlineStatusDisplay(pr);
-  if (status) parts.push(`<span class="meta-pr-status ${esc(pullRequestStatusClass(pr))}">${esc(status)}</span>`);
+  if (status) parts.push(pullRequestStatusBadgeHtml('', status, pullRequestStatusClass(pr), {variant: 'meta'}));
   return metaJoin(parts);
 }
 
@@ -1244,8 +1410,8 @@ function otherBranchesHtml(session, info) {
 
 function dragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-session') || '';
-  if (!raw && dragPaneSlot) return null;
-  if (!raw && dragSession) return {session: dragSession, sourceSlot: dragSourceSlot};
+  if (!raw && dragState.paneSlot) return null;
+  if (!raw && dragState.item) return {session: dragState.item, sourceSlot: dragState.sourceSlot};
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -1257,7 +1423,7 @@ function dragPayload(event) {
 
 function paneDragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-pane') || '';
-  if (!raw && dragPaneSlot) return {slot: dragPaneSlot};
+  if (!raw && dragState.paneSlot) return {slot: dragState.paneSlot};
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
@@ -1288,7 +1454,7 @@ function hasYolomuxFileDrag(event) {
 
 function fileDragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-file') || '';
-  return parseFileDragPayload(raw) || (hasYolomuxFileDrag(event) ? dragFilePayloadState : null);
+  return parseFileDragPayload(raw) || (hasYolomuxFileDrag(event) ? dragState.filePayload : null);
 }
 
 async function openDraggedFilesInEditor(payload, options = {}) {
@@ -1323,7 +1489,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       // with a clean baseline). A dirty file keeps its conflict state so real unsaved-edit warnings stay.
       if (draggedState && !draggedState.dirty) {
         delete draggedState.externalChanged;
-        delete draggedState.externalMissing;
+        clearOpenFileMissingState(draggedState);
         delete draggedState.externalError;
         delete draggedState.externalChangeEditPrompted;
         renderOpenFilePath(path);
@@ -1333,13 +1499,13 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       showFileOpenError(path, error);
     }
   }
-  if (opened) statusOk(`opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}`);
+  if (opened) statusOk(esc(tPlural('status.openedFiles', opened, {name: basenameOf(paths[0])})));
 }
 
 function terminalCurrentPath(session) {
   const signalPath = tmuxSignalPanePathForSession(session);
   if (signalPath) return signalPath;
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   return terminalDisplayPane(info, session)?.current_path || info?.selected_pane?.current_path || '';
 }
 
@@ -1364,23 +1530,33 @@ function terminalFileReferences(session, payload) {
 }
 
 function transparentNativeDragImage() {
-  if (transparentDragImage) return transparentDragImage;
+  if (dragState.transparentImage) return dragState.transparentImage;
   const node = document.createElement('div');
   node.className = 'transparent-drag-image';
   document.body.appendChild(node);
-  transparentDragImage = node;
+  dragState.transparentImage = node;
   return node;
 }
 
 function clearNativeDragImagePreview() {
-  nativeDragImagePreview?.remove?.();
-  nativeDragImagePreview = null;
+  dragState.nativePreview?.remove?.();
+  dragState.nativePreview = null;
+}
+
+function beginFileDrag(payloadObject) {
+  dragState.item = null;
+  dragState.sourceSlot = null;
+  dragState.paneSlot = null;
+  dragState.tabRectCache = null;
+  clearNativeDragImagePreview();
+  dragState.filePayload = normalizeFileDragPayload(payloadObject);
+  return dragState.filePayload;
 }
 
 function moveCustomDragPreview(event) {
-  if (!customDragPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
-  customDragPreview.style.left = `${Math.round(event.clientX - customDragPreviewOffset.x)}px`;
-  customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
+  if (!dragState.customPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+  dragState.customPreview.style.left = `${Math.round(event.clientX - dragState.customPreviewOffset.x)}px`;
+  dragState.customPreview.style.top = `${Math.round(event.clientY - dragState.customPreviewOffset.y)}px`;
 }
 
 const customDragPreviewCleanupEvents = ['drop', 'dragend', 'pointerup', 'mouseup', 'blur', 'visibilitychange'];
@@ -1394,7 +1570,7 @@ function bindCustomDragPreviewListeners() {
     target.addEventListener?.('dragover', moveCustomDragPreview, true);
     target.addEventListener?.('drag', moveCustomDragPreview, true);
     for (const eventName of customDragPreviewCleanupEvents) {
-      target.addEventListener?.(eventName, stopCustomDragPreview, true);
+      target.addEventListener?.(eventName, cancelDragOperationState, true);
     }
   }
 }
@@ -1404,16 +1580,27 @@ function unbindCustomDragPreviewListeners() {
     target.removeEventListener?.('dragover', moveCustomDragPreview, true);
     target.removeEventListener?.('drag', moveCustomDragPreview, true);
     for (const eventName of customDragPreviewCleanupEvents) {
-      target.removeEventListener?.(eventName, stopCustomDragPreview, true);
+      target.removeEventListener?.(eventName, cancelDragOperationState, true);
     }
   }
 }
 
 function stopCustomDragPreview() {
   unbindCustomDragPreviewListeners();
-  customDragPreview?.remove();
-  customDragPreview = null;
+  dragState.customPreview?.remove();
+  dragState.customPreview = null;
   closeFileImagePreview();
+}
+
+function cancelDragOperationState() {
+  dragState.item = null;
+  dragState.sourceSlot = null;
+  dragState.paneSlot = null;
+  dragState.filePayload = null;
+  dragState.tabRectCache = null;
+  clearNativeDragImagePreview();
+  stopCustomDragPreview();
+  clearDropPreview();
 }
 
 function paneDragPreviewMetrics(slot, event) {
@@ -1453,7 +1640,7 @@ function paneDragPreviewHtml(slot) {
   return `
     <div class="pane-drag-image-frame">
       <div class="pane-drag-image-title">${esc(title)}</div>
-      <div class="pane-drag-image-meta">${esc(count === 1 ? '1 tab' : `${count} tabs`)}</div>
+      <div class="pane-drag-image-meta">${esc(tPlural('common.tabs', count))}</div>
       ${extra ? `<div class="pane-drag-image-tabs">${extra}</div>` : ''}
     </div>`;
 }
@@ -1471,8 +1658,8 @@ function startPaneDragPreview(event, slot, options = {}) {
   preview.style.width = `${metrics.width}px`;
   preview.style.height = `${metrics.height}px`;
   document.body.appendChild(preview);
-  customDragPreview = preview;
-  customDragPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
+  dragState.customPreview = preview;
+  dragState.customPreviewOffset = {x: metrics.offsetX, y: metrics.offsetY};
   moveCustomDragPreview(event);
   if (options.nativeDrag === true) {
     bindCustomDragPreviewListeners();
@@ -1489,11 +1676,11 @@ function startFileDragPreview(event, paths, entry) {
   const firstPath = normalizedPaths[0] || '';
   const preview = document.createElement('div');
   preview.className = 'file-drag-image drag-image';
-  const title = normalizedPaths.length === 1 ? basenameOf(firstPath) : `${normalizedPaths.length} items`;
+  const title = normalizedPaths.length === 1 ? basenameOf(firstPath) : t('common.items', {count: normalizedPaths.length});
   const pathRows = normalizedPaths.slice(0, 4)
     .map(path => `<div class="file-drag-path">${esc(path)}</div>`)
     .join('');
-  const more = normalizedPaths.length > 4 ? `<div class="file-drag-more">+ ${normalizedPaths.length - 4} more</div>` : '';
+  const more = normalizedPaths.length > 4 ? `<div class="file-drag-more">${esc(t('common.more', {count: normalizedPaths.length - 4}))}</div>` : '';
   preview.innerHTML = `
     <div class="file-drag-main">
       ${fileDragPreviewMedia(firstPath, entry)}
@@ -1506,8 +1693,8 @@ function startFileDragPreview(event, paths, entry) {
   preview.style.pointerEvents = 'none';
   preview.style.zIndex = '99999';
   document.body.appendChild(preview);
-  customDragPreview = preview;
-  customDragPreviewOffset = {x: -14, y: -14};
+  dragState.customPreview = preview;
+  dragState.customPreviewOffset = {x: -14, y: -14};
   moveCustomDragPreview(event);
   bindCustomDragPreviewListeners();
   preview.getBoundingClientRect();
@@ -1567,7 +1754,7 @@ function showDragTimingOverlay(rows) {
     el = document.createElement('pre');
     el.id = 'drag-timing-overlay';
     el.className = 'drag-timing-overlay';
-    el.title = 'drag timing (flag: yolomux.debugDragTiming) — click to select, then copy';
+    el.title = t('debug.dragTimingTitle');
     el.addEventListener('click', () => {
       const range = document.createRange();
       range.selectNodeContents(el);
@@ -1585,9 +1772,10 @@ function showDragTimingOverlay(rows) {
 function startSessionDrag(event, session, sourceSlot = null, options = {}) {
   dragTimingMark('startSessionDrag:begin');
   clearNativeDragImagePreview();
-  dragSession = session;
-  dragSourceSlot = sourceSlot;
-  dragPaneSlot = null;
+  dragState.item = session;
+  dragState.sourceSlot = sourceSlot;
+  dragState.paneSlot = null;
+  dragState.filePayload = null;
   const payload = JSON.stringify({session, sourceSlot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
@@ -1623,9 +1811,10 @@ function startPaneDrag(event, sourceSlot) {
     return;
   }
   dragTimingMark('startPaneDrag');
-  dragSession = active;
-  dragSourceSlot = slot;
-  dragPaneSlot = slot;
+  dragState.item = active;
+  dragState.sourceSlot = slot;
+  dragState.paneSlot = slot;
+  dragState.filePayload = null;
   const payload = JSON.stringify({slot});
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-pane', payload);
@@ -1634,14 +1823,8 @@ function startPaneDrag(event, sourceSlot) {
 }
 
 function endSessionDrag(event) {
-  dragSession = null;
-  dragSourceSlot = null;
-  dragPaneSlot = null;
-  resetDragTabRectCache();
-  clearNativeDragImagePreview();
-  stopCustomDragPreview();
+  cancelDragOperationState();
   sessionButtons.classList.remove(CLS.dragOver);
-  clearDropPreview();
   // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }

@@ -2,6 +2,7 @@ import json
 import os
 import time
 from http import HTTPStatus
+from pathlib import Path
 from typing import get_args
 from typing import get_origin
 from typing import get_type_hints
@@ -12,11 +13,13 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib import session_files
+from yolomux_lib.sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
 from yolomux_lib.types import RepoPayload
 from yolomux_lib.types import SessionFileEntry
 from yolomux_lib.types import SessionFilesPayload
 
 from _git_helpers import git
+from _git_helpers import init_repo
 
 
 def agent(kind, transcript, cwd, session="s1"):
@@ -58,7 +61,7 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
         "diff_tracked",
         "uploaded",
     } <= set(SessionFileEntry.__annotations__)
-    assert {"from_ref", "to_ref", "error", "ahead", "behind"} <= set(RepoPayload.__annotations__)
+    assert {"from_ref", "to_ref", "error", "error_message", "ahead", "behind"} <= set(RepoPayload.__annotations__)
     assert {"hours", "warnings", "cache", "error", "refreshing_elsewhere"} <= set(SessionFilesPayload.__annotations__)
 
     assert get_type_hints(session_files.session_file_entry)["return"] is SessionFileEntry
@@ -70,6 +73,91 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert dict_return_args(get_type_hints(TmuxWebtermApp.cached_session_files_payloads_for_infos)["return"]) == (str, SessionFilesPayload)
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload_for_infos)["return"]) == (SessionFilesPayload, HTTPStatus)
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
+
+
+def test_shared_git_snapshot_reuses_one_worktree_build_and_invalidates_every_state_input(no_control_socket, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "one.py").write_text("one = 1\n", encoding="utf-8")
+    (repo / "two.py").write_text("two = 1\n", encoding="utf-8")
+    git(repo, "add", "one.py", "two.py")
+    git(repo, "commit", "-m", "base")
+    (repo / "one.py").write_text("one = 2\n", encoding="utf-8")
+    (repo / "two.py").write_text("two = 2\n", encoding="utf-8")
+
+    transcript_one = tmp_path / "one.jsonl"
+    transcript_two = tmp_path / "two.jsonl"
+    transcript_one.write_text('{"msg":"*** Begin Patch\\n*** Update File: one.py\\n"}\n', encoding="utf-8")
+    transcript_two.write_text(
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": "two.py"}}]}}) + "\n",
+        encoding="utf-8",
+    )
+    info_one = SessionInfo("one", [], None, [agent("codex", transcript_one, repo, session="one")])
+    info_two = SessionInfo("two", [], None, [agent("claude", transcript_two, repo, session="two")])
+
+    real_build = session_files.build_git_snapshot
+    builds = []
+
+    def counted_build(path, from_ref=None, to_ref=None):
+        builds.append((str(path), from_ref, to_ref))
+        return real_build(path, from_ref, to_ref)
+
+    monkeypatch.setattr(session_files, "build_git_snapshot", counted_build)
+    webapp = TmuxWebtermApp(["one", "two"])
+    try:
+        payload_one = webapp.compute_session_files_payload_for_info(info_one, 24.0, None, None, None)
+        payload_two = webapp.compute_session_files_payload_for_info(info_two, 24.0, None, None, None)
+        assert len(builds) == 1
+        one_files = {item["path"]: item for item in payload_one["files"]}
+        two_files = {item["path"]: item for item in payload_two["files"]}
+        assert one_files["one.py"]["agents"] == ["codex"]
+        assert one_files["two.py"]["agents"] == []
+        assert two_files["one.py"]["agents"] == []
+        assert two_files["two.py"]["agents"] == ["claude"]
+
+        cache_key_before = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
+        (repo / "untracked.py").write_text("new = True\n", encoding="utf-8")
+        cache_key_untracked = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
+        assert cache_key_untracked != cache_key_before
+        webapp.shared_session_files_git_snapshot(repo, None, None)
+        assert len(builds) == 2
+        git(repo, "add", "one.py")
+        cache_key_index = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
+        assert cache_key_index != cache_key_untracked
+        webapp.shared_session_files_git_snapshot(repo, None, None)
+        assert len(builds) == 3
+        git(repo, "add", "two.py", "untracked.py")
+        git(repo, "commit", "-m", "next")
+        cache_key_head = webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, None, None, None)
+        assert cache_key_head != cache_key_index
+        webapp.shared_session_files_git_snapshot(repo, None, None)
+        assert len(builds) == 4
+        assert webapp.session_files_cache_key("payload", {"one": info_one}, "one", 24.0, "HEAD~1", "HEAD", None) != cache_key_head
+        webapp.shared_session_files_git_snapshot(repo, "HEAD~1", "HEAD")
+        assert len(builds) == 5
+
+        other = tmp_path / "other-worktree"
+        git(repo, "worktree", "add", "-b", "other", str(other))
+        (other / "worktree-only.py").write_text("other = True\n", encoding="utf-8")
+        webapp.shared_session_files_git_snapshot(other, None, None)
+        assert len(builds) == 6
+
+        key = ("phase-fixture",)
+        webapp.compute_session_files_cache_entry(key, lambda: (payload_one, HTTPStatus.OK))
+        webapp.compute_session_files_cache_entry(key, lambda: (_ for _ in ()).throw(AssertionError("fresh cache must win")))
+        webapp.record_session_files_phase("bounded-details", 1.0, {"repo": "x" * 1000, "nested": {"drop": True}})
+        recent = webapp.performance_metrics_payload()["recent"]
+    finally:
+        webapp.control_server.stop()
+
+    phase_names = {item["surface"] for item in recent if item["role"] == "session-files"}
+    assert {"phase:transcript-attribution", "phase:repository-discovery", "phase:git-snapshot", "phase:session-merge-render", "phase:cache-serialization"} <= phase_names
+    hit_rows = [item for item in recent if item["surface"] == "phase:git-snapshot" and item["cache_status"] == "hit:fresh"]
+    assert hit_rows and all(item["compute_ms"] == 0 for item in hit_rows)
+    bounded = next(item for item in reversed(recent) if item["surface"] == "phase:bounded-details")
+    assert len(bounded["details"]["repo"]) <= 512
+    assert "nested" not in bounded["details"]
 
 
 def test_scans_claude_and_codex_tool_changes(tmp_path):
@@ -128,7 +216,7 @@ def test_transcript_scans_collect_generated_usage_with_changes(tmp_path):
                         "cached_input_tokens": 500,
                         "output_tokens": 17,
                         "reasoning_output_tokens": 3,
-                        "total_tokens": 1520,
+                        "total_tokens": 1017,
                     }
                 }
             },
@@ -141,13 +229,136 @@ def test_transcript_scans_collect_generated_usage_with_changes(tmp_path):
 
     assert claude_details["changes"][str(tmp_path / "src" / "app.py")] == {"M"}
     assert claude_details["usage"]["generated_tokens"] == 11
-    assert codex_details["usage"]["generated_tokens"] == 20
+    assert codex_details["usage"]["generated_tokens"] == 17
     assert session_files.transcript_generated_tokens(claude_path, "claude", str(tmp_path)) == 11
-    assert session_files.transcript_generated_tokens(codex_path, "codex", str(tmp_path)) == 20
+    assert session_files.transcript_generated_tokens(codex_path, "codex", str(tmp_path)) == 17
+
+
+def test_generated_usage_tokens_treats_reasoning_as_output_subset():
+    assert session_files.generated_usage_tokens({"output_tokens": 17, "reasoning_output_tokens": 3}) == 17
+    assert session_files.generated_usage_tokens({"reasoning_output_tokens": 3}) == 3
+    assert session_files.generated_usage_tokens({"outputTokens": 17, "completion_tokens": 17}) == 17
+
+
+def test_codex_generated_tokens_reads_latest_cumulative_usage_from_the_tail(tmp_path, monkeypatch):
+    transcript = tmp_path / "rollout.jsonl"
+
+    def usage_line(tokens):
+        return json.dumps({"payload": {"info": {"total_token_usage": {"output_tokens": tokens}}}}) + "\n"
+
+    transcript.write_text(
+        usage_line(11)
+        + json.dumps({"payload": "x" * (session_files._TRANSCRIPT_REVERSE_SCAN_BYTES * 3)}) + "\n"
+        + usage_line(17)
+        + '{"partial":',
+        encoding="utf-8",
+    )
+    real_loads = session_files.json.loads
+    parsed = []
+
+    def tracking_loads(value):
+        parsed.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", tracking_loads)
+
+    assert session_files.transcript_generated_tokens(transcript, "codex") == 17
+    assert len(parsed) == 1
+
+
+def test_transcript_usage_identity_changes_after_in_place_replacement(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text('{"session":"first"}\n', encoding="utf-8")
+    first = session_files.transcript_usage_identity(transcript, "codex")
+
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write('{"event":"append"}\n')
+    appended = session_files.transcript_usage_identity(transcript, "codex")
+
+    transcript.write_text('{"session":"replacement"}\n', encoding="utf-8")
+    replacement = session_files.transcript_usage_identity(transcript, "codex")
+
+    assert first
+    assert appended == first
+    assert replacement
+    assert replacement != first
+
+
+def test_claude_transcript_usage_deduplicates_repeated_message_ids(tmp_path):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "claude.jsonl"
+
+    def line(message_id, output_tokens):
+        return json.dumps({
+            "type": "assistant",
+            "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []},
+        }) + "\n"
+
+    transcript.write_text(line("msg-1", 11), encoding="utf-8")
+    first = session_files.scan_claude_transcript_details(transcript)
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(line("msg-1", 11) + line("msg-1", 13) + line("msg-2", 7))
+
+    details = session_files.scan_claude_transcript_details(transcript)
+
+    assert first["usage"]["generated_tokens"] == 11
+    assert details["usage"]["generated_tokens"] == 20
+
+
+def test_claude_generated_tokens_include_subagent_transcript_family(tmp_path):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "session-id.jsonl"
+    subagent = tmp_path / "session-id" / "subagents" / "agent-a.jsonl"
+    nested_subagent = tmp_path / "session-id" / "subagents" / "nested" / "agent-b.jsonl"
+    subagent.parent.mkdir(parents=True)
+    nested_subagent.parent.mkdir(parents=True)
+
+    def line(message_id, output_tokens):
+        return json.dumps({
+            "type": "assistant",
+            "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []},
+        }) + "\n"
+
+    transcript.write_text(line("parent", 11), encoding="utf-8")
+    subagent.write_text(line("child-a", 17), encoding="utf-8")
+    nested_subagent.write_text(line("child-b", 23), encoding="utf-8")
+
+    identity = session_files.transcript_usage_identity(transcript, "claude")
+    assert session_files.transcript_generated_tokens(transcript, "claude") == 51
+
+    with subagent.open("a", encoding="utf-8") as handle:
+        handle.write(line("child-a-more", 7))
+
+    assert session_files.transcript_usage_identity(transcript, "claude") == identity
+    assert session_files.transcript_generated_tokens(transcript, "claude") == 58
+
+
+def test_transcript_generated_token_events_preserve_codex_counters_and_claude_subagents(tmp_path):
+    codex = tmp_path / "rollout.jsonl"
+    claude = tmp_path / "session.jsonl"
+    subagent = tmp_path / "session" / "subagents" / "agent.jsonl"
+    subagent.parent.mkdir(parents=True)
+
+    def codex_line(timestamp, total):
+        return json.dumps({"timestamp": timestamp, "payload": {"info": {"total_token_usage": {"output_tokens": total}}}}) + "\n"
+
+    def claude_line(timestamp, message_id, output_tokens):
+        return json.dumps({"timestamp": timestamp, "type": "assistant", "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []}}) + "\n"
+
+    codex.write_text(codex_line(100, 11) + codex_line(160, 31), encoding="utf-8")
+    claude.write_text(claude_line(100, "parent", 7) + claude_line(160, "parent", 9), encoding="utf-8")
+    subagent.write_text(claude_line(130, "child", 13), encoding="utf-8")
+
+    codex_events = session_files.transcript_generated_token_events(codex, "codex")
+    claude_events = session_files.transcript_generated_token_events(claude, "claude")
+
+    assert [(event.timestamp, event.tokens) for event in codex_events] == [(100.0, 11.0), (160.0, 20.0)]
+    assert sorted((event.timestamp, event.tokens) for event in claude_events) == [(100.0, 7.0), (130.0, 13.0), (160.0, 2.0)]
+    assert len({event.source for event in claude_events}) == 2
 
 
 def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypatch):
-    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "rollout.jsonl"
 
     def line(path_name, generated_tokens):
@@ -189,8 +400,239 @@ def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypat
     assert second["usage"]["generated_tokens"] == 12
 
 
+def test_codex_transcript_raw_scan_is_shared_across_cwds_and_derives_paths(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    line = json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "git add relative.py"}),
+        },
+    }) + "\n"
+    transcript.write_text(line, encoding="utf-8")
+    real_loads = session_files.json.loads
+    parsed_lines = []
+
+    def counting_loads(value):
+        parsed_lines.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", counting_loads)
+    first = session_files.scan_codex_transcript_details(transcript, str(first_cwd), include_patch_text=False)
+    second = session_files.scan_codex_transcript_details(transcript, str(second_cwd), include_patch_text=False)
+
+    assert session_files.codex_transcript_scan_cache_key(transcript, str(first_cwd), False) == session_files.codex_transcript_scan_cache_key(transcript, str(second_cwd), True)
+    assert first["changes"] == {str(first_cwd / "relative.py"): {"M"}}
+    assert second["changes"] == {str(second_cwd / "relative.py"): {"M"}}
+    assert [value for value in parsed_lines if isinstance(value, str) and value.endswith("\n")] == [line]
+
+
+def test_historical_codex_index_reuses_warm_raw_candidates_without_decoding(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    session_files._HISTORICAL_CODEX_TRANSCRIPT_INDEX.clear()
+    first_repo = tmp_path / "first"
+    second_repo = tmp_path / "second"
+    first_repo.mkdir()
+    second_repo.mkdir()
+
+    def transcript(path, repo, name):
+        path.write_text(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"git add {name}", "workdir": str(repo)}),
+            },
+        }) + "\n", encoding="utf-8")
+
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    transcript(first, first_repo, "one.py")
+    transcript(second, second_repo, "two.py")
+    monkeypatch.setattr(session_files, "find_recent_codex_transcript", lambda _cwd: None)
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", lambda: [first, second])
+
+    assert session_files.historical_codex_transcript_for_cwd(str(first_repo), cutoff=0) == first
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    monkeypatch.setattr(session_files.json, "loads", lambda _value: (_ for _ in ()).throw(AssertionError("warm historical lookup must use the index")))
+    assert session_files.historical_codex_transcript_for_cwd(str(second_repo), cutoff=0) == second
+
+
+def test_codex_transcript_scan_cache_holds_full_recent_candidate_window(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    line = json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n"
+    transcripts = []
+    for index in range(CODEX_TRANSCRIPT_SCAN_LIMIT * 2):
+        transcript = tmp_path / f"rollout-{index:03d}.jsonl"
+        transcript.write_text(line, encoding="utf-8")
+        transcripts.append(transcript)
+
+    for transcript in transcripts:
+        session_files.scan_codex_transcript_details(transcript, str(tmp_path), include_patch_text=False)
+
+    real_loads = session_files.json.loads
+    parsed_lines = []
+
+    def counting_loads(value):
+        parsed_lines.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", counting_loads)
+    for transcript in transcripts:
+        session_files.scan_codex_transcript_details(transcript, str(tmp_path), include_patch_text=False)
+
+    assert parsed_lines == []
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+
+
+def test_transcript_scan_store_survives_cold_reload_and_resumes_append(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(session_files, "_TRANSCRIPT_SCAN_PERSIST_MIN_BYTES", 0)
+    monkeypatch.setattr(session_files, "_TRANSCRIPT_SCAN_PERSIST_APPEND_BYTES", 0)
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+
+    def line(path_name, generated_tokens, secret):
+        return json.dumps({
+            "type": "response_item",
+            "secret_blob": secret,
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"git add {path_name}", "workdir": str(tmp_path)}),
+                "info": {"last_token_usage": {"output_tokens": generated_tokens}},
+            },
+        }) + "\n"
+
+    first_line = line("a.py", 5, "RAW_SECRET_FIRST")
+    second_line = line("b.py", 7, "RAW_SECRET_SECOND")
+    third_line = line("c.py", 11, "RAW_SECRET_THIRD")
+    transcript.write_text(first_line + second_line, encoding="utf-8")
+    first = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+    cache_key = session_files.codex_transcript_scan_cache_key(transcript, str(tmp_path), True)
+    assert cache_key is not None
+    cache_path = session_files.transcript_scan_store_path(cache_key)
+    assert cache_path.exists()
+    persisted = cache_path.read_text(encoding="utf-8")
+    assert "RAW_SECRET" not in persisted
+    assert "git add" not in persisted
+    assert oct(cache_path.stat().st_mode & 0o777) == "0o600"
+
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    real_loads = session_files.json.loads
+    parsed = []
+
+    def tracking_loads(value):
+        parsed.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", tracking_loads)
+    cold = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+    assert [value for value in parsed if isinstance(value, str) and value.endswith("\n")] == []
+    assert cold == first
+
+    transcript.write_text(first_line + second_line + third_line, encoding="utf-8")
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    parsed.clear()
+    appended = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+    assert [value for value in parsed if isinstance(value, str) and value.endswith("\n")] == [third_line]
+    assert appended["changes"] == {
+        str(tmp_path / "a.py"): {"M"},
+        str(tmp_path / "b.py"): {"M"},
+        str(tmp_path / "c.py"): {"M"},
+    }
+    assert appended["usage"]["generated_tokens"] == 23
+
+
+def test_transcript_scan_store_rejects_schema_tail_and_same_inode_prefix_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(session_files, "_TRANSCRIPT_SCAN_PERSIST_MIN_BYTES", 0)
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "claude.jsonl"
+
+    def line(path_name, padding):
+        return json.dumps({
+            "type": "assistant",
+            "padding": padding,
+            "message": {"usage": {"output_tokens": 5}, "content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": path_name}}]},
+        }) + "\n"
+
+    original = line("a.py", "x" * 5000)
+    replacement = line("b.py", "x" * 5000)
+    stable_tail = line("tail.py", "y" * 1000)
+    assert len(original) == len(replacement)
+    transcript.write_text(original + stable_tail, encoding="utf-8")
+    assert str(tmp_path / "a.py") in session_files.scan_claude_transcript_details(transcript, str(tmp_path))["changes"]
+    cache_key = session_files.claude_transcript_scan_cache_key(transcript)
+    assert cache_key is not None
+    cache_path = session_files.transcript_scan_store_path(cache_key)
+
+    record = json.loads(cache_path.read_text(encoding="utf-8"))
+    record["schema_version"] = 999
+    cache_path.write_text(json.dumps(record), encoding="utf-8")
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    reparsed = session_files.scan_claude_transcript_details(transcript, str(tmp_path))
+    assert str(tmp_path / "a.py") in reparsed["changes"]
+
+    transcript.write_text(replacement + stable_tail, encoding="utf-8")
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    replaced = session_files.scan_claude_transcript_details(transcript, str(tmp_path))
+    assert str(tmp_path / "a.py") not in replaced["changes"]
+    assert str(tmp_path / "b.py") in replaced["changes"]
+
+    transcript.write_text(replacement, encoding="utf-8")
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    truncated = session_files.scan_claude_transcript_details(transcript, str(tmp_path))
+    assert str(tmp_path / "tail.py") not in truncated["changes"]
+
+
+def test_transcript_scan_store_is_bounded_and_atomic_failure_is_nonfatal(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    store_dir = session_files.transcript_scan_store_dir()
+    store_dir.mkdir(parents=True)
+    for index in range(4):
+        path = store_dir / f"{index}.json"
+        path.write_text("x" * 10, encoding="utf-8")
+        os.utime(path, (100 + index, 100 + index))
+    session_files.prune_transcript_scan_store(max_entries=2, max_bytes=100)
+    assert sorted(path.name for path in store_dir.glob("*.json")) == ["2.json", "3.json"]
+    session_files.prune_transcript_scan_store(max_entries=2, max_bytes=10)
+    assert len(list(store_dir.glob("*.json"))) == 1
+
+    monkeypatch.setattr(session_files, "_TRANSCRIPT_SCAN_PERSIST_MIN_BYTES", 0)
+    monkeypatch.setattr(session_files, "atomic_write_text", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        details = session_files.scan_codex_transcript_details(transcript, str(tmp_path))
+    assert details["changes"] == {}
+    assert "failed to persist transcript scan cache" in caplog.text
+
+
+def test_transcript_scan_cache_has_one_owner_and_bounds_claude_message_ids():
+    state = session_files.new_claude_transcript_scan_state()
+    for index in range(session_files._TRANSCRIPT_SCAN_MESSAGE_ID_MAX + 3):
+        session_files.update_claude_transcript_scan_state(state, json.dumps({
+            "type": "assistant",
+            "message": {"id": f"message-{index}", "usage": {"output_tokens": 1}, "content": []},
+        }))
+    assert len(state["usage_tokens_by_message_id"]) == session_files._TRANSCRIPT_SCAN_MESSAGE_ID_MAX
+    assert "message-0" not in state["usage_tokens_by_message_id"]
+    source = Path(session_files.__file__).read_text(encoding="utf-8")
+    assert "_CODEX_TRANSCRIPT_SCAN_CACHE" not in source
+    assert "_CLAUDE_TRANSCRIPT_SCAN_CACHE" not in source
+    assert source.count("_TRANSCRIPT_SCAN_CACHE: dict") == 1
+
+
 def test_codex_transcript_scan_restarts_after_truncation(tmp_path):
-    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "rollout.jsonl"
 
     def line(path_name, generated_tokens):
@@ -218,7 +660,7 @@ def test_codex_transcript_scan_restarts_after_truncation(tmp_path):
 
 
 def test_codex_transcript_scan_restarts_when_existing_bytes_change(tmp_path):
-    session_files._CODEX_TRANSCRIPT_SCAN_CACHE.clear()
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "rollout.jsonl"
 
     def line(path_name, generated_tokens):
@@ -457,22 +899,144 @@ def test_session_files_payload_carries_agent_window_attribution(tmp_path):
     assert item["agent_windows"] == [{"kind": "codex", "window": "0", "window_index": 0, "pane": "0", "pane_target": "s1:0.0"}]
 
 
-def test_scan_claude_transcript_refreshes_cache_on_change(tmp_path):
-    # the (path, mtime, size) cache must not serve stale results after the transcript is appended to.
+def test_scan_claude_transcript_incrementally_scans_complete_appends_and_reuses_raw_parse_for_cwds(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "c.jsonl"
-    transcript.write_text(
-        json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Edit", "input": {"file_path": "/tmp/a.py"}}]}}) + "\n",
-        encoding="utf-8",
-    )
-    assert session_files.scan_claude_transcript(transcript, None) == {"/tmp/a.py": {"M"}}
-    transcript.write_text(
-        json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/b.py"}}]}}) + "\n\n",
-        encoding="utf-8",
-    )
-    refreshed = session_files.scan_claude_transcript(transcript, None)
-    assert refreshed == {"/tmp/b.py": {"A"}}, "size/mtime change invalidates the cache, no stale hit"
+    first_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 5}, "content": [
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": "a.py"}}]}}) + "\n"
+    second_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 7}, "content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": "b.py"}}]}}) + "\n"
+    transcript.write_text(first_line, encoding="utf-8")
+    root_a = tmp_path / "root-a"
+    root_b = tmp_path / "root-b"
+    first = session_files.scan_claude_transcript_details(transcript, str(root_a))
+    assert first["changes"] == {str(root_a / "a.py"): {"M"}}
+    assert first["usage"]["generated_tokens"] == 5
+
+    transcript.write_text(first_line + second_line, encoding="utf-8")
+    real_loads = session_files.json.loads
+    parsed_lines = []
+
+    def counting_loads(value):
+        parsed_lines.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", counting_loads)
+    second = session_files.scan_claude_transcript_details(transcript, str(root_a))
+    same_raw_parse = session_files.scan_claude_transcript_details(transcript, str(root_b))
+
+    assert [value for value in parsed_lines if isinstance(value, str) and value.endswith("\n")] == [second_line]
+    assert second["changes"] == {str(root_a / "a.py"): {"M"}, str(root_a / "b.py"): {"A"}}
+    assert same_raw_parse["changes"] == {str(root_b / "a.py"): {"M"}, str(root_b / "b.py"): {"A"}}
+    assert second["usage"]["generated_tokens"] == 12
+
+
+def test_transcript_scan_streams_complete_lines_without_reading_the_full_file(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("".join(
+        json.dumps({
+            "payload": {"info": {"total_token_usage": {"output_tokens": index + 1}}},
+            "padding": "x" * 4096,
+        }) + "\n"
+        for index in range(256)
+    ), encoding="utf-8")
+    real_open = session_files.Path.open
+    readline_calls = 0
+
+    class TrackingFile:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def seek(self, *args):
+            return self.handle.seek(*args)
+
+        def readline(self, *args):
+            nonlocal readline_calls
+            readline_calls += 1
+            return self.handle.readline(*args)
+
+        def read(self, size=-1):
+            assert size >= 0, "transcript scans must not materialize the full unread file"
+            return self.handle.read(size)
+
+    def tracking_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        return TrackingFile(handle) if path == transcript and args and args[0] == "rb" else handle
+
+    monkeypatch.setattr(session_files.Path, "open", tracking_open)
+    details = session_files.scan_codex_transcript_details(transcript)
+
+    assert details["usage"]["generated_tokens"] == 256
+    assert readline_calls == 258  # one bounded prefix-identity read plus 256 records and EOF
+
+
+def test_transcript_scanners_skip_json_for_records_without_usage_or_changes(monkeypatch):
+    def unexpected_loads(_value):
+        raise AssertionError("irrelevant transcript records must not be decoded into object trees")
+
+    monkeypatch.setattr(session_files.json, "loads", unexpected_loads)
+    claude_state = session_files.new_claude_transcript_scan_state()
+    codex_state = session_files.new_codex_transcript_scan_state()
+
+    session_files.update_claude_transcript_scan_state(claude_state, json.dumps({"type": "user", "message": "x" * 1000}))
+    session_files.update_codex_transcript_scan_state(codex_state, json.dumps({"type": "response_item", "payload": {"text": "please run git add big-file " + ("x" * 1000)}}), None, False)
+
+    assert claude_state["generated_tokens"] == 0
+    assert codex_state["last_token_total"] is None
+
+
+def test_codex_change_scan_does_not_parse_usage_only_records(tmp_path, monkeypatch):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "rollout.jsonl"
+    usage_line = json.dumps({"payload": {"info": {"total_token_usage": {"output_tokens": 17}}}})
+    shell_line = json.dumps({
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "git add tracked.txt", "workdir": str(tmp_path)}),
+        },
+    })
+    transcript.write_text(usage_line + "\n" + shell_line + "\n", encoding="utf-8")
+    real_loads = session_files.json.loads
+    parsed = []
+
+    def tracking_loads(value):
+        parsed.append(value)
+        return real_loads(value)
+
+    monkeypatch.setattr(session_files.json, "loads", tracking_loads)
+
+    assert session_files.scan_codex_transcript(transcript, str(tmp_path), include_patch_text=False) == {str(tmp_path / "tracked.txt"): {"M"}}
+    assert all("total_token_usage" not in str(value) for value in parsed)
+
+
+def test_scan_claude_transcript_waits_for_partial_lines_and_resets_after_replacement(tmp_path):
+    session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    transcript = tmp_path / "c.jsonl"
+    partial_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 5}, "content": [
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": "/tmp/a.py"}}]}})
+    transcript.write_text(partial_line, encoding="utf-8")
+    assert session_files.scan_claude_transcript_details(transcript)["changes"] == {}
+
+    transcript.write_text(partial_line + "\n", encoding="utf-8")
+    complete = session_files.scan_claude_transcript_details(transcript)
+    assert complete["changes"] == {"/tmp/a.py": {"M"}}
+    assert complete["usage"]["generated_tokens"] == 5
+
+    replacement_line = json.dumps({"type": "assistant", "message": {"usage": {"output_tokens": 3}, "content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/b.py"}}]}}) + "\n"
+    transcript.write_text(replacement_line, encoding="utf-8")
+    replacement = session_files.scan_claude_transcript_details(transcript)
+    assert replacement["changes"] == {"/tmp/b.py": {"A"}}
+    assert replacement["usage"]["generated_tokens"] == 3
 
 
 def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path):
@@ -923,7 +1487,11 @@ def test_session_files_payload_demotes_missing_transcript_to_per_agent_warning(t
     assert payload["errors"] == []
 
     # It is surfaced as a non-blocking, per-agent warning instead.
-    assert payload["warnings"] == ["codex transcript not found by process fd or cwd"]
+    assert payload["warnings"] == [{
+        "key": "diff.warning.agentDiscovery",
+        "params": {"error": "codex transcript not found by process fd or cwd"},
+        "fallback": "codex transcript not found by process fd or cwd",
+    }]
 
 
 def test_git_status_parses_renames_and_tab_paths(tmp_path):
@@ -1373,6 +1941,34 @@ def test_session_files_payload_reports_invalid_ref_order(tmp_path):
 
     assert payload["files"] == []
     assert payload["errors"] == []
+    assert payload["repos"][0]["error_message"] == {
+        "key": "diff.warning.refsFallback",
+        "params": {"repo": "repo"},
+        "fallback": "requested refs not found in this repo; showing default",
+    }
+
+    aggregate, status = session_files.session_files_payload(
+        None,
+        {"s1": info, "s2": info},
+        hours=24,
+        from_ref=newer,
+        to_ref=older,
+    )
+    assert status == HTTPStatus.OK
+    assert aggregate["repos"][0]["error_message"] == payload["repos"][0]["error_message"]
+
+
+def test_diff_ref_issue_uses_one_structured_classifier():
+    assert session_files.diff_ref_issue("unknown FROM ref: missing", "missing", "current") == {
+        "key": "common.unknownFromRef",
+        "params": {"ref": "missing"},
+        "fallback": "unknown FROM ref: missing",
+    }
+    assert session_files.diff_ref_issue("unknown TO ref: future", "HEAD", "future") == {
+        "key": "common.unknownToRef",
+        "params": {"ref": "future"},
+        "fallback": "unknown TO ref: future",
+    }
 
 
 def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path):

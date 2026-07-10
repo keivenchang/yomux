@@ -7,7 +7,6 @@ let shareDefaultReadOnly = initialSetting('share.read_only', true) !== false;
 let shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
 let shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', 'cover'));
 let shareStatusPill = null;
-let shareStatusTimer = null;
 let shareViewerBanner = null;
 let shareMirrorStage = null;
 let shareReplayShellActive = false;
@@ -15,7 +14,6 @@ let shareReplayShellState = {status: 'idle'};
 let shareReplayLastKeyframe = null;
 let shareReplayNodeMap = new Map();
 let shareReplayTerminalPlaceholders = new Map();
-const shareReplayScrollPublishTimers = new Map();
 let shareReplayLastKeyframeBytes = 0;
 let shareReplayLastDeltaBytes = 0;
 let shareReplayLastLatencyMs = null;
@@ -183,7 +181,7 @@ function shareDefaultSchemeForForm(readOnly = shareDefaultReadOnly) {
 }
 
 function shareModeLabel(share) {
-  return share?.mode === 'rw' ? t('share.mode.write') : t('share.mode.readOnly');
+  return share?.mode === 'rw' ? t('share.mode.write') : t('common.readOnly');
 }
 
 function shareTotalViewers() {
@@ -221,7 +219,7 @@ function shareAppearanceSnapshot() {
     editorFontSize,
     previewFontSize: clampEditorPreviewFontSize(editorPreviewFontSize),
     fileExplorerFontSize,
-    tabWidth: numberSetting('appearance.tab_width', 180),
+    tabWidth: numberSetting('appearance.tab_width', 172),
     paneSpacing: Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 3))),
     paneRingOpacity: Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75))),
     inactivePaneOpacity: Math.max(0, Math.min(100, numberSetting('appearance.inactive_pane_opacity', 60))),
@@ -295,12 +293,16 @@ function shareReplayShellEnabled() {
   return shareReplayViewerModeEnabled();
 }
 
+function shareReplayMirrorLabel() {
+  return t('share.replay.mirrorAria');
+}
+
 function shareReplayUserStatusText(status = '') {
   const cleanStatus = String(status || '').trim();
-  if (cleanStatus === 'mirrored') return 'mirrored';
-  if (cleanStatus === 'host-disconnected') return 'host disconnected';
-  if (cleanStatus === 'viewer-behind') return 'viewer behind';
-  return 'resyncing';
+  if (cleanStatus === 'mirrored') return t('share.mirror.synced');
+  if (cleanStatus === 'host-disconnected') return t('share.mirror.hostDisconnected');
+  if (cleanStatus === 'viewer-behind') return t('share.mirror.viewerBehind');
+  return t('share.mirror.checking');
 }
 
 function setShareReplayShellStatus(status = 'waiting', detail = {}) {
@@ -339,7 +341,7 @@ function prepareShareReplayMirrorRoot() {
   root.dataset.shareReplayInert = 'true';
   root.dataset.shareReplayStatus = 'waiting';
   root.setAttribute('role', 'presentation');
-  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('aria-label', shareReplayMirrorLabel());
   root.setAttribute('tabindex', '-1');
   return root;
 }
@@ -361,16 +363,8 @@ function installShareReplayShell() {
 
 function shareReplaySendUiMessage(message = {}) {
   if (!shareReplayShellActive || !shareToken || !message?.type) return false;
-  const socket = ensureShareHostSocket(shareToken);
-  if (!socket) return false;
-  if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(message));
-    return true;
-  }
-  const shareHostQueue = shareHostQueues.get(shareToken) || [];
-  if (shareHostQueue.length < 32) shareHostQueue.push(message);
-  shareHostQueues.set(shareToken, shareHostQueue);
-  return true;
+  const delivery = sendOrQueueShareHostMessage(shareToken, message);
+  return delivery.sent || delivery.queued;
 }
 
 function shareReplayResetKeyframeRequestBackoff() {
@@ -580,7 +574,6 @@ function shareFinderSeed() {
   return {
     root,
     rootMode: fileExplorerRootMode === 'fixed' ? 'fixed' : 'sync',
-    mode: normalizeFileExplorerMode(fileExplorerMode),
     session: typeof fileExplorerSessionFilesTargetSession === 'function' ? fileExplorerSessionFilesTargetSession() : '',
   };
 }
@@ -629,40 +622,72 @@ function shareViewerUiWsUrl(token) {
   return `${scheme}//${location.host}/ws/share-ui?${params.toString()}`;
 }
 
+function shareHostConnectionRecord(token, options = {}) {
+  const cleanToken = String(token || '');
+  if (!cleanToken) return null;
+  const senderRecord = shareSenderRecord(cleanToken, {create: options.create === true});
+  if (!senderRecord) return null;
+  if (!senderRecord.connection && options.create === true) senderRecord.connection = {socket: null, queue: []};
+  return senderRecord.connection;
+}
+
+function shareHostConnectionSockets() {
+  return shareSenderRecordEntries('connection').map(([, record]) => record.connection.socket).filter(Boolean);
+}
+
+function shareHostQueuedMessageCount(token) {
+  return shareHostConnectionRecord(token)?.queue.length || 0;
+}
+
+function enqueueShareHostMessage(token, message) {
+  const record = shareHostConnectionRecord(token, {create: true});
+  if (!record || record.queue.length >= 32) return false;
+  record.queue.push(message);
+  return true;
+}
+
+function sendOrQueueShareHostMessage(token, message) {
+  const socket = ensureShareHostSocket(token);
+  if (!socket) return {sent: false, queued: false};
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(typeof message === 'string' ? message : JSON.stringify(message));
+    return {sent: true, queued: false};
+  }
+  return {sent: false, queued: enqueueShareHostMessage(token, message)};
+}
+
 function closeShareHostSocket() {
-  for (const socket of shareHostSockets.values()) {
+  for (const socket of shareHostConnectionSockets()) {
     try { socket?.close?.(); } catch (_) {}
   }
-  shareHostSockets = new Map();
-  shareHostQueues = new Map();
+  for (const [token] of shareSenderRecordEntries('connection')) deleteShareSenderRecord(token);
 }
 
 function flushShareHostQueue(token) {
-  const socket = shareHostSockets.get(token);
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  const shareHostQueue = shareHostQueues.get(token) || [];
-  const pending = shareHostQueue.splice(0, shareHostQueue.length);
-  shareHostQueues.set(token, shareHostQueue);
-  for (const message of pending) socket.send(typeof message === 'string' ? message : JSON.stringify(message));
+  const record = shareHostConnectionRecord(token);
+  if (!record?.socket || record.socket.readyState !== WebSocket.OPEN) return;
+  const pending = record.queue.splice(0, record.queue.length);
+  for (const message of pending) record.socket.send(typeof message === 'string' ? message : JSON.stringify(message));
 }
 
 function ensureShareHostSocket(token) {
   const cleanToken = String(token || '');
   if ((!shareViewMode && readOnlyMode) || !cleanToken) return null;
-  const current = shareHostSockets.get(cleanToken);
+  const record = shareHostConnectionRecord(cleanToken, {create: true});
+  const current = record.socket;
   if (current && current.readyState !== WebSocket.CLOSED && current.readyState !== WebSocket.CLOSING) {
     return current;
   }
   const socket = new WebSocket(shareViewMode ? shareViewerUiWsUrl(cleanToken) : shareHostWsUrl(cleanToken));
-  shareHostSockets.set(cleanToken, socket);
-  if (!shareHostQueues.has(cleanToken)) shareHostQueues.set(cleanToken, []);
+  record.socket = socket;
   socket.onopen = () => flushShareHostQueue(cleanToken);
   socket.onmessage = event => {
     const message = shareSocketMessage(event.data);
     if (message?.ch === 'ui') applyShareUiMessage(message);
   };
   socket.onclose = () => {
-    if (shareHostSockets.get(cleanToken) === socket) shareHostSockets.delete(cleanToken);
+    const currentRecord = shareHostConnectionRecord(cleanToken);
+    if (currentRecord?.socket === socket) currentRecord.socket = null;
   };
   socket.onerror = () => {};
   return socket;
@@ -675,11 +700,11 @@ function ensureShareHostSockets() {
       : activeShares.map(share => share.token).filter(Boolean)
   );
   for (const token of activeTokens) ensureShareHostSocket(token);
-  for (const [token, socket] of shareHostSockets.entries()) {
+  for (const [token, senderRecord] of shareSenderRecordEntries('connection')) {
+    const record = senderRecord.connection;
     if (activeTokens.has(token)) continue;
-    try { socket?.close?.(); } catch (_) {}
-    shareHostSockets.delete(token);
-    shareHostQueues.delete(token);
+    try { record.socket?.close?.(); } catch (_) {}
+    deleteShareSenderRecord(token);
   }
 }
 

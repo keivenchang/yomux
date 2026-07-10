@@ -3,7 +3,7 @@
 // YO!agent panel rendering, conversation controls, and activity summary refresh split from 80_panes_preferences.js.
 
 function sessionActivitySummary(session) {
-  return activitySummaryPayload?.sessions?.[session] || null;
+  return activitySummaryState.payload?.sessions?.[session] || null;
 }
 
 function activitySummaryMarkdownBlockHtml(text, className) {
@@ -19,19 +19,10 @@ function activitySummaryLinesHtml(lines, options = {}) {
 function yoagentTimestampText(value) {
   const date = value ? new Date(value) : new Date();
   if (!Number.isFinite(date.getTime())) return '';
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      timeZone: 'America/Los_Angeles',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      timeZoneName: 'short',
-    }).format(date);
-  } catch (_) {
-    return date.toLocaleString();
-  }
+  return localizedDateTimeFormat(date.getTime() / 1000, {
+    timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  });
 }
 
 function yoagentMessageResponseMs(message) {
@@ -69,48 +60,11 @@ function yoagentAuxiliaryLines(message) {
   return lines.map(line => String(line || '').trim()).filter(Boolean);
 }
 
-function yoagentAuxiliaryLineIsTool(line) {
-  return /^(tool start|tool output|tool done|approval requested):?/i.test(String(line || '').trim());
-}
-
-function yoagentAuxiliaryLineIsDiagnostic(line) {
-  return /^(?:thinking done|usage:|[-*]\s*(?:backend|response time|model CLI time|Codex transport|Codex timing|prompt size|model session|fallback reason|stream phase|raw model thinking|activity context changed|auxiliary stream truncated)\b)/i.test(String(line || '').trim());
-}
-
-function yoagentAuxiliaryLineIsThinking(line) {
-  return /^(?:thinking|thinking summary|redacted thinking):?/i.test(String(line || '').trim());
-}
-
 const YOAGENT_THINKING_PREVIEW_WORDS = 50;
 const YOAGENT_THINKING_LIVE_PREVIEW_WORDS = 160;
 
 function yoagentAuxiliaryPreviewThinkingLines(text) {
-  const result = [];
-  let currentKind = '';
-  for (const rawLine of String(text || '').split(/\r?\n/)) {
-    const line = String(rawLine || '').trim();
-    if (!line) continue;
-    if (yoagentAuxiliaryLineIsTool(line)) {
-      currentKind = 'tool';
-      continue;
-    }
-    if (yoagentAuxiliaryLineIsDiagnostic(line)) {
-      currentKind = 'diagnostic';
-      continue;
-    }
-    if (yoagentAuxiliaryLineIsThinking(line)) {
-      currentKind = 'thinking';
-      result.push(line);
-      continue;
-    }
-    if (currentKind === 'tool' || currentKind === 'diagnostic') continue;
-    result.push(line);
-  }
-  return result;
-}
-
-function yoagentLastLines(lines, count = 1) {
-  return (Array.isArray(lines) ? lines : []).slice(-Math.max(1, count)).join('\n');
+  return String(text || '').split(/\r?\n/).map(line => String(line || '').trim()).filter(Boolean);
 }
 
 function yoagentThinkingPreviewText(text, wordLimit = YOAGENT_THINKING_PREVIEW_WORDS) {
@@ -131,21 +85,7 @@ function yoagentThinkingWordCount(text) {
   return yoagentThinkingWords(text).length;
 }
 
-function yoagentThinkingTokenCount(text) {
-  let latest = 0;
-  const tokenPattern = /~\s*([0-9][\d,.]*)([kKmM]?)\s*tokens?\b/g;
-  for (const match of String(text || '').matchAll(tokenPattern)) {
-    const value = Number(String(match[1] || '').replace(/,/g, ''));
-    if (!Number.isFinite(value) || value <= 0) continue;
-    const suffix = String(match[2] || '').toLowerCase();
-    const multiplier = suffix === 'm' ? 1000000 : (suffix === 'k' ? 1000 : 1);
-    latest = Math.max(latest, Math.round(value * multiplier));
-  }
-  return latest;
-}
-
-function yoagentThinkingLabel(text) {
-  const tokenCount = yoagentThinkingTokenCount(text);
+function yoagentThinkingLabel(text, tokenCount = 0) {
   if (tokenCount > 0) return tPlural('yoagent.thinking.tokens', tokenCount);
   return tPlural('yoagent.thinking.words', yoagentThinkingWordCount(text));
 }
@@ -153,27 +93,23 @@ function yoagentThinkingLabel(text) {
 function yoagentThinkingReadableText(text) {
   return String(text || '')
     .replace(/\\n/g, '\n')
-    .replace(/\(~\s*[0-9][\d,.]*[kKmM]?\s*tokens?\)/g, ' ')
-    .replace(/~\s*[0-9][\d,.]*[kKmM]?\s*tokens?\b/g, ' ')
-    .split(/\r?\n/)
-    .map(line => line.replace(/^\s*(?:thinking summary|redacted thinking|thinking)\s*(?::|[.…-]+)?\s*/i, ''))
-    .join(' ')
+    .replace(/\s+/g, ' ')
     .replace(/[()[\]{}~*.,:;!?\s-]+/g, ' ')
     .trim();
 }
 
-function yoagentThinkingIsTokenOnly(text) {
-  return yoagentThinkingTokenCount(text) > 0 && !yoagentThinkingReadableText(text);
+function yoagentThinkingIsTokenOnly(text, tokenCount = 0) {
+  return Number(tokenCount) > 0 && !yoagentThinkingReadableText(text);
 }
 
-function yoagentThinkingTokenOnlyNoteHtml(text) {
-  return yoagentThinkingIsTokenOnly(text)
+function yoagentThinkingTokenOnlyNoteHtml(text, tokenCount = 0) {
+  return yoagentThinkingIsTokenOnly(text, tokenCount)
     ? `<div class="yoagent-details-note">${esc(t('yoagent.thinking.tokensOnlyNote'))}</div>`
     : '';
 }
 
 function yoagentThinkingDetailsPreview(text, options = {}) {
-  if (!options.active || yoagentThinkingIsTokenOnly(text)) return '';
+  if (!options.active || yoagentThinkingIsTokenOnly(text, options.tokenCount)) return '';
   return yoagentThinkingPreviewText(text, YOAGENT_THINKING_LIVE_PREVIEW_WORDS);
 }
 
@@ -193,21 +129,23 @@ function yoagentDetailsPreviewHtml(preview, className = '') {
   return `<span class="${esc(classes)}">${esc(preview)}</span>`;
 }
 
-function yoagentToolLineHtml(line) {
-  const text = String(line || '').replace(/\\n/g, '\n');
-  const commandMatch = text.match(/^((?:tool start:\s*(?:command|bash|shell)|approval requested):\s*)(.*)$/i);
-  if (commandMatch) {
-    return `${esc(commandMatch[1])}<span class="yoagent-tc-command">${esc(commandMatch[2])}</span>`;
-  }
-  const shellMatch = text.match(/^(\$\s+)(.*)$/);
-  if (shellMatch) {
-    return `${esc(shellMatch[1])}<span class="yoagent-tc-command">${esc(shellMatch[2])}</span>`;
-  }
-  return esc(text);
+function yoagentToolItemBodyHtml(item) {
+  const text = String(item?.text || '').replace(/\\n/g, '\n');
+  const command = String(item?.command || '');
+  return command && text === command
+    ? `<span class="yoagent-tc-command">${esc(command)}</span>`
+    : esc(text);
 }
 
-function yoagentToolLinesHtml(lines) {
-  return (Array.isArray(lines) ? lines : []).map(yoagentToolLineHtml).join('\n');
+function yoagentStreamItemLabel(item) {
+  const source = item?.label && typeof item.label === 'object'
+    ? item.label
+    : {key: item?.labelKey, params: item?.labelParams, fallback: item?.fallback};
+  return {
+    key: String(source?.key || ''),
+    params: source?.params && typeof source.params === 'object' ? {...source.params} : {},
+    fallback: String(source?.fallback || ''),
+  };
 }
 
 function yoagentStreamItems(message) {
@@ -215,19 +153,30 @@ function yoagentStreamItems(message) {
     .map(item => {
       const text = String(item?.text || '');
       const sourceIndex = Number(item?.sourceIndex);
+      const label = yoagentStreamItemLabel(item);
       return {
         kind: String(item?.kind || '').trim(),
         text,
+        eventKind: String(item?.eventKind || ''),
+        label,
+        tokenCount: Math.max(0, Number(item?.tokenCount) || 0),
+        toolName: String(item?.toolName || ''),
+        command: String(item?.command || ''),
+        path: String(item?.path || ''),
         sourceIndex: Number.isFinite(sourceIndex) ? sourceIndex : null,
       };
     })
-    .filter(item => ['assistant', 'thinking', 'tool'].includes(item.kind) && item.text.trim())
+    .filter(item => ['assistant', 'thinking', 'tool', 'diagnostic'].includes(item.kind)
+      && (item.text.trim() || item.label.key || item.label.fallback))
     .map((item, index) => ({...item, sourceIndex: item.sourceIndex == null ? index : item.sourceIndex}));
   const coalesced = [];
   for (const item of items) {
     const previous = coalesced[coalesced.length - 1];
-    if (previous && previous.kind === item.kind && (item.kind === 'thinking' || item.kind === 'tool')) {
+    if (previous && previous.kind === item.kind
+      && JSON.stringify(previous.label) === JSON.stringify(item.label)
+      && (item.kind === 'thinking' || item.kind === 'tool')) {
       previous.text = `${previous.text.replace(/\s+$/, '')}\n${item.text.replace(/^\s+/, '')}`;
+      previous.tokenCount = Math.max(previous.tokenCount, item.tokenCount);
       continue;
     }
     coalesced.push({...item});
@@ -242,10 +191,12 @@ function yoagentPreviewLine(text) {
 function yoagentStreamAuxiliaryItemHtml(item, key, index, options = {}) {
   const kind = String(item?.kind || '');
   const text = String(item?.text || '');
-  if (!text || (kind !== 'thinking' && kind !== 'tool')) return '';
+  if (!['thinking', 'tool', 'diagnostic'].includes(kind)) return '';
   const tool = kind === 'tool';
-  const label = tool ? t('yoagent.toolCall.label') : yoagentThinkingLabel(text);
-  const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingDetailsPreview(text, options);
+  const diagnostic = kind === 'diagnostic';
+  const descriptorLabel = messageDescriptorText(item.label);
+  const label = kind === 'thinking' ? yoagentThinkingLabel(text, item.tokenCount) : descriptorLabel;
+  const preview = tool ? yoagentPreviewLine(text) : yoagentThinkingDetailsPreview(text, {...options, tokenCount: item.tokenCount});
   const previewHtml = yoagentDetailsPreviewHtml(preview, tool ? '' : 'yoagent-thinking-live-preview');
   const classes = tool
     ? 'yoagent-message-details yoagent-toolcall-details has-auxiliary yoagent-stream-detail'
@@ -253,9 +204,9 @@ function yoagentStreamAuxiliaryItemHtml(item, key, index, options = {}) {
   const streamClasses = tool
     ? 'yoagent-auxiliary-stream yoagent-toolcall-stream'
     : 'yoagent-auxiliary-stream';
-  const body = tool ? yoagentToolLinesHtml(String(text).replace(/\\n/g, '\n').split(/\r?\n/)) : esc(text);
-  const note = tool ? '' : yoagentThinkingTokenOnlyNoteHtml(text);
-  const streamBody = tool || !yoagentThinkingIsTokenOnly(text)
+  const body = tool ? yoagentToolItemBodyHtml(item) : esc(text);
+  const note = tool || diagnostic ? '' : yoagentThinkingTokenOnlyNoteHtml(text, item.tokenCount);
+  const streamBody = text && (tool || diagnostic || !yoagentThinkingIsTokenOnly(text, item.tokenCount))
     ? `<pre class="${streamClasses}">${body}</pre>`
     : '';
   const streamIndex = Number.isFinite(Number(item?.sourceIndex)) ? Number(item.sourceIndex) : index;
@@ -271,7 +222,7 @@ function yoagentMessageStreamItemsHtml(message, key = '') {
   const thinkingActive = yoagentThinkingPreviewActive(message);
   return `<div class="yoagent-message-stream">${items.map((item, index) => {
     if (item.kind === 'assistant') {
-      return `<div class="yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
+      return `<div class="conversation-message-body yoagent-message-body markdown-body yoagent-stream-assistant" data-yoagent-markdown>${esc(item.text)}</div>`;
     }
     return yoagentStreamAuxiliaryItemHtml(item, key, index, {active: thinkingActive});
   }).join('')}</div>`;
@@ -280,52 +231,50 @@ function yoagentMessageStreamItemsHtml(message, key = '') {
 function yoagentMessageDetailsHtml(message, key = '') {
   const text = String(message?.details || '').trim();
   const auxiliaryLines = yoagentAuxiliaryLines(message);
-  const toolLines = auxiliaryLines.filter(yoagentAuxiliaryLineIsTool);
-  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line) && !yoagentAuxiliaryLineIsDiagnostic(line));
-  const auxiliaryText = thinkingLines.join('\n');
-  const toolText = toolLines.join('\n');
+  const auxiliaryText = auxiliaryLines.join('\n');
   const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(message?.auxiliaryPreview || '');
-  const auxiliarySourceText = auxiliaryPreviewLines.join('\n') || thinkingLines.join('\n');
+  const auxiliarySourceText = auxiliaryPreviewLines.join('\n') || auxiliaryText;
   const auxiliaryBodyText = auxiliaryText || auxiliarySourceText;
   const thinkingActive = yoagentThinkingPreviewActive(message);
   const auxiliaryPreview = yoagentThinkingDetailsPreview(auxiliarySourceText, {active: thinkingActive});
-  const toolPreview = yoagentPreviewLine(yoagentLastLines(toolLines, 1));
   const hasAuxiliary = Boolean(auxiliaryBodyText || auxiliaryPreview);
-  const hasTool = Boolean(toolText || toolPreview);
   const truncated = Boolean(message?.auxiliaryTruncated);
-  if (!text && !hasAuxiliary && !hasTool) return '';
+  if (!text && !hasAuxiliary) return '';
   const preview = yoagentDetailsPreviewHtml(auxiliaryPreview, 'yoagent-thinking-live-preview');
   const auxiliaryBlock = auxiliaryBodyText && !yoagentThinkingIsTokenOnly(auxiliaryBodyText)
     ? `<pre class="yoagent-auxiliary-stream">${esc(auxiliaryBodyText)}</pre>`
     : '';
   const tokenOnlyNote = auxiliaryBodyText ? yoagentThinkingTokenOnlyNoteHtml(auxiliaryBodyText) : '';
   const truncationNote = truncated
-    ? `<div class="yoagent-details-note">auxiliary stream truncated to latest entries</div>`
+    ? `<div class="yoagent-details-note">${esc(t('yoagent.details.auxiliaryTruncated'))}</div>`
     : '';
   const detailsBlock = text
     ? `<pre class="yoagent-safe-details">${esc(text)}</pre>`
     : '';
   const detailsLabel = hasAuxiliary
     ? yoagentThinkingLabel(auxiliaryBodyText || auxiliaryPreview)
-    : t('popover.details');
+    : t('common.details');
   const thinkingDetails = (text || hasAuxiliary)
     ? `<details class="yoagent-message-details${hasAuxiliary ? ' has-auxiliary' : ''}" data-yoagent-message-details-key="${esc(key)}">
     <summary><span>${esc(`${detailsLabel}…`)}</span>${preview}</summary>
     ${tokenOnlyNote}${auxiliaryBlock}${truncationNote}${detailsBlock}
   </details>`
     : '';
-  const toolDetails = hasTool
-    ? `<details class="yoagent-message-details yoagent-toolcall-details has-auxiliary" data-yoagent-message-details-key="${esc(`${key}|tc`)}">
-    <summary><span>${esc(t('yoagent.toolCall.label'))}</span>${yoagentDetailsPreviewHtml(toolPreview)}</summary>
-    <pre class="yoagent-auxiliary-stream yoagent-toolcall-stream">${yoagentToolLinesHtml(toolLines.length ? toolLines : [toolPreview])}</pre>
-  </details>`
-    : '';
-  return `${thinkingDetails}${toolDetails}`;
+  return thinkingDetails;
 }
 
-function relativeActivityGeneratedText(payload = activitySummaryPayload) {
+function yoagentMessageDetailRowsHtml(message, key = '') {
+  const rows = Array.isArray(message?.detailRows) ? message.detailRows : [];
+  if (!rows.length) return '';
+  return `<details class="yoagent-message-details" data-yoagent-message-details-key="${esc(`${key}|metadata`)}">
+    <summary><span>${esc(`${t('common.details')}…`)}</span></summary>
+    <div class="yoagent-safe-details">${rows.map(row => `<div>${esc(messageDescriptorText(row))}</div>`).join('')}</div>
+  </details>`;
+}
+
+function relativeActivityGeneratedText(payload = activitySummaryState.payload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
-  if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
+  if (!Number.isFinite(ts) || ts <= 0) return {text: t('state.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
   // Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
   // locale phrasing, wrapped by the localized "last updated {rel}" string.
@@ -333,24 +282,29 @@ function relativeActivityGeneratedText(payload = activitySummaryPayload) {
     ? t('yoagent.updated.justNow')
     : t('yoagent.updated.wrap', {rel: relativeTimeFormat(seconds)});
   let title = payload?.generated_at || '';
-  try {
-    title = new Intl.DateTimeFormat(undefined, {
-      timeZone: 'America/Los_Angeles',
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-      timeZoneName: 'short',
-    }).format(new Date(ts * 1000));
-  } catch (_) {}
+  title = localizedDateTimeFormat(ts, {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  }) || title;
   return {text, title};
 }
 
+function activitySummaryGlobalDetailLines(summary) {
+  if (!summary || typeof summary !== 'object') return [];
+  const lines = Array.isArray(summary.detail_lines) ? summary.detail_lines.filter(Boolean) : [];
+  const messages = Array.isArray(summary.detail_messages)
+    ? summary.detail_messages.map(message => messageDescriptorText(message)).filter(Boolean)
+    : [];
+  return [...lines, ...messages];
+}
+
 function globalActivitySummaryHtml() {
-  const summary = activitySummaryPayload?.global || {};
+  const summary = activitySummaryState.payload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
-  const detailLines = lines.filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)));
+  const detailLines = activitySummaryGlobalDetailLines(summary);
   const generated = relativeActivityGeneratedText();
-  const refreshBar = activitySummaryRefreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
+  const refreshBar = activitySummaryState.refreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
   return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel()}))}">
     <div class="yoagent-global-head">
       <span>${esc(yoagentTabLabel())}</span>
@@ -363,8 +317,8 @@ function globalActivitySummaryHtml() {
 }
 
 function yoagentStreamingMessagesList() {
-  if (!(yoagentStreamingMessages instanceof Map)) return [];
-  return [...yoagentStreamingMessages.values()]
+  if (!(yoagentConversationState.streamingMessages instanceof Map)) return [];
+  return [...yoagentConversationState.streamingMessages.values()]
     .filter(message => message && (message.content || message.streaming || message.aborted || message.details || message.auxiliaryText || message.auxiliaryPreview))
     .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 }
@@ -377,7 +331,8 @@ function yoagentAgentResultParts(text) {
 }
 
 function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
-  const content = String(message?.content || (message?.aborted ? t('yoagent.stopped') : (streaming ? t('yoagent.thinking') : '')));
+  const contentFallback = message?.content || (message?.aborted ? t('yoagent.stopped') : (streaming ? t('yoagent.thinking') : ''));
+  const content = structuredMessageText(message, 'content', contentFallback);
   if (agentResult) {
     const parts = yoagentAgentResultParts(content);
     const heading = parts.heading
@@ -386,16 +341,16 @@ function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
     const output = parts.output
       ? `<div class="yoagent-agent-result-output markdown-body" data-yoagent-markdown>${esc(parts.output)}</div>`
       : '';
-    return `<div class="yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
+    return `<div class="conversation-message-body yoagent-message-body yoagent-agent-result-body">${heading}${output}</div>`;
   }
-  const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
+  const bodyClass = roleClass === 'assistant' ? 'conversation-message-body yoagent-message-body markdown-body' : 'conversation-message-body yoagent-message-body';
   const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
   return `<div class="${bodyClass}"${markdownAttr}>${esc(content)}</div>`;
 }
 
 function yoagentChatMessagesHtml() {
-  const messages = [...(Array.isArray(yoagentMessages) ? yoagentMessages : []), ...yoagentStreamingMessagesList()];
-  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
+  const messages = [...(Array.isArray(yoagentConversationState.messages) ? yoagentConversationState.messages : []), ...yoagentStreamingMessagesList()];
+  const startupInfo = yoagentStartupState.infoVisible ? yoagentStartupInfoHtml() : '';
   if (!messages.length) {
     if (startupInfo) return startupInfo;
     if (!yoagentChatEnabled()) {
@@ -414,13 +369,14 @@ function yoagentChatMessagesHtml() {
     const stoppedState = roleClass === 'assistant' && message?.aborted && String(message?.content || '').trim()
       ? `<div class="yoagent-message-state">${esc(t('yoagent.stopped'))}</div>`
       : '';
-    return `<div class="${messageClass}">
-      <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null)}</div>
-      ${streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming)}
-      ${stoppedState}
-      ${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}
-      ${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}
-    </div>`;
+    return conversationMessageShellHtml({
+      self: roleClass === 'user',
+      className: messageClass,
+      author: role,
+      timestampHtml: yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null),
+      bodyHtml: streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming),
+      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
+    });
   }).join('');
   return `${messageHtml}${startupInfo}`;
 }
@@ -436,16 +392,16 @@ function yoagentActionCardHtml(action) {
   const status = String(action.status || 'ready');
   const transport = String(target.transport || 'tmux-legacy');
   const transportLabel = yoagentActionTransportText(transport, target.transport_label);
-  const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentBusy;
+  const canSend = status === 'ready' && action.id && !readOnlyMode && !yoagentChatState.busy;
   const button = canSend
-    ? `<button type="button" class="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
+    ? `<button type="button" class="yoagent-action-send" data-action="yoagent-action-send" data-yoagent-action-send="${esc(action.id)}">${esc(t('yoagent.action.send'))}</button>`
     : `<span class="yoagent-action-state">${esc(yoagentActionStatusText(action))}</span>`;
   const rows = [
-    [t('yoagent.action.row.session'), target.session || action.session || ''],
+    [t('common.sessionLabel'), target.session || action.session || ''],
     [t('yoagent.action.row.agent'), [target.agent_kind, target.agent_model].filter(Boolean).join(' ')],
     [t('yoagent.action.row.transport'), transportLabel],
     [t('yoagent.action.row.pane'), target.pane_target || ''],
-    [t('yoagent.action.row.path'), target.cwd || ''],
+    [t('common.pathLabel'), target.cwd || ''],
   ].filter(row => row[1]);
   const rowHtml = rows.map(([label, value]) => `<div class="yoagent-action-row"><span>${esc(label)}</span><code>${esc(value)}</code></div>`).join('');
   return `<div class="yoagent-action-card ${esc(status)}" data-yoagent-action-card="${esc(action.id || '')}">
@@ -464,13 +420,26 @@ function yoagentActionTransportText(transport, fallback = '') {
 
 function yoagentActionStatusText(action) {
   const status = String(action?.status || '');
-  if (status === 'sent') return t('yoagent.action.state.sent');
-  if (String(action?.status_text || '') === 'sending') return t('yoagent.action.state.sending');
-  return action?.status_text || status;
+  return structuredMessageText(action, 'status_text', status);
+}
+
+function yoagentActionStatusPatch(key, fallback, params = {}) {
+  return structuredMessageSnapshot({status_text: fallback, status_text_key: key, status_text_params: params}, 'status_text');
+}
+
+function yoagentActionErrorStatusPatch(error) {
+  const snapshot = userMessageSnapshot(error, error?.message || String(error || ''));
+  return {
+    status: 'error',
+    status_text: snapshot.user_message.fallback,
+    status_text_key: snapshot.user_message.key,
+    status_text_params: snapshot.user_message.params,
+    status_diagnostic: snapshot.error,
+  };
 }
 
 function yoagentStartupActivityPayload() {
-  return yoagentStartupActivitySummaryPayload || activitySummaryPayload;
+  return yoagentStartupState.activityPayload || activitySummaryState.payload;
 }
 
 function cloneYoagentActivitySummaryPayload(payload) {
@@ -478,15 +447,15 @@ function cloneYoagentActivitySummaryPayload(payload) {
 }
 
 function captureYoagentStartupActivitySummarySnapshot(options = {}) {
-  if (options.replace !== true && yoagentStartupActivitySummaryPayload) return yoagentStartupActivitySummaryPayload;
-  yoagentStartupActivitySummaryPayload = activitySummaryPayload && typeof activitySummaryPayload === 'object'
-    ? cloneYoagentActivitySummaryPayload(activitySummaryPayload)
+  if (options.replace !== true && yoagentStartupState.activityPayload) return yoagentStartupState.activityPayload;
+  yoagentStartupState.activityPayload = activitySummaryState.payload && typeof activitySummaryState.payload === 'object'
+    ? cloneYoagentActivitySummaryPayload(activitySummaryState.payload)
     : {sessions: {}, global: {lines: []}, session_order: []};
-  return yoagentStartupActivitySummaryPayload;
+  return yoagentStartupState.activityPayload;
 }
 
 function resetYoagentStartupActivitySummarySnapshot() {
-  yoagentStartupActivitySummaryPayload = null;
+  yoagentStartupState.activityPayload = null;
 }
 
 function yoagentIntroMessageText(payload = yoagentStartupActivityPayload()) {
@@ -494,21 +463,22 @@ function yoagentIntroMessageText(payload = yoagentStartupActivityPayload()) {
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = String(summary.headline || lines[0] || '').trim();
   if (!headline) return '';
-  const details = lines
-    .filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)))
+  const details = activitySummaryGlobalDetailLines(summary)
     .slice(0, 2)
     .map(line => `- ${String(line).trim()}`);
-  return ["Here's what I see right now:", "", headline, ...details].filter(Boolean).join('\n');
+  return [t('yoagent.intro.now'), '', headline, ...details].filter(Boolean).join('\n');
 }
 
 function yoagentIntroMessageHtml() {
   const payload = yoagentStartupActivityPayload();
   const text = yoagentIntroMessageText(payload);
   if (!text || !yoagentChatEnabled()) return '';
-  return `<div class="yoagent-message assistant yoagent-intro-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
-    <div class="yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>
-  </div>`;
+  return conversationMessageShellHtml({
+    className: 'yoagent-message yoagent-intro-message',
+    author: yoagentTabLabel(),
+    timestampHtml: yoagentMessageTimestampHtml(payload?.generated_at),
+    bodyHtml: `<div class="conversation-message-body yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>`,
+  });
 }
 
 function yoagentStartupInfoHtml() {
@@ -516,31 +486,42 @@ function yoagentStartupInfoHtml() {
 }
 
 function showYoagentStartupInfoOnce() {
-  if (yoagentStartupInfoShown) return false;
+  if (yoagentStartupState.infoShown) return false;
   captureYoagentStartupActivitySummarySnapshot();
-  yoagentStartupInfoShown = true;
-  yoagentStartupInfoVisible = true;
+  yoagentStartupState.infoShown = true;
+  yoagentStartupState.infoVisible = true;
   return true;
 }
 
 function showYoagentStartupInfoForLatestActivity() {
   resetYoagentStartupActivitySummarySnapshot();
-  yoagentStartupInfoShown = false;
+  yoagentStartupState.infoShown = false;
   return showYoagentStartupInfoOnce();
 }
 
 function hideYoagentStartupInfo() {
-  yoagentStartupInfoVisible = false;
+  yoagentStartupState.infoVisible = false;
 }
 
 function yoagentNoticeHtml() {
-  if (!yoagentNotice?.reason) return '';
-  const backend = yoagentNotice.backend ? `<span class="yoagent-chat-notice-backend">${esc(yoagentNotice.backend)}</span> ` : '';
-  return `<div class="yoagent-chat-notice">${backend}${esc(yoagentNotice.reason)}</div>`;
+  if (!yoagentChatState.notice?.reason) return '';
+  const backendText = yoagentChatState.notice.backend ? yoagentBackendLabel(yoagentChatState.notice.backend) : '';
+  const backend = backendText ? `<span class="yoagent-chat-notice-backend">${esc(backendText)}</span> ` : '';
+  const reason = typeof yoagentChatState.notice.reason === 'object'
+    ? messageDescriptorText(yoagentChatState.notice.reason)
+    : String(yoagentChatState.notice.reason || '');
+  return `<div class="yoagent-chat-notice">${backend}${esc(reason)}</div>`;
+}
+
+function yoagentFallbackNotice(payload = {}) {
+  return {
+    backend: String(payload.backend_used || payload.backend || ''),
+    reason: messageFieldDescriptor(payload, 'fallback_reason'),
+  };
 }
 
 function yoagentPendingWaitsHtml() {
-  const waits = Array.isArray(yoagentPendingWaits) ? yoagentPendingWaits : [];
+  const waits = Array.isArray(yoagentConversationState.pendingWaits) ? yoagentConversationState.pendingWaits : [];
   if (!waits.length) return '';
   const title = tPlural('yoagent.waiting.count', waits.length);
   const rows = waits.map(wait => {
@@ -560,24 +541,29 @@ function yoagentPendingWaitsHtml() {
     const transcript = String(wait?.transcript || '');
     const id = String(wait?.id || '');
     const clearButton = id && !readOnlyMode
-      ? `<button type="button" class="yoagent-waiting-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('yoagent.clear'))}" aria-label="${esc(t('yoagent.clear'))}">${esc(t('yoagent.clear'))}</button>`
+      ? `<button type="button" class="yoagent-waiting-clear btn-base yoagent-compact-action" data-action="yoagent-wait-clear" data-yoagent-wait-clear="${esc(id)}" title="${esc(t('common.clear'))}" aria-label="${esc(t('common.clear'))}">${esc(t('common.clear'))}</button>`
       : '';
-    return `<li class="yoagent-waiting-item" title="${esc(transcript)}">
-      <span class="session-yolo-marker active working yoagent-waiting-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span>
-      <span class="yoagent-waiting-label">${esc(label)}</span>
+    return `<li class="yoagent-waiting-item yoagent-compact-item" title="${esc(transcript)}">
+      <span class="yoagent-waiting-label yoagent-compact-label">${textWithMovingEllipsisHtml(label, 'yoagent-waiting-dots')}</span>
       ${age ? `<span class="yoagent-waiting-age">${esc(age)}</span>` : ''}
       ${clearButton}
     </li>`;
   }).join('');
   return `<div class="yoagent-waiting-queue" aria-live="polite" aria-label="${esc(title)}">
-    <div class="yoagent-waiting-title">${esc(title)}</div>
-    <ul class="yoagent-waiting-list">${rows}</ul>
+    <div class="yoagent-waiting-title yoagent-section-title">${esc(title)}</div>
+    <ul class="yoagent-waiting-list yoagent-compact-list">${rows}</ul>
   </div>`;
 }
 
-function applyYoagentJobsPayload(payload = {}) {
+function setYoagentJobs(items, options = {}) {
+  if (options.invalidateRequest !== false) yoagentJobsState.guard.invalidate();
+  yoagentJobsState.items = Array.isArray(items) ? items : [];
+  return yoagentJobsState.items;
+}
+
+function applyYoagentJobsPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  yoagentJobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+  setYoagentJobs(payload.jobs, {invalidateRequest: options.source !== 'request'});
   return true;
 }
 
@@ -592,42 +578,85 @@ function yoagentJobActionText(job) {
   return String(job?.public_text || job?.prompt_preview || action.text_preview || action.text || action.message || '').trim();
 }
 
-function yoagentJobStatusText(job) {
-  const status = String(job?.status || '');
-  if (status === 'pending_confirmation') return t('yoagent.jobs.status.pendingConfirmation');
-  if (status === 'timed_out') return t('yoagent.jobs.status.timedOut');
-  if (status) return status.replace(/_/g, ' ');
-  return t('yoagent.jobs.status.unknown');
+function yoagentJobDestinationText(job) {
+  const action = job?.action && typeof job.action === 'object' ? job.action : {};
+  return String(action.session || '').trim();
+}
+
+function yoagentJobQuietText(job) {
+  const predicate = job?.predicate && typeof job.predicate === 'object' ? job.predicate : {};
+  const interval = Number(predicate.interval_seconds);
+  if (String(predicate.type || '') === 'interval' && Number.isFinite(interval) && interval > 0) {
+    const runs = Number(job?.max_runs);
+    const count = Number(job?.run_count);
+    return t('yoagent.jobs.every', {seconds: Math.round(interval), runs: Number.isFinite(runs) ? Math.round(runs) : '?', count: Number.isFinite(count) ? Math.round(count) : 0});
+  }
+  const seconds = Number(predicate.quiet_seconds);
+  return Number.isFinite(seconds) && seconds > 0 ? t('yoagent.jobs.calmFor', {seconds: Math.round(seconds)}) : '';
+}
+
+const YOAGENT_JOB_CLASSIFICATION_KEYS = Object.freeze({
+  status: Object.freeze({
+    queued: 'yoagent.jobs.status.queued',
+    firing: 'yoagent.action.state.sending',
+    pending_confirmation: 'yoagent.jobs.status.pendingConfirmation',
+    fired: 'yoagent.jobs.status.fired',
+    failed: 'yoagent.jobs.status.failed',
+    cancelled: 'yoagent.jobs.status.cancelled',
+    timed_out: 'yoagent.jobs.status.timedOut',
+  }),
+  type: Object.freeze({
+    notify_session_idle: 'yoagent.jobs.type.notifySessionIdle',
+    notify_session_needs_input: 'yoagent.jobs.type.notifySessionNeedsInput',
+    notify_session_blocked: 'yoagent.jobs.type.notifySessionBlocked',
+    notify_session_done_after_working: 'yoagent.jobs.type.notifySessionDoneAfterWorking',
+    notify_all_idle: 'yoagent.jobs.type.notifyAllIdle',
+    wait_then_send: 'yoagent.jobs.type.waitThenSend',
+    wait_roster_then_send: 'yoagent.jobs.type.waitRosterThenSend',
+    loop_send: 'yoagent.jobs.type.loopSend',
+    result_watch: 'yoagent.jobs.type.resultWatch',
+  }),
+});
+
+function yoagentJobClassificationText(classification, value) {
+  const kind = String(classification || '');
+  const normalized = String(value || '');
+  const key = YOAGENT_JOB_CLASSIFICATION_KEYS[kind]?.[normalized] || `yoagent.jobs.${kind}.unknown`;
+  return t(key);
 }
 
 function yoagentJobRowsHtml() {
-  const jobs = Array.isArray(yoagentJobs) ? yoagentJobs : [];
+  const jobs = Array.isArray(yoagentJobsState.items) ? yoagentJobsState.items : [];
   if (!jobs.length) return '';
   return jobs.map(job => {
     const id = String(job?.id || job?.job_id || '');
     const status = String(job?.status || '');
     const type = String(job?.type || '');
     const target = yoagentJobTargetText(job);
+    const destination = yoagentJobDestinationText(job);
     const actionText = yoagentJobActionText(job);
     const canConfirm = status === 'pending_confirmation' && id && !readOnlyMode;
-    const canCancel = ['queued', 'pending_confirmation'].includes(status) && id && !readOnlyMode;
+    const canCancel = (['queued', 'pending_confirmation'].includes(status) || (status === 'firing' && type === 'loop_send')) && id && !readOnlyMode;
     const blocker = job?.last_observed_state?.blockers && Array.isArray(job.last_observed_state.blockers)
       ? job.last_observed_state.blockers.join(', ')
       : '';
-    const error = String(job?.error || job?.result?.error || '');
+    const error = userMessageText(job?.result?.send || job?.result || job, '');
+    const route = target && destination ? t('yoagent.jobs.route', {roster: target, session: destination}) : '';
+    const quiet = yoagentJobQuietText(job);
     const meta = [
-      type,
-      target ? t('yoagent.jobs.target', {target}) : '',
+      type ? yoagentJobClassificationText('type', type) : '',
+      route || (target ? t('yoagent.jobs.target', {target}) : ''),
+      quiet,
       blocker ? t('yoagent.jobs.blockedBy', {blocker}) : '',
       error,
     ].filter(Boolean).join(' · ');
     const controls = [
-      canConfirm ? `<button type="button" class="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
-      canCancel ? `<button type="button" class="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('yoagent.jobs.cancel'))}</button>` : '',
+      canConfirm ? `<button type="button" class="yoagent-job-confirm" data-action="yoagent-job-confirm" data-yoagent-job-confirm="${esc(id)}">${esc(t('yoagent.jobs.confirm'))}</button>` : '',
+      canCancel ? `<button type="button" class="yoagent-job-cancel" data-action="yoagent-job-cancel" data-yoagent-job-cancel="${esc(id)}">${esc(t('common.cancel'))}</button>` : '',
     ].filter(Boolean).join('');
     return `<li class="yoagent-job-item yoagent-job-${esc(status || 'unknown')}" data-yoagent-job-row="${esc(id)}">
       <div class="yoagent-job-main">
-        <span class="yoagent-job-status">${esc(yoagentJobStatusText(job))}</span>
+        <span class="yoagent-job-status">${esc(yoagentJobClassificationText('status', status))}</span>
         <span class="yoagent-job-meta">${esc(meta)}</span>
       </div>
       ${actionText ? `<div class="yoagent-job-text">${esc(actionText)}</div>` : ''}
@@ -640,42 +669,44 @@ function yoagentJobsHtml() {
   const rows = yoagentJobRowsHtml();
   if (!rows) return '';
   return `<div class="yoagent-jobs-list" aria-live="polite" aria-label="${esc(t('yoagent.jobs.title'))}">
-    <div class="yoagent-jobs-title">${esc(t('yoagent.jobs.title'))}</div>
+    <div class="yoagent-jobs-title yoagent-section-title">${esc(t('yoagent.jobs.title'))}</div>
     <ul class="yoagent-jobs-items">${rows}</ul>
   </div>`;
 }
 
 function yoagentChatQueueHtml() {
-  const items = Array.isArray(yoagentChatQueue) ? yoagentChatQueue : [];
+  const items = Array.isArray(yoagentChatState.queue) ? yoagentChatState.queue : [];
   if (!items.length) return '';
   const rows = items.map((item, index) => {
     const id = String(item?.id || '');
     const text = String(item?.text || '');
     const label = text.length > 180 ? `${text.slice(0, 177)}...` : text;
-    return `<li class="yoagent-chat-queue-item" data-yoagent-chat-queue-row="${esc(id)}">
+    return `<li class="yoagent-chat-queue-item yoagent-compact-item" data-yoagent-chat-queue-row="${esc(id)}">
       <span class="yoagent-chat-queue-index">${esc(String(index + 1))}</span>
-      <span class="yoagent-chat-queue-text">${esc(label)}</span>
-      <button type="button" class="yoagent-chat-queue-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('yoagent.queue.cancel'))}" aria-label="${esc(t('yoagent.queue.cancel'))}">${esc(t('yoagent.queue.cancel'))}</button>
+      <span class="yoagent-chat-queue-text yoagent-compact-label">${esc(label)}</span>
+      <button type="button" class="yoagent-chat-queue-cancel btn-base yoagent-compact-action" data-action="yoagent-queued-cancel" data-yoagent-queued-cancel="${esc(id)}" title="${esc(t('common.cancel'))}" aria-label="${esc(t('common.cancel'))}">${esc(t('common.cancel'))}</button>
     </li>`;
   }).join('');
   return `<div class="yoagent-chat-queue" aria-live="polite" aria-label="${esc(t('yoagent.queue.title'))}">
-    <div class="yoagent-chat-queue-title">${esc(t('yoagent.queue.title'))}</div>
-    <ul class="yoagent-chat-queue-items">${rows}</ul>
+    <div class="yoagent-chat-queue-title yoagent-section-title">${esc(t('yoagent.queue.title'))}</div>
+    <ul class="yoagent-chat-queue-items yoagent-compact-list">${rows}</ul>
   </div>`;
 }
 
-function applyYoagentConversationPayload(payload = {}) {
+function applyYoagentConversationPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   if (!Object.prototype.hasOwnProperty.call(payload, 'messages')) return false;
+  if (options.source !== 'request') yoagentConversationState.guard.invalidate();
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
-  const hadPendingWaits = Array.isArray(yoagentPendingWaits) && yoagentPendingWaits.length > 0;
-  yoagentPendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
-  if (messages.length && yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
-  yoagentMessages = messages;
-  yoagentConversationPath = String(payload.transcript_path || '');
-  yoagentConversationDisplayPath = String(payload.transcript_display_path || yoagentConversationPath);
-  yoagentConversationLoaded = true;
-  if (hadPendingWaits && !yoagentPendingWaits.length && yoagentChatQueue.length) {
+  const hadPendingWaits = Array.isArray(yoagentConversationState.pendingWaits) && yoagentConversationState.pendingWaits.length > 0;
+  yoagentConversationState.pendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
+  if (messages.length && yoagentConversationState.streamingMessages instanceof Map) yoagentConversationState.streamingMessages.clear();
+  yoagentConversationState.messages = messages;
+  yoagentConversationState.path = String(payload.transcript_path || '');
+  yoagentConversationState.displayPath = String(payload.transcript_display_path || yoagentConversationState.path);
+  yoagentConversationState.loaded = true;
+  yoagentConversationState.loading = false;
+  if (hadPendingWaits && !yoagentConversationState.pendingWaits.length && yoagentChatState.queue.length) {
     if (typeof queueMicrotask === 'function') queueMicrotask(() => drainYoagentChatQueue());
     else Promise.resolve().then(() => drainYoagentChatQueue());
   }
@@ -686,12 +717,13 @@ function applyYoagentStreamPayload(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const streamId = String(payload.stream_id || '').trim();
   if (!streamId) return false;
-  if (!(yoagentStreamingMessages instanceof Map)) yoagentStreamingMessages = new Map();
+  yoagentConversationState.guard.invalidate();
+  if (!(yoagentConversationState.streamingMessages instanceof Map)) yoagentConversationState.streamingMessages = new Map();
   const createdAt = String(payload.created_at || new Date().toISOString());
   const content = String(payload.content || '');
   const phase = String(payload.phase || '');
   const hiddenThinking = Boolean(payload.hidden_thinking_removed);
-  const previous = yoagentStreamingMessages.get(streamId) || {};
+  const previous = yoagentConversationState.streamingMessages.get(streamId) || {};
   const auxiliaryLines = Array.isArray(payload.auxiliary_lines)
     ? payload.auxiliary_lines.map(line => String(line || '')).filter(Boolean)
     : (Array.isArray(previous.auxiliaryLines) ? previous.auxiliaryLines : []);
@@ -701,22 +733,22 @@ function applyYoagentStreamPayload(payload = {}) {
   const thinkingActive = Boolean(payload.hidden_work_active);
   const toolActive = Boolean(payload.tool_active);
   const auxiliaryActive = Boolean(thinkingActive || toolActive);
-  const thinkingLines = auxiliaryLines.filter(line => !yoagentAuxiliaryLineIsTool(line) && !yoagentAuxiliaryLineIsDiagnostic(line));
-  const auxiliaryPreviewLines = yoagentAuxiliaryPreviewThinkingLines(payload.auxiliary_preview || '');
+  const thinkingItems = streamItems.filter(item => item.kind === 'thinking');
+  const auxiliaryPreviewLines = thinkingItems.map(item => item.text).filter(Boolean);
   const auxiliaryPreview = yoagentThinkingPreviewText(
     auxiliaryPreviewLines.join('\n')
-    || (thinkingLines.length ? thinkingLines.join('\n') : String(previous.auxiliaryPreview || '')),
+    || String(previous.auxiliaryPreview || ''),
   );
-  const detailLines = [];
-  if (payload.backend) detailLines.push(`- backend: \`${payload.backend}\``);
-  if (phase) detailLines.push(`- stream phase: \`${phase}\``);
-  if (hiddenThinking) detailLines.push('- raw model thinking was hidden; YOLOmux shows safe diagnostics instead of chain-of-thought');
-  if (payload.auxiliary_truncated) detailLines.push('- auxiliary stream truncated to latest entries');
-  yoagentStreamingMessages.set(streamId, {
+  const detailRows = [];
+  if (payload.backend) detailRows.push({key: 'yoagent.details.backend', params: {backend: payload.backend}, fallback: `backend: ${payload.backend}`});
+  if (phase) detailRows.push({key: 'yoagent.details.streamPhase', params: {phase}, fallback: `stream phase: ${phase}`});
+  if (hiddenThinking) detailRows.push({key: 'yoagent.details.hiddenThinking', params: {}, fallback: 'raw model thinking was hidden'});
+  if (payload.auxiliary_truncated) detailRows.push({key: 'yoagent.details.auxiliaryTruncated', params: {}, fallback: 'auxiliary stream truncated'});
+  yoagentConversationState.streamingMessages.set(streamId, {
     role: 'assistant',
     content: content || previous.content || '',
     createdAt: previous.createdAt || createdAt,
-    details: detailLines.join('\n') || previous.details || '',
+    detailRows: detailRows.length ? detailRows : (Array.isArray(previous.detailRows) ? previous.detailRows : []),
     auxiliaryLines,
     auxiliaryText: auxiliaryLines.join('\n') || previous.auxiliaryText || '',
     auxiliaryPreview,
@@ -729,17 +761,17 @@ function applyYoagentStreamPayload(payload = {}) {
     aborted: Boolean(payload.aborted) || previous.aborted || false,
     streaming: payload.done !== true,
   });
-  yoagentPrewarming = payload.done === true ? false : yoagentPrewarming;
+  yoagentStartupState.prewarming = payload.done === true ? false : yoagentStartupState.prewarming;
   return true;
 }
 
 function resetYoagentComposerHistory() {
-  yoagentHistoryCursor = null;
-  yoagentHistoryDraft = '';
+  yoagentChatState.historyCursor = null;
+  yoagentChatState.historyDraft = '';
 }
 
 function yoagentUserMessageHistory() {
-  return (Array.isArray(yoagentMessages) ? yoagentMessages : [])
+  return (Array.isArray(yoagentConversationState.messages) ? yoagentConversationState.messages : [])
     .filter(message => message?.role === 'user')
     .map(message => String(message.content || '').trim())
     .filter(Boolean);
@@ -749,7 +781,7 @@ function setYoagentChatInputValue(input, value) {
   if (!input) return;
   const nextValue = String(value || '');
   input.value = nextValue;
-  yoagentDraft = nextValue;
+  yoagentChatState.draft = nextValue;
   const end = nextValue.length;
   try { input.setSelectionRange(end, end); } catch (_) {}
 }
@@ -757,28 +789,28 @@ function setYoagentChatInputValue(input, value) {
 function yoagentNavigateChatHistory(input, direction) {
   if (!input || input.disabled) return false;
   const history = yoagentUserMessageHistory();
-  const latest = yoagentHistoryCursor === null;
+  const latest = yoagentChatState.historyCursor === null;
   if (direction === 'up') {
     if (!history.length) return false;
     if (latest) {
-      yoagentHistoryDraft = input.value || yoagentDraft || '';
-      yoagentHistoryCursor = history.length - 1;
+      yoagentChatState.historyDraft = input.value || yoagentChatState.draft || '';
+      yoagentChatState.historyCursor = history.length - 1;
     } else {
-      yoagentHistoryCursor = Math.max(0, Math.min(history.length - 1, Number(yoagentHistoryCursor) - 1));
+      yoagentChatState.historyCursor = Math.max(0, Math.min(history.length - 1, Number(yoagentChatState.historyCursor) - 1));
     }
-    setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+    setYoagentChatInputValue(input, history[yoagentChatState.historyCursor] || '');
     return true;
   }
   if (direction === 'down') {
     if (latest) return false;
-    const next = Math.min(history.length, Number(yoagentHistoryCursor) + 1);
+    const next = Math.min(history.length, Number(yoagentChatState.historyCursor) + 1);
     if (next >= history.length) {
-      yoagentHistoryCursor = null;
-      setYoagentChatInputValue(input, yoagentHistoryDraft);
-      yoagentHistoryDraft = '';
+      yoagentChatState.historyCursor = null;
+      setYoagentChatInputValue(input, yoagentChatState.historyDraft);
+      yoagentChatState.historyDraft = '';
     } else {
-      yoagentHistoryCursor = next;
-      setYoagentChatInputValue(input, history[yoagentHistoryCursor] || '');
+      yoagentChatState.historyCursor = next;
+      setYoagentChatInputValue(input, history[yoagentChatState.historyCursor] || '');
     }
     return true;
   }
@@ -796,14 +828,14 @@ function handleYoagentChatHistoryKeydown(event, input) {
 
 function yoagentTranscriptPathHtml() {
   if (readOnlyMode) return '';
-  const path = yoagentConversationPath || '';
-  const display = yoagentConversationDisplayPath || path;
-  if (!path && !yoagentConversationLoading && !yoagentConversationLoaded) return '';
+  const path = yoagentConversationState.path || '';
+  const display = yoagentConversationState.displayPath || path;
+  if (!path && !yoagentConversationState.loading && !yoagentConversationState.loaded) return '';
   const value = path
-    ? `<code class="yoagent-transcript-value" title="${esc(path)}">${esc(display)}</code>${pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy', title: t('yoagent.transcript.copy')})}`
+    ? `<code class="yoagent-transcript-value" title="${esc(path)}">${esc(display)}</code>${pathCopyButtonHtml(path, {className: 'yoagent-transcript-copy', title: t('common.copyTranscriptPath')})}`
     : `<span class="yoagent-transcript-loading">${esc(t('yoagent.transcript.loading'))}</span>`;
   return `<div class="yoagent-transcript-path">
-    <span class="yoagent-transcript-label">${esc(t('yoagent.transcript.label'))}</span>
+    <span class="yoagent-transcript-label">${esc(t('common.transcript'))}</span>
     ${value}
   </div>`;
 }
@@ -814,7 +846,7 @@ function yoagentRecentAgentActivityText(agent) {
   const activityTs = tmuxSignalWindowActivityTs(signal.window);
   if (activityTs > 0) {
     const seconds = Math.max(0, Math.round(Date.now() / 1000 - activityTs));
-    return `tmux ${compactRelativeTimeFormat(seconds)}`;
+    return t('yoagent.recent.tmuxActivity', {time: compactRelativeTimeFormat(seconds)});
   }
   if (agent?.running === true) return t('yoagent.agent.running');
   const ts = Number(agent?.last_used_ts || agent?.sort_ts || 0);
@@ -855,11 +887,11 @@ function yoagentRecentAgentSignalBadgesHtml(signal) {
   const badges = [];
   const deadText = tmuxSignalDeadText(pane);
   if (deadText) badges.push({kind: 'dead', text: deadText});
-  if (windowRecord?.bell_flag === true) badges.push({kind: 'bell', text: 'bell'});
-  if (windowRecord?.silence_flag === true) badges.push({kind: 'silence', text: 'silent'});
+  if (windowRecord?.bell_flag === true) badges.push({kind: 'bell', text: t('yoagent.recent.bell')});
+  if (windowRecord?.silence_flag === true) badges.push({kind: 'silence', text: t('yoagent.recent.silent')});
   const presenceText = tmuxSignalWindowPresenceText(windowRecord);
   if (presenceText) badges.push({kind: 'presence', text: presenceText});
-  if (windowRecord?.zoomed === true) badges.push({kind: 'zoom', text: 'zoom'});
+  if (windowRecord?.zoomed === true) badges.push({kind: 'zoom', text: t('yoagent.recent.zoom')});
   for (const label of tmuxSignalPaneModeLabels(pane)) badges.push({kind: 'mode', text: label});
   if (!badges.length) return '';
   return `<span class="yoagent-recent-agent-signals">${badges.map(badge => `<span class="yoagent-recent-agent-signal signal-${esc(badge.kind)}">${esc(badge.text)}</span>`).join('')}</span>`;
@@ -869,7 +901,7 @@ function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
   if (!tmuxSignalAgentCommands.has(kind)) return '';
-  return `<button type="button" class="yoagent-recent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="Create a new ${esc(agentLabel(kind))} session">Restart</button>`;
+  return `<button type="button" class="yoagent-recent-agent-restart" data-action="yoagent-agent-restart" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
 function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {
@@ -909,15 +941,15 @@ function yoagentRecentAgentsHtml(payload = yoagentStartupActivityPayload()) {
     const restart = yoagentRecentAgentRestartHtml(agent, signal);
     const idleClass = signal.window && !tmuxSignalWindowIsRecentlyActive(signal.window) ? ' tmux-idle' : '';
     const title = [
-      agent.cwd ? `cwd: ${agent.cwd}` : '',
-      pathText ? `paths: ${pathText}` : '',
-      agent.transcript ? `transcript: ${agent.transcript}` : '',
-      signal.window?.activity_ts ? `tmux activity: ${new Date(Number(signal.window.activity_ts) * 1000).toISOString()}` : '',
-      tmuxSignalWindowClientNames(signal.window).length ? `tmux viewers: ${tmuxSignalWindowClientNames(signal.window).join(', ')}` : '',
-      signal.window?.layout ? `tmux layout: ${signal.window.layout}` : '',
-      signal.window?.visible_layout ? `tmux visible layout: ${signal.window.visible_layout}` : '',
-      signal.window?.bell_flag ? 'tmux bell alert' : '',
-      signal.window?.silence_flag ? 'tmux silence alert' : '',
+      agent.cwd ? t('yoagent.tooltip.cwd', {path: agent.cwd}) : '',
+      pathText ? t('yoagent.tooltip.paths', {paths: pathText}) : '',
+      agent.transcript ? t('yoagent.tooltip.transcript', {path: agent.transcript}) : '',
+      signal.window?.activity_ts ? t('yoagent.tooltip.tmuxActivity', {time: new Date(Number(signal.window.activity_ts) * 1000).toISOString()}) : '',
+      tmuxSignalWindowClientNames(signal.window).length ? t('yoagent.tooltip.tmuxViewers', {viewers: tmuxSignalWindowClientNames(signal.window).join(', ')}) : '',
+      signal.window?.layout ? t('yoagent.tooltip.tmuxLayout', {layout: signal.window.layout}) : '',
+      signal.window?.visible_layout ? t('yoagent.tooltip.tmuxVisibleLayout', {layout: signal.window.visible_layout}) : '',
+      signal.window?.bell_flag ? t('state.reason.tmuxBellAlert') : '',
+      signal.window?.silence_flag ? t('yoagent.tooltip.tmuxSilenceAlert') : '',
       signal.pane?.dead ? tmuxSignalDeadText(signal.pane) : '',
       tmuxSignalPaneModeLabels(signal.pane).join(', '),
       agent.state_text || '',
@@ -935,7 +967,7 @@ function yoagentRecentAgentsHtml(payload = yoagentStartupActivityPayload()) {
     </li>`;
   }).join('');
   return `<div class="yoagent-recent-agents" aria-label="${esc(t('yoagent.recentAgents.label'))}">
-    <span class="yoagent-recent-agents-label">${esc(t('yoagent.recentAgents.label'))}</span>
+    <span class="yoagent-recent-agents-label yoagent-section-title">${esc(t('yoagent.recentAgents.label'))}</span>
     <ul class="yoagent-recent-agents-list">${rows}</ul>
   </div>`;
 }
@@ -944,42 +976,64 @@ function yoagentRecentAgentsMessageHtml() {
   const payload = yoagentStartupActivityPayload();
   const html = yoagentRecentAgentsHtml(payload);
   if (!html || !yoagentChatEnabled()) return '';
-  return `<div class="yoagent-message assistant yoagent-recent-agents-message">
-    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(payload?.generated_at)}</div>
-    ${html}
-  </div>`;
+  return conversationMessageShellHtml({
+    className: 'yoagent-message yoagent-recent-agents-message',
+    author: yoagentTabLabel(),
+    timestampHtml: yoagentMessageTimestampHtml(payload?.generated_at),
+    bodyHtml: html,
+  });
 }
 
 async function loadYoagentConversation(options = {}) {
-  if (readOnlyMode || yoagentConversationLoading) return;
-  if (yoagentConversationLoaded && options.force !== true) return;
-  yoagentConversationLoading = true;
+  if (readOnlyMode) return false;
+  if (yoagentConversationState.request && options.force !== true) return yoagentConversationState.request;
+  if (yoagentConversationState.loaded && options.force !== true) return;
+  const requestIsCurrent = yoagentConversationState.guard.begin();
+  yoagentConversationState.loading = true;
   if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
-  try {
-    const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
-    applyYoagentConversationPayload(payload);
-  } catch (error) {
-    if (!options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
-  } finally {
-    yoagentConversationLoading = false;
-    if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
-  }
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
+      return applyYoagentConversationPayload(payload, {source: 'request'});
+    } catch (error) {
+      if (requestIsCurrent() && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
+      return false;
+    } finally {
+      if (yoagentConversationState.request === request) {
+        yoagentConversationState.loading = false;
+        yoagentConversationState.request = null;
+        if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
+      }
+    }
+  })();
+  yoagentConversationState.request = request;
+  return request;
 }
 
 async function loadYoagentJobs(options = {}) {
-  if (yoagentJobsLoading) return false;
-  yoagentJobsLoading = true;
-  try {
-    const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
-    applyYoagentJobsPayload(payload);
-    if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
-    return true;
-  } catch (error) {
-    if (!options.silent) console.warn('YO!agent jobs refresh failed', error);
-    return false;
-  } finally {
-    yoagentJobsLoading = false;
-  }
+  if (yoagentJobsState.request && options.force !== true) return yoagentJobsState.request;
+  const requestIsCurrent = yoagentJobsState.guard.begin();
+  yoagentJobsState.loading = true;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
+      applyYoagentJobsPayload(payload, {source: 'request'});
+      if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
+      return true;
+    } catch (error) {
+      if (requestIsCurrent() && !options.silent) console.warn('YO!agent jobs refresh failed', error);
+      return false;
+    } finally {
+      if (yoagentJobsState.request === request) {
+        yoagentJobsState.loading = false;
+        yoagentJobsState.request = null;
+      }
+    }
+  })();
+  yoagentJobsState.request = request;
+  return request;
 }
 
 let yoagentAgentAvailabilityRefreshPromise = null;
@@ -1008,10 +1062,10 @@ async function refreshYoagentAgentAvailability(options = {}) {
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
   if (key === 'auto') return t('yoagent.backend.auto');
-  if (key === 'deterministic') return t('yoagent.backend.none');
+  if (key === 'deterministic') return t('state.noAgent');
   if (key === 'codex') return 'Codex';
   if (key === 'claude') return 'Claude';
-  return value || t('yoagent.backend.none');
+  return value || t('state.noAgent');
 }
 
 function yoagentBackendKey() {
@@ -1064,7 +1118,7 @@ function yoagentChoiceValue(path, choices) {
 }
 
 function yoagentComposerSelectHtml({kind, title, path, value, choices, disabled, noneLabel, dot = false}) {
-  const effectiveChoices = choices.length ? choices : [{value: '', label: noneLabel || t('yoagent.backend.none')}];
+  const effectiveChoices = choices.length ? choices : [{value: '', label: noneLabel || t('state.noAgent')}];
   const disabledAttr = disabled || !choices.length ? ' disabled' : '';
   const options = effectiveChoices
     .map(choice => `<option value="${esc(choice.value)}"${choice.value === value ? ' selected' : ''}>${esc(choice.label)}</option>`)
@@ -1086,30 +1140,30 @@ function yoagentComposerControlsHtml(disabled) {
     value: backend,
     choices: backendChoices,
     disabled,
-    noneLabel: t('yoagent.backend.none'),
+    noneLabel: t('state.noAgent'),
     dot: true,
   });
   const modelPath = backend ? `yoagent.${backend}_model` : 'yoagent.backend';
   const modelChoices = backend ? yoagentModelPreferenceChoicesForBackend(backend) : [];
   const modelHtml = yoagentComposerSelectHtml({
     kind: 'model',
-    title: backend === 'claude' ? t('pref.yoagent.claude_model.label') : backend === 'codex' ? t('pref.yoagent.codex_model.label') : t('yoagent.backend.none'),
+    title: backend === 'claude' ? t('pref.yoagent.claude_model.label') : backend === 'codex' ? t('pref.yoagent.codex_model.label') : t('state.noAgent'),
     path: modelPath,
     value: yoagentChoiceValue(modelPath, modelChoices),
     choices: modelChoices,
     disabled,
-    noneLabel: t('yoagent.backend.none'),
+    noneLabel: t('state.noAgent'),
   });
   const effortPath = backend ? `yoagent.${backend}_effort` : 'yoagent.backend';
   const effortChoices = backend ? yoagentEffortPreferenceChoicesForBackend(backend) : [];
   const effortHtml = yoagentComposerSelectHtml({
     kind: 'effort',
-    title: backend === 'claude' ? t('pref.yoagent.claude_effort.label') : backend === 'codex' ? t('pref.yoagent.codex_effort.label') : t('yoagent.backend.none'),
+    title: backend === 'claude' ? t('pref.yoagent.claude_effort.label') : backend === 'codex' ? t('pref.yoagent.codex_effort.label') : t('state.noAgent'),
     path: effortPath,
     value: yoagentChoiceValue(effortPath, effortChoices),
     choices: effortChoices,
     disabled,
-    noneLabel: t('yoagent.backend.none'),
+    noneLabel: t('state.noAgent'),
   });
   return backendHtml + modelHtml + effortHtml;
 }
@@ -1117,35 +1171,25 @@ function yoagentComposerControlsHtml(disabled) {
 function yoagentChatHtml() {
   const chatEnabled = yoagentChatEnabled();
   const disabled = !chatEnabled ? ' disabled' : '';
-  const backendDisabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
+  const backendDisabled = yoagentChatState.busy || readOnlyMode ? ' disabled' : '';
   const placeholder = t('yoagent.chatPlaceholder');
-  const isThinking = yoagentBusy || yoagentPrewarming;
-  const startupInfo = yoagentStartupInfoVisible ? yoagentStartupInfoHtml() : '';
-  const hasConversation = Boolean(yoagentMessages.length || yoagentChatQueue.length || yoagentPendingWaits.length || yoagentJobs.length || yoagentNotice || isThinking || yoagentError || startupInfo || !chatEnabled);
+  const isThinking = yoagentChatState.busy || yoagentStartupState.prewarming;
+  const startupInfo = yoagentStartupState.infoVisible ? yoagentStartupInfoHtml() : '';
+  const hasConversation = Boolean(yoagentConversationState.messages.length || yoagentChatState.queue.length || yoagentConversationState.pendingWaits.length || yoagentJobsState.items.length || yoagentChatState.notice || isThinking || yoagentChatState.error || startupInfo || !chatEnabled);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingHtml}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="yoagent-thinking">${thinkingHtml}</span></div>`
     : '';
-  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy
-    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
+  const retry = yoagentChatState.error && yoagentChatState.draft && yoagentChatEnabled() && !yoagentChatState.busy
+    ? `<button type="button" class="yoagent-chat-retry" data-action="yoagent-retry" data-yoagent-retry>${esc(t('common.retry'))}</button>`
     : '';
-  const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentError)}</span>${retry}</div>` : '';
+  const error = yoagentChatState.error ? `<div class="yoagent-chat-error"><span>${esc(yoagentErrorText())}</span>${retry}</div>` : '';
   const chatDisabled = !chatEnabled ? `<div class="yoagent-chat-disabled">${esc(t('yoagent.chatDisabled'))}</div>` : '';
-  const clearDisabled = yoagentBusy || readOnlyMode || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
-  const submitButton = yoagentBusy
-    ? `<button type="button" class="yoagent-chat-stop" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
-    : `<button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
-          <svg class="yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>`;
-  const form = `<form class="yoagent-chat-form" data-yoagent-chat-form>
-      <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <div class="yoagent-chat-controls">
-        ${yoagentComposerControlsHtml(backendDisabled)}
-        <span class="yoagent-chat-controls-spacer"></span>
-        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('yoagent.clear'))}</button>
-        ${submitButton}
-      </div>
-    </form>`;
+  const clearDisabled = yoagentChatState.busy || readOnlyMode || (!yoagentConversationState.messages.length && !yoagentChatState.notice && !yoagentChatState.error) ? ' disabled' : '';
+  const submitButton = yoagentChatState.busy
+    ? `<button type="button" class="yoagent-chat-stop" data-action="yoagent-chat-cancel" data-yoagent-chat-cancel title="${esc(t('yoagent.stop'))}" aria-label="${esc(t('yoagent.stop'))}">×</button>`
+    : conversationSendButtonHtml({className: 'yoagent-chat-send', title: t('yoagent.ask'), disabled: !chatEnabled});
+  const form = conversationComposerHtml({formClassName: 'yoagent-chat-form', formAttributes: 'data-yoagent-chat-form', inputHtml: `<input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>`, leadingControlsHtml: yoagentComposerControlsHtml(backendDisabled), trailingControlsHtml: `<button type="button" class="yoagent-chat-clear" data-action="yoagent-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>`, sendHtml: submitButton});
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     ${yoagentTranscriptPathHtml()}
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentChatQueueHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}${chatDisabled}</div>
@@ -1154,23 +1198,26 @@ function yoagentChatHtml() {
 }
 
 function yoagentChatNetworkError(error) {
-  const text = String(error?.message || error || '');
-  return error instanceof TypeError || /failed to fetch|networkerror|load failed|fetch failed/i.test(text);
+  return error instanceof TypeError;
 }
 
 function yoagentChatRequestTooLargeError(error) {
-  const text = `${error?.status || ''} ${error?.statusText || ''} ${error?.message || error || ''} ${JSON.stringify(error?.payload || {})}`;
-  return /\b413\b|request entity too large|request body too large|payload too large|entity too large/i.test(text);
+  return Number(error?.status || error?.payload?.status || 0) === 413;
 }
 
-function yoagentChatErrorMessage(error) {
+function yoagentChatErrorState(error) {
   if (yoagentChatNetworkError(error)) {
-    return t('yoagent.networkError');
+    return {key: 'yoagent.networkError', params: {}, fallback: ''};
   }
   if (yoagentChatRequestTooLargeError(error)) {
-    return t('yoagent.chatTooLarge');
+    return {key: 'yoagent.chatTooLarge', params: {}, fallback: ''};
   }
-  return t('yoagent.chatFailed', {error: error?.message || error});
+  return userMessageSnapshot(error, error?.message || String(error || '')).user_message;
+}
+
+function yoagentErrorText() {
+  if (yoagentChatState.error && typeof yoagentChatState.error === 'object') return messageDescriptorText(yoagentChatState.error);
+  return String(yoagentChatState.error || '');
 }
 
 let yoagentFocusSerial = 0;
@@ -1224,8 +1271,8 @@ function startYoagentLocalThinkingStream(streamId) {
 function enqueueYoagentChatMessage(text) {
   const value = String(text || '').trim();
   if (!value) return false;
-  yoagentChatQueue.push({id: `queued-${++yoagentChatQueueSerial}`, text: value, createdAt: new Date().toISOString()});
-  yoagentDraft = '';
+  yoagentChatState.queue.push({id: `queued-${++yoagentChatState.queueSerial}`, text: value, createdAt: new Date().toISOString()});
+  yoagentChatState.draft = '';
   resetYoagentComposerHistory();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true, allowBusyRebuild: true, focusInput: true});
   return true;
@@ -1234,17 +1281,15 @@ function enqueueYoagentChatMessage(text) {
 function cancelQueuedYoagentChatMessage(queueId) {
   const id = String(queueId || '');
   if (!id) return false;
-  const previousLength = yoagentChatQueue.length;
-  yoagentChatQueue = yoagentChatQueue.filter(item => String(item?.id || '') !== id);
-  const changed = yoagentChatQueue.length !== previousLength;
+  const previousLength = yoagentChatState.queue.length;
+  yoagentChatState.queue = yoagentChatState.queue.filter(item => String(item?.id || '') !== id);
+  const changed = yoagentChatState.queue.length !== previousLength;
   if (changed) renderYoagentPanel({preserveDraft: true, scrollBottom: false, allowBusyRebuild: true});
   return changed;
 }
 
-function finishYoagentActiveRequest(requestId, options = {}) {
-  if (!yoagentActiveChatRequest || yoagentActiveChatRequest.id !== requestId) return false;
-  yoagentActiveChatRequest = null;
-  yoagentBusy = false;
+function finishYoagentBusyWork(options = {}) {
+  yoagentChatState.busy = false;
   renderYoagentPanel({
     preserveDraft: options.preserveDraft !== false,
     scrollBottom: options.scrollBottom !== false,
@@ -1256,16 +1301,22 @@ function finishYoagentActiveRequest(requestId, options = {}) {
   return true;
 }
 
+function finishYoagentActiveRequest(requestId, options = {}) {
+  if (!yoagentChatState.activeRequest || yoagentChatState.activeRequest.id !== requestId) return false;
+  yoagentChatState.activeRequest = null;
+  return finishYoagentBusyWork(options);
+}
+
 function drainYoagentChatQueue() {
-  if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length || !yoagentChatEnabled() || !yoagentChatQueue.length) return false;
-  const next = yoagentChatQueue.shift();
+  if (yoagentChatState.busy || yoagentChatState.activeRequest || yoagentConversationState.pendingWaits.length || !yoagentChatEnabled() || !yoagentChatState.queue.length) return false;
+  const next = yoagentChatState.queue.shift();
   if (!next) return false;
   startYoagentChatRequest(next.text, {fromQueue: true});
   return true;
 }
 
 function cancelActiveYoagentChatRequest() {
-  const active = yoagentActiveChatRequest;
+  const active = yoagentChatState.activeRequest;
   if (!active || active.cancelled) return false;
   active.cancelled = true;
   try { active.controller?.abort(); } catch (_) {}
@@ -1288,19 +1339,20 @@ function cancelActiveYoagentChatRequest() {
 }
 
 async function clearYoagentConversation() {
-  yoagentMessages = [];
-  yoagentPendingWaits = [];
-  yoagentChatQueue = [];
-  if (yoagentActiveChatRequest) cancelActiveYoagentChatRequest();
-  yoagentBusy = false;
-  yoagentPrewarming = false;
-  yoagentPrewarmStarted = false;
-  yoagentStartupLlmRequested = false;
-  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
-  yoagentError = '';
-  yoagentDraft = '';
+  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.messages = [];
+  yoagentConversationState.pendingWaits = [];
+  yoagentChatState.queue = [];
+  if (yoagentChatState.activeRequest) cancelActiveYoagentChatRequest();
+  yoagentChatState.busy = false;
+  yoagentStartupState.prewarming = false;
+  yoagentStartupState.prewarmStarted = false;
+  yoagentStartupState.llmRequested = false;
+  if (yoagentConversationState.streamingMessages instanceof Map) yoagentConversationState.streamingMessages.clear();
+  yoagentChatState.error = null;
+  yoagentChatState.draft = '';
   resetYoagentComposerHistory();
-  yoagentNotice = null;
+  yoagentChatState.notice = null;
   showYoagentStartupInfoForLatestActivity();
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
@@ -1327,14 +1379,14 @@ async function updateYoagentJob(jobId, action) {
       body: JSON.stringify({id}),
     });
     if (payload?.job) {
-      const next = yoagentJobs.map(job => String(job?.id || job?.job_id || '') === id ? payload.job : job);
+      const next = yoagentJobsState.items.map(job => String(job?.id || job?.job_id || '') === id ? payload.job : job);
       if (!next.some(job => String(job?.id || job?.job_id || '') === id)) next.unshift(payload.job);
-      yoagentJobs = next;
+      setYoagentJobs(next);
     }
     await loadYoagentJobs({silent: true, render: false});
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   } catch (error) {
-    yoagentError = yoagentChatErrorMessage(error);
+    yoagentChatState.error = yoagentChatErrorState(error);
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   }
 }
@@ -1360,14 +1412,14 @@ async function clearYoagentPendingWait(waitId) {
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   } catch (error) {
     if (error?.payload?.conversation) applyYoagentConversationPayload(error.payload.conversation);
-    yoagentError = yoagentChatErrorMessage(error);
+    yoagentChatState.error = yoagentChatErrorState(error);
     renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   }
 }
 
 async function startYoagentChatRequest(rawText, options = {}) {
   const text = String(rawText || '').trim();
-  if (!text || yoagentBusy || yoagentActiveChatRequest) return;
+  if (!text || yoagentChatState.busy || yoagentChatState.activeRequest) return;
   if (YOAGENT_CHAT_BACKENDS.includes(yoagentBackendKey())) {
     await refreshYoagentAgentAvailability({force: true, silent: true, render: false});
   }
@@ -1380,16 +1432,17 @@ async function startYoagentChatRequest(rawText, options = {}) {
   const requestId = yoagentNewChatRequestId();
   const streamId = requestId;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  yoagentActiveChatRequest = {id: requestId, streamId, controller, text, cancelled: false};
+  yoagentConversationState.guard.invalidate();
+  yoagentChatState.activeRequest = {id: requestId, streamId, controller, text, cancelled: false};
   const focusSerial = yoagentFocusSerial;
   const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
-  yoagentMessages.push({role: 'user', content: text, createdAt: new Date().toISOString()});
-  yoagentDraft = '';
-  yoagentBusy = true;
-  yoagentPrewarming = false;
-  yoagentError = '';
-  yoagentNotice = null;
-  if (yoagentStreamingMessages instanceof Map) yoagentStreamingMessages.clear();
+  yoagentConversationState.messages.push({role: 'user', content: text, createdAt: new Date().toISOString()});
+  yoagentChatState.draft = '';
+  yoagentChatState.busy = true;
+  yoagentStartupState.prewarming = false;
+  yoagentChatState.error = null;
+  yoagentChatState.notice = null;
+  if (yoagentConversationState.streamingMessages instanceof Map) yoagentConversationState.streamingMessages.clear();
   startYoagentLocalThinkingStream(streamId);
   renderYoagentPanel({preserveDraft: false, scrollBottom: true, allowBusyRebuild: true});
   try {
@@ -1399,18 +1452,19 @@ async function startYoagentChatRequest(rawText, options = {}) {
       body: JSON.stringify({message: text, locale: i18nActiveLocaleId(), request_id: requestId, stream_id: streamId}),
       signal: controller?.signal,
     });
-    if (yoagentActiveChatRequest?.id !== requestId) return;
+    if (yoagentChatState.activeRequest?.id !== requestId) return;
     if (payload.cancelled) {
       applyYoagentStreamPayload({stream_id: streamId, phase: 'stopped', done: true, aborted: true, auxiliary_done: true});
       return;
     }
     if (payload.fallback && payload.fallback_reason) {
-      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+      yoagentChatState.notice = yoagentFallbackNotice(payload);
     }
     if (!applyYoagentConversationPayload(payload.conversation || {})) {
-      yoagentMessages.push({
+      yoagentConversationState.messages.push({
         role: 'assistant',
-        content: payload.answer || t('yoagent.noAnswer'),
+        content: payload.answer || '',
+        ...(!payload.answer ? structuredMessageSnapshot({content: '', content_key: 'yoagent.noAnswer', content_params: {}}, 'content') : {}),
         actions: Array.isArray(payload.actions) ? payload.actions : [],
         details: payload.details || '',
         createdAt: payload.answered_at || new Date().toISOString(),
@@ -1418,9 +1472,9 @@ async function startYoagentChatRequest(rawText, options = {}) {
     }
     statusEl.textContent = t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)});
   } catch (error) {
-    if (yoagentActiveChatRequest?.id !== requestId || yoagentChatAbortError(error)) return;
-    if (yoagentChatNetworkError(error)) yoagentDraft = text;
-    yoagentError = yoagentChatErrorMessage(error);
+    if (yoagentChatState.activeRequest?.id !== requestId || yoagentChatAbortError(error)) return;
+    if (yoagentChatNetworkError(error)) yoagentChatState.draft = text;
+    yoagentChatState.error = yoagentChatErrorState(error);
   } finally {
     finishYoagentActiveRequest(requestId, {
       preserveDraft: true,
@@ -1433,7 +1487,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
   if (!text) return;
-  if (yoagentBusy || yoagentActiveChatRequest || yoagentPendingWaits.length) {
+  if (yoagentChatState.busy || yoagentChatState.activeRequest || yoagentConversationState.pendingWaits.length) {
     enqueueYoagentChatMessage(text);
     return;
   }
@@ -1442,7 +1496,7 @@ async function sendYoagentChatMessage(rawText) {
 
 function updateYoagentActionPreview(previewId, patch) {
   let changed = false;
-  for (const message of yoagentMessages) {
+  for (const message of yoagentConversationState.messages) {
     if (!Array.isArray(message.actions)) continue;
     message.actions = message.actions.map(action => {
       if (action?.id !== previewId) return action;
@@ -1454,10 +1508,11 @@ function updateYoagentActionPreview(previewId, patch) {
 }
 
 async function executeYoagentActionSend(previewId) {
-  if (!previewId || readOnlyMode || yoagentBusy) return;
+  if (!previewId || readOnlyMode || yoagentChatState.busy) return;
+  yoagentConversationState.guard.invalidate();
   hideYoagentStartupInfo();
-  yoagentBusy = true;
-  updateYoagentActionPreview(previewId, {status_text: 'sending'});
+  yoagentChatState.busy = true;
+  updateYoagentActionPreview(previewId, yoagentActionStatusPatch('yoagent.action.state.sending', 'sending'));
   renderYoagentPanel({preserveDraft: true, scrollBottom: false});
   try {
     const payload = await apiFetchJson('/api/yoagent/actions/execute-send', {
@@ -1466,27 +1521,26 @@ async function executeYoagentActionSend(previewId) {
       body: JSON.stringify({preview_id: previewId}),
     });
     applyYoagentConversationPayload(payload.conversation || {});
-    updateYoagentActionPreview(previewId, {status: 'sent', status_text: 'sent'});
+    updateYoagentActionPreview(previewId, {status: 'sent', ...yoagentActionStatusPatch('yoagent.action.state.sent', 'sent')});
     const answer = payload.answer
       ? t('yoagent.action.sentWithAnswer', {session: payload.session, transport: payload.transport, answer: payload.answer})
       : t('yoagent.action.sent', {session: payload.session, transport: payload.transport});
-    if (!payload.conversation) yoagentMessages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
+    if (!payload.conversation) yoagentConversationState.messages.push({role: 'assistant', content: answer, createdAt: new Date().toISOString()});
     statusEl.textContent = t('yoagent.statusActionSent', {session: payload.session});
   } catch (error) {
-    updateYoagentActionPreview(previewId, {status: 'error', status_text: error?.message || String(error)});
-    yoagentError = yoagentChatErrorMessage(error);
+    updateYoagentActionPreview(previewId, yoagentActionErrorStatusPatch(error));
+    yoagentChatState.error = yoagentChatErrorState(error);
   } finally {
-    yoagentBusy = false;
-    renderYoagentPanel({preserveDraft: true, scrollBottom: true});
+    finishYoagentBusyWork({preserveDraft: true, scrollBottom: true});
   }
 }
 
 async function prewarmYoagent(options = {}) {
-  if (yoagentPrewarmStarted || readOnlyMode || !yoagentChatEnabled()) return;
-  const shouldRequestStartupAnswer = !yoagentStartupLlmRequested && !yoagentMessages.length && !yoagentConversationLoaded;
-  if (shouldRequestStartupAnswer) yoagentStartupLlmRequested = true;
-  yoagentPrewarmStarted = true;
-  yoagentPrewarming = true;
+  if (yoagentStartupState.prewarmStarted || readOnlyMode || !yoagentChatEnabled()) return;
+  const shouldRequestStartupAnswer = !yoagentStartupState.llmRequested && !yoagentConversationState.messages.length && !yoagentConversationState.loaded;
+  if (shouldRequestStartupAnswer) yoagentStartupState.llmRequested = true;
+  yoagentStartupState.prewarmStarted = true;
+  yoagentStartupState.prewarming = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
   try {
     const payload = await apiFetchJson('/api/yoagent/prewarm', {
@@ -1495,16 +1549,16 @@ async function prewarmYoagent(options = {}) {
       body: JSON.stringify({locale: i18nActiveLocaleId(), visible: shouldRequestStartupAnswer}),
     });
     if (payload?.fallback && payload.fallback_reason) {
-      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+      yoagentChatState.notice = yoagentFallbackNotice(payload);
     }
     if (payload?.conversation) applyYoagentConversationPayload(payload.conversation || {});
   } catch (error) {
     if (shouldRequestStartupAnswer) {
-      yoagentError = yoagentChatErrorMessage(error);
+      yoagentChatState.error = yoagentChatErrorState(error);
     }
     // Non-visible process warm-up is opportunistic; visible chat requests handle real errors.
   } finally {
-    yoagentPrewarming = false;
+    yoagentStartupState.prewarming = false;
     renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
   }
 }
@@ -1518,13 +1572,13 @@ function activitySummaryIsVisible() {
 }
 
 async function refreshActivitySummary(options = {}) {
-  if (options.silent === true) {
+  if (options.silent === true && options.localeChange !== true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
   }
-  if (activitySummaryRefreshing && options.force !== true) return;
-  const requestIsCurrent = activitySummaryGuard.begin();
-  activitySummaryRefreshing = true;
+  if (activitySummaryState.refreshing && options.force !== true) return;
+  const requestIsCurrent = activitySummaryState.guard.begin();
+  activitySummaryState.refreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
     const params = new URLSearchParams();
@@ -1534,18 +1588,28 @@ async function refreshActivitySummary(options = {}) {
     params.set('hours', String(infoSessionFileLookbackHours));
     const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
-    applyActivitySummaryPayloadFromPush(payload, {refreshStartupSnapshot: true, render: true});
+    applyActivitySummaryPayloadFromPush(payload, {refreshStartupSnapshot: true, render: true, source: 'request'});
   } catch (error) {
     if (!requestIsCurrent()) return;
-    activitySummaryPayload = {
-      ...activitySummaryPayload,
+    const errorDescriptor = userMessageSnapshot(error, error?.message || String(error || '')).user_message;
+    activitySummaryState.payload = {
+      ...activitySummaryState.payload,
       errors: [String(error)],
-      global: {lines: [`activity summary unavailable: ${String(error)}`]},
+      global: {
+        headline: '',
+        lines: [],
+        detail_lines: [],
+        detail_messages: [{
+          key: 'status.activitySummaryFailed',
+          params: {error: errorDescriptor},
+          fallback: '',
+        }],
+      },
     };
     if (!options.silent) statusErr(localizedHtml('status.activitySummaryFailed', {error}));
   } finally {
     if (requestIsCurrent()) {
-      activitySummaryRefreshing = false;
+      activitySummaryState.refreshing = false;
       renderInfoPanel();
       renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
       if (yoagentPanelIsActive()) prewarmYoagent();
@@ -1555,12 +1619,12 @@ async function refreshActivitySummary(options = {}) {
 
 function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (options.source !== 'request') activitySummaryState.guard.invalidate();
   if (payload.session_file_hours != null) {
     infoSessionFileLookbackHours = writeStoredInfoLookbackHours(payload.session_file_hours);
   }
-  activitySummaryPayload = payload;
-  activitySummaryLastRefreshTs = Date.now();
-  activitySummaryRefreshing = false;
+  activitySummaryState.payload = payload;
+  activitySummaryState.refreshing = false;
   if (options.refreshStartupSnapshot === true) captureYoagentStartupActivitySummarySnapshot({replace: true});
   if (options.render === true || options.refreshStartupSnapshot === true) {
     renderInfoPanel();

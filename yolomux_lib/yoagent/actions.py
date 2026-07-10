@@ -69,6 +69,14 @@ NOTIFY_SESSION_BLOCKED_RE = re.compile(
     r"(?:(?:is|gets|becomes)\s+(?:blocked|stuck|disconnected)|(?:hits|has)\s+an?\s+error|errors?|needs\s+approval|is\s+at\s+an?\s+approval\s+prompt)\b",
     re.IGNORECASE,
 )
+ROSTER_CALM_THEN_SEND_RE = re.compile(
+    r"\b(?:periodically\s+)?(?:monitor|watch)\s+(?P<roster>.+?)\s+"
+    r"(?:and\s+)?(?:if|when|once|after)\s+(?:they|all(?:\s+(?:sessions|agents))?)?\s*"
+    r"(?:are\s+)?(?:all\s+)?(?:done|finished|complete(?:d)?|idle|calm)\s*,?\s*"
+    r"(?:then\s+)?send\s+(?P<command>.+?)\s+(?:to|into)\s+(?:the\s+)?"
+    r"(?:(?:tmux\s+)?session|agent)\s+[`'\"]?(?P<destination>[^`'\",\s.]+)[`'\"]?\s*[.!?]?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 EXPLICIT_SHELL_COMMAND_RE = re.compile(r"(?:`[^`]+`|\b(?:run|execute|shell\s+command|terminal\s+command)\b)", re.IGNORECASE)
 FENCED_TEXT_RE = re.compile(r"```(?:yaml|yml|markdown|md|text)?\s*\n(?P<text>[\s\S]*?)```", re.IGNORECASE)
 SKILL_NAME_RE = re.compile(r"\b(?:yo!?skill|skill|context)\s+(?:named\s+|called\s+)?[`'\"]?([a-z][a-z0-9-]{1,63})[`'\"]?", re.IGNORECASE)
@@ -208,6 +216,56 @@ def extract_session_name(text: str, known_sessions: list[str] | tuple[str, ...])
     return ""
 
 
+def session_roster_from_clause(clause: str, known_sessions: list[str] | tuple[str, ...]) -> list[str]:
+    """Return known targets from a roster clause only when it contains no unknown target text."""
+    text = str(clause or "")
+    known = list(dict.fromkeys(str(item).strip() for item in known_sessions if str(item).strip()))
+    matches: list[tuple[int, int, str]] = []
+    for session in sorted(known, key=len, reverse=True):
+        for match in re.finditer(bare_session_target_pattern(session), text, flags=re.IGNORECASE):
+            matches.append((match.start(), match.end(), session))
+    matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    selected: list[str] = []
+    masked = list(text)
+    occupied: set[int] = set()
+    for start, end, session in matches:
+        if any(index in occupied for index in range(start, end)):
+            continue
+        occupied.update(range(start, end))
+        if session not in selected:
+            selected.append(session)
+        for index in range(start, end):
+            masked[index] = " "
+    remainder = "".join(masked)
+    remainder = re.sub(r"\b(?:tmux|session|sessions|agent|agents|and)\b", " ", remainder, flags=re.IGNORECASE)
+    remainder = re.sub(r"[\s,;/]+", "", remainder)
+    return selected if selected and not re.search(r"[A-Za-z0-9_.-]", remainder) else []
+
+
+def parse_roster_calm_then_send_intent(text: str, known_sessions: list[str] | tuple[str, ...]) -> dict[str, Any] | None:
+    match = ROSTER_CALM_THEN_SEND_RE.search(str(text or ""))
+    if not match:
+        return None
+    roster = session_roster_from_clause(match.group("roster"), known_sessions)
+    destination = str(match.group("destination") or "").strip()
+    known = {str(item) for item in known_sessions}
+    if not roster or destination not in known:
+        return None
+    command = str(match.group("command") or "").strip().strip("`'\"").rstrip(". ").strip()
+    command = re.sub(r"^an?\s+(?=/)", "", command, flags=re.IGNORECASE)
+    if not command:
+        return None
+    action = {
+        "session": destination,
+        "text": command,
+        "submit": True,
+        "return_result": bool(action_result_requested(text) and not action_result_opted_out(text)),
+    }
+    if action_confirmation_requested(text):
+        action["requires_confirmation"] = True
+    return {"type": "wait_roster_then_send", "roster": roster, "action": action}
+
+
 def recent_session_from_history(history: list[dict[str, str]], known_sessions: list[str] | tuple[str, ...]) -> str:
     for item in reversed(history or []):
         session = extract_session_name(str(item.get("content") or ""), known_sessions)
@@ -331,6 +389,9 @@ def parse_yoagent_job_intent(question: str, known_sessions: list[str] | tuple[st
         session = extract_session_name(text, known_sessions)
         if session:
             return {"type": "cancel_session_jobs", "session": session}
+    roster_calm_then_send = parse_roster_calm_then_send_intent(text, known_sessions)
+    if roster_calm_then_send:
+        return roster_calm_then_send
     if NOTIFY_ALL_IDLE_RE.search(text):
         return {"type": "notify_all_idle"}
     for pattern, intent_type in [

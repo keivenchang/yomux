@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -25,6 +26,7 @@ import mock_agent_common  # noqa: E402
 
 PROMPT_CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "prompt_corpus"
 VISUAL_TMUX_SESSION_PREFIX = "test-mock-visual"
+UNIX_SOCKET_SAFE_PATH_BYTES = 100
 
 
 def load_structured_fixture(path):
@@ -91,6 +93,11 @@ def tmux_cmd(tmux_binary, socket_path, *args, timeout=8):
     return subprocess.run([tmux_binary, "-S", str(socket_path), *args], capture_output=True, text=True, timeout=timeout, check=False)
 
 
+def short_tmux_socket_path(prefix):
+    socket_base = Path(tempfile.mkdtemp(prefix=f"{prefix}-{os.getpid()}-", dir="/tmp"))
+    return socket_base / "s"
+
+
 def capture(tmux_binary, socket_path, session):
     return tmux_cmd(tmux_binary, socket_path, "capture-pane", "-p", "-t", f"{session}:").stdout or ""
 
@@ -148,9 +155,8 @@ def run_mockcase(monkeypatch, tmp_path, case):
     if not tmux_binary:
         pytest.skip("tmux is not installed")
     agent = case_agent(case)
-    sock_base = Path("/tmp") / f"yomockcase-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    sock_base.mkdir(mode=0o700)
-    socket_path = sock_base / "s"
+    socket_path = short_tmux_socket_path("yomockcase")
+    sock_base = socket_path.parent
     session = f"ymock-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     created = tmux_cmd(
@@ -199,11 +205,18 @@ def cleanup_mockcase(tmp_path):
         socket_file.unlink()
 
 
-def visual_tmux_socket_path():
-    worker = re.sub(r"[^A-Za-z0-9_.-]", "-", os.environ.get("PYTEST_XDIST_WORKER", "main"))
-    socket_base = Path("/tmp") / f"yolomux-{VISUAL_TMUX_SESSION_PREFIX}-{os.getuid()}-{worker}"
-    socket_base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return socket_base / "s"
+def test_short_tmux_socket_paths_are_unique_secure_and_bounded():
+    first = short_tmux_socket_path("yovisual")
+    second = short_tmux_socket_path("yovisual")
+    try:
+        assert first != second
+        assert first.parent.stat().st_mode & 0o777 == 0o700
+        assert second.parent.stat().st_mode & 0o777 == 0o700
+        assert len(os.fsencode(first)) < UNIX_SOCKET_SAFE_PATH_BYTES
+        assert len(os.fsencode(second)) < UNIX_SOCKET_SAFE_PATH_BYTES
+    finally:
+        shutil.rmtree(first.parent, ignore_errors=True)
+        shutil.rmtree(second.parent, ignore_errors=True)
 
 
 def cleanup_visual_test_sessions(tmux_binary, socket_path):
@@ -285,7 +298,7 @@ def visual_tmux(monkeypatch):
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_path = visual_tmux_socket_path()
+    socket_path = short_tmux_socket_path("yovisual")
     cleanup_visual_test_sessions(tmux_binary, socket_path)
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     harness = VisualTmuxHarness(tmux_binary, socket_path)
@@ -525,6 +538,54 @@ def test_claude_default_mock_list_has_no_unknown_or_generic_cases(monkeypatch):
         label = mock_agent_common.mock_fixture_outcome_label(case)
         assert expected.get("screen_key") == "idle"
         assert label == "idle"
+
+
+def test_claude_mock_lists_and_replays_compacting_spinner_capture(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", None)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "claude")
+
+    case = mock_agent_common.find_mock_fixture_case("compacting_conversation_unicode_ellipsis")
+
+    assert case is not None
+    assert case["expected"]["screen_key"] == "working"
+    assert classify_agent_pane(
+        {"pane_target": "%mock-compacting", "agent_kind": "claude"},
+        capture_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        capture_styled_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        include_composer=False,
+        include_transcript_activity=False,
+    ).screen["key"] == "working"
+
+    fields = mock_agent_common.claude_fixture_working_fields(case)
+    assert fields["marker"] == "✶"
+    assert fields["verb"] == "Compacting conversation"
+    assert fields["base_seconds"] == "674"
+    assert fields["base_tokens"] == "28600"
+    assert fields["token_suffix"] == "k"
+    assert fields["token_decimals"] == "1"
+    assert fields["direction"] == "↑"
+    assert fields["composer_label"] == "Check ABC-2310 status"
+    assert fields["footer_status"] == "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · PR #93 · esc to interrupt"
+
+    mock_agent_common.handle_command("mock list", {})
+    assert "compacting_conversation_unicode_ellipsis [Working]" in capsys.readouterr().out
+
+
+def test_claude_mock_replays_compaction_progress_bar_as_working(monkeypatch):
+    monkeypatch.setattr(mock_agent_common, "MOCK_FIXTURE_CASES", None)
+    monkeypatch.setattr(mock_agent_common, "AGENT_NAME", "claude")
+
+    case = mock_agent_common.find_mock_fixture_case("compacting_conversation_progress_bar")
+
+    assert case is not None
+    assert "▰▰▰" in str(case["raw_capture"])
+    assert classify_agent_pane(
+        {"pane_target": "%mock-compacting-progress", "agent_kind": "claude"},
+        capture_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        capture_styled_func=lambda _target, visible_only=True: str(case["raw_capture"]),
+        include_composer=False,
+        include_transcript_activity=False,
+    ).screen["key"] == "working"
 
 
 def test_mock_fixture_list_dedupes_same_fixture_identity(monkeypatch, capsys):
@@ -901,6 +962,46 @@ def test_codex_working_refresh_updates_only_status_row_on_steady_tick(monkeypatc
     assert f"\x1b[{prompt_row};1H\x1b[2K" not in rendered
 
 
+def test_claude_anchored_working_status_restores_the_existing_cursor(capsys):
+    mock_agent_common.write_anchored_working_status_block([
+        "✢ Compacting conversation… (2s · ↑ 1.1k tokens)",
+        "  ▰▰▰▱▱ 40%",
+    ])
+
+    rendered = capsys.readouterr().out
+    assert rendered.startswith("\x1b7\r\x1b[2K")
+    assert rendered.endswith("\x1b[1A\x1b8")
+
+
+def test_background_codex_working_animation_reuses_its_status_row(monkeypatch):
+    source = Path(mock_agent_common.__file__).read_text(encoding="utf-8")
+
+    assert "def agent_working_status" in source
+    assert "refresh_codex_working_block(" in source.split("def agent_working_status", 1)[1].split("def run_with_agent_working_status", 1)[0]
+    assert "write_codex_working_block(max(1, time.time() - started_at), background=True)" not in source
+
+
+def test_all_mock_timer_paths_obey_the_no_repaint_contract():
+    source = Path(mock_agent_common.__file__).read_text(encoding="utf-8")
+    client_docs = (REPO_ROOT / "tools" / "CLIENTS.md").read_text(encoding="utf-8")
+    claude_loop = source.split("def handle_claude_live_working_tty", 1)[1].split("def handle_codex_live_working_tty", 1)[0]
+    codex_loop = source.split("def handle_codex_live_working_tty", 1)[1].split("def handle_codex_goal_active_tty", 1)[0]
+    background_loop = source.split("def agent_working_status", 1)[1].split("def run_with_agent_working_status", 1)[0]
+    composer_loop = source.split("def read_live_composer", 1)[1].split("def preview_verb", 1)[0]
+    fixture_loop = source.split("if state.get(\"pending\") == \"fixture\"", 1)[1].split("pending = state.get", 1)[0]
+
+    assert "timer-driven mock animation may update only its owned status cells" in client_docs
+    assert "write_claude_working_block(elapsed, state)" in claude_loop
+    assert "render_live_composer(" not in claude_loop
+    assert "refresh_codex_working_block(" in codex_loop
+    assert "write_codex_working_block(" not in codex_loop
+    assert "refresh_codex_working_block(" in background_loop
+    assert "write_anchored_working_status_block(" in background_loop
+    assert "render_live_composer(" not in background_loop
+    assert "if key is None:" in composer_loop and "maybe_redraw_live_composer_for_resize(" in composer_loop
+    assert "render_fixture_screen(" not in fixture_loop
+
+
 def test_plain_claude_working_fixture_replaces_captured_footer(monkeypatch):
     class TtyBuffer(io.StringIO):
         def isatty(self):
@@ -965,6 +1066,16 @@ def test_claude_working_line_increments_from_capture(monkeypatch):
     assert mock_agent_common.claude_working_line(11 + mock_agent_common.CLAUDE_WORKING_FRAME_SECONDS * 5, state) == "* Clauding… (11s · ↓ 485 tokens)"
     assert mock_agent_common.claude_working_line(13, state) == "✽ Clauding… (13s · ↓ 519 tokens)"
 
+    compact_state = {
+        **state,
+        "claude_working_base_seconds": "73",
+        "claude_working_base_tokens": "1000",
+        "claude_working_token_suffix": "k",
+        "claude_working_token_decimals": "1",
+        "claude_working_verb": "Channelling",
+    }
+    assert mock_agent_common.claude_working_line(73, compact_state) == "· Channelling… (1m 13s · ↓ 1.0k tokens)"
+
 
 def test_claude_working_composer_omits_idle_suggestion_until_text(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
@@ -1005,6 +1116,30 @@ def test_claude_working_frame_clears_previous_owned_row(monkeypatch, capsys):
     assert "\x1b7\x1b[8;1H\x1b[2K· Clauding… (11s · ↓ 471 tokens)" in output
     assert working_row == 8
     assert state["claude_working_row"] == "8"
+
+
+def test_claude_working_frame_keeps_the_composer_cursor_anchored(monkeypatch, capsys):
+    monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
+    monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
+    monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
+    monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
+    state = {
+        "claude_working_base_seconds": "11",
+        "claude_working_base_tokens": "471",
+        "claude_working_marker": "·",
+        "claude_working_verb": "Compacting conversation",
+        "claude_working_footer_status": "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt",
+    }
+
+    mock_agent_common.write_claude_working_block(11, state)
+    capsys.readouterr()
+    mock_agent_common.write_claude_working_block(12, state)
+
+    output = capsys.readouterr().out
+    assert "Compacting conversation" in output
+    assert "accept edits on" not in output
+    assert "\x1b[9;1H" not in output
+    assert "\x1b7\x1b[8;1H\x1b[2K" in output
 
 
 def test_clear_claude_working_block_erases_owned_footer_rows(monkeypatch, capsys):
@@ -2544,6 +2679,43 @@ def test_tmux_claude_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_a
     assert "…" not in resized_rows
     assert "..." not in resized_rows
     assert long_fixture_file in resized
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_tmux_claude_labelled_composer_fixture_stays_live_and_working(visual_tmux):
+    session = visual_tmux.launch(
+        "claude-labelled-composer-working",
+        [sys.executable, "tools/claude.py", "--mock", "-C", str(REPO_ROOT)],
+        width=96,
+        height=54,
+    )
+
+    booted, pane = visual_tmux.wait_until(session, lambda text: '❯ Try "fix typecheck errors"' in text)
+    assert booted, pane
+    visual_tmux.send_keys(session, "mock working_labelled_composer", "Enter")
+    rendered, pane = visual_tmux.wait_until(
+        session,
+        lambda text: "Channelling" in text
+        and "babysitting PRs, or polling status." in text
+        and "Check ABC-2310 status" in text,
+    )
+    assert rendered, pane
+    assert pane.count("Channelling") == 1
+    assert "Clauding" not in pane
+
+    state = classify_mockcase_until(
+        {"pane_target": f"{session}:", "agent_kind": "claude"},
+        "working",
+        session=session,
+        prompt_source="pane",
+        include_composer=True,
+        include_transcript_activity=False,
+        capture_full_for_bash=False,
+        expected_composer_key="empty",
+    )
+    assert state.screen["key"] == "working", state.capture.visible_text
+    assert state.composer.key == "empty"
 
 
 @pytest.mark.e2e

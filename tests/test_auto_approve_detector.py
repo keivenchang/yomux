@@ -3,15 +3,19 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import time
 from types import SimpleNamespace
+import types
 
 import pytest
 import yaml
 
 
 import auto_approve_tmux
+from yolomux_lib import app as app_module
 from yolomux_lib import approvals
 from yolomux_lib import prompt_detector
+from yolomux_lib.auto_approve_worker import AutoApproveWorker
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
 
@@ -88,9 +92,6 @@ def test_approval_detection_pipeline_has_one_shared_owner():
     # must all run the SAME detection functions — no parallel re-implementation. Detection lives in
     # yolomux_lib.approvals; the root CLI re-exports it and app.py imports it directly. Identity here
     # means a future divergent copy fails this test instead of silently drifting the two paths apart.
-    from yolomux_lib import app as app_module
-    from yolomux_lib import approvals
-
     assert auto_approve_tmux.hybrid_approval_prompt_state is approvals.hybrid_approval_prompt_state
     assert auto_approve_tmux.transcript_approval_prompt_state is approvals.transcript_approval_prompt_state
     assert auto_approve_tmux.blank_prompt_state is approvals.blank_prompt_state
@@ -609,8 +610,6 @@ def test_mock_codex_3_option_worker_walks_to_option_1():
     # Y8 act-path: the worker derives the target option from the approve action and walks the highlight
     # to `1. Yes` (not `2`, not `3. No`), re-verifies it landed on 1, then confirms. Drives the worker's
     # send_action against a fake tmux module seam so the chosen option is observable without a live tmux.
-    import types
-
     recorded: dict[str, object] = {}
 
     def fake_move(target, option, selected_option=None):
@@ -627,8 +626,6 @@ def test_mock_codex_3_option_worker_walks_to_option_1():
         tmux_move_to_option=fake_move,
         tmux_send_enter=fake_send_enter,
     )
-
-    from yolomux_lib.auto_approve_worker import AutoApproveWorker
 
     worker = AutoApproveWorker("codex-test")
     action = prompt_detector.action_for_bash_prompt(MOCK_CODEX_YESNO_PROMPT)
@@ -858,6 +855,20 @@ VISIBLE_AGENT_WORKING_CASES = [
     ),
     pytest.param(
         "\n".join([
+            "✶ Compacting conversation… (11m 14s · ↑ 28.6k tokens)",
+            "  ⎿ Tip: /loop runs any prompt on a recurring schedule.",
+            "                                      100% context used",
+            "──────────────────────── Check ABC-2310 status ──",
+            "❯",
+            "────────────────────────────────────────────────",
+            "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · PR #93 · esc to interrupt",
+        ]),
+        True,
+        "working",
+        id="claude-compacting-spinner-with-composer-title",
+    ),
+    pytest.param(
+        "\n".join([
             "⠿ Running 2 agents…",
             "  ├ Verify detector fixtures · 14 tool uses · 31.2k tokens",
             "  └ Check current Claude pane state · 23 tool uses · 77.5k tokens",
@@ -978,6 +989,12 @@ VISIBLE_AGENT_WORKING_CASES = [
         id="claude-counter-tip-and-idle-composer",
     ),
     pytest.param(
+        fixture_visible_text(PROMPT_CORPUS_DIR / "captures/working_labelled_composer__claude-code-2.1.198_20260701.yaml"),
+        True,
+        "working",
+        id="claude-session-1-working-with-labelled-composer-border",
+    ),
+    pytest.param(
         "\n".join([
             ". Tomfoolering… (10m 35s · ↓ 55.4K tokens)",
             "Tip: /ultrareview runs a deep, multi-agent review of your changes",
@@ -1072,6 +1089,22 @@ def test_agent_screen_state_reports_visible_counter_evidence_and_advancement():
     assert second_state["status_elapsed_seconds"] == 433
 
 
+def test_agent_screen_state_counter_advances_across_animated_codex_marker():
+    first = "◦ Waiting for background terminal (1m 10s • esc to interrupt) · 1 background terminal running · /ps to view"
+    second = "• Waiting for background terminal (1m 18s • esc to interrupt) · 1 background terminal running · /ps to view"
+
+    first_state = prompt_detector.agent_screen_state(first, pane_target="%counter-marker-advances", now=1000.0)
+    second_state = prompt_detector.agent_screen_state(second, pane_target="%counter-marker-advances", now=1008.0)
+
+    assert first_state["key"] == "working"
+    assert second_state["key"] == "working"
+    assert first_state["status_identity"] == second_state["status_identity"]
+    assert first_state["status_marker"] == "◦"
+    assert second_state["status_marker"] == "•"
+    assert second_state["status_elapsed_seconds"] == 78
+    assert second_state["status_counter_advanced"] is True
+
+
 def test_agent_screen_state_reports_token_counter_advancement():
     first = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
     second = first.replace("30.1k", "30.2k")
@@ -1082,6 +1115,55 @@ def test_agent_screen_state_reports_token_counter_advancement():
     assert state["key"] == "working"
     assert state["status_counter_advanced"] is True
     assert state["status_tokens"] == 30200
+
+
+def test_agent_screen_state_tracks_spinner_movement_across_captures():
+    first = "✶ Wibbling… (13m 48s · ↓ 29.4k tokens)"
+    second = "✢ WhateverTheFuckItIs… (13m 48s · ↓ 29.4k tokens)"
+
+    first_state = prompt_detector.agent_screen_state(first, pane_target="%spinner-moves", now=1000.0)
+    second_state = prompt_detector.agent_screen_state(second, pane_target="%spinner-moves", now=1000.1)
+
+    assert first_state["key"] == "working"
+    assert first_state["status_spinner_advanced"] is False
+    assert second_state["key"] == "working"
+    assert second_state["status_spinner_advanced"] is True
+    assert second_state["status_counter_advanced"] is False
+
+
+def test_codex_spinner_movement_at_same_position_is_temporal_working_evidence():
+    first = "• Working (8m 20s • esc to interrupt)"
+    second = "◦ Working (8m 26s • esc to interrupt)"
+
+    prompt_detector.agent_screen_state(first, pane_target="%codex-spinner-moves", now=1000.0)
+    state = prompt_detector.agent_screen_state(second, pane_target="%codex-spinner-moves", now=1006.0)
+
+    assert state["key"] == "working"
+    assert state["status_spinner_advanced"] is True
+    assert state["status_counter_advanced"] is True
+    assert state["status_row_from_bottom"] == 0
+    assert state["status_column"] == 0
+
+
+@pytest.mark.parametrize(("first", "second", "expected_elapsed", "expected_tokens"), [
+    ("✢ Bloviating… (10s · ↓ 558 tokens)", "* Bloviating… (13s · ↓ 658 tokens)", 13, 658),
+    (
+        "✻ Bloviating… (57s · ↓ 3.7k tokens · thinking with high effort)",
+        "✢ Bloviating… (62s · ↓ 4.7k tokens · thinking with high effort)",
+        62,
+        4700,
+    ),
+])
+def test_agent_screen_state_tracks_spinner_and_counters_over_time(first, second, expected_elapsed, expected_tokens):
+    pane_target = f"%bloviating-moves-{expected_elapsed}"
+    prompt_detector.agent_screen_state(first, pane_target=pane_target, now=1000.0)
+    state = prompt_detector.agent_screen_state(second, pane_target=pane_target, now=1003.0)
+
+    assert state["key"] == "working"
+    assert state["status_spinner_advanced"] is True
+    assert state["status_counter_advanced"] is True
+    assert state["status_elapsed_seconds"] == expected_elapsed
+    assert state["status_tokens"] == expected_tokens
 
 
 def test_agent_screen_state_prefers_codex_pursuing_goal_elapsed_for_display():
@@ -1155,7 +1237,8 @@ def test_codex_pursuing_goal_elapsed_does_not_advance_stale_counter():
     ])
     second = first.replace("3h 45m", "3h 46m")
 
-    prompt_detector.agent_screen_state(first, pane_target="%codex-goal-stale", now=1000.0)
+    for observed_at in (1000.0, 1020.0, 1040.0, 1060.0):
+        prompt_detector.agent_screen_state(first, pane_target="%codex-goal-stale", now=observed_at)
     state = prompt_detector.agent_screen_state(second, pane_target="%codex-goal-stale", now=1080.0)
 
     assert state["key"] == "idle"
@@ -1167,12 +1250,47 @@ def test_codex_pursuing_goal_elapsed_does_not_advance_stale_counter():
 def test_agent_screen_state_stales_repeated_unchanged_visible_counter():
     visible_text = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
 
-    prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=1000.0)
+    for observed_at in (1000.0, 1020.0, 1040.0, 1060.0):
+        prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=observed_at)
     state = prompt_detector.agent_screen_state(visible_text, pane_target="%counter-stale", now=1080.0)
 
     assert state["key"] == "idle"
     assert state["activity_source"] == "visible-counter"
     assert state["negative_reason"] == "stale visible status counter"
+
+
+def test_visible_counter_history_clears_when_counter_disappears_before_target_reuse():
+    visible_text = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
+    pane_target = "%counter-reused"
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
+
+    first = prompt_detector.agent_screen_state(visible_text, pane_target=pane_target, now=1000.0)
+    idle = prompt_detector.agent_screen_state("build finished\nkeivenc@host$ ", pane_target=pane_target, now=1001.0)
+    reused = prompt_detector.agent_screen_state(visible_text, pane_target=pane_target, now=1080.0)
+
+    assert first["key"] == "working"
+    assert idle["key"] == "idle"
+    assert reused["key"] == "working"
+    assert pane_target in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
+
+
+def test_visible_counter_history_is_idle_pruned_and_bounded():
+    visible_text = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
+    base_now = time.monotonic()
+
+    prompt_detector.agent_screen_state(visible_text, pane_target="%counter-old", now=base_now)
+    prompt_detector.agent_screen_state(visible_text, pane_target="%counter-fresh", now=base_now + 31.0)
+    assert "%counter-old" not in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+
+    for index in range(prompt_detector._VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS + 1):
+        prompt_detector.agent_screen_state(visible_text, pane_target=f"%counter-bound-{index}", now=base_now + 31.0)
+
+    assert len(prompt_detector._VISIBLE_STATUS_COUNTER_CACHE) == prompt_detector._VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS
+    assert "%counter-fresh" not in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+    assert f"%counter-bound-{prompt_detector._VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS}" in prompt_detector._VISIBLE_STATUS_COUNTER_CACHE
+    prompt_detector._VISIBLE_STATUS_COUNTER_CACHE.clear()
 
 
 def test_visible_counter_is_stale_when_real_output_follows_it():
@@ -1677,6 +1795,58 @@ def test_real_interrupted_capture_beats_goal_active_working_chrome():
     assert state["agent"] == "claude"
     assert state["question_text"] == "Interrupted · What should Claude do instead?"
     assert state["selected_option"] == 0
+
+
+def test_completed_claude_followup_beats_persistent_goal_active_footer():
+    visible_text = "\n".join([
+        "All 5 tasks complete. The backup is fully migrated.",
+        "Want me to remove the orphaned cache?",
+        "* Brewed for 12m 6s · 2 shells still running",
+        "◎ /goal active (4h)",
+        "❯ yes, remove the orphaned cache",
+        "▶▶ bypass permissions on · 2 shells · ← for agents · ↓ to manage",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert prompt_detector.visible_agent_working(visible_text) is False
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Want me to remove the orphaned cache?"
+
+
+def test_completed_goal_items_followup_beats_persistent_goal_active_footer():
+    visible_text = "\n".join([
+        "Both goal items complete and verified.",
+        "(Notes edited this session; want me to commit + push them?)",
+        "* Sautéed for 2m 33s · 2 shells still running",
+        "◎ /goal active (31m)",
+        "❯ commit and push the notes",
+        "▶▶ bypass permissions on · 2 shells · ← for agents · ↓ to manage",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "want me to commit + push them?"
+
+
+def test_completed_claude_with_persistent_goal_footer_is_idle():
+    visible_text = "\n".join([
+        "Full state, wrapped up:",
+        "- Backups now cover everything.",
+        "Nothing outstanding.",
+        "✻ Worked for 30s · 2 shells still running",
+        "new task? /clear to save 934.6k tokens · ◎ /goal active (9h)",
+        "────────────────────────────────────────────────────────────────",
+        "❯\xa0confirm the next cron backup runs cleanly",
+        "────────────────────────────────────────────────────────────────",
+        "⏵⏵ bypass permissions on · 2 shells · ← for agents · ↓ to manage",
+    ])
+
+    assert prompt_detector.visible_agent_working(visible_text) is False
+    state = prompt_detector.agent_screen_state(visible_text, pane_target="%completed-goal-footer")
+    assert state["key"] == "idle"
+    assert state["negative_reason"] == "idle composer"
 
 
 def test_ask_user_question_footer_parts_are_recognized():

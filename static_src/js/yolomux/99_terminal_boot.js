@@ -1,49 +1,48 @@
 
 function paneFrameControlsHtml(session, options = {}) {
-  const disabled = options.disabled === true;
-  const unavailableLabel = options.unavailableLabel || itemLabel(session);
-  const disabledAttrs = label => ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"`;
+  const role = paneRoleForSlot(options.slot || slotForItem(session));
+  const controlOptions = role.controls === 'minimize-only'
+    ? {...options, actions: false, details: false, popout: false, expand: false, close: false, minimize: true}
+    : options;
+  const disabled = controlOptions.disabled === true;
+  const unavailableLabel = controlOptions.unavailableLabel || itemLabel(session);
+  const unavailableTitle = t('tab.unavailableFor', {name: unavailableLabel});
   const controls = [];
-  const includeActions = options.actions ?? isTmuxSession(session);
-  const includeDetails = options.details === true;
-  const includeMinimize = options.minimize !== false;
-  const includeExpand = options.expand !== false;
-  const includePopout = options.popout === true;
+  const add = spec => controls.push(toolbarButtonHtml({
+    className: ['tab', spec.className, spec.platformKind ? platformWindowControlClass(spec.platformKind) : '', spec.active ? 'active' : ''].filter(Boolean).join(' '),
+    dataset: disabled ? {} : spec.dataset,
+    disabled,
+    hidden: spec.hidden === true,
+    title: disabled ? unavailableTitle : spec.title,
+    ariaLabel: spec.label,
+    pressed: spec.pressed,
+    html: spec.html,
+  }));
+  const includeActions = controlOptions.actions ?? isTmuxSession(session);
+  const includeDetails = controlOptions.details === true;
+  const includeMinimize = controlOptions.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
+  const includeExpand = controlOptions.expand !== false;
+  const includePopout = controlOptions.popout === true;
   if (includeActions) {
-    controls.push(disabled
-      ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
-      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+    add({className: 'pane-actions', dataset: {paneActions: session}, title: t('common.sessionActions'), label: t('common.sessionActions'), html: '<span class="pane-actions-dots" aria-hidden="true">...</span>'});
   }
   if (includeDetails) {
     const detailsLabel = t('pane.details.hide');
-    controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(detailsLabel)}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(detailsLabel)}" aria-label="${esc(detailsLabel)}" aria-pressed="true"></button>`);
+    add({className: 'panel-detail-toggle pane-detail-toggle', platformKind: 'minimize', dataset: {detailToggle: session}, title: detailsLabel, label: detailsLabel, pressed: true, active: true});
   }
   if (includePopout) {
-    controls.push(disabled
-      ? `<button class="tab pane-popout" ${disabledAttrs('Pop out tab')}></button>`
-      : `<button type="button" class="tab pane-popout" data-pane-popout="${esc(session)}" title="Pop out tab" aria-label="Pop out tab"></button>`);
-  }
-  if (includeMinimize) {
-    controls.push(disabled
-      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs(t('pane.minimize'))}></button>`
-      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="${esc(t('pane.minimize'))}" aria-label="${esc(t('pane.minimize'))}"></button>`);
+    add({className: 'pane-popout', dataset: {panePopout: session}, title: t('tab.popout'), label: t('tab.popout')});
   }
   if (includeExpand) {
-    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="${esc(t('pane.expand'))}" aria-label="${esc(t('pane.expand'))}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs(t('pane.expand'))}></button>`
-      : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`);
+    add({className: 'pane-expand', platformKind: 'zoom', dataset: {paneExpand: session}, title: t('pane.expand'), label: t('pane.expand'), hidden: !canPaneExpand(session)});
   }
-  if (options.close) {
-    const closeLabel = options.closeLabel || t('pane.closeTab');
-    const closeTitle = options.closeTitle || closeLabel;
-    const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
-    const closeData = `data-pane-close="${esc(session)}"`;
-    controls.push(disabled
-      ? `<button class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${disabledAttrs(closeLabel)}></button>`
-      : `<button type="button" class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${closeData} title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
+  if (includeMinimize) {
+    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
+  }
+  if (controlOptions.close) {
+    const closeLabel = controlOptions.closeLabel || t('pane.closeTab');
+    const closeTitle = controlOptions.closeTitle || closeLabel;
+    add({className: ['pane-close', controlOptions.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: closeTitle, label: closeLabel});
   }
   return controls.join('');
 }
@@ -60,15 +59,15 @@ function panelControlsHtml(session, options = {}) {
   const readonlyAttrs = label => ` type="button" disabled title="${esc(t('tab.adminRequiredFor', {name: label}))}" aria-label="${esc(label)}"`;
   const tabAttrs = (name, label = '') => {
     if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs('YO!summary');
+    if (readOnlyMode && name === 'summary') return readonlyAttrs(t('brand.tab.summary'));
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? t('tab.terminal.short') : terminalTabLabel(session, info);
-  const isFiles = isFileExplorerItem(session);
+  const isFiles = typeof isFileSurfaceItem === 'function' ? isFileSurfaceItem(session) : isFileExplorerItem(session);
   // Term is pressed ONLY when the terminal view is the active one — computed from the live view, not
   // hardcoded, so a panel re-render (Dockview header refresh) doesn't re-press it after the user
   // switched to transcript / YO!summary / events. activateTab also toggles it on click.
@@ -84,7 +83,14 @@ function panelControlsHtml(session, options = {}) {
       closeTitle: t('finder.close', {name: fileExplorerLabel()}),
       closeLabel: t('finder.close', {name: fileExplorerLabel()}),
     })
-    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
+    : paneFrameControlsHtml(session, {
+      disabled,
+      actions: isTmuxSession(session),
+      details: true,
+      // In a one-column touch layout, X and minus remove only this selected tab. Showing them here
+      // makes the ordinary pane controls useful without offering a blank-the-last-pane action.
+      close: narrowPaneFrameActionTargetsTab(session),
+    });
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${terminalButtonHtml}
           ${frameHtml}
@@ -97,6 +103,30 @@ function virtualPanelControlsHtml(session, options = {}) {
         </div>`;
 }
 
+// A pane has exactly one frame-control owner. Dockview renders it in the common outer group header;
+// the fallback layout renders it inside panelFrameHtml(). Keeping that choice here prevents every
+// virtual panel from growing a second, independently hidden control row.
+function virtualPanelInnerControlsHtml(session, options = {}) {
+  return dockviewLayoutEnabled() ? '' : virtualPanelControlsHtml(session, options);
+}
+
+function relocalizeVirtualPanelChrome(panel, label = '') {
+  if (!panel) return false;
+  panel.querySelectorAll('.pane-tabs[role="tablist"]').forEach(tablist => tablist.setAttribute('aria-label', t('common.tabsLabel')));
+  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
+    button.title = t('pane.minimize');
+    button.setAttribute('aria-label', t('pane.minimize'));
+  });
+  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
+    button.title = t('pane.expand');
+    button.setAttribute('aria-label', t('pane.expand'));
+  });
+  const labelNode = panel.querySelector('.panel-session-label .session-button-dir');
+  if (labelNode && label) labelNode.textContent = label;
+  if (typeof syncPanelDetailsToggleState === 'function') syncPanelDetailsToggleState(panel);
+  return true;
+}
+
 function panelActiveTabName(session) {
   const activePane = document.getElementById(panelDomId(session))?.querySelector('.tab-pane.active');
   const id = activePane?.id || '';
@@ -106,32 +136,535 @@ function panelActiveTabName(session) {
   return 'terminal';
 }
 
+const tmuxStatusModes = new Map();
+
+// Mobile terminal apps conventionally supplement, rather than replace, the OS keyboard with a
+// movable smart-key palette. Keep its state per session and pass every byte through the normal
+// xterm transport so shares, tmux-window tracking, attention acknowledgement, and metrics stay unified.
+const terminalMobileAccessoryStates = new Map();
+const terminalMobileAccessoryKeyPresses = new Map();
+const terminalMobileAccessorySuppressedClicks = new Map();
+let terminalMobileAccessoryDismissalInstalled = false;
+let terminalMobileAccessoryResizeInstalled = false;
+// Clipboard reads must start while a touch still has browser user activation.  The shared
+// terminal context menu opens after the long-press delay, when Safari may reject a new read.
+// Keep only availability (never clipboard contents) so that menu can truthfully offer Paste.
+const terminalClipboardProbeTtlMs = 10_000;
+let terminalClipboardProbe = {available: false, expiresAt: 0, promise: null};
+
+function terminalClipboardPasteAvailable() {
+  return terminalClipboardProbe.available === true && Date.now() < terminalClipboardProbe.expiresAt;
+}
+
+function primeTerminalClipboardAvailability() {
+  if (terminalClipboardProbe.promise) return terminalClipboardProbe.promise;
+  const clipboard = globalThis.navigator?.clipboard;
+  if (!clipboard) return Promise.resolve(false);
+  const probe = (async () => {
+    if (typeof clipboard.read === 'function') {
+      try {
+        const items = await clipboard.read();
+        return (items || []).some(item => (item.types || []).some(type => String(type).startsWith('image/') || type === 'text/plain'));
+      } catch (_) {
+        // Some Safari builds expose read() but grant text-only readText() permission instead.
+      }
+    }
+    if (typeof clipboard.readText === 'function') {
+      try {
+        return Boolean(await clipboard.readText());
+      } catch (_) {
+        // A denied probe simply omits Paste from this long-press menu.
+      }
+    }
+    return false;
+  })()
+    .then(available => {
+      terminalClipboardProbe = {available, expiresAt: Date.now() + terminalClipboardProbeTtlMs, promise: null};
+      return available;
+    });
+  terminalClipboardProbe = {...terminalClipboardProbe, promise: probe};
+  return probe;
+}
+
+const terminalMobileAccessoryKeyDefs = Object.freeze([
+  {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
+  {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
+  {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
+  {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
+  {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
+  {action: 'copy', labelKey: 'common.copy', ariaLabelKey: 'common.copy'},
+  {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
+  {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
+  {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
+  {action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\x7f'},
+  {action: 'arrow-left', label: '←', ariaLabel: 'Left arrow'},
+  {action: 'arrow-down', label: '↓', ariaLabel: 'Down arrow'},
+  {action: 'arrow-up', label: '↑', ariaLabel: 'Up arrow'},
+  {action: 'arrow-right', label: '→', ariaLabel: 'Right arrow'},
+  {action: 'enter', label: '↵', ariaLabel: 'Enter', data: '\r'},
+  {action: 'more', label: '⋯', ariaLabel: 'More terminal keys', more: true},
+]);
+const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
+  // These mirror browser/app actions that a phone has no physical Command key for. They are
+  // actions rather than terminal bytes: Cmd-P opens quick-open; Paste stays visible in the first row.
+  {action: 'command-p', label: '⌘P', ariaLabel: 'Command-P'},
+  {action: 'home', label: 'Home', ariaLabel: 'Home'},
+  {action: 'end', label: 'End', ariaLabel: 'End'},
+  {action: 'delete', label: 'Del', ariaLabel: 'Delete', data: '\x1b[3~'},
+  {action: 'shift-tab', label: '⇧↹', ariaLabel: 'Shift-Tab', data: '\x1b[Z'},
+  {action: 'ctrl-d', label: '^D', ariaLabel: 'Ctrl-D', data: '\x04'},
+  {action: 'ctrl-z', label: '^Z', ariaLabel: 'Ctrl-Z', data: '\x1a'},
+  {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
+  {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
+]);
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'more']);
+// The surrounding command keys form one compact five-column navigation pad: clipboard controls
+// live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
+const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
+
+function terminalMobileAccessoryState(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let state = terminalMobileAccessoryStates.get(key) || null;
+  if (!state && options.create === true) {
+    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false};
+    terminalMobileAccessoryStates.set(key, state);
+  }
+  return state;
+}
+
+function terminalMobileAccessoryEnabled() {
+  return browserUsesCoarsePointer();
+}
+
+function terminalMobileAccessoryCursorData(session, action) {
+  const suffix = {home: 'H', end: 'F', 'arrow-up': 'A', 'arrow-down': 'B', 'arrow-right': 'C', 'arrow-left': 'D'}[action];
+  if (!suffix) return '';
+  // xterm exposes the active cursor-key mode. Respect it so a TUI receives the same sequence as a
+  // physical arrow key instead of assuming shell/readline's normal CSI mode.
+  return terminals.get(session)?.term?.modes?.applicationCursorKeys === true ? `\x1bO${suffix}` : `\x1b[${suffix}`;
+}
+
+function terminalMobileAccessoryData(session, action) {
+  const definition = terminalMobileAccessoryDefinition(action);
+  if (!definition) return '';
+  return definition.data || terminalMobileAccessoryCursorData(session, action);
+}
+
+function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
+  const active = definition.modifier ? state?.[definition.modifier] === true : false;
+  // Copy reads local terminal selection only, so it stays available to read-only share viewers;
+  // every other palette key can change the terminal and keeps the existing write gate.
+  const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
+  const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
+  const label = definition.labelKey ? t(definition.labelKey) : definition.label;
+  const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
+  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
+}
+
+function terminalMobileAccessoryDefinition(action) {
+  return [...terminalMobileAccessoryKeyDefs, ...terminalMobileAccessoryMoreKeyDefs].find(item => item.action === action) || null;
+}
+
+function terminalMobileAccessoryPositionStyle(state) {
+  const x = Number.isFinite(state?.x) ? Math.max(0, Math.round(state.x)) : null;
+  const y = Number.isFinite(state?.y) ? Math.max(0, Math.round(state.y)) : null;
+  if (x === null && y === null) return '';
+  // A moved absolute overlay must release its original end edges. Leaving `bottom` set alongside
+  // the drag-set `top` makes CSS stretch the palette to the terminal bottom, producing a giant
+  // empty box and preventing a useful upward move.
+  return ` style="${x === null ? '' : `inset-inline-start:${x}px;inset-inline-end:auto;`}${y === null ? '' : `inset-block-start:${y}px;inset-block-end:auto;transform:none;`}"`;
+}
+
+function terminalMobileAccessoryHtml(session) {
+  if (!isTmuxSession(session) || !terminalMobileAccessoryEnabled()) return '';
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
+  const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  // The overflow button remains the rightmost control in both palette states. Keeping the return
+  // target in one physical corner avoids a touch user hunting for it after the content switches.
+  const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
+  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
+    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
+      <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
+      <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
+      <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
+      <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
+    </div>`;
+}
+
+function syncTerminalMobileAccessoryState(session) {
+  const state = terminalMobileAccessoryState(session);
+  const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
+  const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+  if (!state || !bar) return false;
+  for (const modifier of ['ctrl', 'alt']) {
+    const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
+    if (!button) continue;
+    const active = state[modifier] === true;
+    button.classList.toggle(CLS.active, active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  const more = bar.querySelector('.mobile-terminal-keyrow--more');
+  const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
+  bar.hidden = state.open !== true;
+  bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+  if (launcher) launcher.setAttribute('aria-expanded', state.open === true ? 'true' : 'false');
+  const positionedInline = Number.isFinite(state.x);
+  const positionedBlock = Number.isFinite(state.y);
+  bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+  bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+  bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+  bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+  bar.style.transform = positionedBlock ? 'none' : '';
+  if (more) more.hidden = state.more !== true;
+  for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
+  scheduleFit(session);
+  return true;
+}
+
+function toggleTerminalMobileAccessoryState(session, key) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  if (!state || !['ctrl', 'alt', 'more', 'open'].includes(key)) return false;
+  if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
+  state[key] = !state[key];
+  syncTerminalMobileAccessoryState(session);
+  return state[key];
+}
+
+function dismissTerminalMobileAccessory(session) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state || state.open !== true) return false;
+  state.open = false;
+  state.more = false;
+  state.ctrl = false;
+  state.alt = false;
+  state.drag = null;
+  syncTerminalMobileAccessoryState(session);
+  return true;
+}
+
+function dismissTerminalMobileAccessories(exceptSession = '') {
+  let dismissed = false;
+  for (const session of terminalMobileAccessoryStates.keys()) {
+    if (session === String(exceptSession || '')) continue;
+    dismissed = dismissTerminalMobileAccessory(session) || dismissed;
+  }
+  return dismissed;
+}
+
+function installTerminalMobileAccessoryDismissal() {
+  if (terminalMobileAccessoryDismissalInstalled) return;
+  terminalMobileAccessoryDismissalInstalled = true;
+  // The key palette is an on-demand aid, not persistent pane chrome. A touch outside its own
+  // launcher/palette means the user has resumed another terminal or app action, so close it.
+  document.addEventListener('pointerdown', event => {
+    const target = event.target;
+    if (target?.closest?.('[data-terminal-mobile-keybar], [data-terminal-mobile-toggle]')) return;
+    dismissTerminalMobileAccessories();
+  }, {capture: true, passive: true});
+}
+
+function installTerminalMobileAccessoryResizeSync() {
+  if (terminalMobileAccessoryResizeInstalled) return;
+  terminalMobileAccessoryResizeInstalled = true;
+  window.addEventListener('resize', () => {
+    for (const [session, state] of terminalMobileAccessoryStates) {
+      if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
+      const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
+      const pane = bar?.closest?.('.tab-pane');
+      if (!bar || !pane) continue;
+      state.x = Math.max(0, Math.min(pane.clientWidth - bar.offsetWidth, state.x));
+      state.y = Math.max(0, Math.min(pane.clientHeight - bar.offsetHeight, state.y));
+      syncTerminalMobileAccessoryState(session);
+    }
+  }, {passive: true});
+}
+
+const terminalMobileAccessoryLongPressMs = 450;
+const terminalMobileAccessoryRepeatDelayMs = mobileTerminalKeyRepeatDelayMs;
+const terminalMobileAccessoryRepeatIntervalMs = mobileTerminalKeyRepeatIntervalMs;
+
+function terminalMobileAccessoryRepeats(action) {
+  return ['arrow-up', 'arrow-down', 'arrow-left', 'arrow-right', 'tmux-scroll-up', 'tmux-scroll-down'].includes(action);
+}
+
+function beginTerminalMobileAccessoryKeyPress(session, action, event, button) {
+  if (!terminalMobileAccessoryRepeats(action) || event.button > 0) return false;
+  const key = String(session || '');
+  const existing = terminalMobileAccessoryKeyPresses.get(key);
+  if (existing) endTerminalMobileAccessoryKeyPress(key, event, button);
+  const press = {action, pointerId: event.pointerId, delayTimer: null, repeatTimer: null};
+  terminalMobileAccessoryKeyPresses.set(key, press);
+  button?.setPointerCapture?.(event.pointerId);
+  // Send the first key on touch-down, then keep repeating it while held, as a hardware arrow key
+  // does. Preventing default keeps xterm's hidden input focused and the palette open.
+  sendTerminalMobileAccessoryInput(key, action);
+  press.delayTimer = window.setTimeout(() => {
+    if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
+    const repeat = () => {
+      if (terminalMobileAccessoryKeyPresses.get(key) !== press) return;
+      sendTerminalMobileAccessoryInput(key, action);
+      press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
+    };
+    press.repeatTimer = window.setTimeout(repeat, terminalMobileAccessoryRepeatIntervalMs);
+  }, terminalMobileAccessoryRepeatDelayMs);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryKeyPress(session, event, button) {
+  const key = String(session || '');
+  const press = terminalMobileAccessoryKeyPresses.get(key);
+  if (!press || press.pointerId !== event.pointerId) return false;
+  window.clearTimeout(press.delayTimer);
+  window.clearTimeout(press.repeatTimer);
+  terminalMobileAccessoryKeyPresses.delete(key);
+  terminalMobileAccessorySuppressedClicks.set(key, press.action);
+  button?.releasePointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function consumeTerminalMobileAccessoryKeyClick(session, action) {
+  const key = String(session || '');
+  if (terminalMobileAccessorySuppressedClicks.get(key) !== action) return false;
+  terminalMobileAccessorySuppressedClicks.delete(key);
+  return true;
+}
+
+function beginTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  if (!state || event.button > 0 || event.pointerType === 'mouse') return false;
+  dismissTerminalMobileAccessories(session);
+  const press = {pointerId: event.pointerId, longPressed: false, timer: null};
+  state.launcherPress = press;
+  press.timer = window.setTimeout(() => {
+    if (terminalMobileAccessoryState(session)?.launcherPress !== press) return;
+    press.longPressed = true;
+    state.open = true;
+    state.more = true;
+    syncTerminalMobileAccessoryState(session);
+  }, terminalMobileAccessoryLongPressMs);
+  return true;
+}
+
+function endTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.launcherPress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  window.clearTimeout(press.timer);
+  state.launcherPress = null;
+  if (!press.longPressed) return false;
+  state.suppressLauncherClick = true;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function consumeTerminalMobileAccessoryLauncherClick(session) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state?.suppressLauncherClick) return false;
+  state.suppressLauncherClick = false;
+  return true;
+}
+
+function beginTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
+  if (!state || !bar || event.button > 0) return false;
+  const rect = bar.getBoundingClientRect();
+  state.drag = {pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top};
+  handle.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function moveTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session);
+  const drag = state?.drag;
+  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
+  const pane = bar?.closest?.('.tab-pane');
+  if (!drag || drag.pointerId !== event.pointerId || !bar || !pane) return false;
+  const paneRect = pane.getBoundingClientRect();
+  state.x = Math.max(0, Math.min(paneRect.width - bar.offsetWidth, event.clientX - paneRect.left - drag.offsetX));
+  state.y = Math.max(0, Math.min(paneRect.height - bar.offsetHeight, event.clientY - paneRect.top - drag.offsetY));
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  return true;
+}
+
+function endTerminalMobileAccessoryDrag(session, event, handle) {
+  const state = terminalMobileAccessoryState(session);
+  if (!state?.drag || state.drag.pointerId !== event.pointerId) return false;
+  handle.releasePointerCapture?.(event.pointerId);
+  state.drag = null;
+  event.preventDefault();
+  return true;
+}
+
+function terminalDataWithMobileAccessoryModifiers(session, data) {
+  const state = terminalMobileAccessoryState(session);
+  const text = String(data || '');
+  if (!state || (!state.ctrl && !state.alt) || !text) return text;
+  const ctrl = state.ctrl === true;
+  const alt = state.alt === true;
+  state.ctrl = false;
+  state.alt = false;
+  syncTerminalMobileAccessoryState(session);
+  let value = text;
+  if (ctrl && text.length === 1) {
+    const code = text.charCodeAt(0);
+    if (code === 32) value = '\x00';
+    else if (code === 63) value = '\x7f';
+    else if (code >= 64 && code <= 95) value = String.fromCharCode(code & 0x1f);
+    else if (code >= 97 && code <= 122) value = String.fromCharCode(code - 96);
+  }
+  return alt ? `\x1b${value}` : value;
+}
+
+async function pasteTerminalMobileAccessoryClipboard(session) {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (!clipboard) {
+    statusErr(t('common.clipboardUnavailable'));
+    return false;
+  }
+  try {
+    let text = '';
+    if (typeof clipboard.read === 'function') {
+      const items = await clipboard.read();
+      const imageFiles = [];
+      for (const item of items || []) {
+        for (const type of item.types || []) {
+          const blob = await item.getType(type);
+          if (String(type).startsWith('image/')) imageFiles.push(new File([blob], pastedImageFilename('', type), {type}));
+          else if (type === 'text/plain' && !text) text = await blob.text();
+        }
+      }
+      if (imageFiles.length) {
+        if (!beginPasteUpload(session)) return false;
+        uploadFiles(session, imageFiles, {source: 'paste'}).finally(() => {
+          pasteUploadInFlight = false;
+        });
+        return true;
+      }
+    }
+    if (!text && typeof clipboard.readText === 'function') text = await clipboard.readText();
+    if (!text) return false;
+    noteTerminalExplicitInput(session);
+    const sent = handleTerminalData(session, text, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+    // Palette keys already travel over the terminal socket; asking xterm to focus here summons
+    // iPadOS's software keyboard after every arrow press.
+    if (!sent) statusErr(terminalNotConnectedHtml(session));
+    return sent;
+  } catch (_error) {
+    // Safari can reject a clipboard read after user activation expires; explain the failure instead
+    // of pretending the terminal received text.
+    statusErr(t('common.clipboardUnavailable'));
+    return false;
+  }
+}
+
+function sendTerminalMobileAccessoryInput(session, action) {
+  if (action === 'copy') {
+    const term = terminals.get(session)?.term || null;
+    const container = document.getElementById(terminalDomId(session));
+    void copyTerminalSelection(session, term, {}, container);
+    return true;
+  }
+  if (action === 'command-p') {
+    openFileQuickOpen();
+    return true;
+  }
+  if (action === 'command-v') {
+    void pasteTerminalMobileAccessoryClipboard(session);
+    return true;
+  }
+  if (action === 'tmux-scroll-up' || action === 'tmux-scroll-down') {
+    const item = terminals.get(session);
+    const term = item?.term;
+    const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
+    const signedLines = action === 'tmux-scroll-up' ? -pageLines : pageLines;
+    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
+      queueTmuxScroll(item, signedLines);
+      return true;
+    }
+    if (term) {
+      queueLocalTerminalScroll(term, signedLines);
+      return true;
+    }
+    statusErr(terminalNotConnectedHtml(session));
+    return false;
+  }
+  if (action === 'ctrl' || action === 'alt' || action === 'more' || action === 'open') {
+    toggleTerminalMobileAccessoryState(session, action);
+    return true;
+  }
+  const data = terminalMobileAccessoryData(session, action);
+  if (!data) return false;
+  noteTerminalExplicitInput(session);
+  const sent = handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+  if (!sent) statusErr(terminalNotConnectedHtml(session));
+  return sent;
+}
+
+function tmuxStatusModeForSession(session) {
+  return tmuxStatusModes.get(String(session || '')) || 'none';
+}
+
+function tmuxStatusToggleHtml(session) {
+  const mode = tmuxStatusModeForSession(session);
+  const label = t(`pref.appearance.tmux_status_bar.${mode === 'none' ? 'off' : mode}`);
+  const disabled = readOnlyMode ? ' disabled' : '';
+  return `<button type="button" class="tab tmux-status-toggle tmux-status-toggle--${mode}" data-tmux-status-toggle="${esc(session)}" title="${esc(t('pref.appearance.tmux_status_bar.label'))}: ${esc(label)}" aria-label="${esc(t('pref.appearance.tmux_status_bar.label'))}: ${esc(label)}"${disabled}>${mode === 'top' ? '↑' : mode === 'bottom' ? '↓' : '·'}</button>`;
+}
+
+async function refreshTmuxStatusMode(session) {
+  if (!isTmuxSession(session)) return;
+  const payload = await apiFetchJson(`/api/tmux-status?session=${encodeURIComponent(session)}`, {cache: 'no-store'});
+  const mode = ['top', 'bottom', 'none'].includes(payload?.status) ? payload.status : 'none';
+  tmuxStatusModes.set(String(session), mode);
+  const button = document.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
+  if (button) button.outerHTML = tmuxStatusToggleHtml(session);
+}
+
+async function cycleTmuxStatusMode(session) {
+  if (readOnlyMode) return;
+  const payload = await apiFetchJson(`/api/tmux-status?session=${encodeURIComponent(session)}`, {method: 'POST'});
+  const mode = ['top', 'bottom', 'none'].includes(payload?.status) ? payload.status : 'none';
+  tmuxStatusModes.set(String(session), mode);
+  const button = document.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
+  if (button) button.outerHTML = tmuxStatusToggleHtml(session);
+}
+
 function createPanel(session) {
   const panel = document.createElement('article');
   panel.className = 'panel';
   panel.id = panelDomId(session);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${panelControlsHtml(session)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: session,
+    controlsHtml: panelControlsHtml(session),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
-          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
+          <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
-          ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
+          ${sessionPopoverHtml(session, transcriptMetadataState.payload.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}
         </div>
-        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMeta.sessions?.[session], {infoBar: true}) : ''}
-      </div>
-      <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
-        <div id="term-${session}" class="terminal"></div>
-        <div id="panel-toasts-${session}" class="panel-toast-stack">
-          <div id="upload-${session}" class="upload-result toast" hidden></div>
-        </div>
-      </div>
-      <div id="transcript-pane-${session}" class="tab-pane">
+        ${isTmuxSession(session) ? tmuxWindowBarHtml(session, transcriptMetadataState.payload.sessions?.[session], {infoBar: true}) : ''}
+        ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
+        ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
+      </div>`,
+    bodyClass: 'tab-pane active',
+    bodyAttributes: `id="terminal-pane-${esc(session)}"`,
+    bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
+    toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
+    afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
-          <div class="transcript-head">${esc(t('tab.transcript'))}</div>
+          <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
           <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
         </div>
@@ -139,16 +672,17 @@ function createPanel(session) {
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('menu.tmux.aiTranscript', {session: sessionLabel(session)}))}</div>
-          <div id="summary-context-${session}" class="summary-context">${esc(t('summary.loadingContext'))}</div>
-          <div id="summary-${session}" class="summary-preview markdown-body">${esc(t('summary.emptyPrompt'))}</div>
+          <div id="summary-context-${session}" class="summary-context" data-locale-text-key="summary.loadingContext">${esc(t('summary.loadingContext'))}</div>
+          <div id="summary-${session}" class="summary-preview markdown-body" data-locale-text-key="summary.emptyPrompt">${esc(t('summary.emptyPrompt'))}</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">${esc(t('events.title'))}</div>
-          <div id="events-${session}" class="event-list">${esc(t('events.loading'))}</div>
+          <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
-      </div>`;
+      </div>`,
+  });
   bindPanelShell(panel, session);
   bindPanelControls(panel, session);
   return panel;
@@ -159,29 +693,23 @@ function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) 
   button.classList.toggle('loading', loading);
   button.disabled = loading;
   button.setAttribute('aria-busy', loading ? 'true' : 'false');
-  button.textContent = loading ? t('info.loadingShort') : idleLabel;
+  button.textContent = idleLabel;
   button.title = loading ? t('info.loadingRepo') : idleTitle;
   button.setAttribute('aria-label', loading ? t('info.loadingRepo') : idleTitle);
 }
 
 function syncTranscriptMetaLoadingUi() {
   document.getElementById(panelDomId(infoItemId))?.querySelectorAll('[data-info-refresh]').forEach(button => {
-    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('meta.refresh'), t('meta.refresh'));
+    setMetadataRefreshButtonLoading(button, transcriptMetadataState.loading, t('common.refresh'), t('common.refresh'));
   });
   const metaRefreshButton = refreshMeta;
   if (metaRefreshButton) {
-    metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
-    metaRefreshButton.disabled = transcriptMetaLoading;
-    metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
-    if (transcriptMetaLoading) {
-      metaRefreshButton.title = t('info.loadingRepo');
-      metaRefreshButton.setAttribute('aria-label', t('info.loadingRepo'));
-    } else {
-      refreshMetaButtonTitle();
-      metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
-    }
+    metaRefreshButton.classList.toggle('loading', transcriptMetadataState.loading);
+    metaRefreshButton.disabled = transcriptMetadataState.loading;
+    metaRefreshButton.setAttribute('aria-busy', transcriptMetadataState.loading ? 'true' : 'false');
+    refreshMetaButtonChrome();
   }
-  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetaLoading);
+  document.getElementById(panelDomId(infoItemId))?.classList.toggle('metadata-loading', transcriptMetadataState.loading);
 }
 
 function infoMetadataLoadingHtml() {
@@ -205,11 +733,11 @@ function backgroundServerLabel(record, fallback = '') {
   return [
     endpoint,
     root,
-    Number.isFinite(pid) && pid > 0 ? `pid ${Math.trunc(pid)}` : '',
-  ].filter(Boolean).join(' · ') || 'this server';
+    Number.isFinite(pid) && pid > 0 ? t('backgroundOwner.pid', {pid: Math.trunc(pid)}) : '',
+  ].filter(Boolean).join(' · ') || t('backgroundOwner.thisServer');
 }
 
-function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPayload, options = {}) {
+function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusState.payload, options = {}) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
   const role = roles[roleName] && typeof roles[roleName] === 'object' ? roles[roleName] : {};
@@ -227,7 +755,7 @@ function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusPay
   };
 }
 
-function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.payload) {
   const data = payload && typeof payload === 'object' ? payload : {};
   const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
   const summary = backgroundOwnerRoleSummary('search-index', payload);
@@ -246,47 +774,62 @@ function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusPayloa
   };
 }
 
-function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusState.payload) {
   return backgroundOwnerRoleSummary('stats-sampler', payload);
 }
 
-function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusPayload) {
+function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState.payload) {
   return backgroundOwnerRoleSummary('session-files', payload);
 }
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusPayload = payload;
-  backgroundOwnerStatusLoaded = true;
-  backgroundOwnerStatusError = '';
-  backgroundOwnerStatusLoading = false;
+  backgroundOwnerStatusState.guard.invalidate();
+  backgroundOwnerStatusState.payload = payload;
+  backgroundOwnerStatusState.updatedAt = Date.now();
+  backgroundOwnerStatusState.error = '';
+  backgroundOwnerStatusState.loading = false;
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
   return true;
 }
 
+const startupSnapshotFreshnessMs = 5_000;
+
+function backgroundOwnerStatusIsFresh() {
+  return Boolean(backgroundOwnerStatusState.payload)
+    && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
+}
+
 async function refreshBackgroundOwnerStatus(options = {}) {
   if (shareViewMode) return false;
-  if (backgroundOwnerStatusRefreshPromise && options.force !== true) return backgroundOwnerStatusRefreshPromise;
-  backgroundOwnerStatusLoading = !backgroundOwnerStatusPayload;
-  backgroundOwnerStatusError = '';
+  // Every consumer observes the same current snapshot. A reconnect may require a new request
+  // after this settles, but must not discard and duplicate the request boot already owns.
+  if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
+  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return true;
+  const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
+  backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
+  backgroundOwnerStatusState.error = '';
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  backgroundOwnerStatusRefreshPromise = (async () => {
+  const request = (async () => {
     try {
       const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
       return applyBackgroundOwnerStatusPayload(payload, options);
     } catch (error) {
-      backgroundOwnerStatusError = String(error?.payload?.error || error?.message || error);
-      backgroundOwnerStatusLoading = false;
+      if (!requestIsCurrent()) return false;
+      backgroundOwnerStatusState.error = userMessageSnapshot(error);
+      backgroundOwnerStatusState.loading = false;
       if (options.render !== false) renderInfoPanel();
       if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
       return false;
     } finally {
-      backgroundOwnerStatusRefreshPromise = null;
+      if (backgroundOwnerStatusState.request === request) backgroundOwnerStatusState.request = null;
     }
   })();
-  return backgroundOwnerStatusRefreshPromise;
+  backgroundOwnerStatusState.request = request;
+  return request;
 }
 
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
@@ -430,14 +973,14 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   if (!chat) return false;
   const openDetails = yoagentOpenMessageDetailsState(node);
   chat.outerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
+  renderConversationMessageMarkdown(node);
   restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   return true;
 }
 
 function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content')) {
-  return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
+  return Boolean(yoagentChatState.busy && node?.querySelector?.('.yoagent-chat-status'));
 }
 
 // Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
@@ -487,7 +1030,7 @@ function linkYoagentSessionCodeReferences(container) {
     const link = document.createElement('a');
     link.href = `?yoagent-session=${encodeURIComponent(session)}`;
     link.className = 'yoagent-session-link';
-    link.title = `Open tmux session ${session}`;
+    link.title = t('yoagent.openSession', {session});
     code.replaceWith(link);
     link.appendChild(code);
   });
@@ -502,7 +1045,7 @@ function installYoagentSessionLinks(container) {
   }
 }
 
-function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
+function renderConversationMessageMarkdown(node = document.getElementById('yoagent-content')) {
   // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
   // display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
@@ -528,7 +1071,7 @@ function renderYoagentPanel(options = {}) {
   const inputFocused = input && document.activeElement === input;
   const selectionStart = inputFocused ? input.selectionStart : null;
   const selectionEnd = inputFocused ? input.selectionEnd : null;
-  if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  if (input && options.preserveDraft !== false) yoagentChatState.draft = input.value || '';
   if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
     if (refreshYoagentSummaryRegions(node)) {
       if (shouldScrollBottom) scrollYoagentChatToBottom(node);
@@ -544,7 +1087,7 @@ function renderYoagentPanel(options = {}) {
     return;
   }
   node.innerHTML = yoagentChatHtml();
-  renderYoagentMessageMarkdown(node);
+  renderConversationMessageMarkdown(node);
   restoreYoagentOpenMessageDetailsState(node, openDetails);
   installYoagentChatScrollTracker(node);
   if (shouldScrollBottom) {
@@ -570,37 +1113,46 @@ const infoGroupingStorageKey = 'yolomux.info.grouping.v1';
 const infoLegacyGroupingStorageKey = 'yolomux.info2.grouping.v1';
 const infoSortStorageKey = 'yolomux.info.sort.v1';
 const infoLegacySortStorageKey = 'yolomux.info2.sort.v1';
-const infoDefaultGrouping = Object.freeze(['tab', 'path']);
+const infoDefaultGrouping = Object.freeze(['tab', 'path', 'tmux-window']);
 const infoDefaultSort = Object.freeze({key: 'date', dir: 'desc'});
 const infoSearchMaxLength = 240;
 const infoSortDefs = Object.freeze([
-  {key: 'name', dir: 'asc', value: 'name:asc', label: 'A-Z'},
-  {key: 'name', dir: 'desc', value: 'name:desc', label: 'Z-A'},
-  {key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'},
-  {key: 'date', dir: 'asc', value: 'date:asc', label: 'oldest'},
+  {key: 'name', dir: 'asc', value: 'name:asc', labelKey: 'finder.sort.az'},
+  {key: 'name', dir: 'desc', value: 'name:desc', labelKey: 'finder.sort.za'},
+  {key: 'date', dir: 'desc', value: 'date:desc', labelKey: 'common.sort.recent'},
+  {key: 'date', dir: 'asc', value: 'date:asc', labelKey: 'finder.sort.oldest'},
 ]);
 const infoDimensionDefs = Object.freeze([
-  {key: 'tab', label: 'Tab'},
-  {key: 'tmux-window', label: 'tmux sub-window'},
-  {key: 'ai', label: 'AI'},
-  {key: 'path', label: 'Path'},
-  {key: 'branch', label: 'Branch'},
-  {key: 'linear', label: 'Linear'},
-  {key: 'pr', label: 'PR'},
+  {key: 'tab', labelKey: 'info.dimension.tab'},
+  {key: 'tmux-window', labelKey: 'info.field.tmuxSubWindow'},
+  {key: 'ai', labelKey: 'info.dimension.ai'},
+  {key: 'path', labelKey: 'common.pathLabel'},
+  {key: 'branch', labelKey: 'common.branchLabel'},
+  {key: 'linear', labelKey: 'info.field.linear'},
+  {key: 'pr', labelKey: 'common.pullRequestShort'},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-path', label: 'Tab > Path', title: 'Tab, then path', grouping: ['tab', 'path']},
-  {key: 'path-branch', label: 'Path > Branch', title: 'Path, then branch', grouping: ['path', 'branch']},
-  {key: 'linear-pr', label: 'Linear > PR', title: 'Linear, then PR', grouping: ['linear', 'pr']},
-  {key: 'pr-branch', label: 'PR > Branch', title: 'PR, then branch', grouping: ['pr', 'branch']},
+  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
+  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['path', 'branch']},
+  {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
+  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['pr', 'branch']},
 ]);
 let infoGrouping = readStoredInfoGrouping();
 let infoSort = readStoredInfoSort();
 let infoSearch = '';
 const infoCollapsedGroupKeys = new Set();
 
+function localizedInfoDefinition(definition) {
+  return {
+    ...definition,
+    ...(definition.labelKey ? {label: t(definition.labelKey)} : {}),
+    ...(definition.titleKey ? {title: t(definition.titleKey)} : {}),
+  };
+}
+
 function infoGroupDimensions() {
-  return infoDimensionDefs.map(dimension => ({...dimension}));
+  return infoDimensionDefs.map(localizedInfoDefinition);
 }
 
 function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
@@ -610,7 +1162,7 @@ function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
   if (dimension === 'ai' && index === 0) return false;
   if (dimension === 'tmux-window') {
     const parent = Array.isArray(grouping) ? String(grouping[0] || '') : '';
-    return index === 1 && parent === 'tab';
+    return index >= 1 && parent === 'tab';
   }
   return true;
 }
@@ -621,15 +1173,15 @@ function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
   return infoDimensionDefs
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
-    .map(dimension => ({...dimension}));
+    .map(localizedInfoDefinition);
 }
 
 function infoSortFields() {
-  return infoSortDefs.map(def => ({...def}));
+  return infoSortDefs.map(localizedInfoDefinition);
 }
 
 function infoGroupingPresets() {
-  return infoPresetDefs.map(preset => ({...preset, grouping: preset.grouping.slice()}));
+  return infoPresetDefs.map(preset => ({...localizedInfoDefinition(preset), grouping: preset.grouping.slice()}));
 }
 
 function normalizeInfoGrouping(value, options = {}) {
@@ -653,7 +1205,7 @@ function normalizeInfoGrouping(value, options = {}) {
 
 function normalizeInfoLegacyPresetGrouping(grouping) {
   const key = (Array.isArray(grouping) ? grouping : []).join('|');
-  if (key === 'tab|ai|path|branch') return ['tab', 'path'];
+  if (key === 'tab|ai|path|branch') return ['tab', 'path', 'tmux-window'];
   if (key === 'path|branch|tab|ai') return ['path', 'branch'];
   if (key === 'branch|path|tab|ai') return ['path', 'branch'];
   if (key === 'ai|tab|path|branch') return ['linear', 'pr'];
@@ -825,8 +1377,8 @@ function infoRecordTmuxWindowIndex(record = {}) {
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
-  if (!infoRecordHasAi(record)) return 'No tmux sub-window';
-  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || 'tmux sub-window';
+  if (!infoRecordHasAi(record)) return t('info.missing.tmuxSubWindow');
+  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxSubWindow');
 }
 
 function infoRecordTmuxWindowKey(record = {}) {
@@ -838,7 +1390,7 @@ function infoRecordTmuxWindowKey(record = {}) {
 }
 
 function infoDimensionValue(record, dimension) {
-  const fallback = {key: 'none', label: 'None', title: ''};
+  const fallback = {key: 'none', label: t('info.group.none'), title: ''};
   if (!record || !dimension) return fallback;
   if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
   if (dimension === 'tmux-window') return {key: infoRecordTmuxWindowKey(record), label: infoRecordTmuxWindowLabel(record), title: record.tmuxWindowTitle || record.aiTitle || infoRecordTmuxWindowLabel(record), sortValue: infoRecordNumericSortValue(record, 'tmux-window')};
@@ -875,21 +1427,29 @@ function infoRowPrNumber(row = {}) {
 
 function infoRelationshipRecords(rows = infoBranchRows()) {
   const records = [];
-  const noTab = {session: '', label: 'No tab / no AI', title: 'No tab or AI associated with this branch', kind: '', window: '', tabLabel: 'No tab', aiLabel: 'No AI'};
+  const noTab = {
+    session: '',
+    label: t('info.missing.tabAndAi'),
+    title: t('info.missing.tabOrAiForBranch'),
+    kind: '',
+    window: '',
+    tabLabel: t('info.missing.tab'),
+    aiLabel: t('info.missing.ai'),
+  };
   for (const row of Array.isArray(rows) ? rows : []) {
     const directTabAgents = Array.isArray(row?.tabAgents) && row.tabAgents.length ? row.tabAgents : [];
     const pathTabAgents = Array.isArray(row?.pathTabAgents) && row.pathTabAgents.length ? row.pathTabAgents : [];
     const tabAgents = directTabAgents.length ? directTabAgents : (pathTabAgents.length ? pathTabAgents : [noTab]);
     for (const agent of tabAgents) {
       const session = String(agent?.session || '');
-      const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || 'No tab');
+      const tabLabel = String(agent?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || t('info.missing.tab'));
       const aiLabel = String(agent?.aiLabel || infoTabAgentAiLabel(agent));
       const aiKind = String(agent?.kind || '');
       const tmuxWindowIndex = String(agent?.windowIndex ?? agent?.window_index ?? agent?.window ?? '');
       const tmuxWindowKey = tmuxWindowIndex
         ? `${session || 'no-tab'}:${tmuxWindowIndex}:${aiLabel}`
         : '__no_tmux_window__';
-      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? 'No tmux sub-window' : aiLabel;
+      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxSubWindow') : aiLabel;
       const path = String(row?.path || '');
       const branch = String(row?.branch || '');
       const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
@@ -917,6 +1477,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         aiPaneTarget: String(agent?.pane_target || ''),
         aiCurrent: agent?.current === true,
         aiWindowActive: agent?.window_active === true,
+        aiPid: tmuxWindowProcessPid(agent),
         aiWorkingStoppedTs: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
         aiIdleSince: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
         aiLastActiveTs: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
@@ -926,15 +1487,17 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tmuxWindowLabel,
         tmuxWindowTitle: String(agent?.title || tmuxWindowLabel),
         pathKey: infoNormalizedPath(path) || '__no_path__',
-        pathLabel: String(row?.pathLabel || compactHomePath(path) || 'No path'),
-        pathTitle: String(row?.pathTitle || path || 'No path'),
+        pathLabel: String(row?.pathLabel || compactHomePath(path) || t('info.missing.path')),
+        pathTitle: String(row?.pathTitle || path || t('info.missing.path')),
+        pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
+        pathActivitySource: String(row?.pathActivitySource || ''),
         branchKey: branch || '__no_branch__',
-        branchLabel: branch || 'No branch',
-        branchTitle: branch || 'No branch',
-        branchHtml: row?.branchHtml || esc(branch || 'No branch'),
+        branchLabel: branch || t('info.missing.branch'),
+        branchTitle: branch || t('info.missing.branch'),
+        branchHtml: row?.branchHtml || esc(branch || t('info.missing.branch')),
         prKey: prCompactLabel || prKeyLabel || '__no_pr__',
-        prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || 'No PR',
-        prTitle: prDisplayLabel || prCompactLabel || 'No PR',
+        prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || t('info.missing.pr'),
+        prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
         prNumber: Number.isFinite(prNumber) ? prNumber : null,
         prUrl: String(row?.prUrl || ''),
         prClass: String(row?.prClass || ''),
@@ -944,14 +1507,15 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         prCiClass: String(row?.prCiClass || ''),
         prHtml: infoPrCellHtml(row) || '',
         linearKey: linearLabel || '__no_linear__',
-        linearLabel: linearLabel || 'No Linear',
-        linearTitle: String(row?.linearTitle || linearLabel || 'No Linear'),
+        linearLabel: linearLabel || t('info.missing.linear'),
+        linearTitle: String(row?.linearTitle || linearLabel || t('info.missing.linear')),
         linearHtml: infoLinearCellHtml(row) || '',
         linearItems: Array.isArray(row?.linearItems) ? row.linearItems.slice(0, 20) : [],
         desc: String(row?.desc || ''),
         updated: String(row?.updatedText || row?.updated || ''),
         updatedTitle: String(row?.updatedTitle || row?.updated || ''),
         updatedTs: Number.isFinite(row?.updatedTs) ? row.updatedTs : 0,
+        updatedSource: String(row?.updatedSource || ''),
       });
     }
   }
@@ -1040,19 +1604,15 @@ function infoRecordLabel(record = {}, dimension = '') {
   return '';
 }
 
-function infoSearchText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
 function infoSearchField(kind, ...values) {
-  const text = values.map(infoSearchText).filter(Boolean).join(' ');
+  const text = values.map(singleLineText).filter(Boolean).join(' ');
   return text ? {kind, text} : null;
 }
 
 function infoSearchFields(kind, ...values) {
   const seen = new Set();
   return values
-    .map(infoSearchText)
+    .map(singleLineText)
     .filter(Boolean)
     .filter(value => {
       const key = value.toLowerCase();
@@ -1129,29 +1689,7 @@ function infoFilteredRecords(records = [], query = infoSearch) {
 }
 
 function infoSearchHighlightHtml(value, query = infoSearch) {
-  const text = String(value ?? '');
-  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return esc(text);
-  const indexes = new Set();
-  for (const token of tokens) {
-    const match = fuzzySubsequenceMatch(token, text);
-    if (match) for (const matchIndex of match.indexes) indexes.add(matchIndex);
-  }
-  if (!indexes.size) return esc(text);
-  const chars = Array.from(text);
-  const parts = [];
-  let index = 0;
-  while (index < chars.length) {
-    if (!indexes.has(index)) {
-      parts.push(esc(chars[index]));
-      index += 1;
-      continue;
-    }
-    const start = index;
-    while (index < chars.length && indexes.has(index)) index += 1;
-    parts.push(`<mark class="info-tree-search-match">${esc(chars.slice(start, index).join(''))}</mark>`);
-  }
-  return parts.join('');
+  return fuzzyHighlightHtml(query, value, {markClass: 'info-tree-search-match'});
 }
 
 function infoRecordSearchValueHtml(record = {}, kind = '', value = '', query = infoSearch) {
@@ -1221,7 +1759,7 @@ function infoGroupTree(records = infoRelationshipRecords(), grouping = infoGroup
     for (const record of sortedItems) {
       const value = infoDimensionValue(record, dimension);
       const key = String(value.key || value.label || 'none');
-      if (!groups.has(key)) groups.set(key, {type: 'group', dimension, key, label: String(value.label || 'None'), title: String(value.title || value.label || ''), sortValue: value.sortValue, count: 0, records: [], children: []});
+      if (!groups.has(key)) groups.set(key, {type: 'group', dimension, key, label: String(value.label || t('info.group.none')), title: String(value.title || value.label || ''), sortValue: value.sortValue, count: 0, records: [], children: []});
       const group = groups.get(key);
       if (!Number.isFinite(Number(group.sortValue)) && Number.isFinite(Number(value.sortValue))) group.sortValue = value.sortValue;
       group.count += 1;
@@ -1300,67 +1838,23 @@ function infoRecordTabValueHtml(record = {}, options = {}) {
     active,
     title,
     attrs,
-    showDetail: false,
     sessionLabelHtml,
     leadingHtml: options.leadingHtml,
   });
 }
 
-function infoPullRequestLifecycleText(pr) {
-  if (!pr?.number) return '';
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (status === 'merged' || pr.merged || pr.merged_at) return t('pr.status.merged');
-  if (status === 'draft' || pr.draft) return t('pr.status.draft');
-  if (status === 'closed') return t('pr.status.closed');
-  return t('pr.status.open');
-}
-
-function infoPullRequestLifecycleClass(pr) {
-  if (!pr?.number) return '';
-  const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (status === 'merged' || pr.merged || pr.merged_at) return 'pr-status-merged';
-  if (status === 'draft' || pr.draft) return 'pr-status-draft';
-  if (status === 'closed') return 'pr-status-closed';
-  return 'pr-status-open';
-}
-
-function infoPullRequestCiText(pr) {
-  if (!pr?.number || infoPullRequestLifecycleClass(pr) === 'pr-status-merged') return '';
-  const checks = pr.checks && typeof pr.checks === 'object' ? pr.checks : null;
-  const checkState = String(checks?.state || checks?.status_label || checks?.conclusion || '').trim();
-  const checkSummary = String(checks?.summary || '').trim();
-  if (checkState && checkState.toLowerCase() !== 'unknown') {
-    const label = checkSummary || checkState;
-    return /^ci\b/i.test(label) ? label : `CI ${label}`;
-  }
-  const status = String(pr?.status_label || '').trim();
-  if (!status || /^(open|merged|closed|draft)$/i.test(status)) return '';
-  if (!/(ci|fail|pend|pass|error|queued|running|success)/i.test(status)) return '';
-  const display = pullRequestStatusDisplay(pr) || status;
-  return /^ci\b/i.test(display) ? display : `CI ${display}`;
-}
-
-function infoPullRequestCiClass(pr) {
-  const checks = pr?.checks && typeof pr.checks === 'object' ? pr.checks : null;
-  const state = String(checks?.state || checks?.status_label || checks?.conclusion || pr?.status_label || '').toLowerCase();
-  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
-  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
-  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
-  return pullRequestCiStatusClass(pr);
-}
-
-function infoStatusBadgeHtml(text, className, options = {}) {
+function infoStatusBadgeHtml(record, text, className, options = {}) {
   const label = String(text || '').trim();
   if (!label) return '';
   const labelHtml = options.highlight ? infoSearchHighlightHtml(label) : esc(label);
-  return `<span class="meta-pr-status info-tree-status-badge ${esc(className || 'pr-status-unknown')}">${labelHtml}</span>`;
+  return pullRequestStatusBadgeHtml(record?.tabSession, label, className, {labelHtml});
 }
 
 function infoRecordPrStatusHtml(record) {
   const parts = [];
   const highlight = infoRecordSearchKindMatches(record, 'pr');
-  if (record?.prLifecycleText) parts.push(infoStatusBadgeHtml(record.prLifecycleText, record.prLifecycleClass, {highlight}));
-  if (record?.prCiText) parts.push(infoStatusBadgeHtml(record.prCiText, record.prCiClass, {highlight}));
+  if (record?.prLifecycleText) parts.push(infoStatusBadgeHtml(record, record.prLifecycleText, record.prLifecycleClass, {highlight}));
+  if (record?.prCiText) parts.push(infoStatusBadgeHtml(record, record.prCiText, record.prCiClass, {highlight}));
   return parts.filter(Boolean).join(' ');
 }
 
@@ -1428,14 +1922,14 @@ function infoRecordLinearDescHtml(record) {
 
 function infoFieldLabel(kind) {
   const labels = {
-    path: 'info.field.path',
+    path: 'common.field.path',
     branch: 'info.field.gitBranch',
     pr: 'info.field.githubPr',
     linear: 'info.field.linear',
     tab: 'info.field.tabTmuxSession',
     ai: 'info.field.tmuxSubWindow',
     'tmux-window': 'info.field.tmuxSubWindow',
-    updated: 'info.field.updated',
+    updated: 'common.updated',
   };
   return t(labels[kind] || kind);
 }
@@ -1463,32 +1957,32 @@ function infoRecordAgentPayload(record) {
     working_stopped_ts: record.aiWorkingStoppedTs,
     idle_since: record.aiIdleSince,
     last_active_ts: record.aiLastActiveTs,
+    pid: record.aiPid,
   };
   return agent;
 }
 
-function infoRecordAgentActivityItem(record) {
-  if (!infoRecordHasAi(record) || typeof agentWindowActivityIcon !== 'function') return null;
-  const agent = infoRecordAgentPayload(record);
-  return agentWindowActivityIcon(record.aiKind, agent.state, typeof agentWindowIdleSeconds === 'function' ? agentWindowIdleSeconds(agent) : null, {
-    session: record.tabSession,
-    window: agent.window,
-    window_index: agent.window_index,
-    pane: agent.pane,
-    pane_target: agent.pane_target,
-    current: false,
-    window_active: false,
-    working_stopped_ts: agent.working_stopped_ts,
-    scheduleRefresh: false,
-  });
+function infoRecordCanonicalAgent(record) {
+  const session = String(record?.tabSession || '').trim();
+  const windowIndex = infoRecordTmuxWindowIndex(record);
+  if (!session || !windowIndex || typeof agentWindowStatusForSessionWindow !== 'function') return null;
+  const info = transcriptMetadataState.payload.sessions?.[session] || null;
+  return agentWindowStatusForSessionWindow(session, windowIndex, info, autoApproveStates.get(session));
 }
 
-function infoTabGroupStatusRank(state) {
-  const key = String(state || '');
-  if (key === 'attention') return 0;
-  if (key === 'cooldown') return 1;
-  if (key === STATE_KEY.working) return 2;
-  return 9;
+function infoRecordDisplayAgent(record) {
+  return infoRecordCanonicalAgent(record) || {...infoRecordAgentPayload(record), state: ''};
+}
+
+function infoRecordAgentActivityItem(record) {
+  if (!infoRecordHasAi(record)) return null;
+  const agent = infoRecordCanonicalAgent(record);
+  if (!agent) return null;
+  return agentWindowActivityIconForStatusItem(agent, record.aiKind, record.tabSession, {
+    current: false,
+    window_active: false,
+    scheduleRefresh: false,
+  });
 }
 
 function infoTabGroupStatusItem(group = {}) {
@@ -1500,8 +1994,9 @@ function infoTabGroupStatusRecord(group = {}) {
   let best = null;
   for (const record of Array.isArray(group.records) ? group.records : []) {
     const item = infoRecordAgentActivityItem(record);
-    if (!item || infoTabGroupStatusRank(item.state) >= 9) continue;
-    if (!best || infoTabGroupStatusRank(item.state) < infoTabGroupStatusRank(best.item.state)) best = {record, item};
+    const rank = agentWindowStatusItemVisualRank(item);
+    if (!item || rank >= 9) continue;
+    if (!best || rank < best.rank) best = {record, item, rank};
   }
   return best;
 }
@@ -1512,10 +2007,19 @@ function infoTabGroupLeadingActivityHtml(group = {}) {
   const record = status.record;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
+  const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
-  const activityHtml = agentWindowActivityIconHtmlForStatus(infoRecordAgentPayload(record), record.aiKind, session, {statusOnly: true, animate: false});
+  const agent = summary?.agent || infoRecordDisplayAgent(record);
+  const activityHtml = summary?.item
+    ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
+      ...agentWindowActivityOptionsForStatus(agent, session),
+      item: summary.item,
+      statusOnly: true,
+    })
+    : agentWindowActivityIconHtmlForStatus(agent, record.aiKind, session, {statusOnly: true});
   return activityHtml ? `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${activityHtml}</span>` : undefined;
 }
 
@@ -1529,8 +2033,8 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
   const label = String(record?.aiLabel || '').trim();
   if (!label) return '';
   const labelHtml = infoRecordSearchValueHtml(record, 'tmux-window', label);
-  const agent = infoRecordAgentPayload(record);
-  const active = record.aiCurrent === true || record.aiWindowActive === true;
+  const agent = infoRecordDisplayAgent(record);
+  const active = agent.current === true || agent.window_active === true;
   const title = String(options.title || record.aiTitle || label);
   const attrs = options.action === false
     ? []
@@ -1547,12 +2051,26 @@ function infoRecordAiWindowButtonHtml(record, options = {}) {
     numberLabel: record.aiWindowIndex || record.aiWindow || label,
     active,
     agentStatus: agent,
-    agentKey: record.aiKind,
-    activityAnimate: false,
+    agentKey: agent.kind || record.aiKind,
     title,
     attrs,
     ariaPressed: options.action !== false,
   });
+}
+
+function infoRecordAiRecencyHtml(record) {
+  const agent = infoRecordDisplayAgent(record);
+  const lastActive = Number(agent.idle_since || agent.last_active_ts || 0);
+  if (!Number.isFinite(lastActive) || lastActive <= 0) return '';
+  const text = typeof sessionPopoverAgentRecencyText === 'function'
+    ? sessionPopoverAgentRecencyText(agent)
+    : sessionFileRelativeTimeText(lastActive);
+  return text ? `<span class="info-tree-ai-recency info-tree-trailing-meta">${esc(text)}</span>` : '';
+}
+
+function infoRecordAiPidHtml(record) {
+  const pidText = tmuxWindowPidText(record?.aiPid);
+  return pidText ? `<span class="info-tree-ai-pid">${esc(pidText)}</span>` : '';
 }
 
 function infoRecordAiValueHtml(record, options = {}) {
@@ -1560,20 +2078,34 @@ function infoRecordAiValueHtml(record, options = {}) {
   const buttonHtml = infoRecordAiWindowButtonHtml(record, options);
   if (!buttonHtml) return '';
   const status = infoAgentAttentionHtml(record);
-  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}</span>`;
+  const pid = infoRecordAiPidHtml(record);
+  const recency = infoRecordAiRecencyHtml(record);
+  return `<span class="info-tree-ai-value tmux-window-bar info-tree-ai-window-token" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">${buttonHtml}${status}${pid}${recency}</span>`;
+}
+
+function infoRecordUpdatedMetaHtml(record) {
+  if (infoRecordMissingValue(record?.updated)) return '';
+  const source = record?.updatedSource === 'git-commit' ? t('info.meta.gitCommit') : '';
+  const text = [source, record.updated].filter(Boolean).join(' ');
+  const title = [source, String(record?.updatedTitle || record.updated)].filter(Boolean).join(': ');
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  return `<span class="info-tree-meta-updated info-tree-trailing-meta"${titleAttr}>${infoRecordSearchValueHtml(record, 'updated', text)}</span>`;
+}
+
+function infoRecordPathActivityMetaHtml(record) {
+  const timestamp = Number(record?.pathActivityTs || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  const text = relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - timestamp));
+  const title = t('info.meta.latestPathActivity', {time: text});
+  return `<span class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta" title="${esc(title)}">${esc(text)}</span>`;
 }
 
 function infoRecordMainChipsHtml(record, options = {}) {
   const hiddenDimensions = new Set(Array.isArray(options.hiddenDimensions) ? options.hiddenDimensions : []);
   const fields = [];
-  if (!hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__') {
-    const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
-    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>`, record.pathTitle));
-  }
-  if (!hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__') {
-    const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>`, record.branchTitle));
-  }
+  const pathVisible = !hiddenDimensions.has('path') && !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__';
+  const branchVisible = !hiddenDimensions.has('branch') && !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__';
+  const updatedMeta = infoRecordUpdatedMetaHtml(record);
   const linearDesc = infoRecordLinearDescHtml(record);
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   const prDesc = infoRecordPrDescHtml(record);
@@ -1584,8 +2116,13 @@ function infoRecordMainChipsHtml(record, options = {}) {
   if (!hiddenDimensions.has('tmux-window') && infoRecordHasAi(record)) {
     fields.push(infoRecordFieldHtml('ai', infoRecordAiValueHtml(record), record.aiTitle));
   }
-  if (!infoRecordMissingValue(record?.updated)) {
-    fields.push(infoRecordFieldHtml('updated', `<span class="info-tree-value-text info-tree-meta-updated">${infoRecordSearchValueHtml(record, 'updated', record.updated)}</span>`, record.updatedTitle));
+  if (pathVisible) {
+    const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
+    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}`, record.pathTitle));
+  }
+  if (branchVisible) {
+    const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
+    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
   }
   return fields.join('');
 }
@@ -1600,23 +2137,25 @@ function infoTreeHiddenDimensions(ancestors, dimension) {
   return Array.from(new Set([...(Array.isArray(ancestors) ? ancestors : []), dimension].filter(Boolean)));
 }
 
-function infoDimensionCountNoun(key, count) {
-  const plural = count !== 1;
-  if (key === 'tab') return plural ? 'tabs' : 'tab';
-  if (key === 'tmux-window') return plural ? 'tmux sub-windows' : 'tmux sub-window';
-  if (key === 'ai') return 'AI';
-  if (key === 'path') return plural ? 'paths' : 'path';
-  if (key === 'branch') return plural ? 'branches' : 'branch';
-  if (key === 'pr') return plural ? 'PRs' : 'PR';
-  if (key === 'linear') return plural ? 'Linear issues' : 'Linear issue';
-  return plural ? 'items' : 'item';
+const infoDimensionCountKeys = Object.freeze({
+  tab: 'common.tabs',
+  'tmux-window': 'info.count.tmuxWindow',
+  ai: 'info.count.ai',
+  path: 'common.pathCount',
+  branch: 'info.count.branch',
+  pr: 'info.count.pr',
+  linear: 'info.count.linear',
+});
+
+function infoDimensionCountText(key, count) {
+  return tPlural(infoDimensionCountKeys[key] || 'info.count.item', count);
 }
 
 function infoGroupLabelHtml(group = {}) {
   const label = String(group.label || '');
   if (group.dimension === 'path' && !infoRecordMissingValue(label) && String(group.key || '') !== '__no_path__') {
     const path = String(group.key || group.title || label);
-    return `<button type="button" class="info-tree-group-label info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button>`;
+    return `<span class="info-tree-group-label info-tree-group-label-path"><button type="button" class="info-tree-group-label-action" data-info-open-path="${esc(path)}" title="${esc(group.title || path)}">${infoGroupSearchValueHtml(group, label)}</button></span>`;
   }
   const representative = infoGroupRepresentativeRecord(group);
   if (group.dimension === 'tmux-window') {
@@ -1625,11 +2164,11 @@ function infoGroupLabelHtml(group = {}) {
   }
   if (group.dimension === 'pr') {
     const html = infoRecordPrDescHtml(representative);
-    return `<span class="info-tree-group-label info-tree-group-label-pr">${html || 'None'}</span>`;
+    return `<span class="info-tree-group-label info-tree-group-label-pr">${html || esc(t('info.group.none'))}</span>`;
   }
   if (group.dimension === 'linear') {
     const html = infoRecordLinearDescHtml(representative);
-    return `<span class="info-tree-group-label info-tree-group-label-linear">${html || 'None'}</span>`;
+    return `<span class="info-tree-group-label info-tree-group-label-linear">${html || esc(t('info.group.none'))}</span>`;
   }
   if (group.dimension === 'tab') {
     const tabHtml = infoRecordTabValueHtml(representative, {
@@ -1647,7 +2186,7 @@ function infoGroupChildCountHtml(group = {}) {
   const directChildGroups = Array.isArray(group.children) ? group.children.filter(child => child?.type === 'group') : [];
   if (directChildGroups.length <= 1) return '';
   const dimension = directChildGroups[0]?.dimension || '';
-  return `<span class="info-tree-group-child-count">(${esc(`${directChildGroups.length} ${infoDimensionCountNoun(dimension, directChildGroups.length)}`)})</span>`;
+  return `<span class="info-tree-group-child-count">(${esc(infoDimensionCountText(dimension, directChildGroups.length))})</span>`;
 }
 
 function infoGroupDimensionLabel(key) {
@@ -1672,11 +2211,12 @@ function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ance
         hiddenDimensions,
       })).join('');
     const childCount = infoGroupChildCountHtml(child);
+    const trailingMeta = child.dimension === 'path' ? infoRecordPathActivityMetaHtml(infoGroupRepresentativeRecord(child)) : '';
     const openAttr = infoCollapsedGroupKeys.has(groupKey) ? '' : ' open';
     return `<details class="${esc(infoTreeItemClasses('info-tree-group', treeItemOptions))}" data-info-dimension="${esc(child.dimension)}" data-info-depth="${depth}" data-info-group-key="${esc(groupKey)}"${openAttr}>
       <summary title="${esc(child.title)}">
         <span class="info-tree-group-dimension">${esc(infoGroupDimensionLabel(child.dimension))}</span>
-        <span class="info-tree-group-label-line">${infoGroupLabelHtml(child)}${childCount}</span>
+        <span class="info-tree-group-label-line">${infoGroupLabelHtml(child)}${childCount}${trailingMeta}</span>
       </summary>
       <div class="info-tree-group-children">${nested}</div>
     </details>`;
@@ -1684,7 +2224,7 @@ function infoTreeChildrenHtml(children, depth = 0, ancestorDimensions = [], ance
 }
 
 function infoDimensionLabel(key) {
-  return infoDimensionDefs.find(dimension => dimension.key === key)?.label || key;
+  return infoGroupDimensions().find(dimension => dimension.key === key)?.label || key;
 }
 
 function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGrouping, sort = infoSort) {
@@ -1702,13 +2242,14 @@ function infoPanelRenderVisible() {
 
 function infoPanelRenderSignature() {
   return JSON.stringify({
-    loading: transcriptMetaLoading,
-    loaded: transcriptMetaLoaded,
-    error: transcriptMetaLoadError,
+    loading: transcriptMetadataState.loading,
+    loaded: transcriptMetadataState.loaded,
+    error: transcriptMetadataState.error,
     search: infoSearch,
     grouping: infoGrouping,
     sort: infoSort,
-    meta: transcriptMeta,
+    meta: transcriptMetadataState.payload,
+    agentStatus: sessions.map(session => [session, agentWindowStatusVisualSignature(autoApproveStates.get(session) || {})]),
   });
 }
 
@@ -1716,11 +2257,9 @@ function renderInfoPanel(options = {}) {
   const node = document.getElementById('info-content');
   if (!node) return;
   if (options.force !== true && !infoPanelRenderVisible()) {
-    infoPanelRenderPending = true;
     recordClientPerfCounter('renderInfoPanel', 0, {skipped: 1});
     return;
   }
-  infoPanelRenderPending = false;
   let renderedNodes = 0;
   const perf = clientPerfStart('renderInfoPanel');
   try {
@@ -1732,38 +2271,43 @@ function renderInfoPanel(options = {}) {
 }
 
 function renderInfoPanelMeasured(node, options = {}) {
-  const renderInfoContent = html => {
-    node.innerHTML = html;
+  const syncInfoContent = () => {
     if (typeof syncInfoTreeScrolledState === 'function') syncInfoTreeScrolledState(node.closest('.info-tree-panel'));
     if (typeof refreshPanePopouts === 'function') refreshPanePopouts(infoItemId);
   };
+  const renderInfoContent = html => {
+    node.innerHTML = html;
+    syncInfoContent();
+  };
   syncTranscriptMetaLoadingUi();
   const signature = infoPanelRenderSignature();
-  if (options.force !== true && signature === infoPanelLastRenderSignature && infoPanelLastRenderHtml) {
-    renderInfoContent(infoPanelLastRenderHtml);
+  if (options.force !== true && signature === infoPanelRenderCache.signature && infoPanelRenderCache.html) {
+    const hasContent = Boolean(node.children?.length || String(node.innerHTML || '').trim());
+    if (!hasContent) renderInfoContent(infoPanelRenderCache.html);
+    else syncInfoContent();
     return;
   }
   const commitInfoContent = html => {
-    infoPanelLastRenderSignature = signature;
-    infoPanelLastRenderHtml = html;
+    infoPanelRenderCache.signature = signature;
+    infoPanelRenderCache.html = html;
     renderInfoContent(html);
   };
   const allRecords = infoRelationshipRecords();
   const records = infoFilteredRecords(allRecords, infoSearch);
   if (!records.length) {
     if (allRecords.length && infoSearch.trim()) {
-      commitInfoContent(`<div class="info-empty info-tree-empty">No matches for "${esc(infoSearch.trim())}"</div>`);
+      commitInfoContent(`<div class="info-empty info-tree-empty">${localizedHtml('info.search.noMatches', {query: infoSearch.trim()})}</div>`);
       return;
     }
-    if (transcriptMetaLoading) {
+    if (transcriptMetadataState.loading) {
       commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
-    if (transcriptMetaLoadError) {
-      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`);
+    if (transcriptMetadataState.error) {
+      commitInfoContent(`<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetadataLoadErrorText())}</div>`);
       return;
     }
-    if (!transcriptMetaLoaded) {
+    if (!transcriptMetadataState.loaded) {
       commitInfoContent(infoMetadataLoadingHtml());
       return;
     }
@@ -1793,14 +2337,14 @@ function infoPathLabel(git) {
   const label = compactHomePath(path);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return label;
-  return `${label} (worktree of ${compactHomePath(parent)})`;
+  return worktreeDisplayText({name: label, parent_root: compactHomePath(parent)});
 }
 
 function infoPathTitle(git) {
   const path = infoGitRoot(git);
   const parent = git?.worktree?.parent_root || '';
   if (!parent) return path;
-  return `${path} (worktree of ${parent})`;
+  return worktreeDisplayText({name: path, parent_root: parent});
 }
 
 function infoGitRoot(git) {
@@ -1855,7 +2399,7 @@ function infoBranchSourcesForSession(session, info) {
 }
 
 function infoBranchSourcesForIndexedRepos() {
-  const repos = Array.isArray(transcriptMeta?.indexed_repos) ? transcriptMeta.indexed_repos : [];
+  const repos = Array.isArray(transcriptMetadataState.payload?.indexed_repos) ? transcriptMetadataState.payload.indexed_repos : [];
   return repos
     .filter(git => infoGitPathKey(git) && Array.isArray(git?.other_branches?.branches) && git.other_branches.branches.length)
     .map(git => ({session: '', info: {}, project: {}, git, primary: false, indexed: true}));
@@ -1924,12 +2468,12 @@ function infoSourceWindowRowsForBranch(source, branch, options = {}) {
 
 function infoTabAgentLabel(session, agent = null) {
   const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
-  if (!agent) return `${tabLabel} / no AI`;
+  if (!agent) return t('info.tabAgent.withoutAi', {tab: tabLabel});
   return `${tabLabel} / ${infoTabAgentAiLabel(agent)}`;
 }
 
 function infoTabAgentAiLabel(agent = null) {
-  if (!agent) return 'no AI';
+  if (!agent) return t('info.missing.ai');
   if (agent.aiLabel) return String(agent.aiLabel);
   if (agent.label && String(agent.label).includes(' / ')) return String(agent.label).split(' / ').slice(1).join(' / ') || 'AI';
   const agentLabel = typeof agentWindowCanonicalLabel === 'function'
@@ -1940,7 +2484,7 @@ function infoTabAgentAiLabel(agent = null) {
 
 function infoAgentKindLabel(value) {
   const kind = String(value || '').trim();
-  return kind || 'No AI';
+  return kind || t('info.missing.ai');
 }
 
 function infoTabAgentEntry(session, agent = null) {
@@ -1950,7 +2494,7 @@ function infoTabAgentEntry(session, agent = null) {
   const label = infoTabAgentLabel(session, agent);
   const title = agent
     ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
-    : `${label} · no Claude/Codex tmux sub-window detected`;
+    : `${label} · ${t('info.missing.tmuxSubWindow')}`;
   return {
     session: String(session || ''),
     label,
@@ -1966,6 +2510,7 @@ function infoTabAgentEntry(session, agent = null) {
     pane_target: String(agent?.pane_target || ''),
     current: agentWindowPayloadCurrent(agent) === true,
     window_active: agent?.window_active === true,
+    pid: tmuxWindowProcessPid(agent),
     working_stopped_ts: Number.isFinite(Number(agent?.working_stopped_ts)) ? Number(agent.working_stopped_ts) : 0,
     idle_since: Number.isFinite(Number(agent?.idle_since)) ? Number(agent.idle_since) : 0,
     last_active_ts: Number.isFinite(Number(agent?.last_active_ts)) ? Number(agent.last_active_ts) : 0,
@@ -2056,6 +2601,17 @@ function rowWithInfoTabAgents(row, tabAgents) {
   };
 }
 
+function infoPathActivityForSource(source = {}) {
+  const root = infoGitRoot(source.git);
+  const repos = Array.isArray(source?.project?.repos) ? source.project.repos : [];
+  const repo = repos.find(item => infoNormalizedPath(item?.root) === infoNormalizedPath(root));
+  const timestamp = Number(repo?.activity_ts ?? source?.git?.activity_ts ?? 0);
+  return {
+    timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
+    source: String(repo?.activity_source || source?.git?.activity_source || ''),
+  };
+}
+
 function infoBranchRowForSource(source, branch, ownsSession) {
   const {session, info, project, git, primary} = source;
   const useCurrentProjectMetadata = ownsSession && primary;
@@ -2072,7 +2628,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const linearHtml = linearSourceItems.length
     ? linearSourceItems.map(issue => linearIssueHtml(issue)).join(' ')
     : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-  const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
+  const prHtml = currentPr?.number ? pullRequestLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
   const prValue = currentPr?.number ? currentPr : branch.pull_request;
   const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
   const prNumber = infoPrNumberFromValue(prValue?.number);
@@ -2083,10 +2639,12 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
   const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
-  const prLifecycleText = prValue?.number ? infoPullRequestLifecycleText(prValue) : '';
-  const prLifecycleClass = prValue?.number ? infoPullRequestLifecycleClass(prValue) : '';
-  const prCiText = prValue?.number ? infoPullRequestCiText(prValue) : '';
-  const prCiClass = prCiText ? infoPullRequestCiClass(prValue) : '';
+  const prLifecycle = prValue?.number ? pullRequestLifecycleStatus(prValue) : null;
+  const prLifecycleText = prLifecycle?.text || '';
+  const prLifecycleClass = prLifecycle?.className || '';
+  const prCiStatus = prValue?.number ? pullRequestCiStatus(prValue) : null;
+  const prCiText = prCiStatus?.text || '';
+  const prCiClass = prCiStatus?.className || '';
   const linearTitle = linearSourceItems.length
     ? linearSourceItems.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
     : linearIds.join(' ');
@@ -2106,11 +2664,14 @@ function infoBranchRowForSource(source, branch, ownsSession) {
       || '',
     180,
   );
+  const pathActivity = infoPathActivityForSource(source);
   return {
     session: '',
     path: infoGitRoot(git),
     pathLabel: infoPathLabel(git),
     pathTitle: infoPathTitle(git),
+    pathActivityTs: pathActivity.timestamp,
+    pathActivitySource: pathActivity.source,
     branch: branch.name || '',
     branchHtml: branchLinkHtml(git, branch.name),
     desc,
@@ -2118,6 +2679,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     updatedText: branchUpdatedText(branch),
     updatedTitle: branch.updated || branchUpdatedText(branch),
     updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
+    updatedSource: 'git-commit',
     prHtml: prHtml || '',
     prTitle,
     prDescriptionTitle,
@@ -2157,9 +2719,9 @@ function mergeInfoBranchRow(existing, next) {
 
 function rawInfoBranchRows() {
   const rowsByKey = new Map();
-  const infoSessions = Array.isArray(transcriptMeta?.session_order) ? transcriptMeta.session_order : sessions;
+  const infoSessions = Array.isArray(transcriptMetadataState.payload?.session_order) ? transcriptMetadataState.payload.session_order : sessions;
   for (const session of infoSessions) {
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     for (const source of infoBranchSourcesForSession(session, info)) {
       for (const branch of source.git?.other_branches?.branches || []) {
         const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
@@ -2209,12 +2771,15 @@ function shareInfoRowSnapshot(row = {}) {
     path: shareInfoString(row.path, 1000),
     pathLabel: shareInfoString(row.pathLabel, 1000),
     pathTitle: shareInfoString(row.pathTitle, 1000),
+    pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
+    pathActivitySource: shareInfoString(row.pathActivitySource, 100),
     branch: shareInfoString(row.branch, 500),
     desc: shareInfoString(row.desc, 1000),
     updated: shareInfoString(row.updated, 200),
     updatedText: shareInfoString(row.updatedText, 200),
     updatedTitle: shareInfoString(row.updatedTitle, 500),
     updatedTs: Number.isFinite(row.updatedTs) ? row.updatedTs : 0,
+    updatedSource: shareInfoString(row.updatedSource, 100),
     prTitle: shareInfoString(row.prTitle, 1000),
     prUrl: shareInfoString(row.prUrl, 1000),
     prLabel: shareInfoString(row.prLabel, 100),
@@ -2267,18 +2832,78 @@ function applyShareInfoState(info = {}) {
 }
 
 function bindPanelControls(panel, session) {
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
+    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-toggle]', (event, button) => {
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-toggle]', (event, button) => {
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+  });
+  delegate(panel, 'contextmenu', '[data-terminal-mobile-toggle]', event => {
+    event.preventDefault();
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-drag]', (event, handle) => {
+    beginTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-drag]', (event, handle) => {
+    moveTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-drag]', (event, handle) => {
+    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-drag]', (event, handle) => {
+    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-toggle]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalMobileToggle || session;
+    if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
+    sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
+    // Do not blur xterm/close the software keyboard before the click sends its byte.
+    if (beginTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, button.dataset.terminalMobileKey, event, button)) return;
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-key]', (event, button) => {
+    endTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, event, button);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-key]', (event, button) => {
+    endTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, event, button);
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-key]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalMobileSession || session;
+    const action = button.dataset.terminalMobileKey;
+    if (consumeTerminalMobileAccessoryKeyClick(targetSession, action)) return;
+    sendTerminalMobileAccessoryInput(targetSession, action);
+  });
+  delegate(panel, 'click', '[data-tmux-status-toggle]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void cycleTmuxStatusMode(button.dataset.tmuxStatusToggle).catch(error => statusErr(userMessageText(error, t('common.requestFailed'))));
+  });
   delegate(panel, 'click', '[data-tab]', (_event, button) => {
     const currentName = button.dataset.tabName;
     const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
     activateTab(button.dataset.tab, nextName, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-window-dir], [data-window-index]', event => {
+  delegate(panel, 'click', '[data-window-dir], [data-window-index]', (event, button) => {
+    if (button.dataset.pointerActionHandled === '1') {
+      delete button.dataset.pointerActionHandled;
+      return;
+    }
     handleWindowStepButtonClick(event);
   });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    removePaneFromLayout(button.dataset.paneClose);
+    closePaneFrameItem(button.dataset.paneClose);
   });
   delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
     event.preventDefault();
@@ -2312,25 +2937,7 @@ function bindPanelControls(panel, session) {
     event.stopPropagation();
     toggleAutoApprove(target.dataset.autoSession || session);
   });
-  panel.querySelector('.meta')?.addEventListener('click', event => {
-    event.stopPropagation();
-    const cycle = event.target.closest('[data-repo-cycle]');
-    if (cycle) {
-      event.preventDefault();
-      const targetSession = cycle.dataset.repoCycle || session;
-      cycleSessionRepoDisplay(targetSession, transcriptMeta.sessions?.[targetSession], cycle.dataset.repoCycleDir || 1);
-      updatePanelHeader(targetSession, transcriptMeta.sessions?.[targetSession]);
-      renderSessionButtons();
-      renderPaneTabStrips();
-      return;
-    }
-    // The repo count opens the per-session multi-repo popover (delegated, since .meta re-renders).
-    const chip = event.target.closest('[data-repo-chip]');
-    if (chip) {
-      event.preventDefault();
-      showRepoChipMenu(chip.dataset.repoChip || session, event.clientX, event.clientY);
-    }
-  });
+  delegate(panel, 'click', repoSelectorControlSelector, (event, button) => activateRepoSelectorControl(event, button, session));
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
   bindFileUpload(panel, session);
 }
@@ -2348,6 +2955,7 @@ function hasUploadableDrag(event) {
 
 function bindFileUpload(panel, session) {
   if (readOnlyMode) return;
+  setFileUploadDropLabel(panel);
   panel.addEventListener('dragenter', event => {
     if (!hasUploadableDrag(event)) return;
     event.preventDefault();
@@ -2379,11 +2987,21 @@ function bindFileUpload(panel, session) {
   });
 }
 
+function setFileUploadDropLabel(panel) {
+  if (panel) panel.dataset.fileDropLabel = t('drop.uploadOverlay');
+}
+
+function relocalizeFileUploadDropLabels() {
+  document.querySelectorAll?.('.panel[data-file-drop-label]').forEach(panel => {
+    setFileUploadDropLabel(panel);
+  });
+}
+
 function insertFileDragPayloadIntoTerminal(session, payload) {
   const references = terminalFileReferences(session, payload);
   if (!references.length) return;
   const inserted = insertIntoTerminal(session, `${references.map(shellQuote).join(' ')} `);
-  const label = references.length === 1 ? references[0] : tPlural('files.pathCount', references.length);
+  const label = references.length === 1 ? references[0] : tPlural('common.pathCount', references.length);
   statusEl.innerHTML = inserted
     ? `<span class="ok">${localizedHtml('status.insertedInto', {name: label, session: sessionLabel(session)})}</span>`
     : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
@@ -2639,7 +3257,7 @@ async function uploadFiles(session, fileList, options = {}) {
           ? insertPasteUploadReferences(session, payload.files || [], {silent: true})
           : insertUploadPaths(session, paths, {silent: true}))
       : false;
-    const uploadResult = showUploadResult(session, payload, inserted);
+    const uploadResult = emitNotification('uploadResult', {session, uploadPayload: payload, inserted}).inApp;
     if (paths.length && boolSetting('uploads.show_suggestions', true)) {
       const timeoutMs = uploadResult?.expiresAt ? uploadResult.expiresAt - Date.now() : toastDurationMs;
       const shown = showTerminalDropSuggestions(session, dropPayload, options.suggestAt?.x, options.suggestAt?.y, {pathInserted, timeoutMs});
@@ -2651,9 +3269,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts({force: true});
   } catch (error) {
-    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
-    statusErr(esc(message));
-    showFileTransferError(message, {session});
+    showFileTransferError(error, {session, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -2683,9 +3299,7 @@ async function uploadEditorFiles(editorTarget, fileList) {
     syncPasteCountersFromPayload(payload);
     insertEditorPasteUploadReferences(editorTarget, payload.files || []);
   } catch (error) {
-    const message = t('status.uploadFailed', {error: error?.payload?.error || error});
-    statusErr(esc(message));
-    showFileTransferError(message, {item: focusedPanelItem});
+    showFileTransferError(error, {item: focusedPanelItem, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
 }
 
@@ -2714,7 +3328,7 @@ function insertUploadPaths(session, paths, options = {}) {
 function insertPasteUploadReferences(session, files, options = {}) {
   const references = pasteUploadReferences(files);
   if (!references.length) return insertUploadPaths(session, files.map(file => file.path).filter(Boolean), options);
-  const inserted = insertIntoTerminal(session, `${references.join(' ')} `);
+  const inserted = insertIntoTerminal(session, references.join(' '));
   if (!options.silent) {
     statusEl.innerHTML = inserted
       ? `<span class="ok">${localizedHtml('status.insertedPastedImage', {session: sessionLabel(session)})}</span>`
@@ -2802,8 +3416,8 @@ function insertIntoTerminal(session, text) {
   if (item.socket?.readyState !== WebSocket.OPEN) return false;
   const sendPerf = clientPerfStart('wsSend');
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
-  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
-  item.lastInputSentAt = clientPerfNow();
+  clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
+  item.lastInputSentAt = performanceNow();
   if (autoFocusEnabled) item.term?.focus?.();
   return true;
 }
@@ -2812,7 +3426,7 @@ function noteTerminalExplicitInput(session) {
   const item = terminals.get(session);
   if (item) {
     item.lastExplicitInputMark = clientPerfMark(`terminal-keydown:${session}`);
-    item.lastExplicitInputAt = clientPerfNow();
+    item.lastExplicitInputAt = performanceNow();
   }
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true, syncFinder: false});
@@ -2836,30 +3450,78 @@ function acknowledgeTerminalAttentionFromTransportInput(session, data, options =
   return acknowledgeTerminalAttentionFromUserAction(session, null, options.attentionOptions || {});
 }
 
-const terminalTmuxPrefixPendingBySession = new Map();
+const terminalTmuxInputStates = new Map();
 const tmuxWindowReadbackDelayMs = tmuxWindowReadbackMs;
 const tmuxWindowReadbackRetryDelayMs = tmuxWindowReadbackRetryMs;
 const tmuxWindowReadbackMaxAttempts = 6;
 const terminalTmuxWindowRepeatMs = 900;
-const terminalTmuxWindowRepeatBySession = new Map();
 
-function terminalTmuxPrefixWindowShortcut(key) {
+function terminalTmuxInputState(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let state = terminalTmuxInputStates.get(key) || null;
+  if (!state && options.create === true) {
+    state = {prefixPending: false, repeatUntilMs: 0};
+    terminalTmuxInputStates.set(key, state);
+  }
+  return state;
+}
+
+function pruneTerminalTmuxInputState(session, now = Date.now()) {
+  const key = String(session || '');
+  const state = terminalTmuxInputState(key);
+  if (!state) return null;
+  if (Number(state.repeatUntilMs || 0) <= now) state.repeatUntilMs = 0;
+  if (state.prefixPending !== true && !state.repeatUntilMs) {
+    terminalTmuxInputStates.delete(key);
+    return null;
+  }
+  return state;
+}
+
+function updateTerminalTmuxInputState(session, updates = {}) {
+  const state = terminalTmuxInputState(session, {create: true});
+  if (!state) return null;
+  if (updates.prefixPending !== undefined) state.prefixPending = updates.prefixPending === true;
+  if (updates.repeatUntilMs !== undefined) state.repeatUntilMs = Math.max(0, Number(updates.repeatUntilMs) || 0);
+  return pruneTerminalTmuxInputState(session);
+}
+
+function pruneTerminalTmuxInputStates(now = Date.now()) {
+  for (const session of terminalTmuxInputStates.keys()) pruneTerminalTmuxInputState(session, now);
+}
+
+const terminalTmuxWindowShortcutDefs = Object.freeze({
+  n: {labelKey: 'terminal.window.next', repeatable: true},
+  p: {labelKey: 'terminal.window.previous', repeatable: true},
+  l: {labelKey: 'terminal.window.last', requireChanged: true, prefixOnly: true},
+  w: {labelKey: 'terminal.window.chooser', requireChanged: true, prefixOnly: true},
+  "'": {labelKey: 'terminal.window.prompt', requireChanged: true, prefixOnly: true},
+  f: {labelKey: 'terminal.window.find', requireChanged: true, prefixOnly: true},
+});
+
+function terminalTmuxWindowShortcut(key, options = {}) {
   const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
-  if (value === 'l') return {label: 'last tmux sub-window', requireChanged: true};
-  if (value === 'w') return {label: 'tmux sub-window chooser', requireChanged: true};
-  if (value === "'") return {label: 'tmux sub-window prompt', requireChanged: true};
-  if (value === 'f') return {label: 'tmux find sub-window', requireChanged: true};
-  if (/^[0-9]$/.test(value)) return {label: `tmux sub-window ${value}`, windowIndex: value};
+  const definition = terminalTmuxWindowShortcutDefs[value];
+  if (definition && (!definition.prefixOnly || options.includePrefixOnly === true)) {
+    return {
+      label: t(definition.labelKey),
+      ...(definition.repeatable ? {repeatable: true} : {}),
+      ...(definition.requireChanged ? {requireChanged: true} : {}),
+    };
+  }
+  if (options.includeNumbers === true && /^[0-9]$/.test(value)) {
+    return {label: t('terminal.window.title', {name: value}), windowIndex: value};
+  }
   return null;
 }
 
+function terminalTmuxPrefixWindowShortcut(key) {
+  return terminalTmuxWindowShortcut(key, {includePrefixOnly: true, includeNumbers: true});
+}
+
 function terminalTmuxAltWindowShortcut(key) {
-  const value = String(key || '');
-  if (value === 'n') return {label: 'next tmux sub-window', repeatable: true};
-  if (value === 'p') return {label: 'previous tmux sub-window', repeatable: true};
-  return null;
+  return terminalTmuxWindowShortcut(key);
 }
 
 function tmuxWindowSignalReadbackUrl(session) {
@@ -2936,7 +3598,7 @@ function mergeTranscriptPaneWithSignalPane(pane, signalPane, activeIndex) {
 
 function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, options = {}) {
   const activeIndex = tmuxWindowIndexKey(windowRecord?.window_index);
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   if (activeIndex === null || !info || !Array.isArray(info.panes)) return false;
   const signalPanes = Array.isArray(windowRecord?.panes) ? windowRecord.panes : [];
   let selectedPane = info.selected_pane || null;
@@ -2964,10 +3626,10 @@ function applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, opti
     selectedPane = synthesized;
   }
   const nextInfo = {...info, selected_pane: selectedPane, panes};
-  transcriptMeta = {
-    ...transcriptMeta,
-    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
-  };
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
+    sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
+  });
   if (options.render !== false) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
@@ -2988,7 +3650,7 @@ function applyTmuxSignalActiveWindowsToTranscriptInfo(payload = {}) {
     changed = applyTmuxSignalActiveWindowToTranscriptInfo(session, windowRecord, {render: false}) || changed;
   }
   if (changed) {
-    for (const session of seen) updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    for (const session of seen) updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
     renderInfoPanel();
     if (typeof refreshTabberPanelsForTmuxWindowChange === 'function') refreshTabberPanelsForTmuxWindowChange();
   }
@@ -3039,7 +3701,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
       if (attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
       } else {
-        const info = transcriptMeta.sessions?.[session];
+        const info = transcriptMetadataState.payload.sessions?.[session];
         reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
       }
     });
@@ -3053,12 +3715,11 @@ function scheduleTmuxWindowReadback(session, options = {}) {
 function noteTerminalTmuxWindowSwitch(session, shortcut) {
   if (!shortcut) return false;
   const directIndex = tmuxWindowNumber(shortcut.windowIndex);
-  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
-  if (shortcut.repeatable) terminalTmuxWindowRepeatBySession.set(session, Date.now() + terminalTmuxWindowRepeatMs);
-  else terminalTmuxWindowRepeatBySession.delete(session);
+  updateTerminalTmuxInputState(session, {repeatUntilMs: shortcut.repeatable ? Date.now() + terminalTmuxWindowRepeatMs : 0});
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
@@ -3072,7 +3733,7 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
 function observeTerminalTmuxPrefixWindowSwitches(session, data) {
   const text = String(data || '');
   if (!text) return false;
-  let pending = terminalTmuxPrefixPendingBySession.get(session) === true;
+  let pending = terminalTmuxInputState(session)?.prefixPending === true;
   let mirrored = false;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
@@ -3084,7 +3745,7 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
         continue;
       }
     }
-    const repeatUntil = Number(terminalTmuxWindowRepeatBySession.get(session) || 0);
+    const repeatUntil = Number(terminalTmuxInputState(session)?.repeatUntilMs || 0);
     const repeatActive = repeatUntil > Date.now();
     const repeatShortcut = repeatActive ? terminalTmuxPrefixWindowShortcut(char) : null;
     if (!pending && repeatShortcut && repeatShortcut.repeatable) {
@@ -3098,11 +3759,8 @@ function observeTerminalTmuxPrefixWindowSwitches(session, data) {
     }
     if (char === '\x02') pending = true;
   }
-  if (pending) terminalTmuxPrefixPendingBySession.set(session, true);
-  else terminalTmuxPrefixPendingBySession.delete(session);
-  for (const [key, expires] of terminalTmuxWindowRepeatBySession.entries()) {
-    if (Number(expires || 0) <= Date.now()) terminalTmuxWindowRepeatBySession.delete(key);
-  }
+  updateTerminalTmuxInputState(session, {prefixPending: pending});
+  pruneTerminalTmuxInputStates();
   return mirrored;
 }
 
@@ -3111,17 +3769,24 @@ function handleTerminalData(session, data, options = {}) {
   try {
     return handleTerminalDataMeasured(session, data, options);
   } finally {
-    clientPerfEnd(perf, {bytes: jsDebugByteLength(data)});
+    clientPerfEnd(perf, {bytes: utf8ByteLength(data)});
   }
 }
 
 function handleTerminalDataMeasured(session, data, options = {}) {
   if (readOnlyMode && !shareWriteMode) return false;
-  const filtered = stripTerminalQueryResponses(data);
+  const filtered = options.bypassMobileAccessoryModifiers === true
+    ? stripTerminalQueryResponses(data)
+    : terminalDataWithMobileAccessoryModifiers(session, stripTerminalQueryResponses(data));
   if (!filtered) return false;
+  // Physical/mobile key input can arrive without another pointer event. Retire a touch-opened
+  // tab detail here as well, while keeping passive terminal protocol reports from dismissing it.
+  if (terminalDataShouldAcknowledgeAttention(filtered) && typeof closeOtherSessionPopovers === 'function') {
+    closeOtherSessionPopovers(null, {force: true});
+  }
   const current = terminals.get(session);
   if (current?.lastExplicitInputMark) {
-    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: jsDebugByteLength(filtered)});
+    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: utf8ByteLength(filtered)});
     current.lastExplicitInputMark = '';
   }
   if (shareReplayShellActive && shareWriteMode) {
@@ -3135,8 +3800,8 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   const sendPerf = clientPerfStart('wsSend');
   socket.send(JSON.stringify({type: 'input', data: filtered}));
-  clientPerfEnd(sendPerf, {bytes: jsDebugByteLength(filtered)});
-  current.lastInputSentAt = clientPerfNow();
+  clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
+  current.lastInputSentAt = performanceNow();
   return true;
 }
 
@@ -3144,7 +3809,44 @@ function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-function showUploadResult(session, payload, inserted) {
+function uploadResultRecord(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let record = uploadResultRecords.get(key) || null;
+  if (!record && options.create === true) {
+    record = {entries: [], cleanupTimer: null};
+    uploadResultRecords.set(key, record);
+  }
+  return record;
+}
+
+function clearUploadResultCleanup(session, record = uploadResultRecord(session)) {
+  if (!record || record.cleanupTimer === null) return false;
+  clearTimeout(record.cleanupTimer);
+  record.cleanupTimer = null;
+  return true;
+}
+
+function deleteUploadResultRecord(session) {
+  const key = String(session || '');
+  const record = uploadResultRecord(key);
+  if (!record) return false;
+  clearUploadResultCleanup(key, record);
+  return uploadResultRecords.delete(key);
+}
+
+function moveUploadResultRecord(oldSession, newSession) {
+  const oldKey = String(oldSession || '');
+  const newKey = String(newSession || '');
+  const record = uploadResultRecord(oldKey);
+  if (!record || !newKey || oldKey === newKey) return false;
+  clearUploadResultCleanup(oldKey, record);
+  if (!uploadResultRecords.has(newKey)) uploadResultRecords.set(newKey, record);
+  uploadResultRecords.delete(oldKey);
+  return true;
+}
+
+function deliverUploadResultNotification(session, payload = {}, inserted = false) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return null;
   const files = payload.files || [];
@@ -3170,16 +3872,16 @@ function showUploadResult(session, payload, inserted) {
       path: target,
       expiresAt,
     }];
-  const existing = uploadResultsBySession.get(session) || [];
-  const active = [...existing.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
-  uploadResultsBySession.set(session, active);
+  const record = uploadResultRecord(session, {create: true});
+  const active = [...record.entries.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
+  record.entries = active;
   renderUploadResult(session);
   return {expiresAt};
 }
 
 function ensureUploadResultShell(session, node) {
   return ensureToastShell(node, {
-    title: t('upload.resultTitle', {host: serverHostname, session: sessionLabel(session)}),
+    title: t('upload.resultTitle', {session: sessionLabel(session)}),
     closeLabel: t('upload.hideStatus'),
     keepLabel: t('upload.keepStatus'),
     onKeep: () => keepUploadResult(session),
@@ -3188,40 +3890,42 @@ function ensureUploadResultShell(session, node) {
 }
 
 function keepUploadResult(session) {
-  const entries = uploadResultsBySession.get(session) || [];
-  for (const entry of entries) entry.expiresAt = Number.POSITIVE_INFINITY;
-  uploadResultsBySession.set(session, entries);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+  const record = uploadResultRecord(session);
+  if (!record) return;
+  for (const entry of record.entries) entry.expiresAt = Number.POSITIVE_INFINITY;
+  clearUploadResultCleanup(session, record);
 }
 
-function scheduleUploadResultCleanup(session, active, now) {
-  if (uploadCleanupTimers.has(session)) clearTimeout(uploadCleanupTimers.get(session));
-  const delay = Math.max(1, Math.min(...active.map(entry => entry.expiresAt - now)));
-  uploadCleanupTimers.set(session, window.setTimeout(() => {
-    uploadCleanupTimers.delete(session);
+function scheduleUploadResultCleanup(session, record, now) {
+  clearUploadResultCleanup(session, record);
+  const delays = record.entries
+    .map(entry => entry.expiresAt - now)
+    .filter(Number.isFinite);
+  if (!delays.length) return;
+  const delay = Math.max(1, Math.min(...delays));
+  const timer = window.setTimeout(() => {
+    const current = uploadResultRecord(session);
+    if (current !== record || record.cleanupTimer !== timer) return;
+    record.cleanupTimer = null;
     renderUploadResult(session);
-  }, delay));
+  }, delay);
+  record.cleanupTimer = timer;
 }
 
 function renderUploadResult(session) {
   const node = document.getElementById(`upload-${session}`);
   if (!node) return;
   const now = Date.now();
-  const active = (uploadResultsBySession.get(session) || []).filter(entry => entry.expiresAt > now).slice(-8);
-  uploadResultsBySession.set(session, active);
+  const record = uploadResultRecord(session);
+  const active = (record?.entries || []).filter(entry => entry.expiresAt > now).slice(-8);
+  if (record) record.entries = active;
   if (!active.length) {
     node.hidden = true;
     const titleNode = node.querySelector('.toast-title');
     if (titleNode) titleNode.textContent = '';
     const textNode = node.querySelector('.toast-body');
     if (textNode) textNode.replaceChildren();
-    if (uploadCleanupTimers.has(session)) {
-      clearTimeout(uploadCleanupTimers.get(session));
-      uploadCleanupTimers.delete(session);
-    }
+    deleteUploadResultRecord(session);
     return;
   }
   const textNode = ensureUploadResultShell(session, node);
@@ -3233,15 +3937,11 @@ function renderUploadResult(session) {
     text: entry.text,
     countdownMs: entry.expiresAt - now,
   })));
-  scheduleUploadResultCleanup(session, active, now);
+  scheduleUploadResultCleanup(session, record, now);
 }
 
 function hideUploadResult(session) {
-  uploadResultsBySession.delete(session);
-  if (uploadCleanupTimers.has(session)) {
-    clearTimeout(uploadCleanupTimers.get(session));
-    uploadCleanupTimers.delete(session);
-  }
+  deleteUploadResultRecord(session);
   const node = document.getElementById(`upload-${session}`);
   if (node) {
     const titleNode = node.querySelector('.toast-title');
@@ -3255,12 +3955,12 @@ function hideUploadResult(session) {
 function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
   panel.dataset.layoutItem = session;
+  syncPaneRoleDom(panel, slot);
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
   if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
   updatePaneExpandButton(panel, session);
   if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
-  updatePanelInactiveOverlays();
 }
 
 function updatePaneExpandButton(panel, session) {
@@ -3270,6 +3970,10 @@ function updatePaneExpandButton(panel, session) {
 
 function syncPanelVisibility(previousActive = []) {
   const visible = new Set(activeSessions);
+  const previouslyVisible = new Set(previousActive);
+  for (const item of activeSessions) {
+    if (isFileExplorerItem(item) && !previouslyVisible.has(item)) activateFileExplorerSurface(item);
+  }
   for (const session of sessions) {
     if (!visible.has(session)) {
       stopTranscriptStream(session);
@@ -3282,6 +3986,7 @@ function syncPanelVisibility(previousActive = []) {
     const pane = document.getElementById(`terminal-pane-${session}`);
     if (pane?.classList.contains(CLS.active)) scheduleFit(session);
   }
+  if (typeof syncChatActiveLifecycle === 'function') syncChatActiveLifecycle();
 }
 
 function activateTab(session, name, options = {}) {
@@ -3321,13 +4026,19 @@ function tmuxWindow(session, key, label) {
     statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
     return;
   }
+  // Callers acknowledge the exact source/target window before switching. Refocusing afterward
+  // must not acknowledge a second, unrelated child selected by the parent-session summary.
+  const focusAfterAcknowledgedSwitch = () => focusTerminalFromUserAction(session, 75, {
+    acknowledgeAgentWindow: false,
+    acknowledgePromptAttention: false,
+  });
   const directIndex = tmuxWindowNumber(key?.windowIndex);
   if (directIndex !== null) {
-    const previousInfo = transcriptMeta.sessions?.[session] || null;
+    const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
-    focusTerminalFromUserAction(session, 75);
+    focusAfterAcknowledgedSwitch();
     apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
       .then(() => {
         if (!tmuxWindowSwitchSequenceMatches(session, sequence)) return;
@@ -3336,16 +4047,16 @@ function tmuxWindow(session, key, label) {
       .catch(error => {
         if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
         if (previousInfo) {
-          transcriptMeta = {
-            ...transcriptMeta,
-            sessions: {...(transcriptMeta.sessions || {}), [session]: previousInfo},
-          };
+          setTranscriptMetadataPayload({
+            ...transcriptMetadataState.payload,
+            sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: previousInfo},
+          });
           updatePanelHeader(session, previousInfo);
           renderInfoPanel();
         } else {
-          reconcileTmuxWindowActiveIndexOverride(session, transcriptMeta.sessions?.[session], {sequence});
+          reconcileTmuxWindowActiveIndexOverride(session, transcriptMetadataState.payload.sessions?.[session], {sequence});
         }
-        statusErr(localizedHtml('terminal.window.failed', {error: error.message || error}));
+        statusErr(esc(userMessageText(error, t('terminal.window.failed', {error: error.message || error}))));
       });
     return;
   }
@@ -3354,13 +4065,13 @@ function tmuxWindow(session, key, label) {
     statusErr(terminalNotConnectedHtml(session));
     return;
   }
-  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]);
+  const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = setTmuxWindowActiveIndexPending(session);
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
-  focusTerminalFromUserAction(session, 75);
+  focusAfterAcknowledgedSwitch();
   scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
 }
 
@@ -3378,7 +4089,7 @@ async function ensureTerminalRunning(session) {
       startTerminal(session);
       return;
     }
-    const knownFromTranscriptPayload = Boolean(transcriptMetaLoaded && transcriptMeta.sessions?.[session]);
+    const knownFromTranscriptPayload = Boolean(transcriptMetadataState.loaded && transcriptMetadataState.payload.sessions?.[session]);
     const ensured = knownFromTranscriptPayload || await ensureSession(session);
     if (!ensured) {
       const container = document.getElementById(terminalDomId(session));
@@ -3412,6 +4123,7 @@ function connectTerminalSocket(session, item) {
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
       if (!shareViewMode) scheduleRemoteResize(session, shareRemoteResizeAfterSocketOpenMs);
     }
+    void refreshTmuxStatusMode(session).catch(error => console.warn('tmux status read failed', error));
     updateTypingIndicator(session);
     updateStatus();
     refreshTrackedSessionChrome(session);
@@ -3419,10 +4131,10 @@ function connectTerminalSocket(session, item) {
   socket.onmessage = event => {
     if (terminals.get(session) !== item || !item.term) return;
     try {
-      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : jsDebugByteLength(event.data);
+      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : utf8ByteLength(event.data);
       const inputSentAt = Number(item.lastInputSentAt || 0);
       if (inputSentAt > 0) {
-        recordClientPerfCounter('echoToTermWrite', clientPerfNow() - inputSentAt, {bytes: dataBytes});
+        recordClientPerfCounter('echoToTermWrite', performanceNow() - inputSentAt, {bytes: dataBytes});
         item.lastInputSentAt = 0;
       }
       const writePerf = clientPerfStart('xtermWrite');
@@ -3505,6 +4217,8 @@ function bindTerminalContainerForSession(session, term, container) {
   if (!session || !term || !container) return;
   if (container.dataset?.terminalHandlersBound === session) return;
   if (container.dataset) container.dataset.terminalHandlersBound = session;
+  installTerminalMobileAccessoryDismissal();
+  installTerminalMobileAccessoryResizeSync();
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);
@@ -3519,9 +4233,18 @@ function bindTerminalContainerForSession(session, term, container) {
   container.addEventListener('copy', event => {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
-  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
-  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('keydown', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
+  container.addEventListener('paste', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
+  container.addEventListener('beforeinput', () => {
+    dismissTerminalMobileAccessory(session);
+    noteTerminalExplicitInput(session);
+  }, {capture: true});
 }
 
 function terminalUnicode11AddonCtor() {
@@ -3557,7 +4280,7 @@ function startTerminal(session) {
   }
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
-    container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
+    container.innerHTML = `<pre class="terminal-error">${esc(t('terminal.xtermLoadFailed'))}</pre>`;
     statusErr(localizedHtml('status.xtermUnavailable'));
     return;
   }
@@ -3688,6 +4411,7 @@ async function setAutoApprove(session, enabled) {
     autoApproveStates.set(session, payload);
     updateDocumentTitle();
     updateSessionButtonStates();
+    renderInfoPanel();
     renderAutoApproveButton(session, payload);
     scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();
@@ -3705,25 +4429,35 @@ async function setAutoApprove(session, enabled) {
         scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
-      statusErr(localizedHtml('status.yoloApprovalFailed', {error: payload.error || t('status.yoloApprovalFailedDefault')}));
+      statusErr(esc(userMessageText(error, t('status.yoloApprovalFailedDefault'))));
       return;
     }
     statusErr(localizedHtml('status.yoloRequestFailed', {error}));
   }
 }
 
-async function refreshAutoStatuses() {
-  const result = await loadAutoStatuses({render: false});
+async function refreshAutoStatuses(options = {}) {
+  const result = await loadAutoStatuses({...options, render: false});
   renderAutoApproveStatusSurfaces(result);
   bindClipboardPaste();
   refreshOpenEventLogs();
 }
 
-async function loadAutoStatuses(options = {}) {
+function autoApproveSnapshotIsFresh() {
+  return loadAutoStatuses.lastResult !== null
+    && Date.now() - Number(loadAutoStatuses.updatedAt || 0) < startupSnapshotFreshnessMs;
+}
+
+function loadAutoStatuses(options = {}) {
+  if (loadAutoStatuses.request) return loadAutoStatuses.request;
+  if (options.force !== true && options.preferFresh === true && autoApproveSnapshotIsFresh()) return Promise.resolve(loadAutoStatuses.lastResult);
+  const request = (async () => {
   let result = null;
   try {
     const payload = await apiFetchJson('/api/auto-approve');
     result = applyAutoApprovePayload(payload, options);
+    loadAutoStatuses.lastResult = result;
+    loadAutoStatuses.updatedAt = Date.now();
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -3735,7 +4469,16 @@ async function loadAutoStatuses(options = {}) {
   }
   if (options.render !== false && !result?.rendered) renderAutoApproveStatusSurfaces(result);
   return result;
+  })();
+  const settledRequest = request.finally(() => {
+    if (loadAutoStatuses.request === settledRequest) loadAutoStatuses.request = null;
+  });
+  loadAutoStatuses.request = settledRequest;
+  return settledRequest;
 }
+loadAutoStatuses.request = null;
+loadAutoStatuses.lastResult = null;
+loadAutoStatuses.updatedAt = 0;
 
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
@@ -3748,6 +4491,7 @@ function renderAutoApproveStatusSurfaces(result = {}) {
   // updated the title but never re-synced the markers).
     renderAutoApproveButtons();
     updateSessionButtonStates();
+    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
     refreshActivePanelHeaders();
     trackSessionStateChanges();
     syncTerminalAttentionHighlights();
@@ -3769,18 +4513,69 @@ function applyAutoApprovePayload(payload, options = {}) {
   for (const session of sessions) {
     const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
     autoApproveStates.set(session, state);
+    reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
-  const result = {applied: true, sessionsChanged, previousActive};
-  if (options.render === false) return result;
-  renderAutoApproveStatusSurfaces(result);
+  const result = {applied: true, sessionsChanged, previousActive, workingAgentTransitionNotifications: 0};
+  if (options.render !== false) renderAutoApproveStatusSurfaces(result);
+  // Deliver after the status render. Rendering may rebuild a pane and its toast stack; inserting a
+  // transition toast before that pass makes it disappear immediately even though classification ran.
+  if (typeof reconcileWorkingAgentTransitionNotifications === 'function') {
+    for (const session of sessions) {
+      const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
+      result.workingAgentTransitionNotifications += reconcileWorkingAgentTransitionNotifications(session, state);
+    }
+  }
   return result;
+}
+
+function reconcileTmuxWindowMetadataFromAgentWindows(session, payload = {}) {
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const agentWindows = typeof agentWindowPayloadRows === 'function'
+    ? agentWindowPayloadRows(payload.agent_windows)
+    : [];
+  if (!info || !agentWindows.length) return false;
+  const paneWindows = new Set(panes.map(pane => tmuxWindowIndexKey(pane?.window)).filter(index => index !== null));
+  const missing = agentWindows.filter(agent => {
+    const index = tmuxWindowIndexKey(agent?.window_index ?? agent?.window);
+    return index !== null && !paneWindows.has(index);
+  });
+  if (!missing.length) return false;
+  const reconciledPanes = [...panes, ...missing.map(agent => {
+    const window = tmuxWindowIndexKey(agent.window_index ?? agent.window);
+    const name = String(agent.window_name || agent.kind || 'window').trim();
+    const active = agent.current === true || agent.window_active === true;
+    return {
+      window,
+      window_name: name,
+      process_label: name,
+      target: agent.pane_target || '',
+      pane_id: agent.pane_target || '',
+      active,
+      window_active: active,
+      pid: agent.pid || null,
+      process_label_pid: agent.pid || null,
+    };
+  })].sort((left, right) => Number(left.window) - Number(right.window));
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
+    sessions: {
+      ...(transcriptMetadataState.payload.sessions || {}),
+      [session]: {
+        ...info,
+        panes: reconciledPanes,
+        selected_pane: reconciledPanes.find(pane => pane.window_active === true) || info.selected_pane,
+      },
+    },
+  });
+  return true;
 }
 
 function autoApproveOwnerLabel(payload) {
   const owner = payload?.lock_owner || {};
   const pid = owner.pid ? `pid ${owner.pid}` : '';
   const root = owner.project_root || '';
-  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || t('yolo.ownerFallback');
+  return [pid, root].filter(Boolean).join(' ') || structuredMessageText(payload, 'last_action', t('yolo.ownerFallback'));
 }
 
 function renderAutoApproveButtons() {
@@ -3802,7 +4597,8 @@ function renderAutoApproveButton(session, payload) {
     button.classList.toggle('working', working);
     button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = t('brand.marker');
-    const action = payload?.last_action ? t('yolo.actionSuffix', {action: payload.last_action}) : '';
+    const actionText = structuredMessageText(payload, 'last_action');
+    const action = actionText ? t('yolo.actionSuffix', {action: actionText}) : '';
     const readonly = readOnlyMode ? t('yolo.readonlySuffix') : '';
     const buttonLabel = enabled
       ? t('yolo.buttonOnForSession', {session: sessionLabel(session), action, readonly})
@@ -3813,7 +4609,7 @@ function renderAutoApproveButton(session, payload) {
     if (button.closest('.tabber-session-tab')) button.removeAttribute('title');
     else button.title = buttonLabel;
   }
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
   updateTypingIndicator(session);
 }
 
@@ -3821,6 +4617,7 @@ function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));
   if (!node) return;
+  delete node.dataset.localeTextKey;
   if (readOnlyMode) {
     node.textContent = t('transcript.adminRequired');
     statusErr(`${esc(t('transcript.adminStatus'))}`);
@@ -3830,7 +4627,7 @@ function startSummaryStream(session) {
   // (coalesced to one render per frame) so the panel shows formatted markdown,
   // not raw `##`/`**`/backticks. The leading `[codex]` status lines render as
   // plain paragraphs, then the model's markdown summary renders properly.
-  let raw = 'Starting structured Codex summary for the last hour…\n\n';
+  let raw = `${t('summary.stream.starting')}\n\n`;
   let renderScheduled = false;
   const renderSummary = () => {
     renderScheduled = false;
@@ -3850,15 +4647,20 @@ function startSummaryStream(session) {
   source.addEventListener('meta', event => {
     const payload = safeJsonParse(event.data, null);
     if (!payload) return;
-    const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
+    const fallback = t(payload.fallback ? 'summary.stream.source.recentTail' : 'summary.stream.source.lastHour');
     const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
-    appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
-    if (payload.summary_model) appendSummary(`[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`);
-    appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
+    appendSummary(`${t('summary.stream.summarizing', {source: fallback, focus: payload.focus_root || session})}\n`);
+    if (payload.summary_model) {
+      appendSummary(`${t('summary.stream.model', {
+        model: payload.summary_model,
+        effort: payload.summary_effort || t('summary.stream.effortDefault'),
+      })}\n`);
+    }
+    appendSummary(`${tPlural('summary.stream.projectInventory', projectCount)}\n\n`);
   });
   source.addEventListener('log', event => {
     const payload = safeJsonParse(event.data, null);
-    if (payload?.text) appendSummary(`[codex] ${payload.text}\n`);
+    if (payload?.text) appendSummary(`${t('summary.stream.log', {text: payload.text})}\n`);
   });
   source.addEventListener('delta', event => {
     const payload = safeJsonParse(event.data, null);
@@ -3868,13 +4670,13 @@ function startSummaryStream(session) {
     // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
     // — an unguarded JSON.parse throw here would leak the EventSource.
     const payload = safeJsonParse(event.data, null);
-    appendSummary(`\n[error] ${payload?.error || 'summary failed'}\n`);
+    appendSummary(`\n${t('summary.stream.error', {error: userMessageText(payload, t('summary.stream.failed'))})}\n`);
     stopSummaryStream(session);
   });
   source.addEventListener('done', event => {
     const payload = safeJsonParse(event.data, null);
     if (payload?.return_code && payload.return_code !== 0) {
-      appendSummary(`\n[codex exited ${payload.return_code}]\n`);
+      appendSummary(`\n${t('summary.stream.exited', {code: payload.return_code})}\n`);
     }
     stopSummaryStream(session);
   });
@@ -3903,12 +4705,14 @@ function reloadIsSafe() {
 }
 
 let selfUpdateAvailableTarget = '';
-let selfUpdateReloadPending = false;
-let selfUpdateReloadTarget = '';
-let selfUpdateReloadAttempts = 0;
-let selfUpdateReloadTimer = null;
-let selfUpdateReloadDeferredToastShown = false;
-const selfUpdateReloadPollMs = 1500;
+const selfUpdateReloadState = {
+  pending: false,
+  target: '',
+  attempts: 0,
+  timer: null,
+  deferredToastShown: false,
+};
+const selfUpdateReloadPollMs = 1501;
 const selfUpdateReloadMaxAttempts = 120;
 
 function dismissToastNode(node) {
@@ -3932,20 +4736,32 @@ function hideUpdateBadge() {
   if (!badge) return;
   badge.hidden = true;
   delete badge.dataset.updateTarget;
+  renderUpdateBadgeChrome();
+}
+
+function renderUpdateBadgeChrome() {
+  const badge = document.querySelector('[data-update-badge]');
+  if (!badge) return;
+  const target = String(badge.dataset.updateTarget || selfUpdateAvailableTarget || '').trim();
+  badge.textContent = t('update.badgeLabel');
+  badge.setAttribute('aria-label', t('update.badgeAria'));
+  badge.title = badge.hidden
+    ? t('update.badgeTitle')
+    : t('update.badgeAvailable', {target: target ? ` (${target})` : ''});
 }
 
 function markSelfUpdateReloadPending(target = '') {
-  selfUpdateReloadPending = true;
-  selfUpdateReloadTarget = String(target || selfUpdateReloadTarget || '').trim();
-  selfUpdateReloadAttempts = 0;
-  selfUpdateReloadDeferredToastShown = false;
-  if (selfUpdateReloadTarget) serverVersionReloadHandled = selfUpdateReloadTarget;
+  selfUpdateReloadState.pending = true;
+  selfUpdateReloadState.target = String(target || selfUpdateReloadState.target || '').trim();
+  selfUpdateReloadState.attempts = 0;
+  selfUpdateReloadState.deferredToastShown = false;
+  if (selfUpdateReloadState.target) serverVersionReloadHandled = selfUpdateReloadState.target;
   document.getElementById('serverUpdateBanner')?.remove();
 }
 
 function selfUpdateOwnsServerVersion(serverVersion) {
-  if (!selfUpdateReloadPending) return false;
-  if (!selfUpdateReloadTarget || serverVersion === selfUpdateReloadTarget) {
+  if (!selfUpdateReloadState.pending) return false;
+  if (!selfUpdateReloadState.target || serverVersion === selfUpdateReloadState.target) {
     if (serverVersion) serverVersionReloadHandled = serverVersion;
     return true;
   }
@@ -3954,25 +4770,27 @@ function selfUpdateOwnsServerVersion(serverVersion) {
 
 function selfUpdateReloadDeferredReason() {
   for (const file of openFiles.values()) {
-    if (file?.dirty) return 'unsaved edits';
+    if (file?.dirty) return t('update.defer.unsavedEdits');
   }
   const active = document.activeElement;
   if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
-    return 'active typing';
+    return t('update.defer.activeTyping');
   }
-  return 'current activity';
+  return t('update.defer.currentActivity');
 }
 
 function showSelfUpdateReloadDeferredToast() {
-  if (selfUpdateReloadDeferredToastShown) return;
-  selfUpdateReloadDeferredToastShown = true;
-  showToast('Software Update', [
-    `Reload deferred because of ${selfUpdateReloadDeferredReason()}. YOLOmux will reload when it is safe.`,
-  ], {className: 'attention-alert toast toast-update'});
+  if (selfUpdateReloadState.deferredToastShown) return;
+  selfUpdateReloadState.deferredToastShown = true;
+  emitNotification('update', {
+    title: t('update.softwareTitle'),
+    lines: [t('update.reloadDeferred', {reason: selfUpdateReloadDeferredReason()})],
+    className: 'attention-alert toast toast-update', coalesceKey: 'self-update-reload-deferred',
+  });
 }
 
 function maybeReloadAfterSelfUpdate() {
-  if (!selfUpdateReloadPending) return false;
+  if (!selfUpdateReloadState.pending) return false;
   if (reloadIsSafe()) {
     location.reload();
     return true;
@@ -3983,26 +4801,26 @@ function maybeReloadAfterSelfUpdate() {
 }
 
 function scheduleSelfUpdateReloadPoll(delayMs = selfUpdateReloadPollMs) {
-  if (!selfUpdateReloadPending) return;
-  if (selfUpdateReloadTimer) clearTimeout(selfUpdateReloadTimer);
-  selfUpdateReloadTimer = window.setTimeout(() => {
-    selfUpdateReloadTimer = null;
+  if (!selfUpdateReloadState.pending) return;
+  if (selfUpdateReloadState.timer) clearTimeout(selfUpdateReloadState.timer);
+  selfUpdateReloadState.timer = window.setTimeout(() => {
+    selfUpdateReloadState.timer = null;
     pollSelfUpdateReload();
   }, delayMs);
 }
 
 async function pollSelfUpdateReload() {
-  if (!selfUpdateReloadPending) return false;
-  selfUpdateReloadAttempts += 1;
+  if (!selfUpdateReloadState.pending) return false;
+  selfUpdateReloadState.attempts += 1;
   try {
-    const res = await fetch(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
-    if (res && res.ok !== false) return maybeReloadAfterSelfUpdate();
+    await apiFetchJson(`/api/ping?selfUpdate=${Date.now()}`, {cache: 'no-store'});
+    return maybeReloadAfterSelfUpdate();
   } catch (_error) {
     // The old process may already be gone. Keep polling until the replacement server answers.
   }
-  if (selfUpdateReloadAttempts >= selfUpdateReloadMaxAttempts) {
-    selfUpdateReloadPending = false;
-    showToast('Software Update', ['Update installed, but YOLOmux did not answer after restart. Reload when it is reachable.']);
+  if (selfUpdateReloadState.attempts >= selfUpdateReloadMaxAttempts) {
+    selfUpdateReloadState.pending = false;
+    emitNotification('update', {title: t('update.softwareTitle'), lines: [t('update.restartTimeout')], coalesceKey: 'self-update-timeout'});
     return false;
   }
   scheduleSelfUpdateReloadPoll();
@@ -4032,18 +4850,17 @@ function showServerUpdateBanner(version) {
   const msg = document.createElement('span');
   msg.className = 'server-update-banner-msg';
   msg.textContent = t('update.available');
-  const reload = document.createElement('button');
-  reload.type = 'button';
-  reload.className = 'server-update-banner-reload';
-  reload.textContent = t('update.reload');
-  reload.addEventListener('click', () => location.reload());
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'server-update-banner-dismiss';
-  dismiss.setAttribute('aria-label', t('update.dismiss'));
-  dismiss.textContent = t('update.dismiss');
-  dismiss.addEventListener('click', () => banner.remove());
-  banner.append(msg, reload, dismiss);
+  const reload = makeButton({className: 'server-update-banner-reload', label: t('common.reload'), onClick: () => location.reload()});
+  const dismiss = makeButton({
+    className: 'server-update-banner-dismiss',
+    label: t('update.dismiss'),
+    ariaLabel: t('update.dismiss'),
+    onClick: () => banner.remove(),
+  });
+  const actions = document.createElement('div');
+  actions.className = 'toast-control-row server-update-banner-actions';
+  actions.append(reload, dismiss);
+  banner.append(msg, actions);
   document.body.appendChild(banner);
 }
 
@@ -4072,18 +4889,28 @@ function maybeHandleServerVersionChange(serverVersion, serverClientRevision = ''
 
 async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  transcriptMeta = transcriptPayloadWithTmuxWindowOverrides(payload);
-  transcriptMetaLoaded = true;
-  transcriptMetaLoadError = '';
+  const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
+  if (!requestIsCurrent()) return false;
+  setTranscriptMetadataPayload(transcriptPayloadWithTmuxWindowOverrides(payload), {invalidateRequest: options.source !== 'request'});
+  // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
+  // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
+  // until the next poll repairs the client model.
+  for (const session of Object.keys(transcriptMetadataState.payload.sessions || {})) {
+    reconcileTmuxWindowMetadataFromAgentWindows(session, autoApproveStates.get(session));
+  }
+  transcriptMetadataState.loaded = true;
+  transcriptMetadataState.error = null;
   if (typeof warmTabberDataOnLaunch === 'function') warmTabberDataOnLaunch();
-  maybeHandleServerVersionChange(transcriptMeta.server_version, transcriptMeta.client_revision);
-  applyAgentAvailabilityPayload(transcriptMeta);
-  updateMetadataBadgePulses(transcriptMeta);
+  maybeHandleServerVersionChange(transcriptMetadataState.payload.server_version, transcriptMetadataState.payload.client_revision);
+  applyAgentAvailabilityPayload(transcriptMetadataState.payload);
+  updateMetadataBadgePulses(transcriptMetadataState.payload);
   const previousActive = activeSessions.slice();
-  const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+  const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
+  if (!requestIsCurrent()) return false;
+  transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
   renderSessionButtons();
   renderInfoPanel();
@@ -4091,7 +4918,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
   for (const session of activeSessions.filter(isTmuxSession)) {
     const preview = document.getElementById(transcriptDomId(session));
-    const info = transcriptMeta.sessions?.[session];
+    const info = transcriptMetadataState.payload.sessions?.[session];
     const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
     updatePanelHeader(session, info);
     renderSummaryContext(session, info, agent);
@@ -4100,14 +4927,11 @@ async function applySessionMetadataPayload(payload, options = {}) {
       updateTranscriptPathRow(session, agent.transcript);
       if (options.refreshContext === false) continue;
       if (typeof transcriptPreviewPaneIsActive === 'function' && !transcriptPreviewPaneIsActive(session)) continue;
-      preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\n${t('transcript.loadingRecentContext')}`;
+      clearTranscriptContextLoadError(preview);
+      preview.textContent = `${t('transcript.meta', {sessionId: agent.session_id || '', status: agent.status || ''})}\n\n${t('transcript.loadingRecentContext')}`;
       refreshTranscriptPreview(session, preview, {preserveScroll: false});
-    } else if (agent?.error) {
-      updateTranscriptPathRow(session, '', agent.error);
-      preview.textContent = agent.error;
     } else {
-      updateTranscriptPathRow(session, '', t('transcript.noAgentFound'));
-      preview.textContent = t('transcript.noAgentFound');
+      relocalizeTranscriptPanelStatus(session);
     }
   }
   renderPaneTabStrips();
@@ -4123,40 +4947,69 @@ function applyTranscriptsPayload(payload, options = {}) {
   return applySessionMetadataPayload(payload, options);
 }
 
+async function fetchAndApplySessionMetadata(fetchPayload, applyPayload) {
+  let payload;
+  try {
+    payload = await fetchPayload();
+  } catch (error) {
+    return {ok: false, stage: 'fetch', error};
+  }
+  try {
+    await applyPayload(payload);
+  } catch (error) {
+    return {ok: false, stage: 'apply', error};
+  }
+  return {ok: true, payload};
+}
+
+function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
+  const normalizedStage = stage === 'apply' ? 'apply' : 'fetch';
+  const fallback = normalizedStage === 'fetch'
+    ? {key: 'transcript.lookupFailed', params: {}, fallback: ''}
+    : {key: '', params: {}, fallback: String(error?.message || error || '')};
+  return {...userMessageSnapshot(error, fallback), stage: normalizedStage};
+}
+
 async function refreshSessionMetadata(options = {}) {
-  if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
-  transcriptMetaLoading = true;
-  transcriptMetaLoadError = '';
+  if (transcriptMetadataState.request) return transcriptMetadataState.request;
+  const requestIsCurrent = transcriptMetadataState.guard.begin();
+  transcriptMetadataState.loading = true;
+  transcriptMetadataState.error = null;
   syncTranscriptMetaLoadingUi();
   renderInfoPanel();
-  transcriptMetaRefreshPromise = (async () => {
+  const request = (async () => {
     try {
       const params = new URLSearchParams();
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
-      const payload = await apiFetchJson(`/api/session-metadata${suffix ? `?${suffix}` : ''}`);
-      await applySessionMetadataPayload(payload, {
-        refreshAuto: options.refreshAuto !== false,
-        refreshContext: true,
-        refreshActivity: options.refreshActivity !== false,
-      });
-    } catch (error) {
-      transcriptMetaLoadError = String(error);
-      for (const session of activeSessions.filter(isTmuxSession)) {
-        const meta = document.getElementById(`meta-${session}`);
-        const preview = document.getElementById(transcriptDomId(session));
-        if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
-        updateTranscriptPathRow(session, '', 'transcript lookup failed');
-        if (preview) preview.textContent = `transcript lookup failed: ${error}`;
+      const result = await fetchAndApplySessionMetadata(
+        () => apiFetchJson(`/api/session-metadata${suffix ? `?${suffix}` : ''}`),
+        payload => applySessionMetadataPayload(payload, {
+          refreshAuto: options.refreshAuto !== false,
+          refreshContext: true,
+          refreshActivity: options.refreshActivity !== false,
+          source: 'request',
+          requestIsCurrent,
+        }),
+      );
+      if (!result.ok && requestIsCurrent()) {
+        transcriptMetadataState.error = transcriptMetadataLoadErrorSnapshot(result.error, result.stage);
+        console.error(`session metadata ${result.stage} failed`, result.error);
+        for (const session of activeSessions.filter(isTmuxSession)) {
+          renderTranscriptMetadataLoadError(session);
+        }
       }
     } finally {
-      transcriptMetaLoading = false;
-      transcriptMetaRefreshPromise = null;
-      syncTranscriptMetaLoadingUi();
-      renderInfoPanel();
+      if (transcriptMetadataState.request === request) {
+        transcriptMetadataState.loading = false;
+        transcriptMetadataState.request = null;
+        syncTranscriptMetaLoadingUi();
+        renderInfoPanel();
+      }
     }
   })();
-  return transcriptMetaRefreshPromise;
+  transcriptMetadataState.request = request;
+  return request;
 }
 
 async function refreshTranscripts(options = {}) {
@@ -4273,7 +5126,10 @@ function schedulePaneInfoBarMetaOverflowSync(root = document) {
 function updatePanelInfoBarMeta(session, info) {
   const meta = document.getElementById(`meta-${session}`);
   if (!meta) return;
-  const html = stripTitleAttrs(paneInfoBarMetaHtml(session, info));
+  const controls = document.getElementById(`meta-controls-${session}`);
+  const {controlsHtml, metadataHtml} = paneInfoBarMetaParts(session, info);
+  const html = stripTitleAttrs(metadataHtml);
+  if (controls && controls.innerHTML !== controlsHtml) controls.innerHTML = controlsHtml;
   const changed = meta.innerHTML !== html;
   if (changed) meta.innerHTML = html;
   meta.removeAttribute('title');
@@ -4309,7 +5165,7 @@ function updatePanelHeader(session, info) {
 
 function refreshSessionChrome(session) {
   updateSessionButtonStates();
-  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
 }
 
 function refreshTrackedSessionChrome(session) {
@@ -4319,25 +5175,132 @@ function refreshTrackedSessionChrome(session) {
 
 function refreshActivePanelHeaders() {
   for (const session of activeSessions.filter(isTmuxSession)) {
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    relocalizeTerminalPanelChrome(session);
   }
 }
 
 function renderSummaryContext(session, info, agent) {
   const node = document.getElementById(`summary-context-${session}`);
   if (!node) return;
+  delete node.dataset.localeTextKey;
   node.innerHTML = summaryContextHtml(session, info, agent);
 }
 
-function transcriptPathRowHtml(path, fallback = 'no transcript path') {
-  if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
-  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: 'Copy transcript path'})}`;
+function relocalizeTerminalPanelChrome(session) {
+  const panel = document.getElementById(panelDomId(session));
+  if (!panel) return false;
+  relocalizeVirtualPanelChrome(panel);
+  const terminalTab = panel.querySelector('.terminal-tab');
+  if (terminalTab) {
+    const info = transcriptMetadataState.payload.sessions?.[session];
+    const title = terminalTabTitle(session, info);
+    terminalTab.textContent = terminalTabLabel(session, info);
+    terminalTab.title = title;
+    terminalTab.setAttribute('aria-label', title);
+  }
+  panel.querySelectorAll('.pane-actions').forEach(button => {
+    button.title = t('common.sessionActions');
+    button.setAttribute('aria-label', t('common.sessionActions'));
+  });
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
+  panel.querySelectorAll('[data-locale-text-key]').forEach(node => {
+    node.textContent = t(node.dataset.localeTextKey);
+  });
+  const statusToggle = panel.querySelector(`[data-tmux-status-toggle="${cssEscape(session)}"]`);
+  if (statusToggle) statusToggle.outerHTML = tmuxStatusToggleHtml(session);
+  const transcriptHead = panel.querySelector(`#transcript-pane-${cssEscape(session)} .transcript-head`);
+  if (transcriptHead) transcriptHead.textContent = t('common.transcript');
+  const summaryHead = panel.querySelector(`#summary-pane-${cssEscape(session)} .transcript-head`);
+  if (summaryHead) summaryHead.textContent = t('menu.tmux.aiTranscript', {session: sessionLabel(session)});
+  const eventsHead = panel.querySelector(`#events-pane-${cssEscape(session)} .transcript-head`);
+  if (eventsHead) eventsHead.textContent = t('events.title');
+  relocalizeTranscriptPanelStatus(session);
+  return true;
 }
 
-function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
+function transcriptPathRowHtml(path, fallback = '') {
+  if (!path) return `<span class="transcript-path-missing">${esc(fallback || t('transcript.noPath'))}</span>`;
+  return `<span class="transcript-path-label">${esc(t('common.field.path'))}</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', title: t('common.copyTranscriptPath')})}`;
+}
+
+function updateTranscriptPathRow(session, path, fallback = '') {
   const row = document.getElementById(`transcript-path-${session}`);
   if (!row) return;
   row.innerHTML = transcriptPathRowHtml(path, fallback);
+}
+
+function transcriptMetadataLoadErrorText() {
+  const fallback = transcriptMetadataState.error?.stage === 'apply'
+    ? t('common.requestFailed')
+    : t('transcript.lookupFailed');
+  return userMessageText(transcriptMetadataState.error, fallback);
+}
+
+function transcriptMetadataLoadErrorLabel() {
+  return transcriptMetadataState.error?.stage === 'apply'
+    ? transcriptMetadataLoadErrorText()
+    : t('transcript.lookupFailed');
+}
+
+function transcriptAgentErrorText(agent) {
+  return structuredMessageText(agent, 'error', String(agent?.error || t('transcript.noAgentFound')));
+}
+
+function transcriptContextLoadErrorText(error) {
+  return t('transcript.contextLoadFailed', {error: userMessageText(error, t('common.requestFailed'))});
+}
+
+function clearTranscriptContextLoadError(preview) {
+  if (!preview) return;
+  delete preview._transcriptContextLoadError;
+  preview.querySelector?.('.transcript-context-error')?.remove?.();
+}
+
+function renderTranscriptContextLoadError(preview) {
+  if (!preview) return;
+  const error = preview._transcriptContextLoadError;
+  const existing = preview.querySelector?.('.transcript-context-error');
+  if (!error) {
+    existing?.remove?.();
+    return;
+  }
+  const html = `<div class="transcript-item system transcript-context-error"><div class="transcript-text">${esc(transcriptContextLoadErrorText(error))}</div></div>`;
+  if (existing) existing.outerHTML = html;
+  else preview.insertAdjacentHTML?.('beforeend', html);
+}
+
+function renderTranscriptMetadataLoadError(session) {
+  const meta = document.getElementById(`meta-${session}`);
+  const preview = document.getElementById(transcriptDomId(session));
+  const error = transcriptMetadataLoadErrorText();
+  const label = transcriptMetadataLoadErrorLabel();
+  if (meta) meta.innerHTML = `<span class="err">${esc(label)}</span>`;
+  updateTranscriptPathRow(session, '', label);
+  if (preview) {
+    clearTranscriptContextLoadError(preview);
+    preview.textContent = transcriptMetadataState.error?.stage === 'apply'
+      ? error
+      : t('transcript.lookupFailedWithError', {error});
+  }
+}
+
+function relocalizeTranscriptPanelStatus(session) {
+  const preview = document.getElementById(transcriptDomId(session));
+  if (!preview) return;
+  if (transcriptMetadataState.error) {
+    renderTranscriptMetadataLoadError(session);
+    return;
+  }
+  const info = transcriptMetadataState.payload.sessions?.[session];
+  const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+  if (agent?.transcript) {
+    renderTranscriptContextLoadError(preview);
+    return;
+  }
+  clearTranscriptContextLoadError(preview);
+  const message = agent?.error ? transcriptAgentErrorText(agent) : t('transcript.noAgentFound');
+  updateTranscriptPathRow(session, '', message);
+  preview.textContent = message;
 }
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
@@ -4347,7 +5310,8 @@ async function refreshTranscriptPreview(session, preview, options = {}) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
   } catch (error) {
-    preview.textContent += `\n\ncontext load failed: ${error}`;
+    preview._transcriptContextLoadError = userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: ''});
+    renderTranscriptContextLoadError(preview);
   }
 }
 
@@ -4408,6 +5372,7 @@ function renderTranscriptItems(container, path, items, options = {}) {
   const oldTop = container.scrollTop;
   const oldHeight = container.scrollHeight;
   const blocks = items.map(item => transcriptItemHtml(item));
+  delete container._transcriptContextLoadError;
   container.innerHTML = blocks.join('');
   if (shouldScrollBottom) {
     requestAnimationFrame(() => {
@@ -4440,30 +5405,42 @@ function appendTranscriptItems(container, items) {
 
 function transcriptItemHtml(item) {
   const role = normalizeRole(item.role);
+  const roleKeys = {
+    assistant: 'transcript.role.assistant',
+    user: 'transcript.role.user',
+    tool_use: 'transcript.role.toolUse',
+    tool_result: 'transcript.role.toolResult',
+    summary: 'transcript.role.summary',
+    system: 'transcript.role.system',
+  };
+  const roleLabel = t(roleKeys[role] || 'common.message');
+  const meta = [item.timestamp, item.cwd].map(value => String(value || '')).filter(Boolean).join(', ');
+  const header = meta ? t('transcript.itemHeader', {role: roleLabel, meta}) : roleLabel;
   return `<div class="transcript-item ${role}">
-    <div class="transcript-role">${esc(item.header || role)}</div>
+    <div class="transcript-role">${esc(header)}</div>
     <div class="transcript-text">${esc(item.text || '')}</div>
   </div>`;
 }
 
 function eventItemHtml(event) {
   const details = event.details && typeof event.details === 'object' ? event.details : {};
+  const message = structuredMessageText(event, 'message');
   const detailText = Object.entries(details)
     .filter(([, value]) => value != null && value !== '')
     .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(',') : value}`)
     .join(' · ');
-  const title = detailText ? `${event.message || ''}\n${detailText}` : event.message || '';
+  const title = detailText ? `${message}\n${detailText}` : message;
   return `<div class="event-item" title="${esc(title)}">
     <span class="event-time">${esc(formatEventTime(event.time))}</span>
-    <span class="event-type">${esc(event.type || 'event')}</span>
-    <span class="event-message">${esc(event.message || '')}${detailText ? ` · ${esc(detailText)}` : ''}</span>
+    <span class="event-type">${esc(event.type || t('common.eventLabel'))}</span>
+    <span class="event-message">${esc(message)}${detailText ? ` · ${esc(detailText)}` : ''}</span>
   </div>`;
 }
 
 function formatEventTime(value) {
   const date = new Date(value || 0);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString([], {
+  return localizedDateTimeFormat(date.getTime() / 1000, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -4475,18 +5452,19 @@ function formatEventTime(value) {
 async function refreshEventLog(session) {
   const node = document.getElementById(`events-${session}`);
   if (!node) return;
+  delete node.dataset.localeTextKey;
   try {
     const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
     const events = Array.isArray(payload.events) ? payload.events : [];
     node.innerHTML = events.length
       ? events.slice().reverse().map(eventItemHtml).join('')
-      : '<div class="event-empty">no events yet</div>';
+      : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
   } catch (error) {
     if (error?.status) {
-      node.innerHTML = `<div class="event-empty">${esc(error.payload?.error || 'failed to load events')}</div>`;
+      node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
       return;
     }
-    node.innerHTML = `<div class="event-empty">failed to load events: ${esc(error)}</div>`;
+    node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
   }
 }
 
@@ -4552,6 +5530,7 @@ function renderLatency(latestMs) {
 }
 
 async function updateLatency() {
+  if (document.visibilityState === 'hidden') return null;
   const startedAt = performance.now();
   try {
     await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
@@ -4573,9 +5552,9 @@ function refreshAll() {
 }
 
 function scheduleReconnectResync(reason = '') {
-  if (reconnectResyncTimer) clearTimeout(reconnectResyncTimer);
-  reconnectResyncTimer = setTimeout(() => {
-    reconnectResyncTimer = null;
+  if (clientEventTransportState.resyncTimer) clearTimeout(clientEventTransportState.resyncTimer);
+  clientEventTransportState.resyncTimer = setTimeout(() => {
+    clientEventTransportState.resyncTimer = null;
     refreshAll();
   }, reconnectResyncDebounceMs);
 }
@@ -4591,10 +5570,16 @@ function resyncVisibleTerminalRemoteSizes(reason = '') {
 function installReconnectResyncHandlers() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
+      if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
       scheduleReconnectResync('visible');
       resyncVisibleTerminalRemoteSizes('visible');
+      updateLatency();
       if (fileExplorerMode === 'tabber' && typeof fetchTabberActivity === 'function') fetchTabberActivity();
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
+      return;
     }
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({deactivate: true, immediate: true});
+    if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   });
   window.addEventListener('online', () => {
     scheduleReconnectResync('online');
@@ -4614,6 +5599,9 @@ function paintInitialAppShell() {
 }
 
 async function boot() {
+  installNativeAppViewportOwner();
+  installTouchContextMenuOwner();
+  syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installReconnectResyncHandlers();
   if (shareViewMode) {
@@ -4643,11 +5631,7 @@ async function boot() {
   statusEl.textContent = t('status.yoloLoading');
   let initialAutoStatusesPromise = Promise.resolve(false);
   if (!shareViewMode) {
-    loadNotifyStatus().catch(error => {
-      console.warn('initial notify-status refresh failed', error);
-      renderNotifyToggle();
-      return false;
-    });
+    loadNotificationDelivery();
     refreshBackgroundOwnerStatus({render: false}).catch(error => {
       console.warn('initial background-owner status refresh failed', error);
       return false;
@@ -4663,8 +5647,8 @@ async function boot() {
   if (!shareViewMode) {
     await refreshTranscripts({refreshAuto: false});
   } else {
-    transcriptMeta = {session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))};
-    transcriptMetaLoaded = true;
+    setTranscriptMetadataPayload({session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))});
+    transcriptMetadataState.loaded = true;
     await refreshTranscripts({refreshAuto: false, refreshActivity: false});
   }
   installYolomuxFontMetricRefresh();
@@ -4678,6 +5662,10 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
+  if (!shareViewMode && typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
+  if (!shareViewMode && typeof primeJsDebugStatsBeforeLongLivedStreams === 'function') {
+    await primeJsDebugStatsBeforeLongLivedStreams();
+  }
   if (!shareViewMode) installClientEventStream();
   if (!shareViewMode) {
     initialAutoStatusesPromise.then(() => {
@@ -4723,10 +5711,10 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
   if (!jsDebugCollectionEnabled) return;
   const payload = clientEventPayloadFromEnvelope(envelope);
   const rawData = rawEvent?.data || '';
-  const dataBytes = jsDebugByteLength(rawData);
+  const dataBytes = utf8ByteLength(rawData);
   const dataLines = String(rawData || '').split(/\r?\n/);
-  const frameBytes = jsDebugByteLength(`event: ${eventType}\n`)
-    + dataLines.reduce((total, line) => total + jsDebugByteLength(`data: ${line}\n`), 0)
+  const frameBytes = utf8ByteLength(`event: ${eventType}\n`)
+    + dataLines.reduce((total, line) => total + utf8ByteLength(`data: ${line}\n`), 0)
     + 1;
   const serverTimeMs = Number(envelope?.time) * 1000;
   const receiveLatencyMs = Number.isFinite(serverTimeMs)
@@ -4753,13 +5741,13 @@ function updateDryRunEnabled() {
 }
 
 function updateActionButton(label, onClick) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'toast-action';
-  button.textContent = label;
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    onClick(event, button.closest('.toast'));
+  const button = makeButton({
+    className: 'toast-action',
+    label,
+    onClick: event => {
+      event.stopPropagation();
+      onClick(event, button.closest('.toast'));
+    },
   });
   return button;
 }
@@ -4767,22 +5755,21 @@ function updateActionButton(label, onClick) {
 async function triggerSelfUpdate(_event = null, ownerToast = null) {
   const dry = updateDryRunEnabled();
   const confirmed = window.confirm(dry
-    ? 'Dry run: simulate installing a YOLOmux update? Nothing is pulled and the server is not restarted.'
-    : 'Install the latest YOLOmux update and restart now?');
+    ? t('update.confirmDryRun')
+    : t('update.confirmInstall'));
   if (!confirmed) return;
   const target = String(ownerToast?.dataset?.updateTarget || selfUpdateAvailableTarget || '').trim();
   dismissUpdateAvailableToasts(ownerToast);
   hideUpdateBadge();
   try {
-    const res = await fetch(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
-    const data = await res.json().catch(() => ({}));
-    const title = data.ok ? (data.restarting ? 'Installing update...' : 'Software Update') : 'Update failed';
-    showToast(title, [data.message || (data.ok ? 'done' : 'see server logs')]);
+    const data = await apiFetchJson(`/api/self-update${dry ? '?dryrun=1' : ''}`, {method: 'POST'});
+    const title = data.ok ? (data.restarting ? t('update.installing') : t('update.softwareTitle')) : t('update.failed');
+    emitNotification('update', {title, lines: [userMessageText(data, t(data.ok ? 'state.done' : 'update.seeServerLogs'))], coalesceKey: 'self-update-result'});
     if (data.ok && data.restarting) {
       startSelfUpdateReloadPolling(data.target || data.version || target);
     }
   } catch (error) {
-    showToast('Update failed', [String(error)]);
+    emitNotification('update', {title: t('update.failed'), lines: [userMessageText(error, t('update.seeServerLogs'))], coalesceKey: 'self-update-result'});
   }
 }
 
@@ -4796,42 +5783,46 @@ function applyUpdateAvailable(status) {
   const badge = document.querySelector('[data-update-badge]');
   if (badge) {
     badge.hidden = false;
-    badge.title = `YOLOmux update available${status.target ? ` (${status.target})` : ''} - click to update now`;
     if (target) badge.dataset.updateTarget = target;
+    else delete badge.dataset.updateTarget;
+    renderUpdateBadgeChrome();
   }
-  const node = showToast('YOLOmux update available', [
-    `A new YOLOmux update is available${status.target ? ` (${status.target})` : ''}.`,
-  ], {
-    actions: [updateActionButton('Update Now', triggerSelfUpdate)],
+  const node = emitNotification('update', {
+    title: t('update.availableTitle'),
+    lines: [t('update.availableBody', {target: status.target ? ` (${status.target})` : ''})],
+    actions: [updateActionButton(t('update.now'), triggerSelfUpdate)],
     countdownMs: 4 * 60 * 60 * 1000,  // keep the update cue up for 4 hours, not the default ~10s
     className: 'attention-alert toast toast-update',  // solid (opaque) background, not the translucent default
-  });
+    coalesceKey: 'update-available',
+  }).inApp;
   if (node && target) node.dataset.updateTarget = target;
 }
 
 async function checkForUpdateOnce() {
   try {
-    const res = await fetch(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
-    if (!res.ok) return;  // readonly (403) or unavailable
-    const status = await res.json();
+    const status = await apiFetchJson(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
     if (status && status.available) applyUpdateAvailable(status);
   } catch (_error) { /* offline / transient — the hourly push will retry */ }
 }
 
+function yoagentJobNotificationTitle(notification = {}) {
+  return structuredMessageText(notification, 'title', t('brand.tab.agent'));
+}
+
+function yoagentJobNotificationBody(notification = {}) {
+  return structuredMessageText(notification, 'body', '').trim();
+}
+
 function maybeNotifyYoagentJob(notification = {}) {
-  const title = String(notification.title || 'YO!agent');
-  const body = String(notification.body || '').trim();
-  if (!body || !notificationsEnabled) return;
+  const title = yoagentJobNotificationTitle(notification);
+  const body = yoagentJobNotificationBody(notification);
+  if (!body || !notificationDeliveryEnabled()) return;
   const session = String(notification.session || '').trim();
   const tag = `yoagent-job:${session || 'global'}:${body}`;
-  showToast(title, [body], {session});
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(hostNotificationTitle(title), {
-      body,
-      tag,
-      renotify: true,
-      session,
+    emitNotification('yoagentJob', {
+      session, title, body, systemTitle: hostNotificationTitle(title),
+      systemTag: tag, renotify: true, coalesceKey: tag,
     });
   } catch (error) {
     postEvent(session || null, 'yoagent_job_notification_error', `notification failed: ${error}`, {});
@@ -4841,7 +5832,7 @@ function maybeNotifyYoagentJob(notification = {}) {
 function tmuxSignalsPayloadWithWindowOverrides(data) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.windows)) return data;
   const overrides = new Map();
-  for (const [session, override] of tmuxWindowActiveIndexOverrides.entries()) {
+  for (const [session, override] of tmuxWindowActiveIndexOverrideEntries()) {
     if (override === tmuxWindowPendingActiveIndex) continue;
     const indexKey = tmuxWindowIndexKey(override);
     if (indexKey !== null) overrides.set(String(session), indexKey);
@@ -4926,17 +5917,26 @@ function clientPushEventCoalesceKey(type, payload = {}) {
 
 function queueClientPushEvent(type, payload = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientPushEventQueue.set(key, {type, payload});
-  if (clientPushEventFrame) return;
-  clientPushEventFrame = requestAnimationFrame(() => {
-    clientPushEventFrame = 0;
+  clientEventTransportState.queue.set(key, {type, payload});
+  // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
+  // notification state there, otherwise a complete green->red/yellow transition can be missed
+  // before the user returns to YOLOmux.
+  if (document.visibilityState === 'hidden') {
+    if (clientEventTransportState.frame) cancelAnimationFrame(clientEventTransportState.frame);
+    clientEventTransportState.frame = 0;
+    flushQueuedClientPushEvents();
+    return;
+  }
+  if (clientEventTransportState.frame) return;
+  clientEventTransportState.frame = requestAnimationFrame(() => {
+    clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
   });
 }
 
 function flushQueuedClientPushEvents() {
-  const events = Array.from(clientPushEventQueue.values());
-  clientPushEventQueue.clear();
+  const events = Array.from(clientEventTransportState.queue.values());
+  clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
   for (const event of events) handleClientPushEventNow(event.type, event.payload);
 }
@@ -4964,6 +5964,10 @@ function handleClientPushEventNow(type, payload = {}) {
     if (payload.data) applyAutoApprovePayload(payload.data);
     return;
   }
+  if (type === 'attention_acks_changed') {
+    applyAttentionAcknowledgementResponse(payload);
+    return;
+  }
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
@@ -4973,6 +5977,10 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
+      if (payload.root) refreshFileIndexStatus(payload.root);
+      if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
+        refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
+      }
     }
     if (payload.role === 'session-files') {
       const session = String(payload.session || '');
@@ -4984,6 +5992,12 @@ function handleClientPushEventNow(type, payload = {}) {
   }
   if (type === 'tmux_signals_changed') {
     applyTmuxSignalsPayload(payload);
+    if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
+      for (const session of activePaneItems()) {
+        if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
+        updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
+      }
+    }
     return;
   }
   if (type === 'watched_prs_changed') {
@@ -5027,6 +6041,12 @@ function handleClientPushEventNow(type, payload = {}) {
     refreshActivitySummary({force: true, render: yoagentPanelIsActive()}).catch(error => console.warn('YO!agent skills refresh failed', error));
     return;
   }
+  if (type === 'chat_messages_changed' || type === 'chat_typing_changed') {
+    if (typeof handleChatInvalidation === 'function') {
+      handleChatInvalidation(type, payload);
+    }
+    return;
+  }
   if (type === 'session_files_ready') {
     if (payload.data && typeof applySessionFilesPayloadFromPush === 'function') {
       applySessionFilesPayloadFromPush(payload.data, payload.request || {});
@@ -5046,41 +6066,141 @@ function handleClientPushEventNow(type, payload = {}) {
   }
 }
 
-function installClientEventStream() {
-  if (typeof EventSource === 'undefined' || clientEventsSource) return;
+function clientEventDemandDescriptor() {
+  const visible = document.visibilityState !== 'hidden';
+  const activeItems = visible && typeof activePaneItems === 'function' ? activePaneItems() : [];
+  const channels = new Set();
+  const notificationAttention = typeof notificationDeliveryEnabled === 'function' && notificationDeliveryEnabled('system');
+  const notificationChat = typeof notificationDeliveryEnabled === 'function'
+    && (notificationDeliveryEnabled('inApp') || notificationDeliveryEnabled('system'));
+  if (visible) {
+    channels.add('core');
+    channels.add('status');
+    const finderActive = activeItems.includes(fileExplorerItemId);
+    const fileEditorActive = activeItems.some(item => isFileEditorItem(item));
+    if (finderActive && fileExplorerMode === 'tabber') channels.add('activity');
+    if ((finderActive && fileExplorerMode !== 'tabber') || fileEditorActive) channels.add('files');
+    if (activeItems.includes(infoItemId)) {
+      channels.add('activity');
+      channels.add('transcripts');
+    }
+    if (activeItems.includes(yoagentItemId)) {
+      channels.add('activity');
+      channels.add('transcripts');
+      channels.add('yoagent');
+    }
+    if (activeItems.includes(chatItemId) || notificationChat) channels.add('chat');
+    if (activeItems.some(item => isTmuxSession(item) && typeof transcriptPreviewPaneIsActive === 'function' && transcriptPreviewPaneIsActive(item))) {
+      channels.add('transcripts');
+    }
+  } else if (notificationAttention) {
+    channels.add('attention');
+    channels.add('chat');
+  }
+  return {
+    visibility: visible ? 'visible' : 'hidden',
+    active_panes: activeItems.slice().sort(),
+    active_subtabs: {
+      finder: finderActiveMode(),
+      yoagent: activeItems.includes(yoagentItemId),
+      chat: activeItems.includes(chatItemId),
+    },
+    channels: Array.from(channels).sort(),
+    notification_attention: notificationAttention,
+  };
+}
+
+function finderActiveMode() {
+  return itemIsActivePaneTab(fileExplorerItemId) ? normalizeFileExplorerMode(fileExplorerMode) : '';
+}
+
+function clientEventDemandSignature(descriptor) {
+  return JSON.stringify(descriptor);
+}
+
+function closeClientEventStream() {
+  const source = clientEventTransportState.source;
+  clientEventTransportState.source = null;
+  clientEventTransportState.connected = false;
+  source?.close?.();
+}
+
+function openClientEventStream(descriptor) {
+  if (typeof EventSource === 'undefined' || !descriptor.channels.length) return null;
+  const params = new URLSearchParams({
+    channels: descriptor.channels.join(','),
+    client_id: String(shareClientId || ''),
+  });
   let source;
   try {
-    source = new EventSource('/api/client-events');
+    source = new EventSource(`/api/client-events?${params.toString()}`);
   } catch (_error) {
-    return;
+    return null;
   }
-  clientEventsSource = source;
+  clientEventTransportState.source = source;
+  const channels = new Set(descriptor.channels);
   source.addEventListener('ready', event => {
-    clientEventsConnected = true;
+    if (clientEventTransportState.source !== source) return;
+    clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ready', clientEventEnvelope(event), event);
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-    refreshAutoStatuses().catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
+    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
+    if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+    if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   });
   source.addEventListener('ping', event => {
-    clientEventsConnected = true;
+    if (clientEventTransportState.source !== source) return;
+    clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
-    clientEventsConnected = false;
+    if (clientEventTransportState.source !== source) return;
+    clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta']) {
+  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
     source.addEventListener(type, event => {
-      clientEventsConnected = true;
+      if (clientEventTransportState.source !== source) return;
+      clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);
       handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
     });
   }
+  return source;
+}
+
+function applyClientEventDemand() {
+  clientEventTransportState.demandTimer = null;
+  if (!clientEventTransportState.enabled) return false;
+  const descriptor = clientEventDemandDescriptor();
+  const signature = clientEventDemandSignature(descriptor);
+  if (signature === clientEventTransportState.demandSignature && clientEventTransportState.source) return false;
+  clientEventTransportState.demand = descriptor;
+  clientEventTransportState.demandSignature = signature;
+  closeClientEventStream();
+  if (!descriptor.channels.length) {
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+    return true;
+  }
+  openClientEventStream(descriptor);
+  return true;
+}
+
+function syncClientEventDemand(options = {}) {
+  if (!clientEventTransportState.enabled) return false;
+  if (clientEventTransportState.demandTimer) clearTimeout(clientEventTransportState.demandTimer);
+  if (options.immediate === true) return applyClientEventDemand();
+  clientEventTransportState.demandTimer = setTimeout(applyClientEventDemand, clientEventDemandDebounceMs);
+  return true;
+}
+
+function installClientEventStream() {
+  clientEventTransportState.enabled = true;
+  return syncClientEventDemand({immediate: true});
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
@@ -5090,32 +6210,64 @@ function installDevAutoReload() {
   if (!devMode || typeof EventSource === 'undefined') return;
   let source;
   try {
-    source = new EventSource('/api/dev-reload');
+    const revision = encodeURIComponent(String(bootstrap.devBundleRevision || ''));
+    source = new EventSource(`/api/dev-reload?bundle_revision=${revision}`);
   } catch (_error) {
     return;
   }
+  source.addEventListener('ready', event => {
+    // A client reconnects after a server restart, which means it misses the old process's
+    // `reload` event. The fresh server's revision makes that stale bundle observable at once.
+    const serverRevision = String(safeJsonParse(event.data, {})?.signature || '');
+    const bootRevision = String(bootstrap.devBundleRevision || '');
+    if (serverRevision && bootRevision && serverRevision !== bootRevision) location.reload();
+  });
   source.addEventListener('reload', () => {
-    statusOk('dev: bundle changed — reloading');
+    statusOk(localizedHtml('status.devBundleReloading'));
     location.reload();
   });
 }
 
 async function showContext(session) {
   const modal = document.getElementById('modal');
-  const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
   modal.classList.remove('about-open', 'share-open');
-  title.textContent = t('transcript.tailTitle', {session: sessionLabel(session)});
   body.innerHTML = '';
-  body.textContent = t('common.loading');
+  modal.dataset.modalKind = 'context';
+  modal.dataset.modalSession = session;
+  body.dataset.localeTextKey = 'common.loading';
   modal.classList.add(CLS.open);
+  relocalizeModalChrome();
   const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+  delete body.dataset.localeTextKey;
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
   } else {
     body.textContent = JSON.stringify(payload, null, 2);
   }
   scheduleSharePopupLayerPublish();
+}
+
+function relocalizeModalChrome(options = {}) {
+  const modal = document.getElementById('modal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+  const close = document.getElementById('closeModal');
+  const closeLabel = t('common.close');
+  if (close) {
+    close.title = closeLabel;
+    close.setAttribute('aria-label', closeLabel);
+  }
+  if (!modal || options.content === false || !modal.classList.contains(CLS.open)) return Boolean(modal);
+  if (modal.classList.contains('about-open')) {
+    showAboutModal();
+    return true;
+  }
+  if (modal.classList.contains('share-open')) return relocalizeShareModal();
+  if (modal.dataset.modalKind !== 'context') return true;
+  if (title) title.textContent = t('transcript.tailTitle', {session: sessionLabel(modal.dataset.modalSession || '')});
+  if (body?.dataset.localeTextKey) body.textContent = t(body.dataset.localeTextKey);
+  return true;
 }
 
 function globalShortcutTargetAllowsAppAction(target) {
@@ -5183,28 +6335,10 @@ function itemCanCloseWithAppShortcut(item) {
 }
 
 function toggleFileExplorerShortcut() {
-  if (itemInLayout(fileExplorerItemId)) {
-    fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
-    rememberFileExplorerOpenIntent(false);
-    applyLayoutSlots(layoutWithoutItem(fileExplorerItemId, {
-      preservePlaceholders: false,
-    }), {
-      preserveMissingFileExplorer: true,
-      message: fileExplorerHiddenStatusMessage(),
-    });
-    return;
-  }
-  if (fileExplorerShortcutRestoreSlots && itemInLayout(fileExplorerItemId, fileExplorerShortcutRestoreSlots)) {
-    rememberFileExplorerOpenIntent(true);
-    applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
-      prune: false,
-      message: `${fileExplorerLabel()} restored`,
-    });
-    fileExplorerShortcutRestoreSlots = null;
-    return;
-  }
-  rememberFileExplorerOpenIntent(true);
-  selectSession(fileExplorerItemId);
+  // Cmd/Ctrl+B is one atomic triplet transaction. The layout owner owns its saved placement and
+  // default-home restoration; terminal code only preserves the platform/terminal eligibility gate.
+  if (typeof toggleAllFileSurfaces === 'function') return toggleAllFileSurfaces();
+  console.warn('file surface shortcut is unavailable until the layout triplet owner is ready');
 }
 
 function handleFocusedTerminalCopyShortcut(event) {
@@ -5220,9 +6354,7 @@ function handleFocusedTerminalCopyShortcut(event) {
 }
 
 if (refreshMeta) {
-  refreshMeta.textContent = t('meta.refresh');
-  refreshMeta.setAttribute('aria-label', t('meta.refreshAria'));
-  refreshMetaButtonTitle();
+  refreshMetaButtonChrome();
   refreshMeta.onclick = refreshAll;
 }
 if (tabMetaToggle) {
@@ -5231,7 +6363,6 @@ if (tabMetaToggle) {
   notifyToggle?.parentElement?.insertBefore(tabMetaToggle, notifyToggle);
 }
 if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout'; };
-notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => {
   const modal = document.getElementById('modal');
   modal.classList.remove(CLS.open, 'about-open', 'share-open');
@@ -5255,14 +6386,39 @@ document.addEventListener('keydown', event => {
   if (!['Enter', ' '].includes(event.key)) return;
   handlePromptAttentionClearEvent(event);
 });
-document.addEventListener('click', event => {
+document.addEventListener('pointerdown', event => {
   if (event.target?.closest?.('.app-menu')) return;
   closeAppMenus();
-});
+}, true);
 topbar?.addEventListener('pointerenter', () => {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
 });
+
+function focusedPanelSearchTarget(event, item) {
+  const direct = event.target?.closest?.('[data-layout-item]');
+  if (direct?.dataset?.layoutItem === item && direct.offsetParent !== null) return direct;
+  const registered = panelNodes.get(item);
+  if (registered?.offsetParent !== null) return registered;
+  return Array.from(document.querySelectorAll('[data-layout-item]'))
+    .find(panel => panel.dataset.layoutItem === item && panel.offsetParent !== null) || null;
+}
+
+function handleFocusedPanelSearchShortcut(event, {mod = appModifier(event), key = String(event.key || '').toLowerCase()} = {}) {
+  if (!mod || event.shiftKey || key !== 'f') return false;
+  const item = focusedPanelItem;
+  const focusSearch = tabTypeForItem(item)?.focusSearch;
+  if (typeof focusSearch !== 'function') return false;
+  const panel = focusedPanelSearchTarget(event, item);
+  if (!panel) return false;
+  // The tab-type registry owns which panels have an app find control. This single dispatcher keeps
+  // Cmd/Ctrl-F aligned across those panels while leaving native Find intact elsewhere.
+  event.preventDefault();
+  event.stopPropagation();
+  Promise.resolve(focusSearch(item, panel)).catch(error => console.warn('panel search shortcut failed', error));
+  return true;
+}
+
 function handleGlobalShortcutKeydown(event) {
   if (handleFocusedTerminalCopyShortcut(event)) return;
   // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
@@ -5274,6 +6430,7 @@ function handleGlobalShortcutKeydown(event) {
   if (handleFileExplorerArrowNav(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
+  if (handleFocusedPanelSearchShortcut(event, {mod, key})) return;
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
   if (handlePendingGlobalShortcutChord(event, key)) return;
   const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection(event);
@@ -5351,10 +6508,14 @@ function handleGlobalShortcutKeydown(event) {
 installShareReadonlyInteractionBlocker();
 installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
-window.addEventListener('resize', () => {
-  syncAppViewportBreakpointClasses();
+window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
+  // Safari can publish the new viewport before its topbar flex geometry has settled. The shared
+  // fit check runs on the next frame (and the ResizeObserver covers a later width update), so the
+  // full/compact menu decision is based only on current space, never the previous presentation.
+  scheduleTopbarNavigationFitCheck();
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();
+  if (typeof dockviewScheduleLayoutToHost === 'function') dockviewScheduleLayoutToHost();
   applyShareMirrorTransform();
   scheduleShareViewportPublish();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);

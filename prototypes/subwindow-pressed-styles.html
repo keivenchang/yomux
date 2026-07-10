@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLOmux subwindow pressed styles</title>
+<style>
+  :root { color-scheme: dark; --bg: #161b22; --panel: #202830; --line: #45515e; --text: #eef4f8; --muted: #aab6c0; --accent: #e5bb43; --accent-ink: #18150b; --accent-tint: color-mix(in srgb, var(--accent) 14%, transparent); }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, #263341, var(--bg) 52%); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 24px 64px; }
+  h1 { margin: 0 0 6px; font-size: 22px; } p { color: var(--muted); margin: 0 0 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--panel) 90%, transparent); }
+  h2 { margin: 0 0 3px; font-size: 15px; } .note { min-height: 36px; font-size: 12px; }
+  .demo { display: flex; gap: 8px; align-items: center; min-height: 62px; padding: 12px; margin-top: 12px; border: 1px solid color-mix(in srgb, var(--line) 75%, transparent); border-radius: 9px; background: #11171d; }
+  .subwindow { min-width: 62px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: #27313a; color: var(--text); font: inherit; cursor: pointer; transition: background .15s, border-color .15s, box-shadow .15s, color .15s, transform .15s; }
+  .subwindow:hover { border-color: color-mix(in srgb, var(--accent) 80%, var(--line)); }
+  .solid .subwindow[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .inset-ring .subwindow[aria-pressed="true"] { background: var(--accent-tint); border-color: color-mix(in srgb, var(--accent) 78%, var(--line)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent), inset 0 -2px 0 var(--accent); }
+  .accent-edge .subwindow { border-bottom-width: 3px; } .accent-edge .subwindow[aria-pressed="true"] { border-bottom-color: var(--accent); color: color-mix(in srgb, var(--accent) 82%, white); }
+  .tinted-glass .subwindow[aria-pressed="true"] { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 20%, #27313a), color-mix(in srgb, var(--accent) 8%, #27313a)); border-color: color-mix(in srgb, var(--accent) 64%, var(--line)); }
+  .pressed-bevel .subwindow[aria-pressed="true"] { background: #1c242b; border-color: color-mix(in srgb, var(--accent) 65%, var(--line)); box-shadow: inset 0 2px 5px rgb(0 0 0 / .58), inset 0 0 0 1px rgb(255 255 255 / .05); transform: translateY(1px); }
+  .dot-indicator .subwindow { position: relative; } .dot-indicator .subwindow[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); } .dot-indicator .subwindow[aria-pressed="true"]::after { content: ""; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 99px; background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent); }
+  .glyph-only .subwindow[aria-pressed="true"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 19%, transparent); }
+  .recommended .subwindow[aria-pressed="true"] { color: color-mix(in srgb, var(--accent) 78%, white); background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 15%, #27313a), color-mix(in srgb, var(--accent) 8%, #27313a)); border-color: color-mix(in srgb, var(--accent) 68%, var(--line)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent), inset 0 -2px 0 var(--accent); }
+  .light { --bg: #e9edf1; --panel: #f8fafb; --line: #a9b3bd; --text: #1b242c; --muted: #53616d; --accent-ink: #332805; --accent-tint: color-mix(in srgb, var(--accent) 13%, transparent); background: #edf1f4; } .light .demo { background: #fff; } .light .subwindow { background: #f2f5f7; }
+  .theme-toggle { float: right; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: inherit; cursor: pointer; }
+</style>
+<main>
+  <button class="theme-toggle" type="button" onclick="document.body.classList.toggle('light')">Toggle light</button>
+  <h1>Subwindow pressed-state alternatives</h1>
+  <p>Click any button to compare selected and unselected states. The final card combines a quiet tint, inset ring, and accent edge.</p>
+  <div class="grid" id="examples">
+    <section class="card solid"><h2>Current: solid fill</h2><p class="note">Strongest signal, but visually heavy.</p><div class="demo"></div></section>
+    <section class="card inset-ring"><h2>Inset ring</h2><p class="note">Neutral surface; selected state is a precise framed control.</p><div class="demo"></div></section>
+    <section class="card accent-edge"><h2>Accent edge</h2><p class="note">Minimal and compact; selection is carried by the bottom edge.</p><div class="demo"></div></section>
+    <section class="card tinted-glass"><h2>Tinted glass</h2><p class="note">A low-saturation fill with a readable outline.</p><div class="demo"></div></section>
+    <section class="card pressed-bevel"><h2>Pressed bevel</h2><p class="note">Physical pressed-in affordance; slightly more decorative.</p><div class="demo"></div></section>
+    <section class="card dot-indicator"><h2>Dot indicator</h2><p class="note">Best for scanning many compact subwindows.</p><div class="demo"></div></section>
+    <section class="card glyph-only"><h2>Glyph/text color</h2><p class="note">Very quiet; suitable when selected state is secondary.</p><div class="demo"></div></section>
+    <section class="card recommended"><h2>Recommended: tint + ring + edge</h2><p class="note">Clear, restrained, and consistent in dark or light themes.</p><div class="demo"></div></section>
+  </div>
+</main>
+<script>
+  for (const demo of document.querySelectorAll('.demo')) {
+    for (const label of ['Terminal', 'Files', 'Info']) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'subwindow'; button.textContent = label;
+      button.setAttribute('aria-pressed', label === 'Terminal' ? 'true' : 'false');
+      button.addEventListener('click', () => demo.querySelectorAll('.subwindow').forEach(item => item.setAttribute('aria-pressed', String(item === button))));
+      demo.append(button);
+    }
+  }
+</script>
+</html>

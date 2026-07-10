@@ -15,6 +15,7 @@ from . import git_ops
 from . import io_ops
 from . import listing
 from . import search
+from .errors import normalize_os_errors
 
 AUTH_CONFIG_PATH = paths.AUTH_CONFIG_PATH
 AUTH_COOKIE_SECRET_PATH = paths.AUTH_COOKIE_SECRET_PATH
@@ -80,16 +81,15 @@ _BLAME_PR_RE = git_ops._BLAME_PR_RE
 _BLAME_SHA_RE = git_ops._BLAME_SHA_RE
 _blame_cache = git_ops._blame_cache
 _diff_ref_resolution_error = git_ops._diff_ref_resolution_error
-_diff_refs = git_ops._diff_refs
+_diff_refs = git_ops.diff_refs
 _ensure_ref_order = git_ops._ensure_ref_order
 _git_blob_text = git_ops._git_blob_text
 _git_mv_if_tracked = git_ops._git_mv_if_tracked
-_normal_ref = git_ops._normal_ref
+_normal_ref = git_ops.normal_ref
 _parse_blame_porcelain = git_ops._parse_blame_porcelain
-_ref_exists = git_ops._ref_exists
-_refs_requested = git_ops._refs_requested
+_ref_exists = git_ops.git_ref_exists
+_refs_requested = git_ops.refs_requested
 
-_fs_io_errors = io_ops._fs_io_errors
 _mtime_matches_expected = io_ops._mtime_matches_expected
 _sniff_raw_mime = io_ops._sniff_raw_mime
 _validated_child_name = io_ops._validated_child_name
@@ -128,81 +128,112 @@ def _sync_package_overrides() -> None:
     io_ops.TEXT_EXTENSIONS = TEXT_EXTENSIONS
 
 
+@normalize_os_errors
 def list_directory(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     return listing.list_directory(raw_path)
 
 
+@normalize_os_errors
 def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
     _sync_package_overrides()
     return search.search_files(raw_root, query=query, limit=limit, recursive=recursive)
 
 
+@normalize_os_errors
 def index_status(raw_root: str) -> dict[str, Any]:
     _sync_package_overrides()
     return search.index_status(raw_root)
 
 
+@normalize_os_errors
 def unindex_root(raw_root: str) -> dict[str, Any]:
     _sync_package_overrides()
     return search.unindex_root(raw_root)
 
 
+@normalize_os_errors
+def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-change") -> list[str]:
+    _sync_package_overrides()
+    return search.reindex_roots_for_paths(raw_paths, reason=reason)
+
+
+@normalize_os_errors
 def git_repo_info(repo: Path, include_status: bool = True) -> dict[str, Any]:
     _sync_package_overrides()
     return git_ops.git_repo_info(repo, include_status=include_status)
 
 
+@normalize_os_errors
 def git_tracks_path(path: Path) -> bool:
     _sync_package_overrides()
     return git_ops.git_tracks_path(path)
 
 
+@normalize_os_errors
 def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
     _sync_package_overrides()
     return git_ops.git_file_history(path, limit=limit)
 
 
+@normalize_os_errors
 def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
     _sync_package_overrides()
     return git_ops.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref)
 
 
+@normalize_os_errors
 def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
     _sync_package_overrides()
     return git_ops.blame_file(raw_path, ref=ref)
 
 
+@normalize_os_errors
 def git_root_for_path(path: Path) -> str:
     _sync_package_overrides()
     return git_ops.git_root_for_path(path)
 
 
+@normalize_os_errors
 def read_file(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     return io_ops.read_file(raw_path)
 
 
+@normalize_os_errors
 def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.write_file(raw_path, content, expected_mtime=expected_mtime)
+    payload = io_ops.write_file(raw_path, content, expected_mtime=expected_mtime)
+    paths.invalidate_path_policy_caches()
+    return payload
 
 
+@normalize_os_errors
 def delete_path(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.delete_path(raw_path)
+    payload = io_ops.delete_path(raw_path)
+    paths.invalidate_path_policy_caches()
+    return payload
 
 
+@normalize_os_errors
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.rename_path(raw_path, new_name)
+    payload = io_ops.rename_path(raw_path, new_name)
+    paths.invalidate_path_policy_caches()
+    payload["reindex_roots"] = search.reindex_roots_for_paths([payload["old_path"], payload["path"]], reason="fs-rename")
+    return payload
 
 
+@normalize_os_errors
 def create_directory(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.create_directory(raw_path)
+    payload = io_ops.create_directory(raw_path)
+    paths.invalidate_path_policy_caches()
+    return payload
 
 
+@normalize_os_errors
 def path_info(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     return io_ops.path_info(raw_path)
@@ -213,16 +244,19 @@ def is_text_path(raw_path: str) -> bool:
     return io_ops.is_text_path(raw_path)
 
 
+@normalize_os_errors
 def read_raw(raw_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
     _sync_package_overrides()
     return io_ops.read_raw(raw_path, max_bytes=max_bytes)
 
 
+@normalize_os_errors
 def zip_directory(raw_path: str, max_bytes: int | None = None):
     _sync_package_overrides()
     return io_ops.zip_directory(raw_path, max_bytes=max_bytes)
 
 
+@normalize_os_errors
 def count_directory_files(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     return io_ops.count_directory_files(raw_path)
@@ -262,6 +296,7 @@ __all__ = [
     "path_info",
     "read_file",
     "read_raw",
+    "reindex_roots_for_paths",
     "rename_path",
     "search_files",
     "unindex_root",

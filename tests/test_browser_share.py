@@ -3,7 +3,10 @@ from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F
 
 def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
     page = tmp_path / "share-viewer-banner-grid.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
         <script>document.body.classList.add('share-view-mode');</script>
@@ -20,25 +23,20 @@ def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
         <div class="share-viewer-banner" role="status">Viewing keivenc's session - read-only - expires in 9:23</div>
       """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const root = document.getElementById('appRoot');
         const banner = document.querySelector('.share-viewer-banner');
         const grid = document.getElementById('grid');
         const dock = document.querySelector('.yolomux-dockview');
-        const rect = el => {
-          const r = el.getBoundingClientRect();
-          return {top: Math.round(r.top), height: Math.round(r.height), width: Math.round(r.width)};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         return {
-          root: rect(root),
-          banner: rect(banner),
+          root: rect(root, {round: true}),
+          banner: rect(banner, {round: true}),
           bannerPosition: getComputedStyle(banner).position,
-          grid: rect(grid),
-          dock: rect(dock),
+          grid: rect(grid, {round: true}),
+          dock: rect(dock, {round: true}),
         };
         """
     )
@@ -55,7 +53,10 @@ def test_share_mirror_root_transform_and_bundled_fonts_render_in_browser(browser
     shutil.copyfile(REPO_ROOT / "static" / "fonts" / "yolomux-mono.woff2", tmp_path / "yolomux-mono.woff2")
     css = app_css().replace("/static/fonts/yolomux-ui.woff2", "yolomux-ui.woff2").replace("/static/fonts/yolomux-mono.woff2", "yolomux-mono.woff2")
     page = tmp_path / "share-mirror-root-fonts.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""
     <!doctype html>
     <html>
@@ -79,9 +80,7 @@ def test_share_mirror_root_transform_and_bundled_fonts_render_in_browser(browser
       </body>
     </html>
       """,
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[0];
@@ -126,7 +125,10 @@ def test_share_mirror_root_transform_and_bundled_fonts_render_in_browser(browser
 
 def test_share_status_modes_use_distinct_browser_colors(browser, tmp_path):
     page = tmp_path / "share-status-mode-colors.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
         <button class="share-status-pill share-mode-read">YO!share: 1 viewers · 9:23 left</button>
@@ -135,9 +137,7 @@ def test_share_status_modes_use_distinct_browser_colors(browser, tmp_path):
         <div class="share-viewer-banner share-mode-write">Viewing keivenc's session - write - expires in 9:23</div>
       """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const styleFor = selector => {
@@ -160,7 +160,10 @@ def test_share_status_modes_use_distinct_browser_colors(browser, tmp_path):
 
 def test_share_modal_copy_icon_sits_beside_url(browser, tmp_path):
     page = tmp_path / "share-modal-copy-icon.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
         <section id="modal" class="modal app-modal-overlay open share-open">
@@ -184,9 +187,7 @@ def test_share_modal_copy_icon_sits_beside_url(browser, tmp_path):
         </section>
       """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const control = document.querySelector('.share-url-control');
@@ -195,17 +196,14 @@ def test_share_modal_copy_icon_sits_beside_url(browser, tmp_path):
         const primary = document.querySelector('.share-url-primary');
         const primaryStyle = getComputedStyle(primary);
         const actions = document.querySelector('.share-actions');
-        const rect = el => {
-          const r = el.getBoundingClientRect();
-          return {left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height)};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         return {
-          primary: rect(primary),
+          primary: rect(primary, {round: true}),
           primaryBorder: primaryStyle.borderTopColor,
           primaryBackground: primaryStyle.backgroundColor,
-          control: rect(control),
-          input: rect(input),
-          copy: rect(copy),
+          control: rect(control, {round: true}),
+          input: rect(input, {round: true}),
+          copy: rect(copy, {round: true}),
           copyCount: document.querySelectorAll('[data-share-copy]').length,
           copyText: copy.textContent.trim(),
           copyTitle: copy.getAttribute('title'),
@@ -230,7 +228,10 @@ def test_share_modal_copy_icon_sits_beside_url(browser, tmp_path):
 
 def test_share_modal_users_section_is_inline_not_nested_card(browser, tmp_path):
     page = tmp_path / "share-modal-users-inline.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
         <section id="modal" class="modal app-modal-overlay open share-open">
@@ -280,9 +281,7 @@ def test_share_modal_users_section_is_inline_not_nested_card(browser, tmp_path):
         </section>
       """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         document.documentElement.style.setProperty('--pane-split-gap', '6px');
@@ -347,7 +346,10 @@ def test_share_modal_users_section_is_inline_not_nested_card(browser, tmp_path):
 
 def test_share_modal_create_controls_stay_on_one_line_when_wide(browser, tmp_path):
     page = tmp_path / "share-modal-create-one-line.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
         <section id="modal" class="modal app-modal-overlay open share-open">
@@ -378,9 +380,7 @@ def test_share_modal_create_controls_stay_on_one_line_when_wide(browser, tmp_pat
         </section>
       """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const topRows = selector => Array.from(new Set(Array.from(document.querySelectorAll(selector)).map(node => Math.round(node.getBoundingClientRect().top))));
@@ -423,7 +423,10 @@ def test_share_modal_long_active_list_scrolls_inside_dialog(browser, tmp_path):
         for index in range(24)
     )
     page = tmp_path / "share-modal-scroll.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             f"""
         <section id="modal" class="modal app-modal-overlay open share-open">
@@ -446,9 +449,7 @@ def test_share_modal_long_active_list_scrolls_inside_dialog(browser, tmp_path):
         </section>
       """
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const dialog = document.querySelector('.modal-dialog');
@@ -480,7 +481,7 @@ def test_share_modal_long_active_list_scrolls_inside_dialog(browser, tmp_path):
 def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": ["1"],
@@ -572,14 +573,8 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
               const path = {json.dumps(path)};
               const current = {json.dumps(current).replace("</script", "<\\/script")};
               const item = fileEditorItemFor(path);
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 180; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               installShareScrollPublisher();
               installShareReadonlyInteractionBlocker();
               setFileState(path, {{
@@ -617,15 +612,24 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
                 viewState: {{top: 280, left: 0, anchor: 0, head: 0}},
               }}]}}, chrome: {{tabMetaVisible: false, infoSubTab: 'yoagent'}}}});
               renderFileEditorPanel(panel, item);
-              const modeReady = await waitFor(() => panel._cmMode === 'diff' && panel._cmView?.scrollDOM);
+              const modeReady = await waitFor(
+                () => panel._cmMode === 'diff' && panel._cmView?.scrollDOM,
+                {{timeoutMs: 10000, description: 'shared editor diff mode'}}
+              );
               const scroller = panel._cmView?.scrollDOM;
               applyShareScrollState({{target: `editor:${{item}}:editor`, kind: 'editor', path, item, source: 'editor', top: 2320, left: 0, anchor: 0, head: 0}});
               await frame();
               await frame();
-              const diffRowsVisible = await waitFor(() => panel.querySelectorAll('.cm-insertedLine, .cm-deletedLine').length > 0);
+              const diffRowsVisible = await waitFor(
+                () => panel.querySelectorAll('.cm-changedLine').length > 0
+                  && panel.querySelectorAll('.cm-deletedLine, .cm-deletedChunk').length > 0,
+                {{timeoutMs: 10000, description: 'shared editor diff rows'}}
+              );
               const hostTop = Math.round(scroller?.scrollTop || 0);
-              const insertedRows = panel.querySelectorAll('.cm-insertedLine').length;
-              const deletedRows = panel.querySelectorAll('.cm-deletedLine').length;
+              // The product disables intra-line token highlights, so assert the stable full-line/chunk
+              // classes rather than the transient cm-insertedLine token mark.
+              const insertedRows = panel.querySelectorAll('.cm-changedLine').length;
+              const deletedRows = panel.querySelectorAll('.cm-deletedLine, .cm-deletedChunk').length;
               if (scroller) {{
                 scroller.scrollTop = 0;
                 scroller.dispatchEvent(new Event('scroll', {{bubbles: true}}));
@@ -719,7 +723,7 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
 def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": ["alpha", "beta"],
@@ -754,12 +758,12 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
               window.__shareInfoErrors = [];
               window.addEventListener('error', event => window.__shareInfoErrors.push(event.message || String(event.error || event)));
               window.addEventListener('unhandledrejection', event => window.__shareInfoErrors.push(String(event.reason || event)));
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {{frame}} = window.__yolomuxTestHelpers;
               infoPanelSubTab = 'info';
-              transcriptMetaLoaded = true;
-              transcriptMetaLoading = false;
-              transcriptMetaLoadError = '';
-              transcriptMeta = {{
+              transcriptMetadataState.loaded = true;
+              transcriptMetadataState.loading = false;
+              transcriptMetadataState.error = '';
+              transcriptMetadataState.payload = {{
                 session_order: ['beta', 'alpha'],
                 sessions: {{
                   alpha: {{session: 'alpha', project: {{git: {{root: '/repo/client-alpha', cwd: '/repo/client-alpha', branch: 'local-alpha', other_branches: {{branches: [{{name: 'local-alpha', updated: 'later', updated_ts: 200, current: true, subject: 'client alpha row'}}]}}}}, linear: []}}}},
@@ -823,7 +827,7 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
 def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": ["5", "6"],
@@ -886,9 +890,9 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
               window.__shareFinderErrors = [];
               window.addEventListener('error', event => window.__shareFinderErrors.push(event.message || String(event.error || event)));
               window.addEventListener('unhandledrejection', event => window.__shareFinderErrors.push(String(event.reason || event)));
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              transcriptMetaLoaded = true;
-              transcriptMeta = {{
+              const {{frame}} = window.__yolomuxTestHelpers;
+              transcriptMetadataState.loaded = true;
+              transcriptMetadataState.payload = {{
                 session_order: ['5', '6'],
                 sessions: {{
                   '5': {{session: '5', project: {{git: {{root: '/home/test/yolomux.dev1', cwd: '/home/test/yolomux.dev1/src'}}}}, selected_pane: {{current_path: '/home/test/yolomux.dev1/src'}}}},
@@ -964,7 +968,7 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     root_path = str(share_root)
     expires_at = 4102444800.0
     layout = "row@34(left,right)"
-    tabs = f"left:files;right:6,file:{done_path}*"
+    tabs = f"left:__finder__,__differ__,__tabber__;right:6,file:{done_path}*"
     share_ui_state = {
         "layout": layout,
         "tabs": tabs,
@@ -1044,6 +1048,7 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     }
     app = SimpleNamespace(
         sessions=["6"],
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         dangerously_yolo=False,
         verify_share_token=verify_share_token,
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
@@ -1103,14 +1108,8 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
             const donePath = arguments[1];
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {
-                for (let attempt = 0; attempt < 260; attempt += 1) {
-                  if (predicate()) return true;
-                  await frame();
-                }
-                return false;
-              };
+              const {frame} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               const visibleText = selector => Array.from(document.querySelectorAll(selector))
                 .map(node => node.textContent || '')
                 .join('\\n');
@@ -1120,28 +1119,30 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
                 return tab ? tab.textContent : '';
               };
               const finderReady = await waitFor(() => {
-                const pathInput = document.getElementById('fileExplorerPath');
-                const hasDone = Array.from(document.querySelectorAll('.file-tree-row[data-path]'))
+                const pathInput = document.querySelector('#panel-__finder__ .file-explorer-path-inline');
+                const hasDone = Array.from(document.querySelectorAll('#panel-__finder__ .file-tree-row[data-path]'))
                   .some(row => row.dataset.path === donePath);
                 return pathInput?.value === rootPath && hasDone && !pathInput.classList.contains('error');
               });
               const editorReady = await waitFor(() => (document.body.textContent || '').includes('Share viewer parity.'));
               const sessionTabText = tabText();
-              await applyShareUiState({finder: {root: rootPath, rootMode: 'sync', mode: 'diff', session: '6'}});
-              const differReady = await waitFor(() => visibleText('.file-explorer-changes-panel').includes('DONE.md')
-                && !visibleText('.file-explorer-changes-panel').includes('TypeError'));
-              const differText = visibleText('.file-explorer-changes-panel');
-              await applyShareUiState({finder: {root: rootPath, rootMode: 'sync', mode: 'tabber', session: '6'}});
-              const tabberReady = await waitFor(() => Array.from(document.querySelectorAll('.file-tree-row[data-tabber-type="repo"]'))
-                .some(row => row.dataset.tabberRepoRoot === rootPath));
-              const tabberText = visibleText('.file-explorer-changes-panel');
+              activatePaneTab(slotForItem(differItemId), differItemId, {userInitiated: false});
+              await frame();
+              const differReady = await waitFor(() => visibleText('#panel-__differ__ .file-explorer-changes-panel').includes('DONE.md')
+                && !visibleText('#panel-__differ__ .file-explorer-changes-panel').includes('TypeError'));
+              const differText = visibleText('#panel-__differ__ .file-explorer-changes-panel');
+              activatePaneTab(slotForItem(tabberItemId), tabberItemId, {userInitiated: false});
+              await frame();
+              const tabberReady = await waitFor(() => Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="window"]'))
+                .some(row => (row.textContent || '').includes('1:codex')));
+              const tabberText = visibleText('#panel-__tabber__');
               return {
                 finderReady,
                 editorReady,
                 differReady,
                 tabberReady,
-                pathValue: document.getElementById('fileExplorerPath')?.value || '',
-                pathError: document.getElementById('fileExplorerPath')?.classList.contains('error') || false,
+                pathValue: document.querySelector('#panel-__finder__ .file-explorer-path-inline')?.value || '',
+                pathError: document.querySelector('#panel-__finder__ .file-explorer-path-inline')?.classList.contains('error') || false,
                 sessionTabText,
                 bodyHasLoadFailed: (document.body.textContent || '').includes('TypeError: Load failed')
                   || (document.body.textContent || '').includes('Failed to fetch'),
@@ -1169,7 +1170,8 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     assert "finding branch" not in metrics["sessionTabText"], metrics
     assert metrics["bodyHasLoadFailed"] is False, metrics
     assert "DONE.md" in metrics["differText"], metrics
-    assert root_path in metrics["tabberText"], metrics
+    assert "1:codex" in metrics["tabberText"], metrics
+    assert "Compare:" not in metrics["tabberText"], metrics
     assert "valid-share-token" in seen_tokens
 
 
@@ -1198,6 +1200,7 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
 
     app = SimpleNamespace(
         sessions=["6"],
+        tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         dangerously_yolo=False,
         verify_share_token=verify_share_token,
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
@@ -1230,7 +1233,7 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
             """
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               for (let attempt = 0; attempt < 60; attempt += 1) {
                 if (document.querySelector('.share-viewer-banner [data-share-viewer-control="fit"]')) break;
                 await frame();
@@ -1253,8 +1256,8 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
                 rootReplayFlag: root?.dataset?.shareReplayRoot || '',
                 rootInertFlag: root?.dataset?.shareReplayInert || '',
                 rootStatus: root?.dataset?.shareReplayStatus || '',
-                mirroredHandlerCount: root ? root.querySelectorAll('[data-tab], [data-pane-actions], [data-pane-minimize], .app-menu, .panel, .terminal, .xterm').length : -1,
-                rootChildCount: root?.children?.length ?? -1,
+                    mirroredHandlerCount: root ? root.querySelectorAll('[data-tab], [data-pane-actions], [data-pane-minimize], .app-menu, .panel, .terminal, .xterm').length : -1,
+                    rootChildCount: root?.children?.length ?? -1,
                 bannerExists: Boolean(banner),
                 bannerOutsideRoot: Boolean(banner && root && !root.contains(banner)),
                 bannerParentIsBody: banner?.parentElement === document.body,
@@ -1345,15 +1348,8 @@ def test_share_replay_default_routes_write_share_to_replay_shell(browser, tmp_pa
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async (predicate, timeoutMs = 6500) => {
-            const deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
-              if (predicate()) return true;
-              await new Promise(resolve => setTimeout(resolve, 50));
-            }
-            return predicate();
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = (label, sequence) => ({
             digest: `sha256:${label}`,
             viewport: {width: 1200, height: 700},
@@ -1371,16 +1367,25 @@ def test_share_replay_default_routes_write_share_to_replay_shell(browser, tmp_pa
             terminals: [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch: sequence}]
           });
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 2, sequence: 1, payload: keyframe('host frame one', 1)});
-          const mounted = await waitFor(() => terminals.get('6')?.socket?.readyState === WebSocket.OPEN
-            && typeof terminals.get('6')?.term?._onData === 'function'
-            && document.querySelector('[data-testid="writer-pane"] #term-6 .xterm'));
+          const mounted = await waitFor(
+            () => Boolean(terminals.get('6')?.socket?.readyState === WebSocket.OPEN
+              && typeof terminals.get('6')?.term?._onData === 'function'
+              && document.querySelector('[data-testid="writer-pane"] #term-6 .xterm')),
+            {timeoutMs: 6500, intervalMs: 50, description: 'writable share terminal'}
+          );
           const textBeforeInput = document.querySelector('[data-testid="writer-pane"] p')?.textContent || '';
           const terminalSocketBefore = (window.__bootSocketInstances || []).find(socket => socket.url.includes('/ws/share-view') && socket.url.includes('session=6'));
           terminals.get('6')?.term?._onData?.('echo writer\\n');
-          await waitFor(() => (window.__bootSocketInstances || []).some(socket => socket.url.includes('/ws/share-ui') && socket.sent.length > 0));
+          await waitFor(
+            () => (window.__bootSocketInstances || []).some(socket => socket.url.includes('/ws/share-ui') && socket.sent.length > 0),
+            {timeoutMs: 6500, intervalMs: 50, description: 'share UI input message'}
+          );
           const textAfterInput = document.querySelector('[data-testid="writer-pane"] p')?.textContent || '';
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 2, sequence: 2, payload: keyframe('host frame two', 2)});
-          await waitFor(() => (document.querySelector('[data-testid="writer-pane"] p')?.textContent || '') === 'host frame two');
+          await waitFor(
+            () => (document.querySelector('[data-testid="writer-pane"] p')?.textContent || '') === 'host frame two',
+            {timeoutMs: 6500, intervalMs: 50, description: 'second host replay frame'}
+          );
           const sockets = (window.__bootSocketInstances || []).map(socket => ({
             url: socket.url,
             sent: socket.sent.map(message => JSON.parse(message)),
@@ -1449,14 +1454,7 @@ def test_share_host_active_share_publishes_and_answers_dom_keyframes(browser, tm
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const waitFor = async (predicate, timeoutMs = 6500) => {
-            const deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
-              if (predicate()) return true;
-              await new Promise(resolve => setTimeout(resolve, 50));
-            }
-            return predicate();
-          };
+          const waitFor = window.__yolomuxTestWaitFor;
           const hostSockets = () => (window.__bootSocketInstances || []).filter(socket => socket.url.includes('/ws/share-host'));
           const hostMessages = () => hostSockets().flatMap(socket => socket.sent.map(message => JSON.parse(message)));
           const seededShare = {
@@ -1474,7 +1472,10 @@ def test_share_host_active_share_publishes_and_answers_dom_keyframes(browser, tm
           ensureShareHostSockets();
           const replayEnabledAfterActivation = shareReplayFeatureEnabled();
           const publishedInitial = sharePublishDomKeyframe('join');
-          const sentInitial = await waitFor(() => hostMessages().filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).length >= 1);
+          const sentInitial = await waitFor(
+            () => hostMessages().filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).length >= 1,
+            {timeoutMs: 6500, intervalMs: 50, description: 'initial share keyframe'}
+          );
           const publishedFresh = sharePublishDomKeyframe('manual-debug');
           const keyframesBeforeBurst = hostMessages().filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).length;
           shareReplayHostLastKeyframeAt = Date.now() - shareReplayHostKeyframeMinIntervalMs + 250;
@@ -1490,7 +1491,10 @@ def test_share_host_active_share_publishes_and_answers_dom_keyframes(browser, tm
           }
           const keyframesBeforeCoalescedTimer = hostMessages().filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).length;
           const pendingAfterBurst = Boolean(shareReplayHostKeyframeTimer);
-          const answeredRequest = await waitFor(() => hostMessages().filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).length >= keyframesBeforeBurst + 1);
+          const answeredRequest = await waitFor(
+            () => hostMessages().filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).length >= keyframesBeforeBurst + 1,
+            {timeoutMs: 6500, intervalMs: 50, description: 'coalesced keyframe response'}
+          );
           const sockets = hostSockets();
           const messages = hostMessages();
           const keyframes = messages.filter(message => message.type === shareMirrorProtocol.frames.domKeyframe);
@@ -1566,15 +1570,8 @@ def test_share_dom_keyframe_clears_pending_mutation_delta(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async (predicate, timeoutMs = 2500) => {
-            const deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return predicate();
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const hostSockets = () => (window.__bootSocketInstances || []).filter(socket => socket.url.includes('/ws/share-host'));
           const hostMessages = () => hostSockets().flatMap(socket => socket.sent.map(message => JSON.parse(message)));
           const seededShare = {
@@ -1590,7 +1587,10 @@ def test_share_dom_keyframe_clears_pending_mutation_delta(browser, tmp_path):
           window.__fixtureSharePayload = seededShare;
           setActiveShares([seededShare]);
           ensureShareHostSockets();
-          const opened = await waitFor(() => hostSockets().some(socket => socket.readyState === WebSocket.OPEN));
+          const opened = await waitFor(
+            () => hostSockets().some(socket => socket.readyState === WebSocket.OPEN),
+            {timeoutMs: 2500, description: 'share host socket'}
+          );
           const root = appRootElement();
           const initialPayload = shareCreateDomKeyframePayload('join');
           await frame();
@@ -1673,14 +1673,8 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
             const session = arguments[0];
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {
-                for (let attempt = 0; attempt < 180; attempt += 1) {
-                  if (predicate()) return true;
-                  await frame();
-                }
-                return false;
-              };
+              const {frame} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               const bulk = document.createElement('section');
               bulk.id = 'share-large-dom-payload';
               bulk.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;';
@@ -1707,7 +1701,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
               if (!createdShare?.url) throw new Error('share create returned no URL');
               setActiveShares([...activeShares.filter(share => share.token !== createdShare.token), createdShare]);
               ensureShareHostSockets();
-              const opened = await waitFor(() => Array.from(shareHostSockets.values()).some(socket => socket.readyState === WebSocket.OPEN));
+              const opened = await waitFor(() => shareHostConnectionSockets().some(socket => socket.readyState === WebSocket.OPEN));
               const published = sharePublishDomKeyframe('join');
               await frame();
               const keyframe = shareCreateDomKeyframePayload('manual-debug');
@@ -1787,7 +1781,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
             """
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               document.getElementById('share-check-finder')?.remove();
               document.getElementById('share-check-differ')?.remove();
               const finder = document.createElement('section');
@@ -1820,7 +1814,7 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
             """
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {frame} = window.__yolomuxTestHelpers;
               document.getElementById('share-check-finder')?.remove();
               document.getElementById('share-check-differ')?.remove();
               const differ = document.createElement('section');
@@ -1854,7 +1848,8 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
         stop_isolated_browser_share_app(runtime)
 
 
-def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, monkeypatch, tmp_path):
+@pytest.mark.parametrize("matrix_section", ("chrome", "finder", "resilience", "popovers"))
+def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, monkeypatch, tmp_path, matrix_section):
     repo_root = tmp_path / "share-matrix-repo"
     (repo_root / "src").mkdir(parents=True)
     (repo_root / "docs").mkdir()
@@ -1865,6 +1860,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
     runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
     session = runtime.sessions[0]
     server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    # The canonical lane uses xdist worksteal: each parameter can execute in a different process,
+    # so a module-scoped Selenium fixture cannot share a driver across this matrix.  Keep the
+    # independent viewer local, which preserves the currently measured parallel execution and
+    # avoids falsely implying cross-worker browser reuse.
     viewer = new_chrome_driver("1220,742")
     install_browser_websocket_tracker(viewer)
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -2063,17 +2062,13 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             const session = arguments[1];
             const done = arguments[arguments.length - 1];
             (async () => {
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async (predicate, timeoutMs = 10000) => {
-                const deadline = Date.now() + timeoutMs;
-                while (Date.now() < deadline) {
-                  if (predicate()) return true;
-                  await new Promise(resolve => setTimeout(resolve, 50));
-                }
-                return predicate();
-              };
+              const {frame} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               await ensureTerminalRunning(session);
-              if (!await waitFor(() => document.getElementById(terminalDomId(session))?.querySelector?.('.xterm') && terminals.get(session)?.socket?.readyState === WebSocket.OPEN, 10000)) {
+              if (!await waitFor(
+                () => document.getElementById(terminalDomId(session))?.querySelector?.('.xterm') && terminals.get(session)?.socket?.readyState === WebSocket.OPEN,
+                {timeoutMs: 10000, intervalMs: 50, description: 'host terminal socket'}
+              )) {
                 throw new Error('host terminal did not open before share create');
               }
               const seed = shareLayoutSeed();
@@ -2098,11 +2093,14 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
               if (!createdShare?.url) throw new Error('share create returned no URL');
               setActiveShares([...activeShares.filter(share => share.token !== createdShare.token), createdShare]);
               ensureShareHostSockets();
-              if (!await waitFor(() => Array.from(shareHostSockets.values()).some(socket => socket.readyState === WebSocket.OPEN))) {
+              if (!await waitFor(
+                () => shareHostConnectionSockets().some(socket => socket.readyState === WebSocket.OPEN),
+                {timeoutMs: 10000, intervalMs: 50, description: 'share host connection socket'}
+              )) {
                 throw new Error('share host socket did not open');
               }
               window.__shareMatrix = (() => {
-                const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+                const {frame} = window.__yolomuxTestHelpers;
                 const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
                 const marker = () => {
                   let node = document.getElementById('shareMatrixMarker');
@@ -2110,7 +2108,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     node = document.createElement('section');
                     node.id = 'shareMatrixMarker';
                     node.dataset.shareVolatile = 'true';
-                    node.style.cssText = 'position:absolute;left:8px;top:48px;z-index:20;max-width:760px;padding:4px 6px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font:12px/1.3 var(--ui-font);';
+                        node.style.cssText = 'position:absolute;left:8px;top:48px;z-index:20;max-width:760px;padding:4px 6px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font:12px/1.3 var(--ui-font);pointer-events:none;';
                     appRootElement().appendChild(node);
                   }
                   return node;
@@ -2124,7 +2122,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 };
                 const detail = extra => ({
                   ...extra,
-                  finderOpen: itemInLayout(fileExplorerItemId),
+                      finderOpen: itemInLayout(fileExplorerItemId),
+                      finderSlot: slotForItem(fileExplorerItemId) || '',
+                      finderPaneRole: slotForItem(fileExplorerItemId) ? paneRoleForSlot(slotForItem(fileExplorerItemId)).kind : '',
+                      finderPaneSide: slotForItem(fileExplorerItemId) ? paneRoleForSlot(slotForItem(fileExplorerItemId)).side : null,
                   finderMode: normalizeFileExplorerMode(fileExplorerMode),
                   rootMode: fileExplorerRootModeValue(),
                   treeSortMode: fileExplorerTreeSortMode,
@@ -2152,7 +2153,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   await frame();
                   setFileExplorerRootMode('fixed', {sync: false, persist: false});
                   await openFileExplorerAt(repo);
-                  fileExplorerSessionFilesPayload = {
+                  fileExplorerSessionFilesState.payload = {
                     session,
                     loaded: true,
                     errors: [],
@@ -2313,9 +2314,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 	                    closeTransient();
 	                    await ensureFinder();
 	                    const sentinelFile = {session, agent: 'codex', status: 'M', repo, path: 'STALE_DIFF_SENTINEL.md', abs_path: `${repo}/STALE_DIFF_SENTINEL.md`, mtime: 400, added: 8, removed: 2};
-	                    fileExplorerSessionFilesPayload = {
-	                      ...fileExplorerSessionFilesPayload,
-	                      files: [sentinelFile, ...(fileExplorerSessionFilesPayload.files || [])],
+	                    fileExplorerSessionFilesState.payload = {
+	                      ...fileExplorerSessionFilesState.payload,
+	                      files: [sentinelFile, ...(fileExplorerSessionFilesState.payload.files || [])],
 	                    };
 	                    setFileExplorerMode('diff');
 	                    renderFileExplorerChangesPanels({force: true});
@@ -2347,7 +2348,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 	                      node.dataset.phase = 'finder-restore-topology-keyframe';
 	                      node.dataset.detail = JSON.stringify(state);
 	                      node.textContent = `Share matrix phase=finder-restore-topology-keyframe mode=${state.finderMode} root=${state.rootMode} suppressedDeltas=${suppressedDeltas}`;
-	                      const topologyPublished = await waitFor(() => Math.max(0, Math.round(Number(shareReplayHostLastKeyframeAt) || 0)) > priorLastKeyframeAt, 7500);
+	                      const topologyPublished = await waitFor(
+	                        () => Math.max(0, Math.round(Number(shareReplayHostLastKeyframeAt) || 0)) > priorLastKeyframeAt,
+	                        {timeoutMs: 7500, description: 'Finder topology keyframe publication'}
+	                      );
 	                      await frame();
 	                      return {published: true, topologyPublished, phase: 'finder-restore-topology-keyframe', suppressedDeltas, ...state};
 	                    } finally {
@@ -2381,7 +2385,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 		                        geometryDigests += 1;
 		                        await frame();
 		                      }
-		                      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+		                      if (delay > 0 && index + 1 < total) await new Promise(resolve => setTimeout(resolve, delay));
 		                    }
 		                    if (!itemInLayout(fileExplorerItemId)) {
 		                      toggleFileExplorerShortcut();
@@ -2406,11 +2410,22 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     return publish('terminal-expand-with-finder');
                   },
                   async tabPopover() {
-                    await waitFor(() => Boolean(document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover')), 2000);
-                    await frame();
-                    await frame();
+                    await waitFor(
+                      () => Boolean(document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover')),
+                      {timeoutMs: 2000, description: 'shared tab popover'}
+                    );
                     const popover = document.querySelector('.pane-tab-detached-popover.popover-open, .dockview-pane-tab.popover-open > .session-popover, .pane-tab.popover-open > .session-popover');
                     if (!popover) throw new Error('tab hover popover did not open through the real hover path');
+                    let priorGeometry = '';
+                    let stableFrames = 0;
+                    for (let attempt = 0; attempt < 8 && stableFrames < 2; attempt += 1) {
+                      await frame();
+                      const rect = appSpaceRect(popover);
+                      const geometry = [popover.style.left, popover.style.top, popover.style.height, rect.left, rect.top, rect.width, rect.height].join('|');
+                      stableFrames = geometry === priorGeometry ? stableFrames + 1 : 0;
+                      priorGeometry = geometry;
+                    }
+                    if (stableFrames < 2) throw new Error('tab hover popover geometry did not settle before share publish');
                     const popoverRect = appSpaceRect(popover);
                     return publish('tab-hover-popover', {
                       tabPopoverRect: {left: Math.round(popoverRect.left), top: Math.round(popoverRect.top), width: Math.round(popoverRect.width), height: Math.round(popoverRect.height)},
@@ -2457,45 +2472,46 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert initial_metrics["status"] == "mirrored"
         assert_terminal_health(initial_metrics)
 
-        for menu_id in ["file", "view", "tmux", "tabs", "help"]:
-            host = host_phase("menu", menu_id)
-            metrics = wait_viewer_phase(f"menu-{menu_id}")
-            assert host["menuOpen"] == menu_id, host
-            assert metrics["menuOpen"] == menu_id, metrics
-            assert metrics["detail"]["menuId"] == menu_id, metrics
-            assert metrics["menuText"].strip(), metrics
-            assert metrics["menuVisible"] is True, metrics
-            assert metrics["menuCommandCount"] >= 1, metrics
-            assert metrics["menuCommandCount"] == metrics["detail"]["commandCount"], metrics
-            assert metrics["menuActiveCommandCount"] >= 1, metrics
-            assert metrics["menuActiveCommandCount"] == metrics["detail"]["activeCommandCount"], metrics
-            assert metrics["menuRect"]["width"] >= 80 and metrics["menuRect"]["height"] >= 24, metrics
+        if matrix_section == "chrome":
+            for menu_id in ["file", "view", "tmux", "tabs", "help"]:
+                host = host_phase("menu", menu_id)
+                metrics = wait_viewer_phase(f"menu-{menu_id}")
+                assert host["menuOpen"] == menu_id, host
+                assert metrics["menuOpen"] == menu_id, metrics
+                assert metrics["detail"]["menuId"] == menu_id, metrics
+                assert metrics["menuText"].strip(), metrics
+                assert metrics["menuVisible"] is True, metrics
+                assert metrics["menuCommandCount"] >= 1, metrics
+                assert metrics["menuCommandCount"] == metrics["detail"]["commandCount"], metrics
+                assert metrics["menuActiveCommandCount"] >= 1, metrics
+                assert metrics["menuActiveCommandCount"] == metrics["detail"]["activeCommandCount"], metrics
+                assert metrics["menuRect"]["width"] >= 80 and metrics["menuRect"]["height"] >= 24, metrics
 
-        host_phase("shortcuts")
-        shortcuts = wait_viewer_phase("help-shortcuts")
-        assert shortcuts["shortcutsOpen"] is True, shortcuts
-        assert "Keyboard Shortcuts and Legends" in shortcuts["shortcutsText"], shortcuts
+            host_phase("shortcuts")
+            shortcuts = wait_viewer_phase("help-shortcuts")
+            assert shortcuts["shortcutsOpen"] is True, shortcuts
+            assert "Keyboard Shortcuts and Legends" in shortcuts["shortcutsText"], shortcuts
 
-        host_phase("about")
-        about = wait_viewer_phase("help-about")
-        assert any(title.endswith("About") for title in about["modalTitles"]) or "About" in about["modalText"], about
-        assert "Keiven Chang" in about["text"], about
+            host_phase("about")
+            about = wait_viewer_phase("help-about")
+            assert any(title.endswith("About") for title in about["modalTitles"]) or "About" in about["modalText"], about
+            assert "Keiven Chang" in about["text"], about
 
-        host_phase("shareModal")
-        share_modal = wait_viewer_phase("share-modal")
-        assert "share-open" in share_modal["modalClass"], share_modal
-        assert any("YO!share" in title for title in share_modal["modalTitles"]) or "YO!share" in share_modal["modalText"], share_modal
-        assert "debug upload on" in share_modal["text"] or "Debug/profiling upload" in share_modal["text"], share_modal
-        assert share_modal["hasSecretToken"] is False, share_modal
-        assert created["token"] not in share_modal["text"], share_modal
+            host_phase("shareModal")
+            share_modal = wait_viewer_phase("share-modal")
+            assert "share-open" in share_modal["modalClass"], share_modal
+            assert any("YO!share" in title for title in share_modal["modalTitles"]) or "YO!share" in share_modal["modalText"], share_modal
+            assert "debug upload on" in share_modal["text"] or "Debug/profiling upload" in share_modal["text"], share_modal
+            assert share_modal["hasSecretToken"] is False, share_modal
+            assert created["token"] not in share_modal["text"], share_modal
 
-        host_phase("info", "info")
-        info = wait_viewer_phase("info-info")
-        assert "YO!info" in info["text"] or "Session" in info["text"], info
+            host_phase("info", "info")
+            info = wait_viewer_phase("info-info")
+            assert "YO!info" in info["text"] or "Session" in info["text"], info
 
-        host_phase("info", "yoagent")
-        yoagent = wait_viewer_phase("info-yoagent")
-        assert "YO!agent" in yoagent["text"] or "Ask YO!agent" in yoagent["text"], yoagent
+            host_phase("info", "yoagent")
+            yoagent = wait_viewer_phase("info-yoagent")
+            assert "YO!agent" in yoagent["text"] or "Ask YO!agent" in yoagent["text"], yoagent
 
         finder_cases = [
             ("files", "sync", "az", "none"),
@@ -2506,51 +2522,53 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             ("diff", "fixed", "az", "date"),
             ("files", "sync", "az", "relative"),
         ]
-        for mode, root_mode, sort_mode, date_mode in finder_cases:
-            host = host_phase("finder", mode, root_mode, sort_mode, date_mode)
-            metrics = wait_viewer_phase(f"finder-{mode}-{root_mode}-{sort_mode}-{date_mode}")
-            assert host["finderMode"] == mode, host
-            assert host["rootMode"] == root_mode, host
-            assert host["dateMode"] == date_mode, host
-            assert metrics["detail"]["finderMode"] == mode, metrics
-            assert metrics["detail"]["rootMode"] == root_mode, metrics
-            assert metrics["detail"]["dateMode"] == date_mode, metrics
-            assert metrics["detail"]["finderPanelCount"] <= 1, metrics
-            if mode == "diff":
-                assert host["sessionFilesSortMode"] == sort_mode, host
-            else:
-                assert host["treeSortMode"] == sort_mode, host
-            if date_mode == "relative":
-                assert "Ago" in metrics["text"] or "date=relative/Ago" in metrics["text"], metrics
+        if matrix_section == "finder":
+            for mode, root_mode, sort_mode, date_mode in finder_cases:
+                host = host_phase("finder", mode, root_mode, sort_mode, date_mode)
+                metrics = wait_viewer_phase(f"finder-{mode}-{root_mode}-{sort_mode}-{date_mode}")
+                assert host["finderMode"] == mode, host
+                assert host["rootMode"] == root_mode, host
+                assert host["dateMode"] == date_mode, host
+                assert metrics["detail"]["finderMode"] == mode, metrics
+                assert metrics["detail"]["rootMode"] == root_mode, metrics
+                assert metrics["detail"]["dateMode"] == date_mode, metrics
+                assert metrics["detail"]["finderPanelCount"] <= 3, metrics
+                if mode == "diff":
+                    assert host["sessionFilesSortMode"] == sort_mode, host
+                else:
+                    assert host["treeSortMode"] == sort_mode, host
+                if date_mode == "relative":
+                    assert "Ago" in metrics["text"] or "date=relative/Ago" in metrics["text"], metrics
 
-        for visible, mode in [(False, "files"), (True, "files"), (False, "diff"), (True, "diff")]:
-            host = host_phase("visible", visible, mode)
-            metrics = wait_viewer_phase(f"finder-{'show' if visible else 'hide'}-{mode}")
-            assert host["finderOpen"] is visible, host
-            assert metrics["detail"]["finderOpen"] is visible, metrics
-            assert metrics["detail"]["finderPanelCount"] <= 1, metrics
+            for visible, mode in [(False, "files"), (True, "files"), (False, "diff"), (True, "diff")]:
+                host = host_phase("visible", visible, mode)
+                metrics = wait_viewer_phase(f"finder-{'show' if visible else 'hide'}-{mode}")
+                assert host["finderOpen"] is visible, json.dumps(host, sort_keys=True)
+                assert metrics["detail"]["finderOpen"] is visible, metrics
+                assert metrics["detail"]["finderPanelCount"] <= 3, metrics
 
-        host_phase("staleDifferPrecondition")
-        stale_differ = wait_viewer_phase("finder-restore-stale-diff")
-        assert stale_differ["staleDifferSentinel"] is True, stale_differ
-        assert stale_differ["changesPanelCount"] >= 1, stale_differ
-        automatic_restore = host_phase("automaticFinderRestore")
-        assert automatic_restore["topologyPublished"] is True, automatic_restore
-        restored_finder = wait_viewer_phase("finder-restore-topology-keyframe", timeout=14)
-        assert restored_finder["detail"]["finderOpen"] is True, restored_finder
-        assert restored_finder["detail"]["finderMode"] == "files", restored_finder
-        assert restored_finder["detail"]["finderPanelCount"] <= 1, restored_finder
-        assert restored_finder["staleDifferSentinel"] is False, restored_finder
-        assert restored_finder["changesPanelCount"] == 0, restored_finder
+            host_phase("staleDifferPrecondition")
+            stale_differ = wait_viewer_phase("finder-restore-stale-diff")
+            assert stale_differ["staleDifferSentinel"] is True, stale_differ
+            assert stale_differ["changesPanelCount"] >= 1, stale_differ
+            automatic_restore = host_phase("automaticFinderRestore")
+            assert automatic_restore["topologyPublished"] is True, automatic_restore
+            restored_finder = wait_viewer_phase("finder-restore-topology-keyframe", timeout=14)
+            assert restored_finder["detail"]["finderOpen"] is True, restored_finder
+            assert restored_finder["detail"]["finderMode"] == "files", restored_finder
+            assert restored_finder["detail"]["finderPanelCount"] <= 3, restored_finder
+            assert restored_finder["staleDifferSentinel"] is False, restored_finder
+            assert restored_finder["changesPanelCount"] <= 1, restored_finder
 
-        before_rapid = viewer_state()
-        rapid_loop = host_phase("finderToggleLoop", 6, 0, "rapid")
-        assert rapid_loop["finderOpen"] is True, rapid_loop
-        rapid = wait_viewer_phase("finder-toggle-loop-rapid", timeout=14)
-        assert rapid["detail"]["finderOpen"] is True, rapid
-        assert rapid["detail"]["count"] == 6, rapid
-        assert_terminal_health(rapid)
-        assert rapid["droppedFrames"] == before_rapid["droppedFrames"], json.dumps({
+        if matrix_section == "resilience":
+            before_rapid = viewer_state()
+            rapid_loop = host_phase("finderToggleLoop", 6, 0, "rapid")
+            assert rapid_loop["finderOpen"] is True, rapid_loop
+            rapid = wait_viewer_phase("finder-toggle-loop-rapid", timeout=14)
+            assert rapid["detail"]["finderOpen"] is True, rapid
+            assert rapid["detail"]["count"] == 6, rapid
+            assert_terminal_health(rapid)
+            assert rapid["droppedFrames"] == before_rapid["droppedFrames"], json.dumps({
             "beforeDropped": before_rapid["droppedFrames"],
             "afterDropped": rapid["droppedFrames"],
             "lastReplayError": rapid["lastReplayError"],
@@ -2558,18 +2576,18 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             "keyframeRequestsSuppressed": rapid["keyframeRequestsSuppressed"],
             "staleFrames": rapid["staleFrames"],
             "status": rapid["status"],
-        }, sort_keys=True)
-        assert rapid["keyframeRequests"] == before_rapid["keyframeRequests"], {"before": before_rapid, "after": rapid}
+            }, sort_keys=True)
+            assert rapid["keyframeRequests"] == before_rapid["keyframeRequests"], {"before": before_rapid, "after": rapid}
 
-        before_paused = viewer_state()
-        paused_loop = host_phase("finderToggleLoop", 6, 140, "paused")
-        assert paused_loop["finderOpen"] is True, paused_loop
-        paused = wait_viewer_phase("finder-toggle-loop-paused", timeout=16)
-        assert paused["detail"]["finderOpen"] is True, paused
-        assert paused["detail"]["count"] == 6, paused
-        assert paused["detail"]["pauseMs"] == 140, paused
-        assert_terminal_health(paused)
-        assert paused["droppedFrames"] == before_paused["droppedFrames"], json.dumps({
+            before_paused = viewer_state()
+            paused_loop = host_phase("finderToggleLoop", 6, 140, "paused")
+            assert paused_loop["finderOpen"] is True, paused_loop
+            paused = wait_viewer_phase("finder-toggle-loop-paused", timeout=16)
+            assert paused["detail"]["finderOpen"] is True, paused
+            assert paused["detail"]["count"] == 6, paused
+            assert paused["detail"]["pauseMs"] == 140, paused
+            assert_terminal_health(paused)
+            assert paused["droppedFrames"] == before_paused["droppedFrames"], json.dumps({
             "beforeDropped": before_paused["droppedFrames"],
             "afterDropped": paused["droppedFrames"],
             "lastReplayError": paused["lastReplayError"],
@@ -2577,20 +2595,20 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             "keyframeRequestsSuppressed": paused["keyframeRequestsSuppressed"],
             "staleFrames": paused["staleFrames"],
             "status": paused["status"],
-        }, sort_keys=True)
-        assert paused["keyframeRequests"] == before_paused["keyframeRequests"], {"before": before_paused, "after": paused}
+            }, sort_keys=True)
+            assert paused["keyframeRequests"] == before_paused["keyframeRequests"], {"before": before_paused, "after": paused}
 
-        before_safari = viewer_state()
-        safari_loop = host_phase("finderToggleLoop", 3, 2000, "safari-cadence", True)
-        assert safari_loop["finderOpen"] is True, safari_loop
-        assert safari_loop["geometryDigests"] == 3, safari_loop
-        safari = wait_viewer_phase("finder-toggle-loop-safari-cadence", timeout=20)
-        assert safari["detail"]["finderOpen"] is True, safari
-        assert safari["detail"]["count"] == 3, safari
-        assert safari["detail"]["pauseMs"] == 2000, safari
-        assert safari["detail"]["geometryDigests"] == 3, safari
-        assert_terminal_health(safari)
-        assert safari["droppedFrames"] == before_safari["droppedFrames"], json.dumps({
+            before_safari = viewer_state()
+            safari_loop = host_phase("finderToggleLoop", 3, 2000, "safari-cadence", True)
+            assert safari_loop["finderOpen"] is True, safari_loop
+            assert safari_loop["geometryDigests"] == 3, safari_loop
+            safari = wait_viewer_phase("finder-toggle-loop-safari-cadence", timeout=20)
+            assert safari["detail"]["finderOpen"] is True, safari
+            assert safari["detail"]["count"] == 3, safari
+            assert safari["detail"]["pauseMs"] == 2000, safari
+            assert safari["detail"]["geometryDigests"] == 3, safari
+            assert_terminal_health(safari)
+            assert safari["droppedFrames"] == before_safari["droppedFrames"], json.dumps({
             "beforeDropped": before_safari["droppedFrames"],
             "afterDropped": safari["droppedFrames"],
             "lastReplayError": safari["lastReplayError"],
@@ -2598,42 +2616,43 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             "keyframeRequestsSuppressed": safari["keyframeRequestsSuppressed"],
             "staleFrames": safari["staleFrames"],
             "status": safari["status"],
-        }, sort_keys=True)
-        assert safari["keyframeRequests"] == before_safari["keyframeRequests"], {"before": before_safari, "after": safari}
+            }, sort_keys=True)
+            assert safari["keyframeRequests"] == before_safari["keyframeRequests"], {"before": before_safari, "after": safari}
 
-        host_phase("expandWithFinder")
-        expanded = wait_viewer_phase("terminal-expand-with-finder")
-        assert expanded["finderPanelCount"] <= 1, expanded
-        assert_terminal_health(expanded)
+        if matrix_section == "popovers":
+            host_phase("expandWithFinder")
+            expanded = wait_viewer_phase("terminal-expand-with-finder")
+            assert expanded["finderPanelCount"] <= 1, expanded
+            assert_terminal_health(expanded)
 
-        browser.execute_script("tabPopoverShowDelayMs = 0; tabPopoverFollowDelayMs = 0;")
-        host_tab = browser.execute_script(
+            browser.execute_script("tabPopoverShowDelayMs = 0; tabPopoverFollowDelayMs = 0;")
+            host_tab = browser.execute_script(
             """
             return Array.from(document.querySelectorAll('.dockview-pane-tab, .pane-tab'))
               .find(tab => tab.__yolomuxDetachedPopover || tab.querySelector(':scope > .session-popover'));
             """
-        )
-        assert host_tab is not None
-        ActionChains(browser).move_to_element(host_tab).perform()
-        host_phase("tabPopover")
-        tab = wait_viewer_phase("tab-hover-popover")
-        assert tab["tabPopoverText"].strip(), tab
-        expected_rect = tab["detail"].get("tabPopoverRect")
-        actual_rect = tab.get("tabPopoverRect")
-        assert expected_rect and actual_rect, tab
-        for key in ("left", "top", "width", "height"):
-            assert abs(int(actual_rect[key]) - int(expected_rect[key])) <= 2, json.dumps(tab, indent=2, sort_keys=True)
-        assert tab["tabPopoverStyle"].get("left") == tab["detail"]["tabPopoverStyle"]["left"], tab
-        assert tab["tabPopoverStyle"].get("top") == tab["detail"]["tabPopoverStyle"]["top"], tab
-        actual_height = float(str(tab["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
-        expected_height = float(str(tab["detail"]["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
-        assert abs(actual_height - expected_height) <= 2, tab
+            )
+            assert host_tab is not None
+            fast_pointer_actions(browser).move_to_element(host_tab).perform()
+            host_phase("tabPopover")
+            tab = wait_viewer_phase("tab-hover-popover")
+            assert tab["tabPopoverText"].strip(), tab
+            expected_rect = tab["detail"].get("tabPopoverRect")
+            actual_rect = tab.get("tabPopoverRect")
+            assert expected_rect and actual_rect, tab
+            for key in ("left", "top", "width", "height"):
+                assert abs(int(actual_rect[key]) - int(expected_rect[key])) <= 2, json.dumps(tab, indent=2, sort_keys=True)
+            assert tab["tabPopoverStyle"].get("left") == tab["detail"]["tabPopoverStyle"]["left"], tab
+            assert tab["tabPopoverStyle"].get("top") == tab["detail"]["tabPopoverStyle"]["top"], tab
+            actual_height = float(str(tab["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
+            expected_height = float(str(tab["detail"]["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
+            assert abs(actual_height - expected_height) <= 2, tab
 
-        host_phase("repoPopover")
-        repo = wait_viewer_phase("finder-repo-popover")
-        assert "feature/share-matrix" in repo["repoPopoverText"], repo
-        assert "2 ahead" in repo["repoPopoverText"], repo
-        assert "3 dirty" in repo["repoPopoverText"], repo
+            host_phase("repoPopover")
+            repo = wait_viewer_phase("finder-repo-popover")
+            assert "feature/share-matrix" in repo["repoPopoverText"], repo
+            assert "2 ahead" in repo["repoPopoverText"], repo
+            assert "3 dirty" in repo["repoPopoverText"], repo
 
         final_metrics = viewer_state()
         max_expected_keyframe_requests = int(final_metrics["elapsedMs"] // 10000) + 1
@@ -2642,7 +2661,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         assert final_metrics["keyframeRequestBackoffMs"] == 0, final_metrics
         assert final_metrics["keyframeRequests"] <= max_expected_keyframe_requests, final_metrics
         assert final_metrics["rootChildren"] > 0, final_metrics
-        assert_terminal_health(final_metrics)
+        # The chrome section ends in YO!agent, whose pane intentionally replaces the visible terminal.
+        # The initial replay assertion above already proves its terminal placeholder/socket contract.
+        if matrix_section != "chrome":
+            assert_terminal_health(final_metrics)
     finally:
         viewer.quit()
         stop_browser_share_server(server, thread)
@@ -2680,7 +2702,7 @@ def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(bro
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           window.__replayHandlerRan = false;
           window.__replayScriptRan = false;
@@ -2917,7 +2939,7 @@ def test_share_replay_popups_menus_and_modals_use_normal_dom_replay(browser, tmp
         const closePayload = arguments[1];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 22, sequence: 1, payload: openPayload});
           await frame();
           const openText = document.getElementById('appRoot')?.textContent || '';
@@ -3014,14 +3036,8 @@ def test_share_replay_shell_rebinds_xterm_to_moving_terminal_placeholder(browser
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 180; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = (label, terminalEpoch, includeTerminal = true) => ({
             digest: `sha256:${label}`,
             viewport: {width: 1200, height: 700},
@@ -3038,8 +3054,8 @@ def test_share_replay_shell_rebinds_xterm_to_moving_terminal_placeholder(browser
             terminals: includeTerminal ? [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch}] : []
           });
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 1, sequence: 1, payload: keyframe('left-pane', 1)});
-          const mounted = await waitFor(() => terminals.get('6')?.socket?.readyState === WebSocket.OPEN
-            && document.querySelector('[data-testid="left-pane"] #term-6 .xterm'));
+          const mounted = await waitFor(() => Boolean(terminals.get('6')?.socket?.readyState === WebSocket.OPEN
+            && document.querySelector('[data-testid="left-pane"] #term-6 .xterm')));
           const firstItem = terminals.get('6');
           const firstTerm = firstItem?.term || null;
           const firstElement = firstTerm?.element || null;
@@ -3132,14 +3148,8 @@ def test_share_replay_delta_rebinds_xterm_to_moved_terminal_placeholder(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 180; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = {
             digest: '',
             viewport: {width: 1200, height: 700},
@@ -3156,8 +3166,8 @@ def test_share_replay_delta_rebinds_xterm_to_moved_terminal_placeholder(browser,
             terminals: [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch: 1}]
           };
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 8, sequence: 40, payload: keyframe});
-          const mounted = await waitFor(() => terminals.get('6')?.socket?.readyState === WebSocket.OPEN
-            && document.querySelector('[data-testid="left-pane"] #term-6 .xterm'));
+          const mounted = await waitFor(() => Boolean(terminals.get('6')?.socket?.readyState === WebSocket.OPEN
+            && document.querySelector('[data-testid="left-pane"] #term-6 .xterm')));
           const firstItem = terminals.get('6');
           const firstTerm = firstItem?.term || null;
           const firstElement = firstTerm?.element || null;
@@ -3274,15 +3284,8 @@ def test_share_replay_terminal_host_resize_preserves_existing_repaint_bytes(brow
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 180; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = {
             digest: 'sha256:resize-terminal',
             viewport: {width: 1200, height: 700},
@@ -3299,8 +3302,8 @@ def test_share_replay_terminal_host_resize_preserves_existing_repaint_bytes(brow
             terminals: [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch: 1}]
           };
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 1, sequence: 1, payload: keyframe});
-          const mounted = await waitFor(() => terminals.get('6')?.socket?.readyState === WebSocket.OPEN
-            && document.querySelector('#term-6 .xterm'));
+          const mounted = await waitFor(() => Boolean(terminals.get('6')?.socket?.readyState === WebSocket.OPEN
+            && document.querySelector('#term-6 .xterm')));
           const item = terminals.get('6');
           const calls = [];
           const originalResize = item.term.resize.bind(item.term);
@@ -3329,9 +3332,13 @@ def test_share_replay_terminal_host_resize_preserves_existing_repaint_bytes(brow
           await frame();
           const textBeforeResize = item.term.screenText || '';
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.terminalHostResize, sender: 'host', epoch: 1, sequence: 2, payload: {session: '6', rows: 30, cols: 100}});
-          await frame();
-          await delay(320);
-          await frame();
+          await waitFor(
+            () => {
+              const resize = calls.findIndex(call => call[0] === 'resize');
+              return resize >= 0 && calls.some((call, index) => call[0] === 'refresh' && index > resize);
+            },
+            {timeoutMs: 1000, description: 'post-resize terminal refresh'}
+          );
           const resizeIndex = calls.findIndex(call => call[0] === 'resize');
           const resetIndex = calls.findIndex(call => call[0] === 'reset');
           const writeIndex = calls.findIndex(call => call[0] === 'write');
@@ -3415,14 +3422,8 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 180; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const keyframe = {
             digest: 'sha256:behind-terminal',
             viewport: {width: 1200, height: 700},
@@ -3439,8 +3440,8 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
             terminals: [{placeholderId: 'term-ph-6', session: '6', rows: 24, cols: 80, terminalEpoch: 1}]
           };
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 5, sequence: 20, payload: keyframe});
-          const mounted = await waitFor(() => terminals.get('6')?.socket?.readyState === WebSocket.OPEN
-            && document.querySelector('#term-6 .xterm'));
+          const mounted = await waitFor(() => Boolean(terminals.get('6')?.socket?.readyState === WebSocket.OPEN
+            && document.querySelector('#term-6 .xterm')));
           const item = terminals.get('6');
           const firstTerm = item.term;
           const firstContainer = item.container;
@@ -3481,7 +3482,7 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
     assert metrics["mounted"] is True, metrics
     assert metrics["status"] == "mirrored", metrics
-    assert metrics["statusText"] == "mirrored", metrics
+    assert metrics["statusText"] == "mirror synced", metrics
     assert metrics["requestDelta"] == 1, metrics
     assert metrics["dropped"] == 1, metrics
     assert metrics["writes"] == ["terminal keeps streaming"], metrics
@@ -3525,7 +3526,7 @@ def test_share_replay_shell_applies_only_contiguous_deltas(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           const keyframe = {
             digest: 'sha256:keyframe',
@@ -3650,7 +3651,7 @@ def test_share_replay_shell_ignores_interleaved_semantic_finder_frames(browser, 
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const keyframe = (text, nodeId) => ({
             digest: '',
             viewport: {width: 1200, height: 700},
@@ -3768,7 +3769,7 @@ def test_share_replay_shell_applies_scroll_and_pointer_deltas(browser, tmp_path)
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           const scrollerAttrs = testid => ({
             'data-testid': testid,
@@ -3833,10 +3834,10 @@ def test_share_replay_shell_applies_scroll_and_pointer_deltas(browser, tmp_path)
           await frame();
           const expectedPointer = visualPointFromAppSpace(100, 80);
           const ghost = document.querySelector('.share-ghost-cursor.visible');
-          const queueBefore = shareHostQueues.get(shareToken)?.length || 0;
+          const queueBefore = shareHostQueuedMessageCount(shareToken);
           finder.dispatchEvent(new Event('scroll', {bubbles: true}));
           await frame();
-          const queueAfter = shareHostQueues.get(shareToken)?.length || 0;
+          const queueAfter = shareHostQueuedMessageCount(shareToken);
           done({
             initial,
             after: {
@@ -3916,7 +3917,7 @@ def test_share_replay_debug_copy_exports_sanitized_health(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           await frame();
           const keyframe = {
             digest: 'sha256:keyframe-debug',
@@ -3990,8 +3991,8 @@ def test_share_replay_debug_copy_exports_sanitized_health(browser, tmp_path):
     assert metrics["kind"] == "share-replay-health", metrics
     assert metrics["match"] is True, metrics
     assert metrics["status"] == "mirrored", metrics
-    assert metrics["userStatus"] == "mirrored", metrics
-    assert metrics["mirrorStatusText"] == "mirrored", metrics
+    assert metrics["userStatus"] == "mirror synced", metrics
+    assert metrics["mirrorStatusText"] == "mirror synced", metrics
     assert metrics["epoch"] == 13, metrics
     assert metrics["sequence"] == 31, metrics
     assert metrics["keyframeBytes"] > 0, metrics
@@ -4048,7 +4049,7 @@ def test_share_replay_debug_copy_exports_last_replay_error(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const keyframe = {
             digest: 'sha256:keyframe-debug-error',
             createdAt: Date.now() / 1000,
@@ -4150,7 +4151,7 @@ def test_share_replay_health_ignores_legacy_geometry_drift_frames(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const keyframe = {
             digest: 'sha256:replay-health-keyframe',
             createdAt: Date.now() / 1000,
@@ -4210,8 +4211,8 @@ def test_share_replay_health_ignores_legacy_geometry_drift_frames(browser, tmp_p
     assert metrics["after"]["kind"] == "share-replay-health", metrics
     assert metrics["after"]["match"] is True, metrics
     assert metrics["after"]["status"] == "mirrored", metrics
-    assert metrics["after"]["userStatus"] == "mirrored", metrics
-    assert metrics["statusText"] == "mirrored", metrics
+    assert metrics["after"]["userStatus"] == "mirror synced", metrics
+    assert metrics["statusText"] == "mirror synced", metrics
     assert metrics["after"]["epoch"] == metrics["before"]["epoch"] == 23, metrics
     assert metrics["after"]["sequence"] == metrics["before"]["sequence"] == 40, metrics
     assert metrics["after"]["domDigest"] == metrics["before"]["domDigest"], metrics
@@ -4260,7 +4261,7 @@ def test_share_geometry_digest_repairs_wrapped_text_labels_in_browser(browser, t
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const root = appRootElement();
           const label = document.createElement('span');
           label.className = 'file-tree-name';
@@ -4358,18 +4359,12 @@ def test_share_geometry_digest_resyncs_slot_drift_in_browser(browser, tmp_path):
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 90; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           await frame();
           const host = shareGeometryDigestFrame();
-          const drifted = layoutFromParam('row@25(left,slot1)', 'left:1;slot1:2');
-          applyLayoutSlots(drifted, {prune: false});
+          const drifted = layoutFromParam('row@50(left,slot2)', 'left:1;slot2:2');
+          layoutSlots = drifted;
           await waitFor(() => shareGeometryFirstDifference(host, shareGeometryDigestFrame()) === 'slots');
           const beforeDiff = shareGeometryFirstDifference(host, shareGeometryDigestFrame());
           window.__fixtureSharePayload = {
@@ -4479,14 +4474,8 @@ def test_share_geometry_digest_repairs_terminal_cell_drift_with_host_resize(brow
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 120; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const item = terminals.get('1');
           const host = shareGeometryDigestFrame();
           const hostEntry = host.snapshot.terminalCells.find(entry => entry.session === '1');
@@ -4586,7 +4575,7 @@ def test_share_geometry_digest_slots_use_layout_model_in_contain_viewer(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const {frame} = window.__yolomuxTestHelpers;
           const waitFrames = async count => {
             for (let index = 0; index < count; index += 1) await frame();
           };
@@ -4673,14 +4662,8 @@ def test_share_debug_diagnostics_redact_fragment_token_in_browser(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 120; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           await waitFor(() => window.yolomuxShareDebug?.enabled === true && document.querySelector('[data-share-viewer-control="debug"]'));
           const host = shareGeometryDigestFrame();
           const hostSnapshot = {
@@ -4751,6 +4734,7 @@ def test_share_viewer_expiry_redirects_to_login_without_fragment_token(browser, 
         browser,
         tmp_path,
         search=f"?shareDebug=1#t={secret}",
+        expected_redirect_paths=("/login",),
         sessions=["1"],
         access_role="readonly",
         share_bootstrap=share_bootstrap,
@@ -4817,14 +4801,8 @@ def test_share_viewer_finder_minimize_keeps_dockview_terminal_tabs_live(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 160; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           await applyShareUiState({
             layout: arguments[0],
             tabs: arguments[1],
@@ -4832,9 +4810,9 @@ def test_share_viewer_finder_minimize_keeps_dockview_terminal_tabs_live(browser,
             viewport: {width: 1000, height: 620},
             finder: {root: '/home/test/yolomux.dev', rootMode: 'sync', mode: 'files', session: '1'},
           });
-          const ready = await waitFor(() => !itemInLayout(fileExplorerItemId)
+          const ready = await waitFor(() => Boolean(!itemInLayout(fileExplorerItemId)
             && document.querySelectorAll('.dockview-pane-tab[data-pane-tab="1"], .dockview-pane-tab[data-pane-tab="2"]').length === 2
-            && document.querySelector('.dockview-pane-tab[data-pane-tab="2"]'));
+            && document.querySelector('.dockview-pane-tab[data-pane-tab="2"]')));
           return {
             ready,
             finderInLayout: itemInLayout(fileExplorerItemId),
@@ -4860,14 +4838,8 @@ def test_share_viewer_finder_minimize_keeps_dockview_terminal_tabs_live(browser,
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 180; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           await applyShareUiState({
             layout: arguments[0],
             tabs: arguments[1],
@@ -4875,11 +4847,11 @@ def test_share_viewer_finder_minimize_keeps_dockview_terminal_tabs_live(browser,
             viewport: {width: 1000, height: 620},
             finder: {root: '/home/test/yolomux.dev', rootMode: 'sync', mode: 'files', session: '2'},
           });
-          const ready = await waitFor(() => activeItemForSide('left') === '2'
+          const ready = await waitFor(() => Boolean(activeItemForSide('left') === '2'
             && terminals.get('2')?.socket?.readyState === WebSocket.OPEN
             && terminals.get('2')?.container === document.getElementById('term-2')
             && terminals.get('2')?.container?.isConnected === true
-            && document.querySelector('#term-2 .xterm'));
+            && document.querySelector('#term-2 .xterm')));
           const item = terminals.get('2');
           return {
             ready,
@@ -4955,14 +4927,8 @@ def test_share_viewer_drops_stale_layout_after_newer_ui_state(browser, tmp_path)
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 160; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           applyShareUiMessage({
             ch: 'ui',
             type: 'ui-state',
@@ -5056,14 +5022,8 @@ def test_share_topology_snapshot_converges_finder_tab_move_and_editor_mode(brows
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 180; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const path = '/home/test/yolomux.dev/DONE.md';
           const item = fileEditorItemFor(path);
           openFiles.set(path, {
@@ -5079,7 +5039,7 @@ def test_share_topology_snapshot_converges_finder_tab_move_and_editor_mode(brows
             gitHistory: [{ref: 'HEAD', short: 'HEAD'}],
           });
           const initial = layoutFromParam(arguments[0], `left:__files__;slot1:1,${item}`);
-          applyLayoutSlots(initial, {prune: false, preserveMissingFileExplorer: true});
+          applyLayoutSlots(initial, {prune: false, preserveMissingSidePane: true});
           await waitFor(() => slotForItem(item) === 'slot1' && itemInLayout(fileExplorerItemId));
           await applyShareUiState({
             layout: 'left',
@@ -5154,14 +5114,8 @@ def test_share_geometry_digest_tolerates_safari_tab_strip_one_pixel_jitter(brows
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 90; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           setShareViewFit('contain', {persist: false});
           await frame();
           await frame();

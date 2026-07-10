@@ -186,7 +186,7 @@ function previewPopoutVariableStyle() {
 
 function previewPopoutToolbarHtml() {
   return `
-      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
+      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('common.previewFontSize'))}">
         <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
         <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
         <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
@@ -249,20 +249,8 @@ async function renderedPreviewSnapshotAsync(path, text) {
   return snapshotRenderedPreviewContainer(scratch);
 }
 
-function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
-  const doc = previewWindow?.document;
-  if (!doc) return false;
-  const title = `${basenameOf(path)} preview`;
-  const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
-  doc.open();
-  doc.write(`<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${esc(title)}</title>
-  <link rel="stylesheet" href="${esc(cssHref)}">
-  <style>
+function filePreviewPopoutDocumentStyle() {
+  return `
     html {
       min-height: 100%;
       margin: 0;
@@ -290,7 +278,7 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       position: fixed;
       top: 0;
       left: 50%;
-      z-index: 1000;
+      z-index: var(--z-topbar);
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
@@ -661,19 +649,30 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       .file-preview-popout-shell { padding: 64px 14px 28px; }
       .file-preview-popout-title { width: calc(100% - 28px); }
     }
-  </style>
-</head>
-<body class="${esc(previewPopoutBodyClassName())}" style="${esc(previewPopoutVariableStyle())}">
-  <main class="file-preview-popout-shell">
+  `;
+}
+
+function filePreviewPopoutBodyHtml(path, snapshot) {
+  return `<main class="file-preview-popout-shell">
     <header class="file-preview-popout-title" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
       <span class="file-preview-popout-title-path">${esc(compactHomePath(path))}</span>
       ${previewPopoutToolbarHtml()}
     </header>
     <article data-preview-root${previewSnapshotDataAttributesHtml(snapshot)} class="${esc(snapshot.className)}">${snapshot.html}</article>
-  </main>
-</body>
-</html>`);
-  doc.close();
+  </main>`;
+}
+
+function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
+  const doc = previewWindow?.document;
+  if (!doc) return false;
+  const written = writePanePopoutDocument(previewWindow, {
+    title: t('preview.popout.title', {name: basenameOf(path)}),
+    bodyClass: previewPopoutBodyClassName(),
+    bodyStyle: previewPopoutVariableStyle(),
+    style: filePreviewPopoutDocumentStyle(),
+    bodyHtml: filePreviewPopoutBodyHtml(path, snapshot),
+  });
+  if (!written) return false;
   doc._yolomuxPreviewControlsBound = false;
   bindFilePreviewPopoutControls(path, previewWindow);
   return true;
@@ -752,7 +751,7 @@ function updateFilePreviewPopout(path, text) {
     applyPreviewSnapshotRoot(root, snapshot);
     doc.body.className = previewPopoutBodyClassName();
     updateFilePreviewPopoutControls(path, previewWindow);
-    doc.title = `${basenameOf(path)} preview`;
+    doc.title = t('preview.popout.title', {name: basenameOf(path)});
     restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
     renderedPreviewSnapshotAsync(path, text).then(asyncSnapshot => {
       if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;

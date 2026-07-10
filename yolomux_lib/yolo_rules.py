@@ -18,6 +18,9 @@ import yaml
 
 from .atomic_file import atomic_write_text
 from .common import CONFIG_DIR
+from .locales import message_descriptor
+from .locales import message_fields
+from .locales import user_message_payload
 from .settings import settings_payload
 
 
@@ -141,6 +144,34 @@ _RULES_CACHE: dict[str, Any] = {
     "error": "",
 }
 _LAST_ERROR_PRINTED = ""
+
+BUILTIN_RULE_NAME_I18N_KEY_MAP = {
+    "built-in dangerous commands": "yolo.rule.builtin.dangerousCommands",
+    "built-in dangerous patterns": "yolo.rule.builtin.dangerousPatterns",
+}
+RULE_SOURCE_I18N_KEY_MAP = {
+    "built-in": "yolo.rule.source.builtin",
+    "file": "yolo.rule.source.file",
+    "hard-floor": "yolo.rule.source.hardFloor",
+    "error": "yolo.rule.source.error",
+}
+
+
+def rule_name_fields(name: str, key: str = "") -> dict[str, Any]:
+    return message_fields("rule_name", key, name)
+
+
+def rule_source_fields(source: str) -> dict[str, Any]:
+    return message_fields("source", RULE_SOURCE_I18N_KEY_MAP.get(source, ""), source)
+
+
+def decision_rule_name_descriptor(decision: dict[str, Any], fallback: str = "rule") -> dict[str, Any] | str:
+    name = str(decision.get("rule_name") or fallback)
+    key = str(decision.get("rule_name_key") or "")
+    if not key:
+        return name
+    params = decision.get("rule_name_params") if isinstance(decision.get("rule_name_params"), dict) else {}
+    return message_descriptor(key, name, params)
 
 
 def expand_rule_path(path: str | None = None) -> Path:
@@ -570,20 +601,20 @@ def hard_floor_decision(cmd_line: str) -> dict[str, Any] | None:
     if not cmd_line.strip():
         return None
     if fork_bomb_detected(cmd_line):
-        return {"action": "block", "rule_name": "built-in hard floor: fork bomb", "risk": "process"}
+        return {"action": "block", **rule_name_fields("built-in hard floor: fork bomb", "yolo.rule.hardFloor.forkBomb"), "risk": "process"}
     if BLOCK_DEVICE_REDIRECT_RE.search(cmd_line):
-        return {"action": "block", "rule_name": "built-in hard floor: block-device redirect", "risk": "device"}
+        return {"action": "block", **rule_name_fields("built-in hard floor: block-device redirect", "yolo.rule.hardFloor.blockDeviceRedirect"), "risk": "device"}
     for invocation in command_invocations(cmd_line):
         command = invocation.command
         args = list(invocation.args)
         if command == "mkfs" or command.startswith("mkfs."):
-            return {"action": "block", "rule_name": "built-in hard floor: mkfs", "risk": "format"}
+            return {"action": "block", **rule_name_fields("built-in hard floor: mkfs", "yolo.rule.hardFloor.mkfs"), "risk": "format"}
         if command == "dd" and any(BLOCK_DEVICE_RE.search(arg) or BLOCK_DEVICE_RE.search(arg.split("=", 1)[-1]) for arg in args):
-            return {"action": "block", "rule_name": "built-in hard floor: dd block device", "risk": "device"}
+            return {"action": "block", **rule_name_fields("built-in hard floor: dd block device", "yolo.rule.hardFloor.ddBlockDevice"), "risk": "device"}
         if command == "rm" and rm_targets_root(args):
-            return {"action": "block", "rule_name": "built-in hard floor: rm root", "risk": "delete"}
+            return {"action": "block", **rule_name_fields("built-in hard floor: rm root", "yolo.rule.hardFloor.rmRoot"), "risk": "delete"}
         if command == "rmdir" and any(arg == "/" for arg in args):
-            return {"action": "block", "rule_name": "built-in hard floor: rmdir root", "risk": "delete"}
+            return {"action": "block", **rule_name_fields("built-in hard floor: rmdir root", "yolo.rule.hardFloor.rmdirRoot"), "risk": "delete"}
     return None
 
 
@@ -640,16 +671,16 @@ def evaluate_ruleset(cmd_line: str, ruleset: YoloRuleset) -> dict[str, Any]:
         if rule_matches(rule, cmd_line):
             return {
                 "action": rule.action,
-                "rule_name": rule.name,
+                **rule_name_fields(rule.name, BUILTIN_RULE_NAME_I18N_KEY_MAP.get(rule.name, "") if ruleset.builtin else ""),
                 "risk": rule.risk or "unknown",
-                "source": ruleset.source,
+                **rule_source_fields(ruleset.source),
                 "path": str(ruleset.path),
             }
     return {
         "action": ruleset.default_action,
-        "rule_name": "default",
+        **rule_name_fields("default", "yolo.rule.default"),
         "risk": "unknown",
-        "source": ruleset.source,
+        **rule_source_fields(ruleset.source),
         "path": str(ruleset.path),
     }
 
@@ -663,24 +694,24 @@ def evaluate(cmd: str, prompt_type: str = "bash", agent: str = "", session: str 
     # out of the soft ruleset / ask-default, never out of the hard floor.
     floor = hard_floor_decision(cmd)
     if floor:
-        decision = {**floor, "source": "hard-floor", "path": str(path)}
+        decision = {**floor, **rule_source_fields("hard-floor"), "path": str(path)}
     else:
         ruleset, error = cached_rules()
         if error:
             decision = {
                 "action": "ask",
-                "rule_name": "ruleset error",
+                **rule_name_fields("ruleset error", "yolo.rule.rulesetError"),
                 "risk": "unknown",
-                "source": "error",
+                **rule_source_fields("error"),
                 "path": str(path),
                 "error": error,
             }
         elif ruleset is None:
             decision = {
                 "action": "ask",
-                "rule_name": "ruleset unavailable",
+                **rule_name_fields("ruleset unavailable", "yolo.rule.rulesetUnavailable"),
                 "risk": "unknown",
-                "source": "error",
+                **rule_source_fields("error"),
                 "path": str(path),
                 "error": "ruleset unavailable",
             }
@@ -705,14 +736,17 @@ def rules_status(force: bool = False) -> dict[str, Any]:
         mtime_ns = stat.st_mtime_ns
     except OSError:
         mtime_ns = 0
-    return {
+    payload = {
         "path": str(path),
         "display_path": YOLO_RULES_DISPLAY_PATH,
         "exists": path.exists(),
-        "source": ruleset.source if ruleset else "error",
+        **rule_source_fields(ruleset.source if ruleset else "error"),
         "default": ruleset.default_action if ruleset else "ask",
         "rule_count": len(ruleset.rules) if ruleset else 0,
         "mtime_ns": mtime_ns,
         "dry_run": settings["dry_run"],
         "error": error,
     }
+    if error:
+        payload.update(user_message_payload("yolo.error.invalidRules", error))
+    return payload

@@ -19,6 +19,10 @@ from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from .common import DEFAULT_UPLOAD_SUBDIR
 from .common import UPDATE_NOTIFY_LEVELS
 from .common import UPLOAD_MAX_BYTES
+from .locales import LANGUAGE_PREFERENCES
+from .locales import LANGUAGE_VALUE_ALIASES
+from .locales import SYSTEM_LOCALE_PREFERENCE
+from .locales import language_preference_description
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
@@ -72,6 +76,37 @@ def env_choice_default(name: str, default: str, choices: tuple[str, ...]) -> str
 SUMMARY_DEFAULT_CODEX_MODEL = env_choice_default("YOLOMUX_SUMMARY_MODEL", YOAGENT_DEFAULT_CODEX_MODEL, YOAGENT_CODEX_MODEL_CHOICES)
 SUMMARY_DEFAULT_CODEX_EFFORT = env_choice_default("YOLOMUX_SUMMARY_EFFORT", "low", YOAGENT_CODEX_EFFORT_CHOICES)
 SUMMARY_DEFAULT_CODEX_SERVICE_TIER = env_choice_default("YOLOMUX_SUMMARY_SERVICE_TIER", "fast", SUMMARY_CODEX_SERVICE_TIER_CHOICES)
+DEFAULT_INDEX_EXCLUDE_DIR_NAMES: tuple[str, ...] = (
+    ".git",
+    ".hg",
+    ".svn",
+    ".jj",
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".docker",
+    ".ngc",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".uploads",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    "dist",
+    "build",
+    "target",
+)
+DEFAULT_INDEX_EXCLUDE_PATHS: tuple[str, ...] = (
+    "~/.config/gh",
+    "~/.config/git",
+    "~/.cache/huggingface",
+)
 IMAGE_DROP_ACTION_ORDER_SPECS: tuple[dict[str, Any], ...] = (
     {
         "id": "img-ocr",
@@ -108,40 +143,7 @@ IMAGE_DROP_ACTION_ORDER_SPECS: tuple[dict[str, Any], ...] = (
 )
 DEFAULT_IMAGE_DROP_ACTION_ORDER: tuple[str, ...] = tuple(str(spec["canonical"]) for spec in IMAGE_DROP_ACTION_ORDER_SPECS)
 SETTING_VALUE_ALIASES: dict[tuple[str, str], dict[str, str]] = {
-    ("general", "language"): {
-        "arabic": "ar",
-        "deutsch": "de",
-        "dutch": "nl",
-        "english": "en",
-        "espanol": "es",
-        "español": "es",
-        "francais": "fr",
-        "français": "fr",
-        "french": "fr",
-        "german": "de",
-        "hebrew": "he",
-        "hindi": "hi",
-        "italian": "it",
-        "japanese": "ja",
-        "korean": "ko",
-        "nederlands": "nl",
-        "polish": "pl",
-        "portuguese": "pt-BR",
-        "portugues": "pt-BR",
-        "português": "pt-BR",
-        "pseudo": "en-XA",
-        "russian": "ru",
-        "simplified chinese": "zh-Hans",
-        "spanish": "es",
-        "system language": "system",
-        "thai": "th",
-        "traditional chinese": "zh-Hant",
-        "turkish": "tr",
-        "vietnamese": "vi",
-        "中文": "zh-Hans",
-        "日本語": "ja",
-        "한국어": "ko",
-    },
+    ("general", "language"): dict(LANGUAGE_VALUE_ALIASES),
     ("appearance", "editor_color_scheme"): {
         f"{LEGACY_EDITOR_SCHEME_PREFIX}-dark-plus": POPULAR_IDE_DARK_SCHEME,
         f"{LEGACY_EDITOR_SCHEME_PREFIX}-light-plus": POPULAR_IDE_LIGHT_SCHEME,
@@ -159,7 +161,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auto_focus": False,
         "default_layout": "split",
         "default_sessions": [],
-        "language": "system",
+        "language": SYSTEM_LOCALE_PREFERENCE,
         "reload_on_update": True,
         "reload_on_update_auto": False,
         "startup_tips": True,
@@ -167,6 +169,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": {
         "theme": "dark",
         "terminal_theme": "follow-app",
+        "tmux_status_bar": "off",
         "date_time_hour_cycle": "24",
         "ui_font_size": 13,
         "terminal_font_size": 13,
@@ -178,14 +181,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_cursor_style": "block",
         "editor_cursor_color": DEFAULT_CURSOR_COLOR,
         "file_explorer_font_size": 13,
-        "tab_width": 180,
+        "tab_width": 172,
         "pane_spacing": 3,
         "pane_ring_opacity": 75,
         "inactive_pane_opacity": 60,
         "active_color": "green",
         "separator_color": "theme",
         "max_tabs_per_pane": 10,
-        "metadata_badge_pulse_seconds": 20,
     },
     "performance": {
         "latency_refresh_ms": 3000,
@@ -202,12 +204,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tab_popover_show_delay_ms": 1000,
         "tab_popover_follow_delay_ms": 120,
         "remote_resize_delay_ms": 220,
-        "auto_approve_interval_seconds": 2.0,
+        "session_files_max_workers": 2,
+        "auto_approve_interval_seconds": 0.5,
     },
     "notifications": {
         "toast_duration_ms": 10000,
         "notify_transitions": ["needs-input", "needs-approval", "blocked"],
+        "notify_working_attention": True,
+        "notify_working_done": False,
         "throttle_seconds": 60,
+    },
+    "chat": {
+        "retention_days": 7,
     },
     # PRs to watch independently of any open session's branch. Each entry is "owner/repo#N" or
     # a full https://github.com/owner/repo/pull/N URL (normalized when polled).
@@ -238,7 +246,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "image_preview_max_px": 320,
         "quick_access_paths": ["~", "/", "/tmp"],
         "indexed_dirs": [],
-        "index_refresh_seconds": 120,
+        "index_refresh_seconds": 1800,
+        "index_max_files": 100000,
+        "index_persist": True,
+        "index_persist_max_files": 100000,
+        "index_persist_max_mb": 64,
+        "index_exclude_dir_names": list(DEFAULT_INDEX_EXCLUDE_DIR_NAMES),
+        "index_exclude_paths": list(DEFAULT_INDEX_EXCLUDE_PATHS),
         "companion_dirs": [],
         "dir_cache_ms": 5000,
         "new_entry_highlight_ms": 60000,
@@ -340,10 +354,11 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "server_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_background_file_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
-    ("performance", "auto_approve_interval_seconds"): 0.5,
+    ("performance", "auto_approve_interval_seconds"): 2.0,
     ("share", "max_viewers"): 5,
     ("performance", "agent_window_cooldown_seconds"): 0,
     ("uploads", "max_bytes"): 20 * 1024 * 1024,
+    ("file_explorer", "index_refresh_seconds"): 120,
 }
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
@@ -357,7 +372,6 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "pane_ring_opacity"): (5, 100),
     ("appearance", "inactive_pane_opacity"): (0, 100),
     ("appearance", "max_tabs_per_pane"): (2, 30),
-    ("appearance", "metadata_badge_pulse_seconds"): (0, 120),
     ("performance", "latency_refresh_ms"): (1000, 30000),
     ("performance", "event_log_refresh_ms"): (1000, 60000),
     ("performance", "tabber_activity_refresh_ms"): (1000, 60000),
@@ -372,13 +386,18 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("performance", "tab_popover_show_delay_ms"): (0, 3000),
     ("performance", "tab_popover_follow_delay_ms"): (0, 1000),
     ("performance", "remote_resize_delay_ms"): (50, 2000),
-    ("performance", "auto_approve_interval_seconds"): (0.1, 10),
+    ("performance", "session_files_max_workers"): (1, 8),
+    ("performance", "auto_approve_interval_seconds"): (0.1, 4),
     ("notifications", "toast_duration_ms"): (1000, 60000),
     ("notifications", "throttle_seconds"): (0, 600),
+    ("chat", "retention_days"): (1, 365),
     ("terminal_editor", "scrollback"): (1000, 50000),
     ("editor", "autosave_delay_seconds"): (0.5, 60),
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "index_refresh_seconds"): (0, 3600),
+    ("file_explorer", "index_max_files"): (1000, 1000000),
+    ("file_explorer", "index_persist_max_files"): (1000, 1000000),
+    ("file_explorer", "index_persist_max_mb"): (1, 1024),
     ("file_explorer", "dir_cache_ms"): (0, 10000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
@@ -396,16 +415,19 @@ STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
 
 SETTING_LIST_LIMITS: dict[tuple[str, str], int] = {
     ("uploads", "image_action_order"): 9,
+    ("file_explorer", "index_exclude_dir_names"): 256,
+    ("file_explorer", "index_exclude_paths"): 256,
 }
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "split", "grid"},
     # i18n: only locales that ship a catalog are accepted; "system" matches the browser/OS.
-    ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "ja", "ko", "es", "de", "fr", "it", "pt-BR", "pl", "nl", "he", "ar", "ru", "hi", "vi", "th", "tr", "en-XA"},
+    ("general", "language"): set(LANGUAGE_PREFERENCES),
     ("appearance", "theme"): {"system", "dark", "light"},
     ("appearance", "active_color"): set(UI_COLOR_CHOICES),
     ("appearance", "separator_color"): set(SEPARATOR_COLOR_CHOICES),
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
+    ("appearance", "tmux_status_bar"): {"off", "top", "bottom"},
     ("appearance", "date_time_hour_cycle"): {"24", "12"},
     ("share", "view_fit"): {"cover", "contain"},
     ("appearance", "editor_color_scheme"): {
@@ -482,21 +504,28 @@ SETTING_HIDDEN_CHOICES: dict[tuple[str, str], set[str]] = {
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | split | grid. Reserved default for new visits.",
-    ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, ja, ko, es, de, fr, it, pt-BR, pl, nl, he, ar, ru, hi, vi, th, tr, en-XA pseudo).",
+    ("general", "language"): language_preference_description(),
     ("general", "default_sessions"): "Legacy reserved list of tmux sessions. The running server defaults to all discovered sessions unless launched with --sessions.",
     ("general", "reload_on_update"): "true/false. Default true. When true, an open client asks whether to reload the browser once the running server reports a YOLOMUX_VERSION or client bundle revision that differs from the page boot values. This does not check origin/main.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing the browser reload prompt — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
-    ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
+    ("file_explorer", "indexed_dirs"): "Directories with a pre-built Quick Open index, one path per line. In Finder/File Explorer, right-click a directory and choose Allow index to add it or Disallow index to remove it. You can also add or remove paths here.",
     ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
+    ("file_explorer", "index_max_files"): "Files, 1000-1000000. Maximum in-memory Quick Open entries per root; larger roots report partial coverage instead of silently growing an unbounded index.",
+    ("file_explorer", "index_persist"): "true/false. Persist bounded Quick Open indexes for restart and cross-process handoff; active in-memory search remains available when false.",
+    ("file_explorer", "index_persist_max_files"): "Files, 1000-1000000. Maximum entry count eligible for recoverable Quick Open cache persistence.",
+    ("file_explorer", "index_persist_max_mb"): "MiB, 1-1024. Maximum estimated SQLite payload eligible for Quick Open cache persistence.",
+    ("file_explorer", "index_exclude_dir_names"): "Directory names excluded from Quick Open indexing wherever they appear, one name per line. Pre-populated with common VCS, secret, dependency, cache, and build directories such as .git, .ssh, __pycache__, node_modules, and target.",
+    ("file_explorer", "index_exclude_paths"): "Quick Open exclusions, one rule per line. A plain absolute or home-relative path excludes that subtree only when an indexed root contains it. glob:<relative glob> matches paths below every indexed root (for example glob:**/.uploads/**). regex:<regular expression> matches each root-relative POSIX path (for example regex:(^|/)target(?:/|$)). Invalid regex rules are ignored.",
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/vortex/parser-toolkits.",
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
     ("updates", "check_interval_minutes"): "Minutes, 1+. How often the origin/main update checker runs when updates.notify_level is not none.",
-    ("updates", "notify_level"): "major | minor | patch | none. Minimum YOLOMUX_VERSION change that triggers the origin/main update notification. patch means any semver version bump; none disables update checks and notifications.",
+    ("updates", "notify_level"): "major | minor | patch | none. Minimum YOLOMUX_VERSION change that triggers the origin/main update notification; version format is major.minor.patch, such as 0.2.345. patch means any semver version bump; none disables update checks and notifications.",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Differ, and editor defaults.",
     ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, YO markers, and tmux status/pane chrome). Green is the default.",
     ("appearance", "separator_color"): "theme | green | blue | orange | yellow | purple | white. Color for pane separators and dashed tab/file/root drop previews. Theme preserves the dark/light defaults.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
+    ("appearance", "tmux_status_bar"): "off | top | bottom. Native tmux status bar position for new sessions. The YOLOmux Info Bar remains at the top of each pane.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
     ("appearance", "ui_font_size"): "Pixels, 6-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 6-28. Applied live to xterm.js terminals.",
@@ -513,12 +542,11 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "pane_ring_opacity"): "Percent, 5-100. Opacity of the green/red pane ring drawn over the content edge.",
     ("appearance", "inactive_pane_opacity"): "Percent, 0-100. Strength of inactive pane gray-out.",
     ("appearance", "max_tabs_per_pane"): "Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).",
-    ("appearance", "metadata_badge_pulse_seconds"): "Seconds, 0-120. Duration for PR/branch metadata badge pulses.",
     ("performance", "latency_refresh_ms"): "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
     ("performance", "event_log_refresh_ms"): "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
     ("performance", "tabber_activity_refresh_ms"): "Server-side refresh interval for cached Tabber activity; clients read the latest cached snapshot. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
     ("performance", "agent_status_pulse_period_ms"): "Milliseconds, 250-10000. Period for red/yellow/green Claude/Codex status ball transition pulses.",
-    ("performance", "workflow_transition_glow_seconds"): "Seconds, 0-300. A green/red/yellow Claude/Codex status ball glows for this long after it appears or changes color. 0 keeps transition balls visible but static.",
+    ("performance", "workflow_transition_glow_seconds"): "Seconds, 0-300. Shared duration for Claude/Codex status transitions and branch/PR/status/CI badge pulses. 0 keeps transition balls visible but static.",
     ("performance", "server_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for open editor file signatures in visible panes before pushing files_changed events to browsers.",
     ("performance", "server_background_file_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for background editor file signatures before pushing files_changed events to browsers.",
     ("performance", "server_directory_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for Finder/Differ directory signatures before pushing fs_changed events to browsers.",
@@ -528,10 +556,14 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("performance", "tab_popover_show_delay_ms"): "Milliseconds, 0-3000. First hover delay before a tab details popover opens.",
     ("performance", "tab_popover_follow_delay_ms"): "Milliseconds, 0-1000. Delay when moving between tab details after one is already open.",
     ("performance", "remote_resize_delay_ms"): "Stored as milliseconds, shown as milliseconds in Preferences, 50-2000. Debounce for tmux remote resize.",
-    ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-10. Poll loop interval for newly enabled YOLO workers.",
+    ("performance", "session_files_max_workers"): "Workers, 1-8. Maximum concurrent cold session-files rebuilds; two is the measured default that avoids transcript, Git, and disk contention.",
+    ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-4. Fast poll interval for working or changing YOLO panes; quiet panes back off to 4 seconds.",
     ("notifications", "toast_duration_ms"): "Milliseconds, 1000-60000. How long in-page notification popups stay visible.",
     ("notifications", "notify_transitions"): "Event keys that may show notifications. Session states (needs-input, needs-approval, blocked, …) plus watched-PR transitions (pr-merged, pr-ci-failing, pr-review). Unknown keys are ignored.",
+    ("notifications", "notify_working_attention"): "true/false. Default true. Notify when a working Claude or Codex stops and needs your attention.",
+    ("notifications", "notify_working_done"): "true/false. Default false. Notify when a working Claude or Codex finishes without needing attention.",
     ("notifications", "throttle_seconds"): "Seconds, 0-600. Minimum time before repeating a notification signature.",
+    ("chat", "retention_days"): "Days, 1-365. Searchable YO!chat messages are retained for this many days. Default 7; reducing the value prunes newly expired rows immediately.",
     ("terminal_editor", "scrollback"): "Lines, 1000-50000. xterm.js scrollback.",
     ("terminal_editor", "word_wrap"): "true/false. Default editor soft-wrap state.",
     ("terminal_editor", "line_numbers"): "true/false. Default editor line-number gutter state.",
@@ -596,6 +628,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("appearance", "editor_cursor_color"): "Appearance",
     ("appearance", "date_time_hour_cycle"): "Appearance",
     ("appearance", "terminal_theme"): "Terminal and Editor",
+    ("appearance", "tmux_status_bar"): "Terminal and Editor",
     ("appearance", "terminal_font_size"): "Terminal and Editor",
     ("appearance", "editor_font_size"): "Terminal and Editor",
     ("appearance", "preview_font_size"): "Terminal and Editor",
@@ -615,14 +648,19 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("updates", "check_enabled"): "Notifications",
     ("updates", "notify_level"): "Notifications",
     ("notifications", "notify_transitions"): "Notifications",
+    ("notifications", "notify_working_attention"): "Notifications",
+    ("notifications", "notify_working_done"): "Notifications",
     ("notifications", "toast_duration_ms"): "Notifications",
     ("notifications", "throttle_seconds"): "Notifications",
-    ("appearance", "metadata_badge_pulse_seconds"): "Notifications",
+    ("chat", "retention_days"): "YO!chat",
     ("file_explorer", "root_mode"): "Finder",
     ("file_explorer", "image_open_mode"): "Finder",
     ("file_explorer", "image_preview_max_px"): "Finder",
     ("file_explorer", "quick_access_paths"): "Finder",
     ("file_explorer", "indexed_dirs"): "Finder",
+    ("file_explorer", "index_exclude_dir_names"): "Finder",
+    ("file_explorer", "index_exclude_paths"): "Finder",
+    ("file_explorer", "index_max_files"): "Finder",
     ("file_explorer", "index_refresh_seconds"): "Finder",
     ("file_explorer", "companion_dirs"): "Finder",
     ("file_explorer", "dir_cache_ms"): "Finder",
@@ -652,6 +690,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("performance", "tab_popover_show_delay_ms"): "Performance",
     ("performance", "tab_popover_follow_delay_ms"): "Performance",
     ("performance", "remote_resize_delay_ms"): "Performance",
+    ("performance", "session_files_max_workers"): "Performance",
     ("github", "watched_prs"): "GitHub",
     ("performance", "auto_approve_interval_seconds"): "YOLO",
     ("yolo", "rule_file_path"): "YOLO",
@@ -668,14 +707,38 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("yoagent", "format"): "YO!agent",
 }
 
+SETTING_GUI_SECTION_LOCALE_KEYS = {
+    "Appearance": "pref.section.appearance",
+    "Finder": "finder.label.finder",
+    "General": "pref.section.general",
+    "GitHub": "pref.section.github",
+    "Notifications": "pref.section.notifications",
+    "Performance": "pref.section.performance",
+    "Terminal and Editor": "pref.section.terminal_editor",
+    "Uploads/Downloads": "pref.section.uploads",
+    "YO!agent": "brand.tab.agent",
+    "YO!chat": "brand.tab.chat",
+    "YO!share": "brand.share",
+    "YOLO": "brand.yolo",
+}
+
+SETTING_LOCALE_KEY_OVERRIDES: dict[tuple[str, str], dict[str, str]] = {
+    ("appearance", "preview_font_size"): {"label": "common.previewFontSize"},
+    ("file_explorer", "quick_access_paths"): {"label": "common.quickPaths"},
+    ("general", "language"): {"label": "common.language"},
+    ("github", "watched_prs"): {"label": "common.watchedPrs"},
+}
+
 SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
     ("yoagent", "system_prompt"),
     ("yoagent", "intro"),
     ("yoagent", "format"),
     ("yolo", "rule_file_path"),
     ("file_explorer", "indexed_dirs"),
+    ("file_explorer", "index_exclude_dir_names"),
     ("file_explorer", "companion_dirs"),
     ("file_explorer", "quick_access_paths"),
+    ("file_explorer", "index_exclude_paths"),
     ("uploads", "subdir"),
     ("share", "read_only"),
     ("share", "scheme"),
@@ -687,8 +750,10 @@ SETTING_SENSITIVITY: dict[tuple[str, str], str] = {
     ("yoagent", "format"): "prompt",
     ("yolo", "rule_file_path"): "path",
     ("file_explorer", "indexed_dirs"): "path-list",
+    ("file_explorer", "index_exclude_dir_names"): "directory-name-list",
     ("file_explorer", "companion_dirs"): "path-list",
     ("file_explorer", "quick_access_paths"): "path-list",
+    ("file_explorer", "index_exclude_paths"): "path-list",
     ("uploads", "subdir"): "path",
     ("github", "watched_prs"): "external-reference-list",
     ("share", "read_only"): "share-access",
@@ -849,6 +914,12 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             incoming = dict(incoming)
             old_value = incoming.get("agent_window_cooldown_seconds")
             incoming["workflow_transition_glow_seconds"] = defaults["performance"]["workflow_transition_glow_seconds"] if old_value == 0 else old_value
+        if section == "performance" and "workflow_transition_glow_seconds" not in incoming:
+            legacy_value = source.get("appearance", {}).get("metadata_badge_pulse_seconds") if isinstance(source.get("appearance"), dict) else None
+            if legacy_value is not None:
+                incoming = dict(incoming)
+                # The former 20-second default was not an explicit user choice; use the merged setting's 60-second default.
+                incoming["workflow_transition_glow_seconds"] = defaults["performance"]["workflow_transition_glow_seconds"] if legacy_value == 20 else legacy_value
         for key, default in values.items():
             present = key in incoming
             value = incoming.get(key, default)
@@ -1042,6 +1113,8 @@ def setting_units(section: str, key: str, default: Any) -> str:
         return "milliseconds"
     if key.endswith("_seconds") or key.endswith("_interval_seconds") or (section, key) == ("share", "ttl_seconds"):
         return "seconds"
+    if key.endswith("_days"):
+        return "days"
     if key.endswith("_font_size") or key in {"tab_width", "pane_spacing", "image_preview_max_px"}:
         return "pixels"
     if key.endswith("_opacity"):
@@ -1109,11 +1182,17 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
             lower_upper = SETTING_LIMITS.get((section, key))
             limits = {"min": lower_upper[0], "max": lower_upper[1]} if lower_upper else None
             list_limit = SETTING_LIST_LIMITS.get((section, key))
+            locale_keys = {
+                "description": f"pref.{path}.help",
+                "label": f"pref.{path}.label",
+                **SETTING_LOCALE_KEY_OVERRIDES.get((section, key), {}),
+            }
             catalog[path] = {
                 "path": path,
                 "section": section,
                 "key": key,
                 "label": setting_catalog_label(section, key),
+                "locale_keys": locale_keys,
                 "current": current.get(section, {}).get(key, default),
                 "default": default,
                 "type": setting_value_type(default),
@@ -1135,6 +1214,7 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
                 "live_apply": "next-use" if section == "yoagent" and key in {"system_prompt", "intro", "format"} else "live",
                 "gui": {
                     "section": SETTING_GUI_SECTIONS.get((section, key), ""),
+                    "section_locale_key": SETTING_GUI_SECTION_LOCALE_KEYS.get(SETTING_GUI_SECTIONS.get((section, key), ""), ""),
                     "visible": (section, key) in SETTING_GUI_SECTIONS,
                 },
             }

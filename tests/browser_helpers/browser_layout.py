@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 import difflib
 from http import HTTPStatus
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+from types import MappingProxyType
 from types import SimpleNamespace
 import uuid
 from urllib.parse import parse_qsl
@@ -26,6 +28,7 @@ from yolomux_lib import events as events_module
 from yolomux_lib import settings as settings_module
 from yolomux_lib import yolo_rules as yolo_rules_module
 from yolomux_lib import server_auth
+from yolomux_lib.locales import locale_registry_payload
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
@@ -37,15 +40,181 @@ webdriver = pytest.importorskip("selenium.webdriver")
 ActionChains = pytest.importorskip("selenium.webdriver.common.action_chains").ActionChains
 Options = pytest.importorskip("selenium.webdriver.chrome.options").Options
 TimeoutException = pytest.importorskip("selenium.common.exceptions").TimeoutException
-WebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
+SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
+
+
+XDIST_BROWSER_WAIT_FLOOR_SECONDS = 10.0
+DEFAULT_BROWSER_WINDOW_SIZE = (1000, 700)
+GOLDEN_UPDATE_ENV = "YOLOMUX_UPDATE_GOLDENS"
+GOLDEN_DIR_ENV = "YOLOMUX_GOLDEN_DIR"
+LIVE_RUNTIME_BUNDLE_SENTINEL = "__yolomuxLiveRuntimeBundleLoaded"
+LIVE_RUNTIME_LATE_FUNCTION = "handleGlobalShortcutKeydown"
+LIVE_RUNTIME_BUNDLE_WAIT_SECONDS = 20.0
+BROWSER_WAIT_HELPER_SOURCE = r"""
+(() => {
+  const frame = (target = window) => new Promise(resolve => (target || window).requestAnimationFrame(resolve));
+  const settle = async (count = 2) => {
+    const frames = Math.max(1, Number(count) || 1);
+    for (let index = 0; index < frames; index += 1) await frame();
+  };
+  const rect = (node, options = {}) => {
+    if (typeof node === 'string') node = document.querySelector(node);
+    if (!node?.getBoundingClientRect) return options.fallback ?? null;
+    const value = node.getBoundingClientRect();
+    const number = options.round === true ? Math.round : current => current;
+    return {
+      left: number(value.left),
+      right: number(value.right),
+      top: number(value.top),
+      bottom: number(value.bottom),
+      width: number(value.width),
+      height: number(value.height),
+    };
+  };
+  const paint = node => {
+    if (typeof node === 'string') node = document.querySelector(node);
+    if (!node) return null;
+    const style = getComputedStyle(node);
+    return {
+      color: style.color,
+      background: style.backgroundColor,
+      border: style.borderTopColor,
+      borderBottom: style.borderBottomColor,
+    };
+  };
+  // Resolve an expected paint through the same cascade as its owner.  Passing a component as
+  // context matters for scoped tokens (for example an agent-status dot's fill); a document-body
+  // probe would accidentally test only the root fallback.
+  const probePaint = (cssText, context = document.body) => {
+    const probe = document.createElement('div');
+    probe.style.cssText = String(cssText || '');
+    (context || document.body).appendChild(probe);
+    const value = paint(probe);
+    probe.remove();
+    return value;
+  };
+  const normalizeColor = color => {
+    const value = String(color || '').trim().toLowerCase();
+    if (value === 'transparent' || /^#[0-9a-f]{6}$/.test(value)) return value;
+    const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(value);
+    if (!rgb) return value;
+    return `#${rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('')}`;
+  };
+  const parseStops = gradient => {
+    const value = String(gradient || '');
+    const stops = [];
+    const rangePattern = /(#[0-9a-f]{6}|rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+(?:\s*,\s*[0-9.]+)?\s*\)|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+    let match = rangePattern.exec(value);
+    while (match) {
+      stops.push({color: normalizeColor(match[1]), start: Number(match[2]) / 100, end: Number(match[3]) / 100});
+      match = rangePattern.exec(value);
+    }
+    if (stops.length) return stops;
+    const tokens = [];
+    const tokenPattern = /(#[0-9a-f]{6}|rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+(?:\s*,\s*[0-9.]+)?\s*\)|transparent)\s+([0-9.]+)%/gi;
+    match = tokenPattern.exec(value);
+    while (match) {
+      tokens.push({color: normalizeColor(match[1]), pos: Number(match[2]) / 100});
+      match = tokenPattern.exec(value);
+    }
+    for (let index = 1; index < tokens.length; index += 1) {
+      const previous = tokens[index - 1];
+      const current = tokens[index];
+      if (current.pos > previous.pos) stops.push({color: previous.color, start: previous.pos, end: current.pos});
+    }
+    return stops;
+  };
+  const rowsByTop = (rects, tolerance = 1) => {
+    const rows = [];
+    for (const item of [...rects].sort((left, right) => left.top - right.top || left.left - right.left)) {
+      const row = rows.find(candidate => Math.abs(candidate.top - item.top) <= tolerance);
+      if (row) row.items.push(item);
+      else rows.push({top: item.top, items: [item]});
+    }
+    return rows.map(row => row.items);
+  };
+  const waitFor = async (predicate, options = {}) => {
+    if (typeof predicate !== 'function') throw new TypeError('wait predicate must be a function');
+    const requestedTimeout = Number(options.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(0, requestedTimeout) : 6500;
+    const requestedInterval = Number(options.intervalMs);
+    const intervalMs = Number.isFinite(requestedInterval) && requestedInterval > 0
+      ? Math.min(1000, Math.max(4, requestedInterval))
+      : 0;
+    const predicateText = String(predicate).replace(/\s+/g, ' ').slice(0, 180);
+    const description = String(options.description || `browser condition: ${predicateText}`);
+    const deadline = performance.now() + timeoutMs;
+    const poll = () => new Promise(resolve => {
+      if (intervalMs > 0) setTimeout(resolve, intervalMs);
+      else requestAnimationFrame(resolve);
+    });
+    while (true) {
+      const value = await predicate();
+      if (value) return value;
+      if (performance.now() >= deadline) {
+        const finalValue = await predicate();
+        if (finalValue) return finalValue;
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for ${description}`);
+      }
+      await poll();
+    }
+  };
+  Object.defineProperty(window, '__yolomuxTestWaitFor', {
+    configurable: true,
+    value: waitFor,
+  });
+  Object.defineProperty(window, '__yolomuxTestHelpers', {
+    configurable: true,
+    value: Object.freeze({frame, settle, rect, paint, probePaint, parseStops, rowsByTop}),
+  });
+})();
+"""
+
+
+def browser_wait_timeout(timeout, worker=None):
+    requested = max(0.0, float(timeout))
+    active_worker = os.environ.get("PYTEST_XDIST_WORKER") if worker is None else worker
+    if not active_worker:
+        return requested
+    return max(requested, XDIST_BROWSER_WAIT_FLOOR_SECONDS)
+
+
+class WebDriverWait(SeleniumWebDriverWait):
+    def __init__(self, driver, timeout, poll_frequency=0.5, ignored_exceptions=None):
+        # `-n auto` starts one Chrome per worker. A five-second assertion budget is enough for an
+        # isolated browser but randomly expires before an unrelated fixture gets CPU under the full
+        # pool. Keep local focused tests fast while giving xdist one shared, still-bounded floor.
+        super().__init__(driver, browser_wait_timeout(timeout), poll_frequency, ignored_exceptions)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
 
 _APP_CSS_CACHE: str | None = None
+_APP_ENGLISH_STRINGS_CACHE: Mapping[str, str] | None = None
+_UI_PINS_CACHE: Mapping[str, object] | None = None
 
 
-def new_chrome_driver(window_size: str = "1000,700"):
+def register_browser_new_document_script(driver, source: str, *, reset_after_test: bool = True) -> str:
+    result = driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": source})
+    identifier = str(result.get("identifier") or "")
+    if reset_after_test and identifier:
+        identifiers = getattr(driver, "_yolomux_test_script_ids", None)
+        if identifiers is None:
+            identifiers = []
+            driver._yolomux_test_script_ids = identifiers
+        identifiers.append(identifier)
+    return identifier
+
+
+def remove_browser_test_new_document_scripts(driver):
+    identifiers = list(getattr(driver, "_yolomux_test_script_ids", []))
+    driver._yolomux_test_script_ids = []
+    for identifier in identifiers:
+        driver.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
+
+
+def new_chrome_driver(window_size: str | tuple[int, int] | None = None):
     chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
     if not chrome:
         pytest.skip("Chrome/Chromium is not installed")
@@ -54,8 +223,151 @@ def new_chrome_driver(window_size: str = "1000,700"):
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f"--window-size={window_size}")
-    return webdriver.Chrome(options=options)
+    requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
+    window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
+    options.add_argument(f"--window-size={window_size_arg}")
+    driver = webdriver.Chrome(options=options)
+    register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
+    driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
+    return driver
+
+
+def fast_pointer_actions(browser):
+    # Hover/click tests need real W3C pointer events, not Selenium's human-speed 250 ms travel. Keep
+    # roughly three 60 Hz frames so hover paint/popover geometry can settle before the next command.
+    # Drag tests keep constructing ActionChains directly so their motion duration remains deliberate.
+    return ActionChains(browser, duration=50)
+
+
+def settle_browser_frames(browser, count=2):
+    """Wait for a deterministic number of rendered frames using the document helper."""
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const count = arguments[0];
+        const settle = window.__yolomuxTestHelpers?.settle;
+        if (typeof settle !== 'function') {
+          done({error: 'missing __yolomuxTestHelpers.settle'});
+          return;
+        }
+        settle(count).then(() => done({ok: true}), error => done({error: String(error?.stack || error)}));
+        """,
+        count,
+    )
+    assert result == {"ok": True}, result
+
+
+def assert_close(actual, expected, tol=1.0, *, context=None):
+    delta = abs(float(actual) - float(expected))
+    assert delta <= float(tol), context or f"expected {actual!r} to be within {tol} of {expected!r}; delta={delta}"
+
+
+def pause_animations_at_progress(browser, selector, progress=0.5):
+    """Freeze matching CSS animations at one reproducible point before measuring their paint."""
+    return browser.execute_script(
+        """
+        const nodes = Array.from(document.querySelectorAll(arguments[0]));
+        const progress = Math.max(0, Math.min(1, Number(arguments[1]) || 0));
+        let paused = 0;
+        for (const node of nodes) {
+          for (const animation of node.getAnimations({subtree: true})) {
+            const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+            if (!duration) continue;
+            animation.pause();
+            animation.currentTime = duration * progress;
+            paused += 1;
+          }
+        }
+        return paused;
+        """,
+        selector,
+        progress,
+    )
+
+
+def freeze_document_animations(browser, progress=0.5):
+    """Freeze every running document animation at a deterministic point for a golden capture."""
+    return browser.execute_script(
+        """
+        const progress = Math.max(0, Math.min(1, Number(arguments[0]) || 0));
+        let paused = 0;
+        for (const animation of document.getAnimations({subtree: true})) {
+          const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+          if (!duration) continue;
+          animation.pause();
+          animation.currentTime = duration * progress;
+          paused += 1;
+        }
+        return paused;
+        """,
+        progress,
+    )
+
+
+def animated_property_at_progress(browser, selector, property_name, progress=0.5):
+    """Freeze an animation and return its computed property, avoiding timing-sensitive samples."""
+    pause_animations_at_progress(browser, selector, progress)
+    return browser.execute_script(
+        "return getComputedStyle(document.querySelector(arguments[0])).getPropertyValue(arguments[1]).trim();",
+        selector,
+        property_name,
+    )
+
+
+def set_browser_visual_profile(browser, *, theme="dark", dpr=1):
+    """Apply a small explicit visual profile; reset hook clears CDP device metrics afterwards."""
+    if theme not in {"dark", "light"}:
+        raise ValueError(f"unsupported visual theme: {theme!r}")
+    scale = float(dpr)
+    if scale <= 0:
+        raise ValueError(f"device pixel ratio must be positive: {dpr!r}")
+    size = browser.get_window_size()
+    width, height = size["width"], size["height"]
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": int(width), "height": int(height), "deviceScaleFactor": scale, "mobile": False},
+    )
+    browser.execute_script(
+        "document.body.classList.toggle('theme-light', arguments[0] === 'light');"
+        "document.body.classList.toggle('theme-dark', arguments[0] === 'dark');",
+        theme,
+    )
+    return browser.execute_script("return {theme: document.body.className, dpr: window.devicePixelRatio};")
+
+
+def _css_color_rgb(color):
+    value = str(color or "").strip()
+    if value.startswith("#"):
+        digits = value[1:]
+        if len(digits) == 3:
+            digits = "".join(character * 2 for character in digits)
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", digits):
+            raise ValueError(f"unsupported CSS color: {color!r}")
+        return tuple(float(int(digits[index:index + 2], 16)) for index in (0, 2, 4))
+    srgb = re.fullmatch(
+        r"color\(\s*srgb\s+([-+]?[\d.]+)\s+([-+]?[\d.]+)\s+([-+]?[\d.]+)(?:\s*/\s*[^)]+)?\s*\)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if srgb:
+        return tuple(max(0.0, min(255.0, float(srgb.group(index)) * 255.0)) for index in (1, 2, 3))
+    match = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", value)
+    if not match:
+        raise ValueError(f"unsupported CSS color: {color!r}")
+    return tuple(max(0.0, min(255.0, float(match.group(index)))) for index in (1, 2, 3))
+
+
+def wcag_contrast_ratio(first, second):
+    def relative_luminance(color):
+        channels = []
+        for value in _css_color_rgb(color):
+            channel = value / 255.0
+            channels.append(channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    left = relative_luminance(first)
+    right = relative_luminance(second)
+    return (max(left, right) + 0.05) / (min(left, right) + 0.05)
 
 
 def app_css() -> str:
@@ -65,6 +377,51 @@ def app_css() -> str:
     if _APP_CSS_CACHE is None:
         _APP_CSS_CACHE = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     return _APP_CSS_CACHE
+
+
+def app_english_strings() -> Mapping[str, str]:
+    # Locale fixture data is flat string-to-string JSON. Keep one parsed read-only catalog so every
+    # browser fixture consumes the same shipped labels without repeated disk reads and decoding.
+    global _APP_ENGLISH_STRINGS_CACHE
+    if _APP_ENGLISH_STRINGS_CACHE is None:
+        catalog = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+        if not isinstance(catalog, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in catalog.items()):
+            raise TypeError("English browser fixture catalog must contain only string values")
+        _APP_ENGLISH_STRINGS_CACHE = MappingProxyType(catalog)
+    return _APP_ENGLISH_STRINGS_CACHE
+
+
+def ui_pins() -> Mapping[str, object]:
+    """Read the shared cross-layer UI pin registry once and expose it as read-only fixture data."""
+    global _UI_PINS_CACHE
+    if _UI_PINS_CACHE is None:
+        pins = json.loads((REPO_ROOT / "tests" / "ui_pins.json").read_text(encoding="utf-8"))
+        if not isinstance(pins, dict):
+            raise TypeError("tests/ui_pins.json must contain one JSON object")
+        _UI_PINS_CACHE = MappingProxyType(pins)
+    return _UI_PINS_CACHE
+
+
+def ui_pin(name: str) -> str:
+    value = ui_pins().get(name)
+    if not isinstance(value, str) or not value:
+        raise KeyError(f"unknown string UI pin: {name}")
+    return value
+
+
+def css_hex_to_rgb(value: str) -> str:
+    """Convert a #rgb/#rrggbb pin into Selenium's computed `rgb(r, g, b)` spelling."""
+    digits = str(value or "").strip().removeprefix("#")
+    if len(digits) == 3:
+        digits = "".join(character * 2 for character in digits)
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", digits):
+        raise ValueError(f"expected #rgb or #rrggbb, got {value!r}")
+    red, green, blue = (int(digits[index:index + 2], 16) for index in (0, 2, 4))
+    return f"rgb({red}, {green}, {blue})"
+
+
+def ui_pin_rgb(name: str) -> str:
+    return css_hex_to_rgb(ui_pin(name))
 
 
 def page_html(body: str, *, extra_css: str = "") -> str:
@@ -89,6 +446,68 @@ def page_html(body: str, *, extra_css: str = "") -> str:
 def browser_screenshot_rgb(browser):
     image_mod = pytest.importorskip("PIL.Image")
     return image_mod.open(BytesIO(browser.get_screenshot_as_png())).convert("RGB")
+
+
+def local_golden_screenshot_dir():
+    """Return the ignored local baseline directory, optionally redirected for an isolated test."""
+    configured = os.environ.get(GOLDEN_DIR_ENV, "").strip()
+    return Path(configured).expanduser() if configured else LOCAL_GOLDEN_SCREENSHOT_DIR
+
+
+def assert_local_golden_screenshot(browser, name, *, rms_tolerance=6.0, changed_fraction_tolerance=0.015):
+    """Compare one browser screenshot with this machine's reviewed local baseline.
+
+    Golden PNGs deliberately stay out of git: Chrome font rasterization and app chrome are machine
+    specific, while this project runs its GUI gate locally.  Set YOLOMUX_UPDATE_GOLDENS=1 to create
+    or review-refresh them in one command.  A missing baseline is an explicit skip, never an empty
+    pixel assertion pretending to prove a visual result.
+    """
+    image_mod = pytest.importorskip("PIL.Image")
+    image_chops = pytest.importorskip("PIL.ImageChops")
+    image_stat = pytest.importorskip("PIL.ImageStat")
+    safe_name = str(name).strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", safe_name):
+        raise ValueError(f"golden name must be a simple lowercase filename, got {name!r}")
+    directory = local_golden_screenshot_dir()
+    baseline_path = directory / f"{safe_name}.png"
+    actual = browser_screenshot_rgb(browser)
+    if os.environ.get(GOLDEN_UPDATE_ENV) == "1":
+        directory.mkdir(parents=True, exist_ok=True)
+        actual.save(baseline_path)
+        return {"status": "updated", "path": str(baseline_path), "size": actual.size}
+    if not baseline_path.is_file():
+        pytest.skip(
+            f"local golden baseline missing: {baseline_path}; run "
+            f"{GOLDEN_UPDATE_ENV}=1 python3 -m pytest tests/test_browser_golden.py -q"
+        )
+    expected = image_mod.open(baseline_path).convert("RGB")
+    assert actual.size == expected.size, {
+        "golden": safe_name,
+        "actual": actual.size,
+        "expected": expected.size,
+        "baseline": str(baseline_path),
+    }
+    difference = image_chops.difference(actual, expected)
+    stat = image_stat.Stat(difference)
+    rms = sum(float(value) ** 2 for value in stat.rms) ** 0.5 / (3 ** 0.5)
+    changed_pixels = sum(1 for pixel in difference.getdata() if pixel != (0, 0, 0))
+    changed_fraction = changed_pixels / max(1, actual.width * actual.height)
+    assert rms <= rms_tolerance and changed_fraction <= changed_fraction_tolerance, {
+        "golden": safe_name,
+        "baseline": str(baseline_path),
+        "rms": round(rms, 4),
+        "rmsTolerance": rms_tolerance,
+        "changedFraction": round(changed_fraction, 6),
+        "changedFractionTolerance": changed_fraction_tolerance,
+        "refresh": f"{GOLDEN_UPDATE_ENV}=1 python3 -m pytest tests/test_browser_golden.py -q",
+    }
+    return {
+        "status": "matched",
+        "path": str(baseline_path),
+        "size": actual.size,
+        "rms": rms,
+        "changedFraction": changed_fraction,
+    }
 
 
 def browser_auth_yaml() -> str:
@@ -147,54 +566,81 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
 
 
 def cleanup_isolated_browser_runtime_paths(paths):
-    control_socket_dir = getattr(paths, "control_socket_dir", None)
-    if control_socket_dir:
-        shutil.rmtree(control_socket_dir, ignore_errors=True)
+    if paths is None:
+        return
+    shutil.rmtree(paths.control_socket_dir, ignore_errors=True)
 
 
-def start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=1):
+def run_isolated_tmux(runtime, *args, timeout=8):
+    return subprocess.run(
+        [runtime.tmux_binary, "-S", str(runtime.socket_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def capture_isolated_tmux_pane(runtime, session, timeout=8):
+    return run_isolated_tmux(runtime, "capture-pane", "-p", "-t", f"{session}:", timeout=timeout).stdout or ""
+
+
+def wait_for_isolated_tmux_panes(runtime, sessions, predicate, timeout=20, poll_interval=0.4):
+    session_names = list(sessions)
+    deadline = time.monotonic() + timeout
+    panes = {}
+    while time.monotonic() < deadline:
+        panes = {session: capture_isolated_tmux_pane(runtime, session) for session in session_names}
+        if predicate(panes):
+            return True, panes
+        time.sleep(poll_interval)
+    return False, panes
+
+
+def start_isolated_tmux_runtime(
+    monkeypatch,
+    tmp_path,
+    session_count=1,
+    *,
+    session_commands=None,
+    columns=120,
+    rows=36,
+):
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
     socket_dir = Path("/tmp") / f"yts-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     socket_dir.mkdir(mode=0o700)
     socket_path = socket_dir / "s"
-    session_names = [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
+    commands = dict(session_commands or {})
+    session_names = list(commands) if session_commands is not None else [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
+    if not session_names:
+        shutil.rmtree(socket_dir, ignore_errors=True)
+        raise ValueError("at least one isolated tmux session is required")
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
-    for session in session_names:
-        result = subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "new-session", "-d", "-s", session, "-x", "120", "-y", "36"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if result.returncode != 0:
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
-        subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-    return SimpleNamespace(socket_path=socket_path, socket_dir=socket_dir, sessions=session_names)
+    runtime = SimpleNamespace(tmux_binary=tmux_binary, socket_path=socket_path, socket_dir=socket_dir, sessions=session_names)
+    try:
+        for session in session_names:
+            args = ["new-session", "-d", "-s", session, "-x", str(columns), "-y", str(rows)]
+            command = commands.get(session)
+            if command is not None:
+                args.append(command)
+            result = run_isolated_tmux(runtime, *args, timeout=10)
+            if result.returncode != 0:
+                raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
+            if command is None:
+                run_isolated_tmux(runtime, "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter", timeout=5)
+        return runtime
+    except Exception:
+        stop_isolated_tmux_runtime(runtime)
+        raise
 
 
 def stop_isolated_tmux_runtime(runtime):
-    socket_path = getattr(runtime, "socket_path", None)
-    if socket_path:
-        subprocess.run(
-            ["tmux", "-S", str(socket_path), "kill-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-    socket_dir = getattr(runtime, "socket_dir", None)
-    if socket_dir:
-        shutil.rmtree(socket_dir, ignore_errors=True)
+    if runtime is None:
+        return
+    run_isolated_tmux(runtime, "kill-server", timeout=5)
+    shutil.rmtree(runtime.socket_dir, ignore_errors=True)
 
 
 def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True):
@@ -212,11 +658,11 @@ def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, 
 
 
 def stop_isolated_browser_share_app(runtime):
-    control_server = getattr(getattr(runtime, "app", None), "control_server", None)
-    if control_server is not None:
-        control_server.stop()
-    stop_isolated_tmux_runtime(getattr(runtime, "tmux", None))
-    cleanup_isolated_browser_runtime_paths(getattr(runtime, "paths", None))
+    if runtime is None:
+        return
+    runtime.app.control_server.stop()
+    stop_isolated_tmux_runtime(runtime.tmux)
+    cleanup_isolated_browser_runtime_paths(runtime.paths)
 
 
 def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
@@ -236,14 +682,14 @@ def stop_browser_share_server(server, thread):
     server.shutdown()
     server.server_close()
     thread.join(timeout=2)
-    control_server = getattr(getattr(server, "app", None), "control_server", None)
-    if control_server is not None:
-        control_server.stop()
+    if "control_server" in vars(server.app):
+        server.app.control_server.stop()
 
 
 def install_browser_websocket_tracker(driver):
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
+    register_browser_new_document_script(
+        driver,
+        """
         (() => {
           const NativeWebSocket = window.WebSocket;
           if (!NativeWebSocket || NativeWebSocket.__yolomuxTracked) return;
@@ -263,7 +709,7 @@ def install_browser_websocket_tracker(driver):
           window.WebSocket = TrackedWebSocket;
         })();
         """,
-    })
+    )
 
 
 def count_rect_region_pixels(image, dpr, rect, region, predicate, *, step=2):
@@ -308,9 +754,11 @@ def _reset_browser_state(request):
     if driver is None:
         return
     try:
+        remove_browser_test_new_document_scripts(driver)
+        driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         driver.delete_all_cookies()
         driver.execute_script("try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}")
-        driver.set_window_size(1000, 700)
+        driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
     except Exception:
         pass
 
@@ -321,8 +769,7 @@ def pane_fixture_html(width):
         f"""
         <button type="button" class="pane-tab {'active' if number == 5 else ''}">
           <span class="pane-tab-core">
-            <span class="session-button-prefix"><span class="session-button-number">YO</span></span>
-            <span class="session-button-name">{number}</span>
+            <span class="session-button-prefix"><span class="session-button-number">YO</span><strong class="session-button-number session-button-identifier">[{number}]</strong></span>
             <span class="session-button-text">
               <span class="tab-symbol session-state-badge">run</span>
               <span class="session-button-dir">fix: stabilize pane and Finder tab workflow</span>
@@ -414,7 +861,7 @@ def pc_controls_fixture_html():
           <button id="hash-tab" class="tab panel-detail-toggle">#</button>
           <button id="list-tab" class="tab terminal-tab">1.</button>
           <button id="pane-actions" class="tab pane-actions"><span id="pane-actions-dots" class="pane-actions-dots">...</span></button>
-          <button id="pane-zoom" class="tab pane-expand pc-window-control pc-zoom"></button>
+          <button id="pane-zoom" type="button" class="tab pane-expand pc-window-control pc-zoom" data-action="fixture-zoom"></button>
           <button id="hidden-pane-zoom" class="tab pane-expand pc-window-control pc-zoom" hidden></button>
         </div>
         <span id="working-yolo" class="session-yolo-marker active working">YO</span>
@@ -572,17 +1019,17 @@ def codemirror_editor_controls_fixture_html():
                   <div class="cm-panels cm-panels-top">
                     <div class="cm-panel cm-search">
                       <input id="search-field" class="cm-textfield" name="search" value="precedence">
-                      <button class="cm-button" name="next" title="Next match (Enter)">next</button>
-                      <button class="cm-button" name="prev" title="Previous match (Shift+Enter)">previous</button>
-                      <button class="cm-button" name="select">all</button>
-                      <label id="match-label"><input id="match-case" type="checkbox">match case</label>
-                      <label><input type="checkbox">regexp</label>
-                      <label><input type="checkbox">by word</label>
+                      <button class="cm-button" name="next" title="下一项 (Enter)">下一项</button>
+                      <button class="cm-button" name="prev" title="上一项 (Shift+Enter)">上一项</button>
+                      <button class="cm-button" name="select" data-search-label="全部">全部</button>
+                      <label id="match-label"><input id="match-case" type="checkbox">区分大小写</label>
+                      <label><input type="checkbox">正则表达式</label>
+                      <label data-search-label="全字匹配"><input name="word" type="checkbox">全字匹配</label>
                       <button class="cm-dialog-close" type="button">x</button>
                       <br>
-                      <input id="replace-field" class="cm-textfield" name="replace" placeholder="Replace">
-                      <button class="cm-button" name="replace">replace</button>
-                      <button class="cm-button" name="replaceAll">replace all</button>
+                      <input id="replace-field" class="cm-textfield" name="replace" placeholder="替换">
+                      <button class="cm-button" name="replace">替换</button>
+                      <button class="cm-button" name="replaceAll" data-search-label="全部">全部替换</button>
                       <span id="search-count" class="cm-search-count">3/102</span>
                     </div>
                   </div>
@@ -706,7 +1153,7 @@ def codemirror_todo_diff_overview_texts():
 def codemirror_todo_diff_overview_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -769,44 +1216,7 @@ def codemirror_todo_diff_overview_fixture_html():
             const rows = diffOverviewRowsFromCodeMirrorChunks(chunks, current, original);
             const content = view.scrollDOM.querySelector('.cm-content');
             if (content) content.style.minHeight = `${{Math.ceil(rows.totalRows * diffOverviewLineHeight(view, container))}}px`;
-            const normalizeOverviewColor = color => {{
-              const value = String(color || '').toLowerCase();
-              if (value === 'transparent' || value === '#ff5d6c' || value === '#38d878') return value;
-              const rgb = /^rgb\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)$/.exec(value);
-              if (!rgb) return value;
-              const hex = rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('');
-              return `#${{hex}}`;
-            }};
-            const parseStops = gradient => {{
-              const value = String(gradient || '');
-              const stops = [];
-              const normalizeStopPosition = position => String(Number.parseFloat(position));
-              const rangePattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%\\s+([0-9.]+)%/gi;
-              let match = rangePattern.exec(value);
-              while (match) {{
-                const color = normalizeOverviewColor(match[1]);
-                if (color !== 'transparent') {{
-                  stops.push({{color, start: normalizeStopPosition(match[2]), end: normalizeStopPosition(match[3])}});
-                }}
-                match = rangePattern.exec(value);
-              }}
-              if (stops.length) return stops;
-              const tokens = [];
-              const tokenPattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%/gi;
-              match = tokenPattern.exec(value);
-              while (match) {{
-                tokens.push({{color: normalizeOverviewColor(match[1]), pos: normalizeStopPosition(match[2])}});
-                match = tokenPattern.exec(value);
-              }}
-              for (let index = 1; index < tokens.length; index += 1) {{
-                const prev = tokens[index - 1];
-                const next = tokens[index];
-                if (prev.color === next.color && prev.color !== 'transparent') {{
-                  stops.push({{color: prev.color, start: prev.pos, end: next.pos}});
-                }}
-              }}
-              return stops;
-            }};
+            const {{parseStops}} = window.__yolomuxTestHelpers;
             const collectMetrics = () => {{
               const overview = container.querySelector('.cm-diff-overview');
               if (!overview) {{
@@ -852,7 +1262,7 @@ def codemirror_todo_diff_overview_fixture_html():
 def codemirror_file_explorer_diff_overview_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -871,6 +1281,8 @@ def codemirror_file_explorer_diff_overview_fixture_html():
     app_script = app_bundle_before_boot_script()
     original_json = json.dumps(original).replace("</script", "<\\/script")
     current_json = json.dumps(current).replace("</script", "<\\/script")
+    deleted_color = ui_pin("diffOverviewDelete")
+    added_color = ui_pin("diffOverviewAdd")
     return f"""
     <!doctype html>
     <html>
@@ -915,45 +1327,21 @@ def codemirror_file_explorer_diff_overview_fixture_html():
             panel._cmMode = 'diff';
             updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
 
-            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const {{settle, parseStops}} = window.__yolomuxTestHelpers;
             const normalizeColor = color => {{
               const value = String(color || '').toLowerCase();
-              if (value === 'transparent' || value === '#ff5d6c' || value === '#38d878') return value;
+              if (value === 'transparent' || value === '{deleted_color}' || value === '{added_color}') return value;
               const rgb = /^rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/.exec(value);
               if (!rgb) return value;
               return `#${{rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('')}}`;
-            }};
-            const parseStops = gradient => {{
-              const value = String(gradient || '');
-              const stops = [];
-              const rangePattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%\\s+([0-9.]+)%/gi;
-              let match = rangePattern.exec(value);
-              while (match) {{
-                stops.push({{color: normalizeColor(match[1]), start: Number(match[2]) / 100, end: Number(match[3]) / 100}});
-                match = rangePattern.exec(value);
-              }}
-              if (stops.length) return stops;
-              const tokens = [];
-              const tokenPattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%/gi;
-              match = tokenPattern.exec(value);
-              while (match) {{
-                tokens.push({{color: normalizeColor(match[1]), pos: Number(match[2]) / 100}});
-                match = tokenPattern.exec(value);
-              }}
-              for (let index = 1; index < tokens.length; index += 1) {{
-                const prev = tokens[index - 1];
-                const next = tokens[index];
-                if (next.pos > prev.pos) stops.push({{color: prev.color, start: prev.pos, end: next.pos}});
-              }}
-              return stops;
             }};
             const changedStops = gradient => parseStops(gradient).filter(item => item.color !== 'transparent');
             const overview = () => container.querySelector('.cm-diff-overview');
             const railColorAt = fraction => {{
               const stop = parseStops(overview()?.style?.background || '').find(item => fraction >= item.start && fraction < item.end);
               if (!stop || stop.color === 'transparent') return 'normal';
-              if (stop.color === '#ff5d6c') return 'remove';
-              if (stop.color === '#38d878') return 'add';
+              if (stop.color === '{deleted_color}') return 'remove';
+              if (stop.color === '{added_color}') return 'add';
               return stop.color;
             }};
             const rowKind = node => {{
@@ -1065,7 +1453,7 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
     """
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -1135,7 +1523,7 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
             }});
             panel._cmView = view;
             panel._cmMode = 'diff';
-            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const {{settle}} = window.__yolomuxTestHelpers;
             window.__diffWrapMetrics = async function() {{
               await settle();
               const inserted = Array.from(container.querySelectorAll('.cm-insertedLine'))
@@ -1211,7 +1599,7 @@ def app_bundle_before_boot_script():
 def codemirror_wrap_toggle_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -1344,36 +1732,30 @@ def finder_click_toolbar_fixture_html():
     css = app_css()
     return page_html(
         f"""
-        <article id="finder-panel" class="panel file-explorer-panel active-pane">
+        <article id="finder-panel" class="panel file-explorer-panel active-pane" data-file-explorer-mode="files">
           <div class="panel-head file-explorer-head">
-            <div class="pane-tabs" hidden></div>
+            <div class="pane-tabs"><button type="button" class="pane-tab active">Finder</button><button type="button" class="pane-minimize pc-window-control pc-minimize"></button></div>
             <div class="file-explorer-toolbar">
               <div class="file-explorer-toolbar-row file-explorer-primary-row">
-                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ / Tabber">
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="tabber" aria-pressed="false"><span class="file-explorer-mode-label">Tabber</span></button>
-                </span>
-                <label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
+                <label class="file-explorer-diff-session-control changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
                 <span class="file-explorer-toolbar-spacer"></span>
-                <div class="tabs pane-frame-controls file-explorer-frame-controls">
-                  <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
-                </div>
+                <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh>Reload</button>
               </div>
-              <div class="file-explorer-toolbar-row file-explorer-path-row file-explorer-mode-files-only">
-                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only active" aria-pressed="true">Sync</button>
-                <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
-                <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
+              <div class="file-explorer-toolbar-row file-explorer-path-row">
+                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel active" aria-pressed="true">Sync</button>
+                <input class="file-explorer-path-inline" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
+                <button type="button" class="path-copy-button file-explorer-path-copy-panel"></button>
               </div>
-              <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
-                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" id="new-file" data-file-explorer-new-file>+</button>
-                <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
+              <div class="file-explorer-toolbar-row file-explorer-actions-row">
+                <button type="button" class="file-explorer-header-action" id="new-file" data-file-explorer-new-file>+</button>
+                <button type="button" class="file-explorer-header-action file-explorer-folder-action" data-file-explorer-new-folder><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
                 <span class="file-explorer-toolbar-spacer"></span>
-                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only">.*</button>
-                <select class="file-explorer-sort-select file-explorer-mode-files-only"><option>A-Z</option></select>
-                <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
+                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">.*</button>
+                <select class="file-explorer-sort-select"><option>A-Z</option></select>
+                <span class="file-explorer-date-controls">
                   <button type="button" class="file-explorer-header-action file-explorer-date-toggle changes-date-toggle">日期</button>
-                  <button type="button" class="changes-refresh">Reload</button>
+                  <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="expand"><svg class="file-tree-expand-collapse-icon"></svg></button>
+                  <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="collapse"><svg class="file-tree-expand-collapse-icon"></svg></button>
                 </span>
               </div>
             </div>
@@ -1381,15 +1763,26 @@ def finder_click_toolbar_fixture_html():
           <div class="file-explorer-pane">
             <div class="file-explorer-tree-panel" tabindex="0">tree rows</div>
             <div class="file-explorer-changes-resizer"></div>
+            <div class="file-explorer-changes-panel" data-file-explorer-changes tabindex="0"></div>
+          </div>
+        </article>
+        <article id="differ-panel" class="panel file-explorer-panel file-explorer-differ" data-file-explorer-mode="diff" hidden>
+          <div class="panel-head file-explorer-head">
+            <div class="pane-tabs"><button type="button" class="pane-tab active">Differ</button><button type="button" class="pane-minimize pc-window-control pc-minimize"></button></div>
+            <div class="file-explorer-toolbar">
+              <div class="file-explorer-toolbar-row file-explorer-primary-row">
+                <label class="file-explorer-diff-session-control changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
+              </div>
+            </div>
+          </div>
+          <div class="file-explorer-pane">
             <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
               <div class="changes-toolbar file-explorer-diff-toolbar">
                 <label class="changes-control">Sort <select data-session-files-sort><option>new</option></select></label>
                 <button type="button" data-file-explorer-tree-dates>Ago</button>
                 <button type="button" class="changes-refresh" data-session-files-refresh>Reload</button>
               </div>
-              <div id="modified-files-head" class="file-explorer-changes-head">
-                <span class="changes-title">Differ: '5'</span>
-              </div>
+              <div class="file-explorer-changes-head"><span class="changes-title">Differ: '5'</span></div>
               <section class="changes-repo-group">
                 <button type="button" id="modified-files-repo-head" class="changes-repo-head">
                   <span class="ui-disclosure-triangle changes-repo-caret" data-disclosure-expanded="true">›</span>
@@ -1419,23 +1812,11 @@ def finder_click_toolbar_fixture_html():
           <div class="panel-detail-row"><div class="meta">path</div></div>
           <div class="tab-pane active"></div>
         </article>
-        <script>
-          document.body.classList.add('file-explorer-mode-files');
-          document.querySelectorAll('[data-file-explorer-mode-set]').forEach(button => button.addEventListener('click', () => {{
-            const nextMode = button.dataset.fileExplorerModeSet;
-            document.body.classList.toggle('file-explorer-mode-diff', nextMode === 'diff');
-            document.body.classList.toggle('file-explorer-mode-files', nextMode === 'files');
-            document.body.classList.toggle('file-explorer-mode-tabber', nextMode === 'tabber');
-            document.getElementById('finder-panel').dataset.fileExplorerMode = nextMode;
-            document.querySelectorAll('[data-file-explorer-mode-set]').forEach(toggle => {{
-              toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === nextMode ? 'true' : 'false');
-            }});
-          }}));
-        </script>
       """,
         extra_css=f"""
           body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 420px 1fr; gap: 8px; height: auto; min-height: 0; }}
           .panel {{ height: 230px; }}
+          [hidden] {{ display: none !important; }}
         """,
     )
 
@@ -1502,6 +1883,8 @@ def file_tree_status_alignment_fixture_html():
 
 def codemirror_scrollbar_overview_fixture_html():
     css = app_css()
+    deleted_color = ui_pin("diffOverviewDelete")
+    added_color = ui_pin("diffOverviewAdd")
     return f"""
     <!doctype html>
     <html>
@@ -1528,7 +1911,7 @@ def codemirror_scrollbar_overview_fixture_html():
               <div class="cm-content"></div>
             </div>
           </div>
-          <div id="overview" class="cm-diff-overview" style="background: linear-gradient(to bottom, #ff5d6c 0.000% 40.000%, #38d878 40.000% 80.000%, transparent 80.000% 100.000%)"></div>
+          <div id="overview" class="cm-diff-overview" style="background: linear-gradient(to bottom, {deleted_color} 0.000% 40.000%, {added_color} 40.000% 80.000%, transparent 80.000% 100.000%)"></div>
         </div>
       </body>
     </html>
@@ -1552,10 +1935,10 @@ def split_seam_fixture_html():
     )
 
 
-def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
-    script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
+    script_uri = runtime_script_uri or (REPO_ROOT / "static" / "yolomux.js").as_uri()
     dockview_css_uri = (REPO_ROOT / "static" / "vendor" / "dockview.css").as_uri()
     dockview_script_uri = (REPO_ROOT / "static" / "vendor" / "dockview-core.noStyle.js").as_uri()
     settings = settings or {}
@@ -1566,6 +1949,8 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         "sessions": sessions,
         "availableAgents": list(available_agents) if available_agents is not None else ["term"],
         "accessRole": access_role,
+        "authUsername": auth_username if share_bootstrap is None else "",
+        "dangerouslyYolo": dangerously_yolo,
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
         "maxSessionTabs": 9,
@@ -1587,7 +1972,8 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         # the real page inlines the active locale catalog so t() resolves on the first render
         # (the menu bar paints at boot). Mirror that here so the live-boot menu shows real labels.
         "locale": "en",
-        "strings": {"en": json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text())},
+        "localeRegistry": locale_registry_payload(),
+        "strings": {"en": dict(app_english_strings())},
     }
     if share_bootstrap is not None:
         bootstrap["share"] = share_bootstrap
@@ -1620,7 +2006,9 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         stack: event.error?.stack || '',
       }));
       window.addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
-      window.marked = {parse(text) { return String(text || ''); }};
+      window.marked = {parse(text) {
+        return String(text || '').replace(/`\\/yo <query>`/g, '<code>/yo &lt;query&gt;</code>');
+      }};
       window.hljs = {highlightAuto(text) { return {value: String(text || '')}; }, highlightElement() {}};
       window.Notification = {permission: 'denied', requestPermission: async () => 'denied'};
       class FakeTerminal {
@@ -1730,7 +2118,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         }
         if (lower.includes('tab width')) {
           applyFixtureSettingsPatch({appearance: {tab_width: 220}});
-          return fixtureSettingAnswer('appearance.tab_width', '180', '220');
+          return fixtureSettingAnswer('appearance.tab_width', '172', '220');
         }
         if (lower.includes('font size')) {
           applyFixtureSettingsPatch({appearance: {terminal_font_size: 18}});
@@ -1755,11 +2143,148 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         return result;
       }
       window.__fixtureAccessRole = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).accessRole || 'admin';
+      window.__fixtureAuthUsername = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).authUsername || 'alice';
       window.__fixtureYoagentMessages = [];
+      window.__fixtureChatMessages = [];
+      window.__fixtureChatMessageKeys = {};
+      window.__fixtureChatReaders = {};
+      window.__fixtureChatTyping = [];
+      window.__fixtureHoldChatYoagent = false;
+      window.__fixtureReleaseChatYoagent = null;
+      window.__fixtureHoldChatRead = false;
+      window.__fixtureReleaseChatRead = null;
+      window.__fixtureHoldChatBootstrap = false;
+      window.__fixtureReleaseChatBootstrap = null;
+      window.__fixtureChatSendAs = (username, senderInstanceId, messageBody, isQuestion = false, senderIp = '10.1.123.12') => {
+        const message = {
+          id: window.__fixtureChatMessages.length + 1,
+          created_at_utc: Date.now() / 1000,
+          username: String(username),
+          sender_ip: String(senderIp),
+          sender_instance_id: String(senderInstanceId),
+          client_message_uuid: `fixture-${window.__fixtureChatMessages.length + 1}`,
+          body: String(messageBody),
+          is_question: isQuestion === true,
+        };
+        window.__fixtureChatMessages.push(message);
+        emitFixtureClientEvent('chat_messages_changed', {revision: message.id});
+        return message;
+      };
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         const body = options.body ? JSON.parse(options.body || '{}') : null;
         window.__bootFetches.push({path: url.pathname, search: url.search, method: options.method || 'GET', body});
+        if (url.pathname === '/api/chat/bootstrap') {
+          if (window.__fixtureHoldChatBootstrap) {
+            await new Promise(resolve => { window.__fixtureReleaseChatBootstrap = resolve; });
+            window.__fixtureReleaseChatBootstrap = null;
+          }
+          const reader = url.searchParams.get('reader_id') || '';
+          const instance = url.searchParams.get('browser_instance_id') || '';
+          const latest = window.__fixtureChatMessages.at(-1)?.id || 0;
+          const firstRegistration = !Object.hasOwn(window.__fixtureChatReaders, reader);
+          if (firstRegistration) window.__fixtureChatReaders[reader] = latest;
+          const readUpTo = Number(window.__fixtureChatReaders[reader] || 0);
+          window.__fixtureLastChatBootstrapMessages = window.__fixtureChatMessages.filter(message => message.id > readUpTo);
+          return jsonResponse({
+            revision: latest,
+            newer_cursor: String(latest),
+            older_cursor: latest ? String(window.__fixtureChatMessages.find(message => message.id > readUpTo)?.id || (latest + 1)) : null,
+            has_more_older: window.__fixtureChatMessages.some(message => message.id < (window.__fixtureChatMessages.find(message => message.id > readUpTo)?.id || (latest + 1))),
+            read_up_to_id: readUpTo,
+            first_registration: firstRegistration,
+            messages: window.__fixtureLastChatBootstrapMessages,
+            typing: window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance),
+            retention_days: 7,
+            client_ip: '10.1.123.12',
+          });
+        }
+        if (url.pathname === '/api/chat/delta') {
+          const after = Number(url.searchParams.get('after') || 0);
+          const messages = window.__fixtureChatMessages.filter(message => message.id > after);
+          const revision = messages.at(-1)?.id || after;
+          return jsonResponse({messages, revision, newer_cursor: String(revision)});
+        }
+        if (url.pathname === '/api/chat/page') {
+          const before = Number(url.searchParams.get('before') || Number.MAX_SAFE_INTEGER);
+          const limit = Number(url.searchParams.get('limit') || 50);
+          const eligible = window.__fixtureChatMessages.filter(message => message.id < before);
+          const messages = eligible.slice(-limit);
+          return jsonResponse({messages, older_cursor: messages[0]?.id ? String(messages[0].id) : null, has_more: eligible.length > messages.length});
+        }
+        if (url.pathname === '/api/chat/context') {
+          const id = Number(url.searchParams.get('message_id') || 0);
+          const index = window.__fixtureChatMessages.findIndex(message => message.id === id);
+          return jsonResponse({
+            target: window.__fixtureChatMessages[index] || null,
+            before: window.__fixtureChatMessages.slice(Math.max(0, index - 3), Math.max(0, index)),
+            after: window.__fixtureChatMessages.slice(index + 1, index + 4),
+          });
+        }
+        if (url.pathname === '/api/chat/search') {
+          const query = String(url.searchParams.get('query') || '').toLocaleLowerCase();
+          const hits = window.__fixtureChatMessages.filter(message => message.body.toLocaleLowerCase().includes(query)).map(message => ({target: message, before: [], after: []}));
+          return jsonResponse({hits, next_cursor: null, has_more: false});
+        }
+        if (url.pathname === '/api/chat/send') {
+          if (window.__fixtureFailNextChatSendBeforeInsert) {
+            window.__fixtureFailNextChatSendBeforeInsert = false;
+            throw new TypeError('fixture chat send failed before insert');
+          }
+          const key = `${window.__fixtureAuthUsername}\u001f${body?.browser_instance_id || ''}\u001f${body?.client_message_uuid || ''}`;
+          let message = window.__fixtureChatMessageKeys[key];
+          const created = !message;
+          if (!message) {
+            message = window.__fixtureChatSendAs(window.__fixtureAuthUsername, body?.browser_instance_id || '', body?.body || '', false);
+            message.client_message_uuid = body?.client_message_uuid || message.client_message_uuid;
+            window.__fixtureChatMessageKeys[key] = message;
+          }
+          if (window.__fixtureDropNextChatSendResponse) {
+            window.__fixtureDropNextChatSendResponse = false;
+            throw new TypeError('fixture dropped chat response');
+          }
+          return jsonResponse({message, revision: message.id, created});
+        }
+        if (url.pathname === '/api/chat/yoagent') {
+          const sourceId = Number(body?.message_id || 0);
+          const typingInstance = `yolomux-yoagent-${sourceId}`;
+          const refreshYoagentTyping = () => {
+            window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== typingInstance);
+            window.__fixtureChatTyping.push({username: 'YO!agent', browser_instance_id: typingInstance, expires_at_utc: Date.now() / 1000 + 5});
+            emitFixtureClientEvent('chat_typing_changed', {});
+          };
+          refreshYoagentTyping();
+          let typingHeartbeat = null;
+          if (window.__fixtureHoldChatYoagent) {
+            typingHeartbeat = setInterval(refreshYoagentTyping, 2500);
+            try {
+              await new Promise(resolve => { window.__fixtureReleaseChatYoagent = resolve; });
+            } finally {
+              clearInterval(typingHeartbeat);
+              window.__fixtureReleaseChatYoagent = null;
+            }
+          }
+          window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== typingInstance);
+          emitFixtureClientEvent('chat_typing_changed', {});
+          const source = window.__fixtureChatMessages.find(message => message.id === sourceId);
+          const message = window.__fixtureChatSendAs('YO!agent', 'yolomux-yoagent', `YO!agent answer for: ${String(source?.body || '').replace(/^\\/yo\\s+/, '')}`, false, '');
+          return jsonResponse({message, revision: message.id, created: true, source_message_id: source?.id || 0});
+        }
+        if (url.pathname === '/api/chat/typing') {
+          const instance = String(body?.browser_instance_id || '');
+          window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance);
+          if (body?.typing) window.__fixtureChatTyping.push({username: window.__fixtureAuthUsername, browser_instance_id: instance, expires_at_utc: Date.now() / 1000 + 5});
+          emitFixtureClientEvent('chat_typing_changed', {});
+          return jsonResponse({typing: window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance)});
+        }
+        if (url.pathname === '/api/chat/read') {
+          if (window.__fixtureHoldChatRead) {
+            await new Promise(resolve => { window.__fixtureReleaseChatRead = resolve; });
+            window.__fixtureReleaseChatRead = null;
+          }
+          window.__fixtureChatReaders[String(body?.reader_id || '')] = Number(body?.message_id || 0);
+          return jsonResponse({read_up_to_id: Number(body?.message_id || 0)});
+        }
         if (url.pathname === '/api/yoagent/chat' && window.__fixtureYoagentChatMode === 'settings') {
           const message = String(body?.message || '');
           const answer = fixtureYoagentChatResponse(message);
@@ -1836,6 +2361,10 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           return jsonResponse({ok: true, acknowledged, auto_approve: autoPayload, status: 200});
         }
         if (url.pathname === '/api/auto-approve') {
+          if (window.__fixtureHoldAutoApprove) {
+            await new Promise(resolve => { window.__fixtureReleaseAutoApprove = resolve; });
+            window.__fixtureReleaseAutoApprove = null;
+          }
           return jsonResponse(window.__fixtureAutoApprovePayload || {
             session_order: window.__fixtureSessions,
             sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, {target: session, enabled: false, last_action: 'off'}])),
@@ -1923,7 +2452,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           <div class="brand-cell"><div class="brand brand-title title" aria-label="YOLOmux test"><span class="brand-yolo brand-nv">YO</span><span class="brand-lo brand-nv">LO</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
           <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
           <div class="actions">
-            <div id="latencyMeter" class="latency-meter"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
+            <div id="latencyMeter" class="latency-meter topbar-status-surface"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
             <button id="notifyToggle">Notify</button>
             <button id="refreshMeta">Refresh</button>
             <button id="logoutButton">Log out</button>
@@ -1959,6 +2488,8 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
           window.__fixtureSessionFilesPayloads = {json.dumps(session_files_payloads or {}, separators=(",", ":"))};
           window.__fixtureFsEntries = {json.dumps(fs_entries, separators=(",", ":"))};
           window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
+          window.__fixtureHoldAutoApprove = {json.dumps(bool(hold_auto_approve))};
+          window.__fixtureReleaseAutoApprove = null;
           window.__fixtureSharePayload = {json.dumps(share_status_payload, separators=(",", ":")) if share_status_payload is not None else "null"};
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
           window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
@@ -1967,15 +2498,21 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         <script>{stub_script}</script>
         <script src="{dockview_script_uri}"></script>
         <script src="{script_uri}"></script>
+        <script>window.{LIVE_RUNTIME_BUNDLE_SENTINEL} = true;</script>
       </body>
     </html>
     """
 
 
-def load_fixture(browser, tmp_path, width):
-    page = tmp_path / f"pane-{width}.html"
-    page.write_text(pane_fixture_html(width), encoding="utf-8")
+def load_static_html_fixture(browser, tmp_path, filename, html):
+    page = tmp_path / filename
+    page.write_text(html, encoding="utf-8")
     browser.get(page.as_uri())
+    return page
+
+
+def load_fixture(browser, tmp_path, width):
+    load_static_html_fixture(browser, tmp_path, f"pane-{width}.html", pane_fixture_html(width))
     return browser.execute_script(
         """
         const panel = document.querySelector('.panel').getBoundingClientRect();
@@ -2022,33 +2559,23 @@ def load_fixture(browser, tmp_path, width):
 
 
 def load_pc_controls_fixture(browser, tmp_path):
-    page = tmp_path / "pc-controls.html"
-    page.write_text(pc_controls_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "pc-controls.html", pc_controls_fixture_html())
 
 
 def load_topbar_font_fixture(browser, tmp_path):
-    page = tmp_path / "topbar-font.html"
-    page.write_text(topbar_font_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "topbar-font.html", topbar_font_fixture_html())
 
 
 def load_editor_diff_ref_toolbar_fixture(browser, tmp_path):
-    page = tmp_path / "editor-diff-ref-toolbar.html"
-    page.write_text(editor_diff_ref_toolbar_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "editor-diff-ref-toolbar.html", editor_diff_ref_toolbar_fixture_html())
 
 
 def load_codemirror_wrap_toggle_fixture(browser, tmp_path):
-    page = tmp_path / "cm-wrap-toggle.html"
-    page.write_text(codemirror_wrap_toggle_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "cm-wrap-toggle.html", codemirror_wrap_toggle_fixture_html())
 
 
 def load_menu_fixture(browser, tmp_path):
-    page = tmp_path / "menu.html"
-    page.write_text(menu_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "menu.html", menu_fixture_html())
     return browser.execute_script(
         """
         const rows = Array.from(document.querySelectorAll('.app-menu-tab-command')).map(row => {
@@ -2074,83 +2601,211 @@ def load_menu_fixture(browser, tmp_path):
 
 
 def load_editor_pane_legacy_body_fixture(browser, tmp_path):
-    page = tmp_path / "editor-pane-legacy-body.html"
-    page.write_text(editor_pane_ignores_legacy_body_class_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "editor-pane-legacy-body.html", editor_pane_ignores_legacy_body_class_fixture_html())
 
 
 def load_codemirror_editor_controls_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-editor-controls.html"
-    page.write_text(codemirror_editor_controls_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-editor-controls.html", codemirror_editor_controls_fixture_html())
 
 
 def load_codemirror_bundle_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-bundle.html"
-    page.write_text(codemirror_bundle_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-bundle.html", codemirror_bundle_fixture_html())
 
 
 def load_codemirror_todo_diff_overview_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-todo-diff-overview.html"
-    page.write_text(codemirror_todo_diff_overview_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-todo-diff-overview.html", codemirror_todo_diff_overview_fixture_html())
 
 
 def load_codemirror_file_explorer_diff_overview_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-file-explorer-diff-overview.html"
-    page.write_text(codemirror_file_explorer_diff_overview_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-file-explorer-diff-overview.html", codemirror_file_explorer_diff_overview_fixture_html())
 
 
 def load_codemirror_diff_wrapped_inserted_line_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-diff-wrapped-inserted-line.html"
-    page.write_text(codemirror_diff_wrapped_inserted_line_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-diff-wrapped-inserted-line.html", codemirror_diff_wrapped_inserted_line_fixture_html())
 
 
 def load_finder_click_toolbar_fixture(browser, tmp_path):
-    page = tmp_path / "finder-click-toolbar.html"
-    page.write_text(finder_click_toolbar_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "finder-click-toolbar.html", finder_click_toolbar_fixture_html())
 
 
 def activate_finder_diff_fixture(browser):
     browser.execute_script(
         """
-        document.body.classList.remove('file-explorer-mode-files');
-        document.body.classList.add('file-explorer-mode-diff');
-        const panel = document.getElementById('finder-panel');
-        if (panel) panel.dataset.fileExplorerMode = 'diff';
-        document.querySelectorAll('[data-file-explorer-mode-set]').forEach(toggle => {
-          toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === 'diff' ? 'true' : 'false');
-        });
+        const finder = document.getElementById('finder-panel');
+        const differ = document.getElementById('differ-panel');
+        finder?.setAttribute('hidden', '');
+        finder?.classList.remove('active-pane', 'focused-pane');
+        differ?.removeAttribute('hidden');
+        differ?.classList.add('active-pane', 'focused-pane');
         """
     )
 
 
 def load_file_tree_status_alignment_fixture(browser, tmp_path):
-    page = tmp_path / "file-tree-status-alignment.html"
-    page.write_text(file_tree_status_alignment_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "file-tree-status-alignment.html", file_tree_status_alignment_fixture_html())
 
 
 def load_codemirror_scrollbar_overview_fixture(browser, tmp_path):
-    page = tmp_path / "codemirror-scrollbar-overview.html"
-    page.write_text(codemirror_scrollbar_overview_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "codemirror-scrollbar-overview.html", codemirror_scrollbar_overview_fixture_html())
 
 
 def load_split_seam_fixture(browser, tmp_path):
-    page = tmp_path / "split-seam.html"
-    page.write_text(split_seam_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(browser, tmp_path, "split-seam.html", split_seam_fixture_html())
 
 
-def load_live_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwargs):
+def load_live_runtime_boot_fixture(browser, tmp_path, search="", expected_redirect_paths=(), **fixture_kwargs):
     page = tmp_path / "live-runtime-boot.html"
-    page.write_text(live_runtime_boot_fixture_html(**fixture_kwargs), encoding="utf-8")
-    browser.get(page.as_uri() + search)
+    page.write_text(_live_runtime_boot_fixture_html(**fixture_kwargs), encoding="utf-8")
+    fixture_url = page.as_uri() + search
+    browser.get(fixture_url)
+    wait_for_live_runtime_bundle(
+        browser,
+        timeout=LIVE_RUNTIME_BUNDLE_WAIT_SECONDS,
+        expected_url=fixture_url,
+        expected_redirect_paths=expected_redirect_paths,
+    )
+
+
+def live_runtime_bundle_state(browser):
+    return browser.execute_script(
+        f"""
+        return {{
+          sentinel: window.{LIVE_RUNTIME_BUNDLE_SENTINEL} === true,
+          grid: document.getElementById('grid') !== null,
+          appRoot: document.getElementById('appRoot') !== null,
+          lateFunction: typeof {LIVE_RUNTIME_LATE_FUNCTION} === 'function',
+          url: location.href,
+          errors: Array.from(window.__bootErrors || []),
+          rejections: Array.from(window.__bootRejections || []),
+        }};
+        """
+    )
+
+
+def live_runtime_bundle_ready_state(state, expected_path="", expected_redirect_paths=()):
+    failures = [*state.get("errors", []), *state.get("rejections", [])]
+    if failures:
+        raise AssertionError(f"live runtime bundle failed before readiness: {failures}")
+    current_path = urlsplit(state.get("url", "")).path
+    if expected_path and current_path and current_path != expected_path:
+        allowed = frozenset(str(path) for path in expected_redirect_paths)
+        if current_path in allowed:
+            return state
+        if allowed and str(state.get("url", "")).startswith("chrome-error://chromewebdata/"):
+            return state
+        return False
+    anchor_ready = state.get("grid") or state.get("appRoot")
+    return state if state.get("sentinel") and anchor_ready and state.get("lateFunction") else False
+
+
+def wait_for_live_runtime_bundle(browser, timeout=5, expected_url="", expected_redirect_paths=()):
+    last_state = None
+    expected_path = urlsplit(expected_url).path if expected_url else ""
+
+    def ready(driver):
+        nonlocal last_state
+        last_state = live_runtime_bundle_state(driver)
+        return live_runtime_bundle_ready_state(last_state, expected_path, expected_redirect_paths)
+
+    try:
+        return WebDriverWait(browser, timeout).until(ready)
+    except TimeoutException as exc:
+        raise AssertionError(f"live runtime bundle did not become ready: {last_state}") from exc
+
+
+def live_runtime_boot_health(browser):
+    return browser.execute_script(
+        """
+        const root = document.getElementById('appRoot');
+        const grid = document.getElementById('grid');
+        const rootRect = root?.getBoundingClientRect();
+        let activeLocale = '';
+        let localeError = '';
+        let collapsedPreferenceSectionIds = [];
+        let collapsedPreferenceSectionsError = '';
+        try {
+          activeLocale = typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : '';
+        } catch (error) {
+          localeError = String(error?.stack || error);
+        }
+        try {
+          collapsedPreferenceSectionIds = Array.from(collapsedPreferenceSections || []);
+        } catch (error) {
+          collapsedPreferenceSectionsError = String(error?.stack || error);
+        }
+        const visiblePanels = Array.from(document.querySelectorAll('.panel')).filter(panel => {
+          const rect = panel.getBoundingClientRect();
+          const style = getComputedStyle(panel);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        return {
+          documentReady: document.readyState,
+          errors: window.__bootErrors || [],
+          rejections: window.__bootRejections || [],
+          localeError,
+          collapsedPreferenceSectionsError,
+          activeLocale,
+          htmlLang: document.documentElement.lang || '',
+          htmlDir: document.documentElement.dir || '',
+          bodyTextLength: document.body?.innerText?.length || 0,
+          appRootPresent: Boolean(root),
+          appRootWidth: rootRect?.width || 0,
+          appRootHeight: rootRect?.height || 0,
+          gridChildren: grid?.children?.length || 0,
+          gridHtmlLength: grid?.innerHTML?.length || 0,
+          visiblePanels: visiblePanels.length,
+          paneTabs: document.querySelectorAll('.dockview-pane-tab').length,
+          collapsedPreferenceSectionIds,
+        };
+        """
+    )
+
+
+def install_live_runtime_boot_error_tracker(browser):
+    register_browser_new_document_script(
+        browser,
+        """
+              window.__bootErrors = [];
+              window.__bootRejections = [];
+              addEventListener('error', event => window.__bootErrors.push({
+                message: event.message || String(event.error || event),
+                filename: event.filename || '',
+                lineno: event.lineno || 0,
+                colno: event.colno || 0,
+                stack: event.error?.stack || '',
+              }));
+              addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
+            """,
+    )
+
+
+def assert_live_runtime_boot_healthy(browser, case_name, *, expected_locale="en", timeout=8):
+    def settled(driver):
+        metrics = live_runtime_boot_health(driver)
+        fatal = bool(metrics["errors"] or metrics["rejections"] or metrics["localeError"] or metrics["collapsedPreferenceSectionsError"])
+        rendered = metrics["gridChildren"] > 0 and metrics["visiblePanels"] > 0 and metrics["paneTabs"] > 0
+        return fatal or rendered
+
+    try:
+        WebDriverWait(browser, timeout).until(settled)
+    except TimeoutException:
+        pass
+    metrics = live_runtime_boot_health(browser)
+    message = f"full-bundle boot case {case_name!r} failed: {metrics}"
+    assert metrics["documentReady"] == "complete", message
+    assert metrics["errors"] == [], message
+    assert metrics["rejections"] == [], message
+    assert metrics["localeError"] == "", message
+    assert metrics["collapsedPreferenceSectionsError"] == "", message
+    assert metrics["activeLocale"] == expected_locale, message
+    assert metrics["htmlLang"] == expected_locale, message
+    assert metrics["bodyTextLength"] > 0, message
+    assert metrics["appRootPresent"] is True, message
+    assert metrics["appRootWidth"] > 0 and metrics["appRootHeight"] > 0, message
+    assert metrics["gridChildren"] > 0 and metrics["gridHtmlLength"] > 0, message
+    assert metrics["visiblePanels"] > 0, message
+    assert metrics["paneTabs"] > 0, message
+    return metrics
 
 
 def load_dockview_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwargs):
@@ -2160,7 +2815,9 @@ def load_dockview_runtime_boot_fixture(browser, tmp_path, search="", **fixture_k
 
 
 def wait_for_dockview(browser, min_tabs=1):
-    WebDriverWait(browser, 5).until(
+    # Full-gate browser workers contend for CPU; Dockview is a fixture boot readiness condition, not
+    # a product latency budget, so leave enough room for the concurrent lane to schedule it.
+    WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
             """
             return typeof dockviewLayoutActive === 'function'
@@ -2221,12 +2878,14 @@ def wait_for_visible_selector(browser, selector):
     return WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const node = document.querySelector(arguments[0]);
+            const node = [...document.querySelectorAll(arguments[0])].find(candidate => {
+              const rect = candidate.getBoundingClientRect();
+              const style = getComputedStyle(candidate);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            });
             if (!node) return false;
             node.scrollIntoView?.({block: 'center', inline: 'center'});
             const rect = node.getBoundingClientRect();
-            const style = getComputedStyle(node);
-            if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') return false;
             return {
               x: Math.round(rect.left + rect.width / 2),
               y: Math.round(rect.top + rect.height / 2),
@@ -2239,42 +2898,81 @@ def wait_for_visible_selector(browser, selector):
     )
 
 
-def click_visible_panel(browser, panel_id):
-    point = wait_for_visible_panel(browser, panel_id)
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1})
-    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
-    browser.execute_script(
+def _assert_browser_point_hits_target(browser, point, *, panel_id=None, selector=None):
+    result = browser.execute_script(
         """
-        const panel = document.getElementById(arguments[0]);
-        if (!panel) return;
-        const eventInit = {bubbles: true, cancelable: true, clientX: arguments[1], clientY: arguments[2], button: 0, buttons: 1};
-        panel.dispatchEvent(new PointerEvent('pointerdown', {...eventInit, pointerId: 1, pointerType: 'mouse'}));
-        panel.dispatchEvent(new PointerEvent('pointerup', {...eventInit, buttons: 0, pointerId: 1, pointerType: 'mouse'}));
-        panel.dispatchEvent(new MouseEvent('click', {...eventInit, buttons: 0}));
+        const panelId = arguments[0];
+        const selector = arguments[1];
+        const x = arguments[2];
+        const y = arguments[3];
+        const candidates = panelId
+          ? [document.getElementById(panelId)].filter(Boolean)
+          : [...document.querySelectorAll(selector || '')];
+        const target = candidates.find(candidate => {
+          const rect = candidate.getBoundingClientRect();
+          const style = getComputedStyle(candidate);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        const hit = document.elementFromPoint(x, y);
+        const describe = node => node
+          ? `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}${node.classList?.length ? `.${[...node.classList].join('.')}` : ''}`
+          : '<none>';
+        return {
+          ownsHit: Boolean(target && hit && (target === hit || target.contains(hit))),
+          target: describe(target),
+          hit: describe(hit),
+          x,
+          y,
+        };
         """,
         panel_id,
+        selector,
         point["x"],
         point["y"],
     )
+    assert result and result["ownsHit"], f"browser click point is occluded or off-screen: {result}"
+
+
+def _cdp_click_point(browser, point):
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mousePressed",
+            "x": point["x"],
+            "y": point["y"],
+            "button": "left",
+            "buttons": 1,
+            "clickCount": 1,
+        },
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mouseReleased",
+            "x": point["x"],
+            "y": point["y"],
+            "button": "left",
+            "buttons": 0,
+            "clickCount": 1,
+        },
+    )
+
+
+def click_visible_panel(browser, panel_id):
+    point = wait_for_visible_panel(browser, panel_id)
+    _assert_browser_point_hits_target(browser, point, panel_id=panel_id)
+    _cdp_click_point(browser, point)
 
 
 def click_visible_selector(browser, selector):
-    wait_for_visible_selector(browser, selector)
-    browser.execute_script(
-        """
-        const node = document.querySelector(arguments[0]);
-        if (!node) return;
-        const rect = node.getBoundingClientRect();
-        const clientX = Math.round(rect.left + rect.width / 2);
-        const clientY = Math.round(rect.top + rect.height / 2);
-        const eventInit = {bubbles: true, cancelable: true, clientX, clientY, button: 0, buttons: 1};
-        node.dispatchEvent(new PointerEvent('pointerdown', {...eventInit, pointerId: 1, pointerType: 'mouse'}));
-        node.dispatchEvent(new PointerEvent('pointerup', {...eventInit, buttons: 0, pointerId: 1, pointerType: 'mouse'}));
-        node.dispatchEvent(new MouseEvent('click', {...eventInit, buttons: 0}));
-        """,
-        selector,
-    )
+    point = wait_for_visible_selector(browser, selector)
+    _assert_browser_point_hits_target(browser, point, selector=selector)
+    _cdp_click_point(browser, point)
 
 
 def move_to_visible_panel(browser, panel_id):
@@ -2315,36 +3013,16 @@ def cdp_drag(browser, start, end, steps=24):
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start["x"], "y": start["y"], "button": "none"})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": start["x"], "y": start["y"], "button": "left", "buttons": 1, "clickCount": 1})
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
+    settle_browser_frames(browser)
     for index in range(1, steps + 1):
         x = round(start["x"] + (end["x"] - start["x"]) * index / steps)
         y = round(start["y"] + (end["y"] - start["y"]) * index / steps)
         browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1})
         if index % 4 == 0:
-            browser.execute_async_script(
-                """
-                const done = arguments[arguments.length - 1];
-                requestAnimationFrame(done);
-                """
-            )
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(done))));
-        """
-    )
+            settle_browser_frames(browser, 1)
+    settle_browser_frames(browser, 4)
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": end["x"], "y": end["y"], "button": "left", "buttons": 1})
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
+    settle_browser_frames(browser)
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": end["x"], "y": end["y"], "button": "left", "buttons": 0, "clickCount": 1})
 
 
@@ -2353,29 +3031,14 @@ def cdp_drag_hold(browser, start, end, steps=24):
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start["x"], "y": start["y"], "button": "none"})
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": start["x"], "y": start["y"], "button": "left", "buttons": 1, "clickCount": 1})
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(done));
-        """
-    )
+    settle_browser_frames(browser)
     for index in range(1, steps + 1):
         x = round(start["x"] + (end["x"] - start["x"]) * index / steps)
         y = round(start["y"] + (end["y"] - start["y"]) * index / steps)
         browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1})
         if index % 4 == 0:
-            browser.execute_async_script(
-                """
-                const done = arguments[arguments.length - 1];
-                requestAnimationFrame(done);
-                """
-            )
-    browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(done)));
-        """
-    )
+            settle_browser_frames(browser, 1)
+    settle_browser_frames(browser, 3)
 
 
 def cdp_release(browser, point):

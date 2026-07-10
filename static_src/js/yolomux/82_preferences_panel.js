@@ -21,13 +21,13 @@ function editorSchemePreferenceChoices(options = {}) {
     .filter(id => options.dark === undefined || EDITOR_SCHEMES[id]?.dark === options.dark)
     .map(id => {
       const scheme = EDITOR_SCHEMES[id];
-      return {value: id, label: scheme.label, group: scheme.dark ? t('pref.editorScheme.group.dark') : t('pref.editorScheme.group.light')};
+      return {value: id, label: scheme.label, group: scheme.dark ? t('common.theme.dark') : t('common.theme.light')};
     });
 }
 
 function globalThemePreferenceChoices() {
   return [
-    {value: 'system', label: t('pref.appearance.theme.system')},
+    {value: 'system', label: t('common.theme.system')},
     {value: 'dark', label: t('pref.appearance.theme.dark')},
     {value: 'light', label: t('pref.appearance.theme.light')},
   ];
@@ -109,6 +109,29 @@ function settingCatalogEntry(path) {
   return catalog && typeof catalog[path] === 'object' ? catalog[path] : {};
 }
 
+function preferenceSettingLocaleKeys(path) {
+  const localeKeys = settingCatalogEntry(path).locale_keys;
+  const deferredKeys = clientSettingsPayload?.localeKeyOverrides?.[path];
+  const source = localeKeys && typeof localeKeys === 'object'
+    ? localeKeys
+    : (deferredKeys && typeof deferredKeys === 'object' ? deferredKeys : {});
+  return {
+    label: String(source.label || `pref.${path}.label`),
+    help: String(source.description || `pref.${path}.help`),
+  };
+}
+
+function preferenceSettingItem(path, options = {}) {
+  const localeKeys = preferenceSettingLocaleKeys(path);
+  const {labelParams = {}, helpParams = {}, ...itemOptions} = options;
+  return {
+    path,
+    label: t(localeKeys.label, labelParams),
+    ...itemOptions,
+    help: t(localeKeys.help, helpParams),
+  };
+}
+
 function settingChoiceLabels(path) {
   const labels = settingCatalogEntry(path).choice_labels || {};
   return labels && typeof labels === 'object' ? labels : {};
@@ -135,15 +158,21 @@ function yoagentCodexModelPreferenceChoices() {
   return modelPreferenceChoices('yoagent.codex_model', Object.keys(YOAGENT_CODEX_MODEL_LABEL_KEYS), YOAGENT_CODEX_MODEL_LABEL_KEYS);
 }
 
-function effortPreferenceChoices(path, fallbackValues, labelPrefix) {
+function effortPreferenceLabel(value) {
+  return ['low', 'medium', 'high'].includes(value)
+    ? t(`common.effort.${value}`)
+    : preferenceChoiceLabel(value);
+}
+
+function effortPreferenceChoices(path, fallbackValues) {
   const choices = Array.isArray(clientSettingsPayload?.choices?.[path])
     ? clientSettingsPayload.choices[path]
     : fallbackValues;
-  return choices.map(value => ({value, label: t(`${labelPrefix}.${value}`)}));
+  return choices.map(value => ({value, label: effortPreferenceLabel(value)}));
 }
 
 function yoagentClaudeEffortPreferenceChoices() {
-  return effortPreferenceChoices('yoagent.claude_effort', ['low', 'medium', 'high'], 'pref.yoagent.claude_effort');
+  return effortPreferenceChoices('yoagent.claude_effort', ['low', 'medium', 'high']);
 }
 
 function yoagentCodexEffortPreferenceChoices() {
@@ -152,7 +181,7 @@ function yoagentCodexEffortPreferenceChoices() {
   const options = Array.isArray(modelMetadata.effort_options) && modelMetadata.effort_options.length
     ? modelMetadata.effort_options
     : ['low', 'medium', 'high', 'xhigh'];
-  return options.map(value => ({value, label: t(`pref.yoagent.codex_effort.${value}`)}));
+  return options.map(value => ({value, label: effortPreferenceLabel(value)}));
 }
 
 function yoagentModelPreferenceChoicesForBackend(backend) {
@@ -163,138 +192,209 @@ function yoagentEffortPreferenceChoicesForBackend(backend) {
   return backend === 'claude' ? yoagentClaudeEffortPreferenceChoices() : backend === 'codex' ? yoagentCodexEffortPreferenceChoices() : [];
 }
 
+function preferencesStatusPulseExampleMarkerHtml(state, group) {
+  const tabBall = group === 'tab';
+  const acknowledging = group === 'acknowledgement';
+  const subwindow = !tabBall;
+  const label = t(acknowledging ? 'pref.performance.statusSample.acknowledged' : 'pref.performance.statusSample.pulse');
+  const sampleOptions = {surface: subwindow ? 'subwindow' : 'tab', pulse: !acknowledging, acknowledging, label};
+  const item = agentWindowStatusSampleItem(state, sampleOptions);
+  const activityClasses = [
+    'agent-window-activity',
+    subwindow ? 'agent-window-activity--subwindow' : '',
+    agentWindowActivityToneWrapperClass(state),
+    acknowledging ? 'agent-window-activity--acknowledging' : '',
+    'agent-window-activity--status-only',
+  ].filter(Boolean).join(' ');
+  const style = agentWindowActivityStyleAttribute(agentWindowActivityTone(state), item, {
+    subwindowGlyphPulse: subwindow,
+    acknowledgementPreview: acknowledging,
+  });
+  const dotHtml = agentWindowStatusDotHtmlForTone(state, sampleOptions);
+  const activityHtml = `<span class="${esc(activityClasses)}" title="${esc(label)}" aria-label="${esc(label)}"${style}>${dotHtml}</span>`;
+  const surfaceClass = tabBall
+    ? 'session-agent-activity-marker'
+    : 'tmux-window-button keyboard-legend-status-glyph';
+  return `<span class="${surfaceClass} preferences-status-pulse-marker" data-status-pulse-example-group="${esc(group)}" data-status-pulse-example-state="${esc(state)}" aria-hidden="true">${activityHtml}</span>`;
+}
+
+function preferencesStatusPulseExampleHtml() {
+  const states = AGENT_WINDOW_VISIBLE_TONES;
+  const groupHtml = group => `<span class="preferences-status-pulse-example-group" data-status-pulse-example="${esc(group)}">${states.map(state => preferencesStatusPulseExampleMarkerHtml(state, group)).join('')}</span>`;
+  return `<span class="preferences-status-pulse-example">${groupHtml('tab')}${groupHtml('subwindow')}${groupHtml('acknowledgement')}</span>`;
+}
+
+function orderedPreferenceSections(sections) {
+  const orderedIds = [
+    PREFERENCE_SECTION_IDS.general,
+    PREFERENCE_SECTION_IDS.appearance,
+    PREFERENCE_SECTION_IDS.terminalEditor,
+    PREFERENCE_SECTION_IDS.notifications,
+    ...FILE_MENU_PREFERENCE_SECTION_ORDER.flatMap(id => (
+      id === PREFERENCE_SECTION_IDS.fileExplorer ? [id, PREFERENCE_SECTION_IDS.uploads] : [id]
+    )),
+    PREFERENCE_SECTION_IDS.github,
+    PREFERENCE_SECTION_IDS.yolo,
+  ];
+  const rank = new Map(orderedIds.map((id, index) => [id, index]));
+  return sections
+    .map((section, index) => ({section, index}))
+    .sort((left, right) => (rank.get(left.section.id) ?? orderedIds.length) - (rank.get(right.section.id) ?? orderedIds.length) || left.index - right.index)
+    .map(({section}) => section);
+}
+
 function preferenceSections() {
-  return [
-    {title: t('pref.section.general'), items: [
+  const sections = [
+    {id: PREFERENCE_SECTION_IDS.general, title: t('pref.section.general'), items: [
       // #51: Language is the FIRST General preference.
-      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: i18nLocaleChoices(), help: t('pref.general.language.help')},
-      {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
-      {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
+      preferenceSettingItem('general.language', {type: 'select', choices: i18nLocaleChoices()}),
+      preferenceSettingItem('general.auto_focus', {type: 'boolean'}),
+      preferenceSettingItem('general.startup_tips', {type: 'boolean'}),
     ]},
-    {title: t('pref.section.appearance'), items: [
-      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
-      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: layoutModePreferenceChoices(), help: t('pref.general.default_layout.help')},
-      {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 6, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
-      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 6, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+    {id: PREFERENCE_SECTION_IDS.appearance, title: t('pref.section.appearance'), items: [
+      preferenceSettingItem('appearance.theme', {type: 'radio', choices: globalThemePreferenceChoices()}),
+      preferenceSettingItem('general.default_layout', {type: 'radio', choices: layoutModePreferenceChoices()}),
+      preferenceSettingItem('appearance.ui_font_size', {type: 'number', min: 6, max: 20, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.file_explorer_font_size', {type: 'number', min: 6, max: 24, step: 1, suffix: 'px', labelParams: {name: fileExplorerLabel()}}),
       {type: 'note', text: t('pref.appearance.font_sizes.note')},
-      {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
-      {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
-      {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
-      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
-      {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
-      {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
-      {path: 'appearance.separator_color', label: t('pref.appearance.separator_color.label'), type: 'radio', choices: separatorColorPreferenceChoices(), help: t('pref.appearance.separator_color.help')},
-      {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: cursorColorPreferenceChoices(), help: t('pref.appearance.editor_cursor_color.help')},
-      {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
+      preferenceSettingItem('appearance.tab_width', {type: 'number', min: 120, max: 420, step: 5, suffix: 'px'}),
+      preferenceSettingItem('appearance.max_tabs_per_pane', {type: 'number', min: 2, max: 30, step: 1}),
+      preferenceSettingItem('appearance.pane_spacing', {type: 'number', min: 0, max: 20, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.pane_ring_opacity', {type: 'range', min: 5, max: 100, step: 5, suffix: '%'}),
+      preferenceSettingItem('appearance.inactive_pane_opacity', {type: 'range', min: 0, max: 100, step: 5, suffix: '%'}),
+      preferenceSettingItem('appearance.active_color', {type: 'radio', choices: activeColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.separator_color', {type: 'radio', choices: separatorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.editor_cursor_color', {type: 'radio', choices: cursorColorPreferenceChoices()}),
+      preferenceSettingItem('appearance.date_time_hour_cycle', {type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
         {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
-      ], help: t('pref.appearance.date_time_hour_cycle.help')},
+      ]}),
     ]},
-    {title: t('pref.section.terminal_editor'), items: [
-      {path: 'appearance.terminal_theme', label: t('pref.appearance.terminal_theme.label'), type: 'radio', choices: [
+    {id: PREFERENCE_SECTION_IDS.terminalEditor, title: t('pref.section.terminal_editor'), items: [
+      preferenceSettingItem('appearance.terminal_theme', {type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
-        {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
-        {value: 'light', label: t('pref.appearance.terminal_theme.light')},
-      ], help: t('pref.appearance.terminal_theme.help')},
-      {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
-      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
-      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 6, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
-      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
-      {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
-      {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
-      {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'radio', choices: [
+        {value: 'dark', label: t('common.theme.dark')},
+        {value: 'light', label: t('common.theme.light')},
+      ]}),
+      preferenceSettingItem('appearance.tmux_status_bar', {type: 'radio', choices: [
+        {value: 'off', label: t('pref.appearance.tmux_status_bar.off')},
+        {value: 'top', label: t('pref.appearance.tmux_status_bar.top')},
+        {value: 'bottom', label: t('pref.appearance.tmux_status_bar.bottom')},
+      ]}),
+      preferenceSettingItem('appearance.terminal_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.editor_font_size', {type: 'number', min: 6, max: 28, step: 1, suffix: 'px'}),
+      preferenceSettingItem('appearance.preview_font_size', {type: 'number', min: 6, max: 32, step: 1, suffix: 'px'}),
+      preferenceSettingItem('terminal_editor.scrollback', {type: 'number', min: 1000, max: 50000, step: 500, suffix: t('unit.line.other')}),
+      preferenceSettingItem('appearance.editor_dark_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: true})}),
+      preferenceSettingItem('appearance.editor_light_color_scheme', {type: 'select', choices: editorSchemePreferenceChoices({dark: false})}),
+      preferenceSettingItem('appearance.editor_cursor_style', {type: 'radio', choices: [
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
-      ], help: t('pref.appearance.editor_cursor_style.help')},
-      {path: 'terminal_editor.word_wrap', label: t('pref.terminal_editor.word_wrap.label'), type: 'boolean', help: t('pref.terminal_editor.word_wrap.help')},
-      {path: 'terminal_editor.line_numbers', label: t('pref.terminal_editor.line_numbers.label'), type: 'boolean', help: t('pref.terminal_editor.line_numbers.help')},
-      {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},
-      {path: 'editor.autosave_delay_seconds', label: t('pref.editor.autosave_delay_seconds.label'), type: 'number', min: 0.5, max: 60, step: 0.5, suffix: 's', help: t('pref.editor.autosave_delay_seconds.help')},
-      {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
-      {path: 'editor.trim_trailing_whitespace_on_save', label: t('pref.editor.trim_trailing_whitespace_on_save.label'), type: 'boolean', help: t('pref.editor.trim_trailing_whitespace_on_save.help')},
-      {path: 'editor.ensure_final_newline_on_save', label: t('pref.editor.ensure_final_newline_on_save.label'), type: 'boolean', help: t('pref.editor.ensure_final_newline_on_save.help')},
+      ]}),
+      preferenceSettingItem('terminal_editor.word_wrap', {type: 'boolean'}),
+      preferenceSettingItem('terminal_editor.line_numbers', {type: 'boolean'}),
+      preferenceSettingItem('editor.autosave', {type: 'boolean'}),
+      preferenceSettingItem('editor.autosave_delay_seconds', {type: 'number', min: 0.5, max: 60, step: 0.5, suffix: 's'}),
+      preferenceSettingItem('editor.blame_all_lines', {type: 'boolean'}),
+      preferenceSettingItem('editor.trim_trailing_whitespace_on_save', {type: 'boolean'}),
+      preferenceSettingItem('editor.ensure_final_newline_on_save', {type: 'boolean'}),
     ]},
-    {title: t('pref.section.notifications'), items: [
-      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
-      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
-      {path: 'updates.notify_level', label: t('pref.updates.notify_level.label'), type: 'radio', choices: updateNotifyLevelPreferenceChoices(), help: t('pref.updates.notify_level.help')},
-      {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
-      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
-      {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
-      {path: 'performance.agent_status_pulse_period_ms', label: t('pref.performance.agent_status_pulse_period_ms.label'), type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', help: t('pref.performance.agent_status_pulse_period_ms.help')},
-      {path: 'performance.workflow_transition_glow_seconds', label: t('pref.performance.workflow_transition_glow_seconds.label'), type: 'number', min: 0, max: 300, step: 1, suffix: 's', help: t('pref.performance.workflow_transition_glow_seconds.help')},
-      {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
+    {id: PREFERENCE_SECTION_IDS.notifications, title: t('pref.section.notifications'), items: [
+      ...notificationDeliveryDescriptors().map(({channel, label, help}) => ({type: 'notification-delivery', channel, label, help})),
+      preferenceSettingItem('notifications.notify_working_attention', {type: 'boolean'}),
+      preferenceSettingItem('notifications.notify_working_done', {type: 'boolean'}),
+      preferenceSettingItem('notifications.toast_duration_ms', {type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms'}),
+      preferenceSettingItem('updates.notify_level', {type: 'radio', choices: updateNotifyLevelPreferenceChoices()}),
+      preferenceSettingItem('notifications.notify_transitions', {type: 'list'}),
+      preferenceSettingItem('notifications.throttle_seconds', {type: 'number', min: 0, max: 600, step: 5, suffix: 's'}),
+      preferenceSettingItem('performance.agent_status_pulse_period_ms', {type: 'number', min: 250, max: 10000, step: 250, suffix: 'ms', exampleHtml: preferencesStatusPulseExampleHtml}),
+      preferenceSettingItem('performance.workflow_transition_glow_seconds', {type: 'number', min: 0, max: 300, step: 1, suffix: 's'}),
+      preferenceSettingItem('general.reload_on_update', {type: 'boolean'}),
+      preferenceSettingItem('general.reload_on_update_auto', {type: 'boolean'}),
     ]},
-    {title: fileExplorerLabel(), items: [
-      {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
-      {path: 'file_explorer.image_open_mode', label: t('pref.file_explorer.image_open_mode.label'), type: 'radio', choices: ['same-tab', 'new-tab'], help: t('pref.file_explorer.image_open_mode.help')},
-      {path: 'file_explorer.image_preview_max_px', label: t('pref.file_explorer.image_preview_max_px.label'), type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: t('pref.file_explorer.image_preview_max_px.help')},
-      {path: 'file_explorer.quick_access_paths', label: t('pref.file_explorer.quick_access_paths.label'), type: 'list', help: t('pref.file_explorer.quick_access_paths.help')},
-      {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
-      {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
-      {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
-      {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
-      {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
+    {id: PREFERENCE_SECTION_IDS.chat, title: t('brand.tab.chat'), items: [
+      preferenceSettingItem('chat.retention_days', {type: 'number', min: 1, max: 365, step: 1}),
     ]},
-    {title: t('pref.section.uploads'), items: [
-      {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
-      {path: 'uploads.filename_template', label: t('pref.uploads.filename_template.label'), type: 'text', wide: true, help: t('pref.uploads.filename_template.help')},
-      {path: 'uploads.subdir', label: t('pref.uploads.subdir.label'), type: 'text', help: t('pref.uploads.subdir.help')},
-      {path: 'uploads.show_suggestions', label: t('pref.uploads.show_suggestions.label'), type: 'boolean', help: t('pref.uploads.show_suggestions.help')},
-      {path: 'uploads.suggestion_autorun', label: t('pref.uploads.suggestion_autorun.label'), type: 'boolean', help: t('pref.uploads.suggestion_autorun.help')},
-      {path: 'uploads.image_action_order', label: t('pref.uploads.image_action_order.label'), type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true, help: t('pref.uploads.image_action_order.help')},
-      {path: 'uploads.custom_actions', label: t('pref.uploads.custom_actions.label'), type: 'list', wide: true, help: t('pref.uploads.custom_actions.help')},
+    {id: PREFERENCE_SECTION_IDS.fileExplorer, title: fileExplorerLabel(), items: [
+      preferenceSettingItem('file_explorer.root_mode', {type: 'radio', choices: [
+        {value: 'fixed', label: t('pref.file_explorer.root_mode.fixed')},
+        {value: 'sync', label: t('finder.toolbar.syncLabel')},
+      ]}),
+      preferenceSettingItem('file_explorer.image_open_mode', {type: 'radio', choices: [
+        {value: 'same-tab', label: t('pref.file_explorer.image_open_mode.sameTab')},
+        {value: 'new-tab', label: t('pref.file_explorer.image_open_mode.newTab')},
+      ]}),
+      preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
+      preferenceSettingItem('file_explorer.quick_access_paths', {type: 'list'}),
+      preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
+      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true}),
+      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 4, autosize: true}),
+      preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
+      preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
+      preferenceSettingItem('file_explorer.companion_dirs', {type: 'list'}),
+      preferenceSettingItem('file_explorer.dir_cache_ms', {type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms'}),
+      preferenceSettingItem('file_explorer.new_entry_highlight_ms', {type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms'}),
     ]},
-    {title: t('pref.section.performance'), items: [
-      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
-      {path: 'performance.server_background_file_event_poll_ms', label: t('pref.performance.server_background_file_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_background_file_event_poll_ms.help')},
-      {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
-      {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
-      {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
-      {path: 'performance.tabber_activity_refresh_ms', label: t('pref.performance.tabber_activity_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.5, suffix: 's', scale: 1000, help: t('pref.performance.tabber_activity_refresh_ms.help')},
-      {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
-      {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
-      {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
-      {path: 'performance.tab_popover_show_delay_ms', label: t('pref.performance.tab_popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.tab_popover_show_delay_ms.help')},
-      {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
-      {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
+    {id: PREFERENCE_SECTION_IDS.uploads, title: t('pref.section.uploads'), items: [
+      preferenceSettingItem('uploads.max_bytes', {type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576}),
+      preferenceSettingItem('uploads.filename_template', {type: 'text', wide: true}),
+      preferenceSettingItem('uploads.subdir', {type: 'text'}),
+      preferenceSettingItem('uploads.show_suggestions', {type: 'boolean'}),
+      preferenceSettingItem('uploads.suggestion_autorun', {type: 'boolean'}),
+      preferenceSettingItem('uploads.image_action_order', {type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true}),
+      preferenceSettingItem('uploads.custom_actions', {type: 'list', wide: true}),
     ]},
-    {title: t('pref.section.github'), items: [
-      {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
+    {id: PREFERENCE_SECTION_IDS.performance, title: t('pref.section.performance'), items: [
+      preferenceSettingItem('performance.server_event_poll_ms', {type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3}),
+      preferenceSettingItem('performance.server_background_file_event_poll_ms', {type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3}),
+      preferenceSettingItem('performance.server_directory_event_poll_ms', {type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3}),
+      preferenceSettingItem('performance.latency_refresh_ms', {type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000}),
+      preferenceSettingItem('performance.event_log_refresh_ms', {type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000}),
+      preferenceSettingItem('performance.tabber_activity_refresh_ms', {type: 'number', min: 1, max: 60, step: 0.5, suffix: 's', scale: 1000}),
+      preferenceSettingItem('performance.popover_show_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
+      preferenceSettingItem('performance.popover_hide_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
+      preferenceSettingItem('performance.menu_hover_open_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
+      preferenceSettingItem('performance.tab_popover_show_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
+      preferenceSettingItem('performance.tab_popover_follow_delay_ms', {type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms'}),
+      preferenceSettingItem('performance.remote_resize_delay_ms', {type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms'}),
     ]},
-    {title: t('pref.section.yoagent'), items: [
-      {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'radio', choices: [
+    {id: PREFERENCE_SECTION_IDS.github, title: t('pref.section.github'), items: [
+      preferenceSettingItem('github.watched_prs', {type: 'list', wide: true}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.yoagent, title: t('brand.tab.agent'), items: [
+      preferenceSettingItem('yoagent.backend', {type: 'radio', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
         {value: 'codex', label: t('pref.yoagent.backend.codex')},
         {value: 'claude', label: t('pref.yoagent.backend.claude')},
-      ], help: t('pref.yoagent.backend.help')},
-      {path: 'yoagent.invocation', label: t('pref.yoagent.invocation.label'), type: 'radio', choices: [
+      ]}),
+      preferenceSettingItem('yoagent.invocation', {type: 'radio', choices: [
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
-      ], help: t('pref.yoagent.invocation.help')},
-      {path: 'yoagent.claude_model', label: t('pref.yoagent.claude_model.label'), type: 'select', choices: yoagentClaudeModelPreferenceChoices(), help: t('pref.yoagent.claude_model.help')},
-      {path: 'yoagent.claude_effort', label: t('pref.yoagent.claude_effort.label'), type: 'radio', choices: yoagentClaudeEffortPreferenceChoices(), help: t('pref.yoagent.claude_effort.help')},
-      {path: 'yoagent.codex_model', label: t('pref.yoagent.codex_model.label'), type: 'select', choices: yoagentCodexModelPreferenceChoices(), help: t('pref.yoagent.codex_model.help')},
-      {path: 'yoagent.codex_effort', label: t('pref.yoagent.codex_effort.label'), type: 'radio', choices: yoagentCodexEffortPreferenceChoices(), help: t('pref.yoagent.codex_effort.help')},
-      {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
-      {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
-      {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
+      ]}),
+      preferenceSettingItem('yoagent.claude_model', {type: 'select', choices: yoagentClaudeModelPreferenceChoices()}),
+      preferenceSettingItem('yoagent.claude_effort', {type: 'radio', choices: yoagentClaudeEffortPreferenceChoices()}),
+      preferenceSettingItem('yoagent.codex_model', {type: 'select', choices: yoagentCodexModelPreferenceChoices()}),
+      preferenceSettingItem('yoagent.codex_effort', {type: 'radio', choices: yoagentCodexEffortPreferenceChoices()}),
+      preferenceSettingItem('yoagent.system_prompt', {type: 'textarea', alwaysEnableReset: true}),
+      preferenceSettingItem('yoagent.intro', {type: 'textarea', alwaysEnableReset: true}),
+      preferenceSettingItem('yoagent.format', {type: 'textarea', alwaysEnableReset: true}),
     ]},
-    {title: t('pref.section.share'), items: [
-      {path: 'share.ttl_seconds', label: t('pref.share.ttl_seconds.label'), type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60, help: t('pref.share.ttl_seconds.help')},
-      {path: 'share.max_viewers', label: t('pref.share.max_viewers.label'), type: 'number', min: 1, max: 300, step: 1, help: t('pref.share.max_viewers.help')},
-      {path: 'share.read_only', label: t('pref.share.read_only.label'), type: 'boolean', help: t('pref.share.read_only.help')},
-      {path: 'share.scheme', label: t('pref.share.scheme.label'), type: 'radio', choices: ['http', 'https'], help: t('pref.share.scheme.help')},
+    {id: PREFERENCE_SECTION_IDS.share, title: t('brand.share'), items: [
+      preferenceSettingItem('share.ttl_seconds', {type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60}),
+      preferenceSettingItem('share.max_viewers', {type: 'number', min: 1, max: 300, step: 1}),
+      preferenceSettingItem('share.read_only', {type: 'boolean'}),
+      preferenceSettingItem('share.scheme', {type: 'radio', choices: ['http', 'https']}),
     ]},
-    {id: 'yolo', title: t('pref.section.yolo'), items: [
-      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
-      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
-      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
-      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
+    {id: PREFERENCE_SECTION_IDS.yolo, title: t('brand.yolo'), items: [
+      preferenceSettingItem('performance.auto_approve_interval_seconds', {type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's'}),
+      preferenceSettingItem('yolo.rule_file_path', {type: 'text', action: 'open-yolo-rule', wide: true}),
+      preferenceSettingItem('yolo.dry_run', {type: 'boolean'}),
+      preferenceSettingItem('yolo.prompt_source', {type: 'radio', choices: [
         {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
         {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
-      ], help: t('pref.yolo.prompt_source.help')},
+      ]}),
     ]},
   ];
+  return orderedPreferenceSections(sections);
 }
 
 function preferenceItemByPath(path) {
@@ -314,8 +414,8 @@ function preferenceDefault(path) {
 }
 
 function preferenceStatusText() {
-  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: clientSettingsPayload.error});
-  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: yoloRulesPayload.error});
+  if (clientSettingsPayload.error) return t('pref.status.settingsError', {error: userMessageText(clientSettingsPayload, clientSettingsPayload.error)});
+  if (yoloRulesPayload.error) return t('pref.status.rulesError', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)});
   return settingsLoadedAgeText();
 }
 
@@ -345,7 +445,7 @@ function preferencesYoloRulesPathHtml() {
   const rulesDetail = yoloRulesPayload.source ? ` · ${yoloRuleStatusDetail()}` : '';
   return `
     <div class="preferences-path-row preferences-path-row--section">
-      <span class="preferences-path-label">${esc(t('pref.path.rules'))}</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span>${pathCopyButtonHtml(rulesPath, {className: 'preferences-path-copy', title: t('pref.path.copyRules')})}
+      <span class="preferences-path-label">${esc(t('brand.yoloRules'))}</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span>${pathCopyButtonHtml(rulesPath, {className: 'preferences-path-copy', title: t('pref.path.copyRules')})}
     </div>`;
 }
 
@@ -400,7 +500,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
   if (path === 'appearance.date_time_hour_cycle') add(['date', 'time', 'clock', 'hour', 'hours', '12', '24', 'am', 'pm']);
-  if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'codex', 'claude']);
+  if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme' || path === 'appearance.tmux_status_bar') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'tmux', 'status', 'codex', 'claude']);
   if (path.startsWith('editor.') || path.includes('editor_') || path.startsWith('terminal_editor.')) add(['code', 'edit', 'codemirror', 'monaco']);
   if (path === 'terminal_editor.word_wrap') add(['softwrap', 'wrapping']);
   if (path === 'terminal_editor.line_numbers') add(['numbers', 'gutter']);
@@ -413,6 +513,9 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
+  if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);
+  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
+  if (path === 'file_explorer.index_max_files') add(['index', 'limit', 'cap', 'maximum', 'partial', 'quick-open']);
   if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
   if (path === 'file_explorer.companion_dirs') add(['companion', 'repos', 'sibling', 'extra', 'always', 'dirty', 'branch', 'status', 'parser-toolkits']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
@@ -500,6 +603,10 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.type === 'notification-delivery') {
+    const checked = notificationDeliveryEnabled(item.channel) ? ' checked' : '';
+    return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="preference-notification-${esc(item.channel)}">${esc(item.label)}<span class="preferences-setting-help">${esc(item.help)}</span></label><span class="preferences-setting-control"><input type="checkbox" id="preference-notification-${esc(item.channel)}" data-notification-delivery="${esc(item.channel)}"${checked}></span></div>`;
+  }
   if (item.type === 'note') {
     return `<div class="preferences-setting-row preferences-setting-note">${esc(item.text || '')}</div>`;
   }
@@ -554,13 +661,14 @@ function preferenceControlHtml(item, query = '') {
   }
   const resetDisabled = preferencesReadOnlyVisual || (!item.alwaysEnableReset && JSON.stringify(value) === JSON.stringify(defaultValue)) ? ' disabled' : '';
   const extraControl = item.action === 'open-yolo-rule'
-    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${preferencesReadOnlyVisual ? ' disabled' : ''}>${esc(t('pref.openAction'))}</button>`
+    ? `<button type="button" class="preferences-inline-action" data-action="preferences-yolo-rule-open" data-yolo-rule-open${preferencesReadOnlyVisual ? ' disabled' : ''}>${esc(t('common.open'))}</button>`
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
+  const example = typeof item.exampleHtml === 'function' ? item.exampleHtml(value) : String(item.exampleHtml || '');
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
-  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
+  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}${example}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-action="preferences-setting-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('common.reset'))}</button></span>${advisory}</div>`;
 }
 
 function preferenceNumberDisplayValue(item, value) {
@@ -584,26 +692,28 @@ function preferenceAdvisoryHtml(item, value) {
   return `<div class="preferences-setting-advisory">
     <span>${esc(t('pref.advisory.upload', {size: formatFileSize(uploadRsyncRecommendationBytes)}))}</span>
     <code>${esc(command)}</code>
-    <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
+    <button type="button" class="preferences-inline-action" data-action="preferences-copy-text" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
   </div>`;
 }
 
 function preferencesPanelHtml() {
   const query = preferenceSearchNeedle();
-  const sections = preferenceSections()
+  const allSections = preferenceSections();
+  setCollapsedPreferenceSections(collapsedPreferenceSections, {sections: allSections, persist: true});
+  const sections = allSections
     .filter(section => preferenceSectionMatches(section, query))
     .map(section => {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
       const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
-      const collapsed = !query && collapsedPreferenceSections.has(section.title);
-      const sectionIntro = section.id === 'yolo' && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
+      const collapsed = !query && collapsedPreferenceSections.has(section.id);
+      const sectionIntro = section.id === PREFERENCE_SECTION_IDS.yolo && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
         ? preferencesYoloRulesPathHtml()
         : '';
       const rows = `${sectionIntro}${visibleItems.map(item => preferenceControlHtml(item)).join('')}`;
       const count = visibleItems.length;
       return `
-        <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
-          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.title)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+        <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.id)}">
+          <button type="button" class="preferences-section-toggle" data-action="preferences-section-toggle" data-preference-section-toggle="${esc(section.id)}" aria-expanded="${collapsed ? 'false' : 'true'}">
             ${disclosureTriangleHtml(!collapsed, 'preferences-section-caret')}
             <span class="preferences-section-title">${esc(section.title)}</span>
             <span class="preferences-section-count">${count}</span>
@@ -619,9 +729,9 @@ function preferencesPanelHtml() {
     : t('pref.reset.warning', {name: fileExplorerLabel()});
   const resetAction = preferencesResetConfirmVisible ? `
       <div class="preferences-reset-confirm">
-        <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
-        <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('pref.reset.cancel'))}</button>
-      </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
+        <button type="button" class="preferences-reset-continue" data-action="preferences-reset-confirm" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
+        <button type="button" class="preferences-reset-cancel" data-action="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('common.cancel'))}</button>
+      </div>` : `<button type="button" class="preferences-reset-all" data-action="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
   const resetBlock = `
     <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="${esc(t('pref.reset.aria'))}">
       <div>
@@ -633,7 +743,7 @@ function preferencesPanelHtml() {
   return `
     <div class="preferences-search-row">
       <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="${esc(t('pref.searchPlaceholder'))}" aria-label="${esc(t('pref.searchPlaceholder'))}">
-      <button type="button" class="preferences-search-button" data-preferences-search-action>${esc(t('pref.searchButton'))}</button>
+      <button type="button" class="preferences-search-button" data-action="preferences-search" data-preferences-search-action>${esc(t('common.search'))}</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-sections">${sections}</div>
@@ -643,40 +753,30 @@ function createPreferencesPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel preferences-panel';
   panel.id = panelDomId(prefsItemId);
-  panel.innerHTML = `
-      <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: prefsItemId,
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelInnerControlsHtml(prefsItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
-          <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.preferences'))}</span></div>
+          <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('common.preferences'))}</span></div>
           <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="preferences-body panel-overlay-root">
-        <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
-        <div class="preferences-scroll">${preferencesPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'preferences-body',
+    bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
   return panel;
 }
 
-function focusPreferencesSearch(panel = null) {
+function focusPreferencesSearch(panel = null, options = {}) {
   // never steal focus into the search box while a tab is being dragged — focus() during a
   // drag (and the re-render it triggers) aborts the native drag.
-  if (dragSession != null) return false;
-  const root = panel && panel.isConnected !== false
-    ? panel
-    : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
-  const search = root?.querySelector?.('[data-preferences-search]');
-  if (!search) return false;
-  search.focus?.({preventScroll: true});
-  const position = String(search.value || '').length;
-  search.setSelectionRange?.(position, position);
-  return true;
+  if (dragState.item != null) return false;
+  return focusPanelSearchInput(panel, '[data-preferences-search]', {panelSelector: '.preferences-panel', ...options});
 }
 
 function preferencesScrollIsActive(now = Date.now()) {
@@ -705,7 +805,7 @@ function notePreferencesScrollActivity(now = Date.now()) {
 function renderPreferencesPanels(options = {}) {
   // defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
   // node aborts the native HTML5 drag.
-  if (dragSession != null) { pendingPreferencesRender = true; return; }
+  if (dragState.item != null) { pendingPreferencesRender = true; return; }
   scheduleDeferredSettingsMetadataRefresh();
   if (options.force !== true && preferencesScrollIsActive()) {
     pendingPreferencesRender = true;
@@ -728,7 +828,7 @@ function renderPreferencesPanels(options = {}) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
-        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
+        body.innerHTML = `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
       if (options.focusSearch !== true) {
         const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
@@ -748,8 +848,7 @@ function renderPreferencesPanels(options = {}) {
 function autosizePreferenceTextarea(textarea) {
   if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
   const maxRows = Number(textarea.dataset.settingMaxItems || textarea.getAttribute('rows') || 0);
-  textarea.style.height = 'auto';
-  let height = textarea.scrollHeight;
+  let maxHeight = Number.POSITIVE_INFINITY;
   if (Number.isFinite(maxRows) && maxRows > 0) {
     const style = window.getComputedStyle?.(textarea);
     const lineHeight = Number.parseFloat(style?.lineHeight || '');
@@ -758,12 +857,10 @@ function autosizePreferenceTextarea(textarea) {
     const borderTop = Number.parseFloat(style?.borderTopWidth || '0') || 0;
     const borderBottom = Number.parseFloat(style?.borderBottomWidth || '0') || 0;
     if (Number.isFinite(lineHeight) && lineHeight > 0) {
-      const maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
-      height = Math.min(height, maxHeight);
-      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : '';
+      maxHeight = Math.ceil((lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom);
     }
   }
-  textarea.style.height = `${height}px`;
+  conversationAutosizeTextarea(textarea, maxHeight);
 }
 
 function clampPreferenceListControl(control) {
@@ -818,6 +915,12 @@ function bindPreferencesPanel(panel) {
     }
   });
   panel.addEventListener('change', event => {
+    const delivery = event.target.closest('[data-notification-delivery]');
+    if (delivery && panel.contains(delivery)) {
+      setNotificationDelivery(delivery.dataset.notificationDelivery, delivery.checked);
+      renderPreferencesPanels({force: true});
+      return;
+    }
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
     savePreferenceControl(control);
@@ -836,18 +939,13 @@ function bindPreferencesPanel(panel) {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
     }, 0);
   });
-  panel.addEventListener('click', async event => {
-    const searchAction = event.target.closest('[data-preferences-search-action]');
-    if (searchAction && panel.contains(searchAction)) {
-      event.preventDefault();
+  bindActionDispatcher(panel, {
+    'preferences-search': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
       focusPreferencesSearch(panel);
-      return;
-    }
-    const resetAll = event.target.closest('[data-preferences-reset-all]');
-    if (resetAll && panel.contains(resetAll)) {
-      event.preventDefault();
+    },
+    'preferences-reset-all': () => {
       preferencesResetConfirmVisible = true;
       renderPreferencesPanels({force: true});
       setTimeout(() => {
@@ -855,47 +953,32 @@ function bindPreferencesPanel(panel) {
         confirm?.scrollIntoView?.({block: 'nearest', inline: 'nearest'});
         confirm?.focus?.();
       }, 0);
-      return;
-    }
-    const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
-    if (resetConfirm && panel.contains(resetConfirm)) {
-      event.preventDefault();
+    },
+    'preferences-reset-confirm': () => {
       preferencesResetConfirmVisible = false;
       resetAllPreferences();
-      return;
-    }
-    const resetCancel = event.target.closest('[data-preferences-reset-cancel]');
-    if (resetCancel && panel.contains(resetCancel)) {
-      event.preventDefault();
+    },
+    'preferences-reset-cancel': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
-      return;
-    }
-    const copyText = event.target.closest('[data-copy-text]');
-    if (copyText && panel.contains(copyText)) {
-      event.preventDefault();
-      copyTextToClipboard(copyText.dataset.copyText || '')
-        .then(() => { statusEl.textContent = 'copied text'; })
-        .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
-      return;
-    }
-    const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
-    if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
-      event.preventDefault();
+    },
+    'preferences-copy-text': (_event, target) => {
+      copyTextToClipboard(target.dataset.copyText || '')
+        .then(() => { statusEl.textContent = t('status.copiedText'); })
+        .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
+    },
+    'preferences-yolo-rule-open': () => {
       preferencesResetConfirmVisible = false;
       openYoloRuleFile();
-      return;
-    }
-    const sectionToggle = event.target.closest('[data-preference-section-toggle]');
-    if (sectionToggle && panel.contains(sectionToggle)) {
-      event.preventDefault();
+    },
+    'preferences-section-toggle': (_event, sectionToggle) => {
       preferencesResetConfirmVisible = false;
-      const title = sectionToggle.dataset.preferenceSectionToggle || '';
-      if (collapsedPreferenceSections.has(title)) collapsedPreferenceSections.delete(title);
-      else collapsedPreferenceSections.add(title);
+      const sectionId = sectionToggle.dataset.preferenceSectionToggle || '';
+      if (collapsedPreferenceSections.has(sectionId)) collapsedPreferenceSections.delete(sectionId);
+      else collapsedPreferenceSections.add(sectionId);
       writeStoredCollapsedPreferenceSections();
       const section = sectionToggle.closest('[data-preference-section]');
-      const collapsed = collapsedPreferenceSections.has(title);
+      const collapsed = collapsedPreferenceSections.has(sectionId);
       if (section) {
         section.classList.toggle(CLS.collapsed, collapsed);
         sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -906,11 +989,7 @@ function bindPreferencesPanel(panel) {
         renderPreferencesPanels({force: true});
       }
       scheduleShareUiStatePublish();
-      return;
-    }
-    const reset = event.target.closest('[data-setting-reset]');
-    if (!reset || !panel.contains(reset)) return;
-    event.preventDefault();
-    resetPreference(reset.dataset.settingReset || '');
+    },
+    'preferences-setting-reset': (_event, target) => resetPreference(target.dataset.settingReset || ''),
   });
 }

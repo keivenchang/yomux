@@ -260,11 +260,6 @@ const shareReplayHostPerformance = {
   },
 };
 
-function shareReplayHostPerfNow() {
-  const value = globalThis.performance?.now?.();
-  return Number.isFinite(value) ? value : Date.now();
-}
-
 function shareReplayHostPerfMs(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.round(number * 10) / 10 : null;
@@ -301,7 +296,7 @@ function shareReplayRecordHostPerfSkip(kind = '', reason = 'no-viewers') {
 function shareReplayRecordHostPerf(kind = '', startedAt = 0, detail = {}) {
   const counter = shareReplayHostPerformance[kind];
   if (!counter) return;
-  const durationMs = shareReplayHostPerfMs(shareReplayHostPerfNow() - Number(startedAt || 0)) ?? 0;
+  const durationMs = shareReplayHostPerfMs(performanceNow() - Number(startedAt || 0)) ?? 0;
   counter.count += 1;
   counter.totalMs = shareReplayHostPerfMs(Number(counter.totalMs || 0) + durationMs) ?? 0;
   counter.maxMs = Math.max(Number(counter.maxMs || 0), durationMs);
@@ -616,7 +611,7 @@ function shareReplayResetMirrorRootAttributes(root, attrs = {}) {
   root.dataset.shareReplayRoot = 'true';
   root.dataset.shareReplayInert = 'true';
   root.setAttribute('role', 'presentation');
-  root.setAttribute('aria-label', 'YO!share replay mirror');
+  root.setAttribute('aria-label', shareReplayMirrorLabel());
   root.setAttribute('tabindex', '-1');
   shareReplayApplyAttributes(root, attrs, {preserveRoot: true});
 }
@@ -677,7 +672,7 @@ function shareReplayPrepareTerminalPlaceholderElement(element, entry = {}) {
     element.dataset.shareTerminalPlaceholderId = entry.placeholderId;
   }
   element.setAttribute?.('role', 'presentation');
-  element.setAttribute?.('aria-label', `Shared terminal ${entry.session}`);
+  element.setAttribute?.('aria-label', t('share.replay.sharedTerminalAria', {session: entry.session}));
   return element;
 }
 
@@ -1212,7 +1207,7 @@ function shareReplayEnqueueMutationRecords(records = [], options = {}) {
     return [];
   }
   const sourceRecords = Array.from(records || []);
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const entries = shareReplayMutationEntries(sourceRecords);
   const terminals = Array.isArray(entries.terminals) ? entries.terminals : [];
   shareReplayRecordHostPerf('mutationRecords', startedAt, {
@@ -1295,7 +1290,7 @@ function shareReplayFlushMutationDeltas() {
   const mutations = shareReplayPendingMutations.splice(0, shareReplayPendingMutations.length);
   const terminals = shareReplayPendingTerminalPlaceholders.splice(0, shareReplayPendingTerminalPlaceholders.length);
   if (!mutations.length && !terminals.length) return null;
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const payload = {
     mutations,
     count: mutations.length,
@@ -1616,12 +1611,13 @@ function shareDropStaleMirrorFrame(message = {}) {
   const current = shareMirrorFrameNumbers(message);
   if (!current) return false;
   const sender = shareMirrorSenderKey(message);
-  const previous = shareMirrorLastFrameBySender.get(sender);
+  const record = shareSenderRecord(sender);
+  const previous = record.lastFrame;
   if (previous) {
     if (current.epoch < previous.epoch) return true;
     if (current.epoch === previous.epoch && current.sequence <= previous.sequence) return true;
   }
-  shareMirrorLastFrameBySender.set(sender, current);
+  record.lastFrame = current;
   return false;
 }
 
@@ -1630,7 +1626,7 @@ function sharePublish(type, payload = {}, options = {}) {
   if (!shareCanPublishUi() || !type) return {sent: false, queued: 0, bytes: 0};
   const message = shareBuildUiMessage(type, payload, {...options, commitSequence: false});
   const serialized = JSON.stringify(message);
-  const bytes = shareSerializedByteLength(serialized);
+  const bytes = utf8ByteLength(serialized);
   const maxBytes = Math.max(0, Math.round(Number(options.maxBytes) || 0));
   if (maxBytes > 0 && bytes > maxBytes) {
     return {sent: false, queued: 0, dropped: true, bytes, message};
@@ -1642,19 +1638,9 @@ function sharePublish(type, payload = {}, options = {}) {
   for (const share of targets) {
     const token = share?.token || share;
     if (!token) continue;
-    const socket = ensureShareHostSocket(token);
-    if (!socket) continue;
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(serialized);
-      sent += 1;
-      continue;
-    }
-    const shareHostQueue = shareHostQueues.get(token) || [];
-    if (shareHostQueue.length < 32) {
-      shareHostQueue.push(serialized);
-      queued += 1;
-    }
-    shareHostQueues.set(token, shareHostQueue);
+    const delivery = sendOrQueueShareHostMessage(token, serialized);
+    if (delivery.sent) sent += 1;
+    if (delivery.queued) queued += 1;
   }
   return {sent: sent > 0, sentCount: sent, queued, bytes, message};
 }
@@ -1774,9 +1760,10 @@ function applySharePopupLayer(payload = {}, sender = '') {
   const owner = String(payload.owner || sender || 'host');
   const seq = Number(payload.seq);
   if (Number.isFinite(seq)) {
-    const previousSeq = Number(sharePopupLayerLastSeqBySender.get(owner) || 0);
+    const record = shareSenderRecord(owner);
+    const previousSeq = Number(record.popupSequence || 0);
     if (seq <= previousSeq) return;
-    sharePopupLayerLastSeqBySender.set(owner, seq);
+    record.popupSequence = seq;
   }
   const items = Array.isArray(payload.items) ? payload.items : [];
   layer.replaceChildren();
@@ -1839,7 +1826,7 @@ function shareAutoApproveStateSnapshot() {
       target: String(state.target || session),
       enabled: state.enabled === true,
       locked: state.locked === true,
-      last_action: String(state.last_action || ''),
+      ...structuredMessageSnapshot(state, 'last_action'),
       last_screen_sig: String(state.last_screen_sig || ''),
       screen: state.screen && typeof state.screen === 'object'
         ? {
@@ -2246,7 +2233,7 @@ function applyShareAppearanceState(appearance = {}) {
     editorFontSize = applyShareAppearanceNumber(appearance, 'editorFontSize', 'editor_font_size', 6, 28, editorFontSize);
     editorPreviewFontSize = applyShareAppearanceNumber(appearance, 'previewFontSize', 'preview_font_size', 6, 32, editorPreviewFontSize);
     fileExplorerFontSize = applyShareAppearanceNumber(appearance, 'fileExplorerFontSize', 'file_explorer_font_size', 6, 24, fileExplorerFontSize);
-    applyShareAppearanceNumber(appearance, 'tabWidth', 'tab_width', 120, 420, numberSetting('appearance.tab_width', 180));
+    applyShareAppearanceNumber(appearance, 'tabWidth', 'tab_width', 120, 420, numberSetting('appearance.tab_width', 172));
     applyShareAppearanceNumber(appearance, 'paneSpacing', 'pane_spacing', 0, 20, numberSetting('appearance.pane_spacing', 3));
     applyShareAppearanceNumber(appearance, 'paneRingOpacity', 'pane_ring_opacity', 5, 100, numberSetting('appearance.pane_ring_opacity', 75));
     applyShareAppearanceNumber(appearance, 'inactivePaneOpacity', 'inactive_pane_opacity', 0, 100, numberSetting('appearance.inactive_pane_opacity', 60));
@@ -2279,18 +2266,7 @@ function applyShareTerminalDimensionsState(value = []) {
 }
 
 function applyShareEditorState(editor = {}) {
-  if (!editor || typeof editor !== 'object') return;
-  if ('globalThemeMode' in editor) globalThemeMode = normalizeGlobalThemeMode(editor.globalThemeMode);
-  if ('terminalThemeMode' in editor) terminalThemeMode = normalizeTerminalThemeMode(editor.terminalThemeMode);
-  if ('themeMode' in editor) fileEditorThemeMode = normalizeEditorThemeMode(editor.themeMode);
-  if ('previewDisplayMode' in editor) fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(editor.previewDisplayMode);
-  if ('wrapEnabled' in editor) fileEditorWrapEnabled = editor.wrapEnabled === true;
-  if ('lineNumbersEnabled' in editor) fileEditorLineNumbersEnabled = editor.lineNumbersEnabled === true;
-  if ('blameEnabled' in editor) fileEditorBlameEnabled = editor.blameEnabled === true;
-  if ('diffExpandUnchanged' in editor) diffExpandUnchanged = editor.diffExpandUnchanged === true;
-  if ('previewFontSize' in editor) editorPreviewFontSize = clampEditorPreviewFontSize(editor.previewFontSize);
-  const modes = Array.isArray(editor.modes) ? editor.modes : [];
-  for (const entry of modes) shareApplyEditorModeEntry(entry);
+  applyEditorStateFields(editor, {applyModeEntry: shareApplyEditorModeEntry});
   applyCssSettings();
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true, refreshEditors: true});
   applyEditorThemeMode({refreshEditors: true});
@@ -2327,12 +2303,16 @@ async function applyShareFinderState(finder = {}) {
   const session = String(finder.session || '').trim();
   const previousRoot = normalizeDirectoryPath(fileExplorerRoot || '');
   const previousExpandedSignature = shareSetSignature(fileExplorerExpanded);
-  if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
+  // `finder.mode` is a legacy semantic frame field. Layout/tabs now name the independent Finder,
+  // Differ, and Tabber identities, so consuming this old field must never select a surface or
+  // rebuild every file panel. The rest of this state remains shared domain data.
+  const legacyMode = 'mode' in finder ? normalizeFileExplorerMode(finder.mode) : '';
+  void legacyMode;
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
     fileExplorerChangesSelectedSession = session;
-    fileExplorerExplicitSyncSession = session;
+    setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
   if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
   if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
@@ -2348,19 +2328,15 @@ async function applyShareFinderState(finder = {}) {
   if ('changesRepoCollapsed' in finder) shareReplaceSet(changesRepoCollapsed, finder.changesRepoCollapsed);
   if ('tabberCollapsed' in finder) shareReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
   const expandedChanged = previousExpandedSignature !== shareSetSignature(fileExplorerExpanded);
-  applyFileExplorerMode();
   renderFileExplorerRootModeControls();
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);
   syncFileExplorerTreeDateButtons();
   const root = String(finder.root || '').trim();
   const normalizedRoot = root ? normalizeDirectoryPath(expandUserPath(root)) : '';
-  if (!itemInLayout(fileExplorerItemId)) {
+  if (!itemInLayout(finderItemId)) {
     if (normalizedRoot) fileExplorerRoot = normalizedRoot;
-    renderPaneTabStrips();
-    return;
-  }
-  if (normalizedRoot) {
+  } else if (normalizedRoot) {
     fileExplorerRoot = normalizedRoot;
     const hasRenderedTreeRows = fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'));
     if (previousRoot !== normalizedRoot || !hasRenderedTreeRows) {
@@ -2382,25 +2358,37 @@ async function applyShareFinderState(finder = {}) {
   } else if (fileExplorerRoot) {
     await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   }
-  if (fileExplorerMode === 'tabber') {
-    refreshTabberPanels();
-    fetchTabberActivity();
-  } else {
+  if (itemInLayout(differItemId)) {
     renderFileExplorerChangesPanels({force: true});
     if (fileExplorerChangesSelectedSession) {
       fetchSessionFiles({destination: 'finder', session: fileExplorerChangesSelectedSession, silent: true, force: false, background: true});
     }
   }
-  restoreShareScrollTargetByKey(`finder:${normalizeFileExplorerMode(fileExplorerMode)}`);
+  if (itemInLayout(tabberItemId)) {
+    refreshTabberPanels();
+    fetchTabberActivity();
+  }
+  if (itemInLayout(finderItemId)) restoreShareScrollTargetByKey('finder:finder');
+  if (itemInLayout(differItemId)) restoreShareScrollTargetByKey('finder:differ');
+  if (itemInLayout(tabberItemId)) restoreShareScrollTargetByKey('finder:tabber');
   updateFileExplorerCurrentFileHighlight();
   renderPaneTabStrips();
+}
+
+function applyLegacyShareFinderMode(payload = {}) {
+  const session = String(payload.session || '').trim();
+  // Old hosts sent `finder-mode` for a Differ-session selection. Retain that data as a passive
+  // compatibility hint, but topology/layout frames own panel identity and mounting.
+  if (!isTmuxSession(session)) return false;
+  fileExplorerChangesSelectedSession = session;
+  return true;
 }
 
 function applySharePreferencesState(preferences = {}) {
   if (!preferences || typeof preferences !== 'object') return;
   if ('searchText' in preferences) preferencesSearchText = String(preferences.searchText || '');
   if (Array.isArray(preferences.collapsedSections)) {
-    collapsedPreferenceSections = new Set(shareStringArray(preferences.collapsedSections, 200));
+    setCollapsedPreferenceSections(shareStringArray(preferences.collapsedSections, 200), {sections: preferenceSections()});
   }
   if ('resetConfirmVisible' in preferences) preferencesResetConfirmVisible = preferences.resetConfirmVisible === true;
   renderPreferencesPanels({force: true});
@@ -2423,8 +2411,8 @@ async function applyShareUiState(payload = {}) {
     applyShareAppearanceState(payload.appearance || {});
     applyShareTerminalDimensionsState(payload.terminalDims || []);
     if (payload.layout || payload.tabs) {
-      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingFileExplorer: true});
-      if (next) applyLayoutSlots(next, {prune: false, preserveMissingFileExplorer: true});
+      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingSidePane: true});
+      if (next) applyLayoutSlots(next, {prune: false, preserveMissingSidePane: true});
     }
     applyShareChromeState(payload.chrome || {});
     applyShareAutoApproveState(payload.autoApprove || {});
@@ -2484,16 +2472,19 @@ function sharePointerSenderColor(sender = '') {
 
 function ensureSharePointerGhost(sender = '') {
   const key = sharePointerSenderKey(sender);
-  const existing = sharePointerGhosts.get(key);
-  if (existing?.isConnected) return existing;
+  const senderRecord = shareSenderRecord(key);
+  let record = senderRecord.pointer;
+  if (record?.ghost?.isConnected) return record.ghost;
+  if (!record) record = senderRecord.pointer = {ghost: null, hideTimer: null};
+  if (record.hideTimer) clearTimeout(record.hideTimer);
+  record.hideTimer = null;
   const ghost = document.createElement('div');
   ghost.className = 'share-ghost-cursor';
   ghost.dataset.shareSender = key;
   ghost.setAttribute('aria-hidden', 'true');
   ghost.style.setProperty('--share-cursor-color', sharePointerSenderColor(key));
   document.body.appendChild(ghost);
-  sharePointerGhosts.set(key, ghost);
-  sharePointerGhost = ghost;
+  record.ghost = ghost;
   return ghost;
 }
 
@@ -2516,16 +2507,17 @@ function renderSharePointerGhost(payload = {}) {
   if (!point) return;
   const sender = sharePointerSenderKey(payload.sender || '');
   const ghost = ensureSharePointerGhost(sender);
+  const record = shareSenderRecord(sender, {create: false})?.pointer;
   ghost.style.transform = `translate3d(${Math.round(point.x)}px, ${Math.round(point.y)}px, 0)`;
   ghost.classList.add('visible');
-  const existingTimer = sharePointerHideTimers.get(sender);
-  if (existingTimer) clearTimeout(existingTimer);
+  if (record.hideTimer) clearTimeout(record.hideTimer);
   const timer = setTimeout(() => {
-    sharePointerHideTimers.delete(sender);
-    sharePointerGhosts.get(sender)?.classList.remove('visible');
+    const current = shareSenderRecord(sender, {create: false})?.pointer;
+    if (!current || current.hideTimer !== timer) return;
+    current.hideTimer = null;
+    current.ghost?.classList.remove('visible');
   }, 1800);
-  sharePointerHideTimers.set(sender, timer);
-  sharePointerHideTimer = timer;
+  record.hideTimer = timer;
   if (payload.click === true) renderShareClickRipple(point.x, point.y, sender);
 }
 
@@ -2638,16 +2630,18 @@ function scheduleShareScrollPublishForElement(element) {
   }
   const payload = shareScrollPayloadForElement(element);
   if (!payload?.target) return;
-  if (shareScrollPublishTimers.has(payload.target)) {
-    shareScrollPublishTimers.get(payload.target).payload = payload;
+  const senderRecord = shareSenderRecord(payload.target);
+  if (senderRecord.scrollPublish) {
+    senderRecord.scrollPublish.payload = payload;
     return;
   }
   const state = {payload};
   state.timer = setTimeout(() => {
-    shareScrollPublishTimers.delete(payload.target);
+    const current = shareSenderRecord(payload.target, {create: false});
+    if (current?.scrollPublish === state) current.scrollPublish = null;
     if (shareCanPublishScroll()) sharePublish('scroll', state.payload);
   }, 50);
-  shareScrollPublishTimers.set(payload.target, state);
+  senderRecord.scrollPublish = state;
 }
 
 function scheduleShareReplayScrollPublishForElement(element) {
@@ -2655,16 +2649,18 @@ function scheduleShareReplayScrollPublishForElement(element) {
   const entry = shareReplayScrollEntryForElement(element);
   if (!entry?.nodeId) return;
   const key = String(entry.nodeId);
-  if (shareReplayScrollPublishTimers.has(key)) {
-    shareReplayScrollPublishTimers.get(key).entry = entry;
+  const senderRecord = shareSenderRecord(key);
+  if (senderRecord.replayScrollPublish) {
+    senderRecord.replayScrollPublish.entry = entry;
     return;
   }
   const state = {entry};
   state.timer = setTimeout(() => {
-    shareReplayScrollPublishTimers.delete(key);
+    const current = shareSenderRecord(key, {create: false});
+    if (current?.replayScrollPublish === state) current.replayScrollPublish = null;
     shareReplayPublishDeltaPayload({scroll: [state.entry]}, 'scroll');
   }, 50);
-  shareReplayScrollPublishTimers.set(key, state);
+  senderRecord.replayScrollPublish = state;
 }
 
 function sharePublishFileVersion(path, options = {}) {
@@ -2718,13 +2714,51 @@ function shareScrollElementForPayload(payload = {}) {
   return null;
 }
 
-function applyShareScrollState(payload = {}) {
+function applyShareScrollDescriptorPosition(descriptor, top, left) {
+  if (!descriptor) return false;
+  if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
+    descriptor.term.scrollToLine(top);
+    return true;
+  }
+  if (!descriptor.element) return false;
+  descriptor.element.scrollTop = top;
+  descriptor.element.scrollLeft = left;
+  // Setting scrollTop before CodeMirror's first measure can leave its virtual viewport at the old
+  // rows without emitting another scroll event. Force the same editor view to consume the host offset.
+  if (descriptor.kind === 'editor') descriptor.panel?._cmView?.requestMeasure?.();
+  return true;
+}
+
+function shareScrollTargetRecord(target, options = {}) {
+  const cleanTarget = String(target || '');
+  if (!cleanTarget) return null;
+  const senderRecord = shareSenderRecord(cleanTarget, {create: options.create !== false});
+  let record = senderRecord?.scrollTarget || null;
+  if (!record && options.create !== false) {
+    record = {
+      top: 0,
+      left: 0,
+      payload: {target: cleanTarget, top: 0, left: 0},
+      snapshotGeneration: shareScrollSnapshotGeneration,
+      restoreGeneration: 0,
+      remainingFrames: 0,
+    };
+    senderRecord.scrollTarget = record;
+  }
+  return record || null;
+}
+
+function applyShareScrollState(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return;
   const target = String(payload.target || '');
   const top = Math.max(0, Math.round(Number(payload.top || 0)));
   const left = Math.max(0, Math.round(Number(payload.left || 0)));
   if (target) {
-    shareLastAppliedScrollByTarget.set(target, {top, left, payload: {...payload, target, top, left}});
+    const record = shareScrollTargetRecord(target);
+    record.top = top;
+    record.left = left;
+    record.payload = {...payload, target, top, left};
+    record.snapshotGeneration = Number(options.snapshotGeneration || shareScrollSnapshotGeneration);
   }
   if (String(payload.kind || '') === 'editor' || target.startsWith('editor:')) {
     shareRememberEditorViewState(payload, top, left);
@@ -2737,14 +2771,7 @@ function applyShareScrollState(payload = {}) {
   const previous = applyingShareRemoteScroll;
   applyingShareRemoteScroll = true;
   try {
-    if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
-      descriptor.term.scrollToLine(top);
-      return;
-    }
-    if (descriptor.element) {
-      descriptor.element.scrollTop = top;
-      descriptor.element.scrollLeft = left;
-    }
+    applyShareScrollDescriptorPosition(descriptor, top, left);
     if (descriptor.kind === 'editor' && descriptor.panel?._cmView) {
       const view = descriptor.panel._cmView;
       const docLength = view.state?.doc?.length || 0;
@@ -2762,7 +2789,13 @@ function applyShareScrollState(payload = {}) {
 
 function applyShareScrollSnapshot(scroll = []) {
   if (!Array.isArray(scroll)) return;
-  for (const payload of scroll.slice(0, 100)) applyShareScrollState(payload);
+  const payloads = scroll.slice(0, 100).filter(payload => payload && typeof payload === 'object' && String(payload.target || ''));
+  const currentTargets = new Set(payloads.map(payload => String(payload.target)));
+  const snapshotGeneration = ++shareScrollSnapshotGeneration;
+  for (const [target, senderRecord] of shareSenderRecordEntries('scrollTarget')) {
+    if (!currentTargets.has(target)) senderRecord.scrollTarget = null;
+  }
+  for (const payload of payloads) applyShareScrollState(payload, {snapshotGeneration});
 }
 
 async function applyShareFileVersion(payload = {}) {
@@ -3017,6 +3050,8 @@ function shareSlotDigestSnapshot() {
     slots: layoutSlotKeys().map(slot => ({
       slot,
       placeholder: paneIsPlaceholder(slot),
+      paneRole: paneRoleForSlot(slot).kind,
+      side: paneRoleForSlot(slot).side,
     })),
   };
 }
@@ -3063,12 +3098,6 @@ function stableDigestJson(value) {
     return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableDigestJson(value[key])}`).join(',')}}`;
   }
   return JSON.stringify(value);
-}
-
-function shareSerializedByteLength(text = '') {
-  const value = String(text || '');
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
-  return value.length;
 }
 
 function shareHashText(text) {
@@ -3330,7 +3359,7 @@ function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
 
 function shareReplayFrameByteLength(value = {}) {
   const text = stableDigestJson(shareRedactDiagnosticValue(value));
-  return shareSerializedByteLength(text);
+  return utf8ByteLength(text);
 }
 
 function shareReplayFrameLatencyMs(payload = {}) {
@@ -3430,7 +3459,7 @@ function shareReplayHealthDiagnostics() {
 }
 
 function shareDebugTextForClipboard(report = shareDebugReports[shareDebugReports.length - 1] || null) {
-  const fallback = shareReplayShellActive ? shareReplayHealthDiagnostics() : {message: 'No share debug diagnostics recorded yet'};
+  const fallback = shareReplayShellActive ? shareReplayHealthDiagnostics() : {message: t('share.debug.noDiagnostics')};
   return JSON.stringify(shareRedactDiagnosticValue(report || fallback), null, 2);
 }
 
@@ -3696,7 +3725,7 @@ function publishShareGeometryDigest() {
     shareReplayRecordHostPerfSkip('geometryDigest');
     return;
   }
-  const startedAt = shareReplayHostPerfNow();
+  const startedAt = performanceNow();
   const frame = shareGeometryDigestFrame();
   shareReplayRecordHostPerf('geometryDigest', startedAt, {
     digest: frame.digest,
@@ -3706,8 +3735,7 @@ function publishShareGeometryDigest() {
 }
 
 function installShareGeometryDigestLoop() {
-  if (shareGeometryDigestTimer) clearInterval(shareGeometryDigestTimer);
-  shareGeometryDigestTimer = setInterval(publishShareGeometryDigest, shareGeometryDigestPublishMs);
+  resetRuntimeInterval('share-geometry-digest', publishShareGeometryDigest, shareGeometryDigestPublishMs);
 }
 
 function applyShareUiMessage(message) {
@@ -3736,8 +3764,8 @@ function applyShareUiMessage(message) {
   const finishRemoteApply = beginShareRemoteUiApply();
   try {
     if (message.type === 'layout') {
-      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingFileExplorer: true});
-      if (next) applyLayoutSlots(next, {prune: false, preserveMissingFileExplorer: true});
+      const next = layoutFromParam(payload.layout || '', payload.tabs || '', {preserveMissingSidePane: true});
+      if (next) applyLayoutSlots(next, {prune: false, preserveMissingSidePane: true});
       return;
     }
     if (message.type === 'active-tab') {
@@ -3748,8 +3776,8 @@ function applyShareUiMessage(message) {
       setFocusedPanelItem(payload.item);
       return;
     }
-    if (message.type === 'finder-mode' && payload.session) {
-      switchFileExplorerChangesSession(payload.session);
+    if (message.type === 'finder-mode') {
+      applyLegacyShareFinderMode(payload);
       return;
     }
     if (message.type === 'menu') {

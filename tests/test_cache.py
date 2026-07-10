@@ -2,6 +2,7 @@
 route through it now. These pin the parent's contract so the consumers can rely on it."""
 
 from yolomux_lib import cache
+from yolomux_lib import common
 from yolomux_lib.cache import MISS
 from yolomux_lib.cache import TtlCache
 
@@ -35,5 +36,4 @@ def test_bounded_eviction_caps_size():
 def test_common_cache_miss_is_the_shared_sentinel():
     # metadata.py and sessions.py compare against common._CACHE_MISS; it must be the same object TtlCache
     # returns, or those comparisons silently never match after the B3 migration.
-    from yolomux_lib import common
     assert common._CACHE_MISS is cache.MISS

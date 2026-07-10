@@ -19,7 +19,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Active Queue Follow-Ups
 
-- [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive `7777`, `8001`, `8002`, and `8003`, verify startup ownership order, `8001` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work.
+- [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive Linux `7770`, `7771`, `7772`, and `7773`, verify startup ownership order, `7771` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work.
 - [ ] [M] License history remote finalization. Only after explicit force-push authorization, push the rewritten PolyForm Noncommercial history with `--force-with-lease`, then verify a fresh clone against the key license searches. The current-tree migration, local history rewrite, and local verification are already complete.
 
 ## Current Priorities
@@ -33,7 +33,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## YO!agent
 
-- [ ] [M] Add remaining watch predicates on top of persisted YO!agent jobs: tests-finished, all-agents-status fanout, review sweep, close-out finished work, and pause noisy watches. Needs-input watches, blocked-session watches, done-after-working watches, and cancel pending jobs by session are shipped in DONE 2026-06-20.
+- [ ] [M] Add remaining watch predicates on top of persisted YO!agent jobs: tests-finished, all-agents-status fanout, review sweep, close-out finished work, and pause noisy watches. Needs-input watches, blocked-session watches, done-after-working watches, cancel pending jobs by session, and deterministic roster-calm-then-send jobs are shipped.
 - [ ] [M] Add artifact-handoff helpers: choose a safe project-local path, ask a target to write there, validate existence/size/type, and pass the path or bounded content to the next target.
 - [ ] [L] Add golden-frame fixtures for remaining scrape-and-type paths. Record real Claude/Codex `capture-pane` frames per agent version and pin spinner/footer/approval/ready detection so upstream TUI changes fail tests instead of silently changing behavior.
 - [ ] [L] Expose YOLOmux as a local MCP/ACP-style control plane so agents can query session/activity state and request server-verified sends through structured APIs instead of requiring YO!agent to paste into panes.
@@ -63,6 +63,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Launch, Worktrees, And Vitals
 
+- [ ] [L] Evaluate hidden-document terminal WebSocket suspension as an isolated feature. Use a bounded grace period and prove no lost input, duplicate socket, resize-authority drift, scrollback loss, missed attention transition, or incomplete current-snapshot recovery before enabling it; demand-aware HTTP/SSE gating intentionally leaves terminal sockets connected until this proof exists.
 - [ ] [L] Add a launch dialog behind `+ Claude`, `+ Codex`, and `+ Term` with cwd, agent, model/profile, permission mode, initial prompt, optional session name, and optional worktree-backed launch.
 - [ ] [M] Add a resume picker for recent Claude/Codex conversations scoped to the selected cwd.
 - [ ] [M] Add a peek/reply action for a session when it needs only a short response and the user does not need to attach to the full terminal.
@@ -77,7 +78,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Internationalization
 
-- [ ] [M] Backfill low-coverage locale catalogs one locale at a time using `python3 tools/static_build.py --i18n-untranslated-report` as the source list, starting with `nl`, `it`, `pl`, `tr`, `th`, and `vi`; keep `{tokens}` unchanged, lower each locale's untranslated baseline after each pass, and run `python3 tools/check.py` after each locale batch.
+- [ ] [M] Finish structured localization for the auxiliary tmux-wall shell and remaining browser-visible share/upload/filesystem/search/run-history/transcript/API errors while retaining raw OS/git/tmux/model text only as diagnostic detail.
 
 ## Product Guardrails
 

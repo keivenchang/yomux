@@ -1,9 +1,13 @@
+import errno
 import inspect
 import io
 import json
 import os
+import socket
 from http import HTTPStatus
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import pytest
 
@@ -12,6 +16,7 @@ from yolomux_lib import app as app_module
 from yolomux_lib import http_routes
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
+from yolomux_lib import web
 from yolomux_lib.common import ACTIVITY_MAX_HOURS
 from yolomux_lib.common import error_payload
 from yolomux_lib.server import Handler
@@ -20,6 +25,9 @@ from yolomux_lib.server import parse_query_int
 from yolomux_lib.server import parse_repo_refs_param
 from yolomux_lib.server import ws_resize_dimensions
 from yolomux_lib.web import html_page
+
+
+SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
 
 def server_ws_json(frame: bytes) -> dict:
@@ -34,6 +42,11 @@ def server_ws_json(frame: bytes) -> dict:
     return json.loads(frame[offset:offset + payload_length].decode("utf-8"))
 
 
+def init_share_replay_state(server):
+    server.share_replay_lock = server_module.threading.Lock()
+    server.share_replay_records = {}
+
+
 def test_get_agent_auth_honors_force_query():
     writes = []
     calls = []
@@ -46,30 +59,130 @@ def test_get_agent_auth_honors_force_query():
     assert writes == [(HTTPStatus.OK, {"ok": True, "force": True})]
 
 
+def test_request_query_is_request_scoped_and_routes_use_the_shared_accessor(monkeypatch):
+    calls = []
+    real_parse_qs = http_routes.parse_qs
+
+    def counted_parse_qs(query):
+        calls.append(query)
+        return real_parse_qs(query)
+
+    monkeypatch.setattr(http_routes, "parse_qs", counted_parse_qs)
+    request = SimpleNamespace()
+    parsed = SimpleNamespace(query="session=one&session=two")
+
+    first = http_routes.request_query(request, parsed)
+    second = http_routes.request_query(request, parsed)
+
+    assert first is second
+    assert first == {"session": ["one", "two"]}
+    assert calls == ["session=one&session=two"]
+    source = inspect.getsource(http_routes)
+    assert source.count("request_query(request, parsed)") == 36
+    assert source.count("parse_qs(parsed.query)") == 1
+
+
+def test_chat_send_route_uses_authenticated_username_and_allows_readonly():
+    writes = []
+    calls = []
+    app = SimpleNamespace(
+        chat_send=lambda username, payload, locale, sender_ip="": calls.append((username, sender_ip, payload, locale)) or {
+            "message": {"id": 1, "username": username, "body": payload["body"]},
+            "revision": 1,
+            "created": True,
+        }
+    )
+    payload = {
+        "browser_instance_id": "browser-a", "client_message_uuid": "message-a", "body": "<b>exact text</b>",
+        "username": "mallory", "created_at_utc": 0, "is_question": True,
+    }
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=app), share_token_text=lambda: "",
+        client_address=("10.1.2.3", 12345),
+        auth_identity=lambda: SimpleNamespace(username="readonly-user", role="readonly"), request_locale_pref=lambda: "en",
+        read_json_body=lambda _limit: payload, write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
+    )
+    route = route_by_path("POST", "/api/chat/send")
+
+    http_routes.post_chat_send(request, SimpleNamespace(query=""), route)
+
+    assert route.role == "readonly" and route.share_access == http_routes.SHARE_ACCESS_NONE
+    assert calls == [("readonly-user", "10.1.2.3", payload, "en")]
+    assert writes[0][0] == HTTPStatus.CREATED
+    assert writes[0][1]["message"] == {"id": 1, "username": "readonly-user", "body": "<b>exact text</b>"}
+
+
+def test_chat_bootstrap_includes_server_observed_client_ip():
+    writes = []
+    calls = []
+    app = SimpleNamespace(
+        chat_bootstrap=lambda username, reader_id, browser_instance_id: calls.append((username, reader_id, browser_instance_id)) or {
+            "revision": 0, "messages": [], "typing": [],
+        }
+    )
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=app),
+        client_address=("10.1.123.12", 54321),
+        share_token_text=lambda: "",
+        auth_identity=lambda: SimpleNamespace(username="alice", role="readonly"),
+        write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
+    )
+
+    http_routes.get_chat_bootstrap(
+        request,
+        SimpleNamespace(query="reader_id=reader-a&browser_instance_id=browser-a"),
+        route_by_path("GET", "/api/chat/bootstrap"),
+    )
+
+    assert calls == [("alice", "reader-a", "browser-a")]
+    assert writes == [(HTTPStatus.OK, {"revision": 0, "messages": [], "typing": [], "client_ip": "10.1.123.12"})]
+
+
+def test_chat_yoagent_route_uses_authenticated_identity_and_stored_source():
+    writes = []
+    calls = []
+    payload = {"browser_instance_id": "browser-a", "message_id": 17, "message": "spoofed query"}
+    app = SimpleNamespace(
+        chat_yoagent=lambda username, role, body, locale: calls.append((username, role, body, locale)) or {
+            "message": {"id": 18, "username": "YO!agent", "body": "answer"}, "revision": 18, "created": True,
+        }
+    )
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=app), share_token_text=lambda: "",
+        auth_identity=lambda: SimpleNamespace(username="guest", role="readonly"), request_locale_pref=lambda: "en",
+        read_json_body=lambda _limit: payload, write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
+    )
+
+    http_routes.post_chat_yoagent(request, SimpleNamespace(query=""), route_by_path("POST", "/api/chat/yoagent"))
+
+    assert calls == [("guest", "readonly", payload, "en")]
+    assert writes[0][0] == HTTPStatus.CREATED
+
+
 def test_get_home_records_html_page_compute_time(monkeypatch):
     writes = []
     html_calls = []
     clock = iter([100.0, 100.037])
 
-    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None):
-        html_calls.append((sessions, access_role, dev, dangerously_yolo, share))
+    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None, accept_language="", auth_username="", recent_sessions=None):
+        html_calls.append((sessions, access_role, dev, dangerously_yolo, share, accept_language, auth_username, recent_sessions))
         return "<html>boot</html>"
 
     monkeypatch.setattr(http_routes, "html_page", fake_html_page)
     monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
     request = SimpleNamespace(
-        server=SimpleNamespace(app=SimpleNamespace(sessions=["5"], dangerously_yolo=True), dev=True),
+        server=SimpleNamespace(app=SimpleNamespace(sessions=["5"], dangerously_yolo=True, tmux_recency_ordered_sessions=lambda sessions: list(sessions)), dev=True),
         share_sessions=lambda: [],
         share_record=lambda: None,
         share_bootstrap_payload=lambda record: {"record": record},
-        auth_identity=lambda: SimpleNamespace(role="admin"),
+        auth_identity=lambda: SimpleNamespace(role="admin", username="alice"),
         write_html=lambda body: writes.append(body),
     )
 
     http_routes.get_home(request, SimpleNamespace(query=""), route_by_path("GET", "/"))
 
     assert writes == ["<html>boot</html>"]
-    assert html_calls == [(["5"], "admin", True, True, None)]
+    assert html_calls == [(["5"], "admin", True, True, None, "", "alice", ["5"])]
     assert request._http_response_compute_ms == pytest.approx(37.0)
     assert request._http_response_performance_details == {
         "html_page": True,
@@ -99,20 +212,112 @@ def test_record_http_response_bytes_includes_route_compute_details():
     assert kwargs["details"]["bootstrap_bytes"] == 17
 
 
+def test_keepalive_request_profile_is_reset_before_each_dispatch(monkeypatch):
+    handler = object.__new__(Handler)
+    handler._http_response_compute_ms = 37.0
+    handler._http_response_performance_details = {"html_page": True}
+    observed = []
+
+    def fake_handle_one_request(request):
+        observed.append((request._http_response_compute_ms, request._http_response_performance_details, request._http_request_dispatch_started_at))
+
+    monkeypatch.setattr(server_module.BaseHTTPRequestHandler, "handle_one_request", fake_handle_one_request)
+
+    Handler.handle_one_request(handler)
+    handler._http_response_compute_ms = 12.0
+    handler._http_response_performance_details = {"stats_build_ms": 12.0}
+    Handler.handle_one_request(handler)
+
+    assert observed[0][:2] == (None, None)
+    assert observed[1][:2] == (None, None)
+    assert all(item[2] is None for item in observed)
+
+
+def test_keepalive_homepage_profile_cannot_leak_to_api_endpoints(monkeypatch):
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    paths = iter(["/", "/api/ping", "/api/share", "/api/stats-sample"])
+
+    def fake_handle_one_request(request):
+        request.path = next(paths)
+        request._http_request_dispatch_started_at = server_module.time.perf_counter()
+        if request.path == "/":
+            request._http_response_compute_ms = 37.0
+            request._http_response_performance_details = {"html_page": True}
+        Handler.record_http_response_bytes(request, HTTPStatus.OK, 17, "application/json")
+
+    monkeypatch.setattr(server_module.BaseHTTPRequestHandler, "handle_one_request", fake_handle_one_request)
+
+    for _ in range(4):
+        Handler.handle_one_request(handler)
+
+    assert [args[1] for args, _kwargs in records] == ["GET /", "GET /api/ping", "GET /api/share", "GET /api/stats-sample"]
+    assert records[0][1]["compute_ms"] == 37.0
+    assert all(kwargs["compute_ms"] != 37.0 for _args, kwargs in records[1:])
+    assert all("html_page" not in kwargs["details"] for _args, kwargs in records[1:])
+
+
+def test_generic_route_profile_uses_this_request_dispatch_timer(monkeypatch):
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/ping"
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = 100.0
+    handler._http_request_dispatch_started_at = 100.01
+    monkeypatch.setattr(server_module.time, "perf_counter", lambda: 100.035)
+
+    Handler.record_http_response_bytes(handler, HTTPStatus.OK, 17, "application/json")
+
+    _args, kwargs = records[0]
+    assert kwargs["compute_ms"] == pytest.approx(25.0)
+    assert kwargs["details"]["accept_to_route_ms"] == pytest.approx(10.0)
+    assert kwargs["details"]["request_total_ms"] == pytest.approx(35.0)
+
+
 def test_get_stats_sample_uses_app_payload():
     writes = []
     calls = []
-    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0: calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
+    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds, token_history_start, token_history_end, history_start, history_end, history_resolution_seconds, history_max_points)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
     request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
 
     http_routes.get_stats_sample(request, SimpleNamespace(query="since=9&client_id=client-a"), None)
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120"), None)
+    http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120&token_history_start=800&token_history_end=1300&history_start=900&history_end=1200&history_resolution=10&history_max_points=60"), None)
 
-    assert calls == [(9, "client-a", False, 0, 0), (10, "client-a", True, 7, 120)]
+    assert calls == [
+        (9, "client-a", False, 0, 0, None, None, 0, 0, 0, 0),
+        (10, "client-a", True, 7, 120, 800, 1300, 900, 1200, 10, 60),
+    ]
     assert writes == [
         (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
         (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
     ]
+
+
+def test_get_stats_sample_promotes_backend_phase_profile_without_exposing_private_payload(monkeypatch):
+    writes = []
+    clock = iter([100.0, 100.025])
+    monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
+    app = SimpleNamespace(stats_sample_payload=lambda **_kwargs: {
+        "ok": True,
+        "history": {"records": []},
+        "_endpoint_profile": {"stats_history_encode_ms": 7.5, "stats_history_compact_ms": 1.25},
+    })
+    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
+
+    http_routes.get_stats_sample(request, SimpleNamespace(query="history_start=900&history_end=1200"), None)
+
+    assert writes == [(HTTPStatus.OK, {"ok": True, "history": {"records": []}})]
+    assert request._http_response_compute_ms == pytest.approx(25.0)
+    assert request._http_response_performance_details == {
+        "stats_build_ms": 25.0,
+        "stats_history_encode_ms": 7.5,
+        "stats_history_compact_ms": 1.25,
+    }
 
 
 class FakeShareConnection:
@@ -147,9 +352,31 @@ def test_parse_repo_refs_param_decodes_per_repo_overrides():
 def test_error_payload_normalizes_status_and_context():
     assert error_payload("bad", path="/tmp/a", session="6", status=HTTPStatus.BAD_REQUEST) == {
         "error": "bad",
+        "user_message": {"key": "", "params": {}, "fallback": "bad"},
         "path": "/tmp/a",
         "session": "6",
         "status": 400,
+    }
+
+
+def test_error_payload_reuses_typed_message_metadata_and_keeps_diagnostic():
+    error = server_module.FilesystemError(
+        "filesystem operation failed",
+        status=403,
+        message_key="fs.error.operationFailed",
+        diagnostic="raw permission detail",
+    )
+
+    assert error.payload(path="/private") == {
+        "error": "filesystem operation failed",
+        "user_message": {
+            "key": "fs.error.operationFailed",
+            "params": {},
+            "fallback": "filesystem operation failed",
+        },
+        "diagnostic": "raw permission detail",
+        "path": "/private",
+        "status": 403,
     }
 
 
@@ -267,7 +494,15 @@ def test_write_validated_float_result_centralizes_activity_hours_validation():
         ACTIVITY_MAX_HOURS,
         lambda value: ({"hours": value}, HTTPStatus.OK),
     )
-    assert writes == [("json", HTTPStatus.BAD_REQUEST, {"error": "hours must be a number", "status": HTTPStatus.BAD_REQUEST})]
+    assert writes == [("json", HTTPStatus.BAD_REQUEST, {
+        "error": "hours must be a number",
+        "user_message": {
+            "key": "request.error.number",
+            "params": {"field": "hours"},
+            "fallback": "hours must be a number",
+        },
+        "status": HTTPStatus.BAD_REQUEST,
+    })]
 
 
 def test_activity_hours_routes_share_float_validation_owner():
@@ -286,7 +521,11 @@ def test_session_files_route_validates_hours_before_share_scope():
 
     http_routes.get_session_files(handler, SimpleNamespace(query="session=blocked&hours=nope"), None)
 
-    assert writes == [("json", HTTPStatus.BAD_REQUEST, {"error": "hours must be a number", "status": HTTPStatus.BAD_REQUEST})]
+    assert writes[0][2]["user_message"] == {
+        "key": "request.error.number",
+        "params": {"field": "hours"},
+        "fallback": "hours must be a number",
+    }
 
 
 def test_write_int_query_app_result_parses_and_validates_once():
@@ -314,7 +553,15 @@ def test_write_int_query_app_result_parses_and_validates_once():
 
     assert writes == [
         ("app", ({"session": "6", "limit": 7}, HTTPStatus.OK)),
-        ("json", HTTPStatus.BAD_REQUEST, {"error": "limit must be an integer", "status": 400}),
+        ("json", HTTPStatus.BAD_REQUEST, {
+            "error": "limit must be an integer",
+            "user_message": {
+                "key": "request.error.integer",
+                "params": {"field": "limit"},
+                "fallback": "limit must be an integer",
+            },
+            "status": 400,
+        }),
     ]
 
 
@@ -326,6 +573,14 @@ def test_websocket_bridge_terminates_tmux_process_group():
     assert "terminate_process_group(process)" in bridge_body
     assert "process.terminate()" not in bridge_body
     assert "process.kill()" not in bridge_body
+
+
+def test_websocket_bridge_treats_close_before_initial_resize_as_normal_disconnect(monkeypatch):
+    handler = object.__new__(Handler)
+    handler.read_initial_ws_payloads = lambda: (_ for _ in ()).throw(ConnectionError("websocket closed"))
+    monkeypatch.setattr(server_module.pty, "openpty", lambda: pytest.fail("PTY must not open after the client closes"))
+
+    Handler.bridge_tmux(handler, "1")
 
 
 def test_websocket_frame_reads_are_timeout_wrapped():
@@ -496,7 +751,16 @@ def test_handle_upload_enforces_live_app_size_limit():
     payload, status = Handler.handle_upload(handler, "6")
 
     assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
-    assert payload == {"session": "6", "error": "upload is too large; limit is 5 bytes"}
+    assert payload == {
+        "session": "6",
+        "error": "upload is too large; limit is 5 bytes",
+        "user_message": {
+            "key": "request.error.contentTooLarge",
+            "params": {"max": 5},
+            "fallback": "upload is too large; limit is 5 bytes",
+        },
+        "status": 413,
+    }
     assert handler.close_connection is True
 
 
@@ -526,7 +790,15 @@ def test_do_post_share_stop_rejects_invalid_content_length_without_value_error()
     assert writes == [(
         "json",
         HTTPStatus.LENGTH_REQUIRED,
-        {"error": "missing or invalid Content-Length", "status": 411},
+        {
+            "error": "missing or invalid Content-Length",
+            "user_message": {
+                "key": "request.error.contentLengthInvalid",
+                "params": {},
+                "fallback": "missing or invalid Content-Length",
+            },
+            "status": 411,
+        },
     )]
     assert app_calls == []
 
@@ -539,7 +811,6 @@ def route_handler(path, app=None, readonly=False):
     handler.server = SimpleNamespace(app=app or SimpleNamespace(), dev=False)
     handler.close_connection = False
     handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or True
-    handler.require_auth_for_post = lambda path: calls.append(("require_auth_for_post", path)) or True
     handler.auth_readonly = lambda: readonly
     handler.auth_identity = lambda: SimpleNamespace(role="readonly" if readonly else "admin")
     handler.share_readonly_api_allowed = lambda parsed: False
@@ -560,6 +831,26 @@ def route_by_path(method, path):
     raise AssertionError(f"missing route: {method} {path}")
 
 
+def test_unknown_get_localizes_plain_text_from_accept_language(monkeypatch):
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
+    web.bootstrap_locale_catalogs.cache_clear()
+    writes = []
+    request = SimpleNamespace(
+        require_auth=lambda role: role == "readonly",
+        request_locale_pref=lambda: "system",
+        headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5"},
+        write_text=lambda body, status=HTTPStatus.OK: writes.append((status, body)),
+    )
+
+    try:
+        http_routes._write_not_found_after_default_auth(request, "GET")
+        assert writes == [
+            (HTTPStatus.NOT_FOUND, web.server_string("zh-Hans", "common.notFound") + "\n"),
+        ]
+    finally:
+        web.bootstrap_locale_catalogs.cache_clear()
+
+
 def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     get_body = inspect.getsource(Handler.do_GET)
     post_body = inspect.getsource(Handler.do_POST)
@@ -568,7 +859,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert 'dispatch_http_route(self, "POST")' in post_body
     assert "if parsed.path" not in get_body
     assert "if parsed.path" not in post_body
-    assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "filesystem", "tmux"}
+    assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "chat", "filesystem", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert route_by_path("GET", "/api/stats-sample").handler is http_routes.get_stats_sample
     assert route_by_path("GET", "/pane-popout").handler is http_routes.get_pane_popout
@@ -579,11 +870,65 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/yoagent/jobs/cancel-session").handler is http_routes.post_yoagent_jobs_cancel_session
     assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
-    assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_readonly_post_role
+    assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_token_readonly_role
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
     assert route_by_path("GET", "/api/fs/zip").handler is http_routes.get_fs_zip
     assert route_by_path("GET", "/api/fs/count").handler is http_routes.get_fs_count
     assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
+
+
+def test_http_route_registry_owns_the_complete_share_policy_matrix():
+    expected = {
+        ("GET", "/static/*", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/ping", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/session-metadata", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/transcripts", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/activity", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/session-files-batch", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/session-files", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/share/*", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/share", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/ws/share-ui", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/ws/share-view", http_routes.SHARE_ACCESS_READONLY),
+        ("POST", "/api/share/debug-profile", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/list", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/index-status", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/read", http_routes.SHARE_ACCESS_SCOPED_FILE),
+        ("GET", "/api/fs/info", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/diff", http_routes.SHARE_ACCESS_SCOPED_FILE),
+        ("GET", "/api/fs/watch-diff", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/api/fs/raw", http_routes.SHARE_ACCESS_SCOPED_FILE),
+        ("POST", "/api/fs/batch", http_routes.SHARE_ACCESS_READONLY),
+        ("GET", "/ws", http_routes.SHARE_ACCESS_READONLY),
+    }
+    actual = {
+        (route.method, route.path, route.share_access)
+        for route in http_routes.ALL_ROUTES
+        if route.share_access != http_routes.SHARE_ACCESS_NONE
+    }
+    assert actual == expected
+    assert len({(route.method, route.path) for route in http_routes.ALL_ROUTES}) == len(http_routes.ALL_ROUTES)
+
+    no_share = SimpleNamespace(share_token_text=lambda: "")
+    with_share = SimpleNamespace(share_token_text=lambda: "share-token")
+    for route in http_routes.ALL_ROUTES:
+        parsed = SimpleNamespace(path=route.path, query="")
+        assert http_routes.route_required_role(route, no_share, parsed) in {None, "readonly", "admin"}
+        assert http_routes.route_required_role(route, with_share, parsed) in {None, "readonly", "admin"}
+
+
+def test_share_policy_consumers_have_no_parallel_api_path_lists():
+    policy_source = "\n".join((
+        inspect.getsource(Handler.share_request_allowed),
+        inspect.getsource(Handler.share_readonly_api_allowed),
+        inspect.getsource(Handler.plaintext_share_scope_allowed),
+    ))
+    assert "/api/" not in policy_source
+    assert not hasattr(Handler, "SHARE_READONLY_GET_PATHS")
+    assert not hasattr(Handler, "SHARE_SCOPED_FILE_GET_PATHS")
+    assert not hasattr(Handler, "SHARE_READONLY_POST_PATHS")
+    assert not hasattr(Handler, "require_auth_for_post")
 
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
@@ -591,14 +936,14 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         session_metadata_payload=lambda force=False: {"sessions": {}, "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
         activity_payload=lambda hours=24.0, visible=True: ({"hours": hours, "visible": visible}, HTTPStatus.OK),
-        stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds},
+        stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds, "token_history_start": token_history_start, "token_history_end": token_history_end, "history_start": history_start, "history_end": history_end, "history_resolution_seconds": history_resolution_seconds, "history_max_points": history_max_points},
         tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
 
     handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1&token_since=3&token_resolution=120", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a", "token_consumer": True, "token_since": 3, "token_resolution_seconds": 120})]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a", "token_consumer": True, "token_since": 3, "token_resolution_seconds": 120, "token_history_start": None, "token_history_end": None, "history_start": 0, "history_end": 0, "history_resolution_seconds": 0, "history_max_points": 0})]
 
     handler, calls, writes = route_handler("/api/session-metadata?force=1", app)
     Handler.do_GET(handler)
@@ -662,17 +1007,17 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"messages": []})]
 
-    app = SimpleNamespace(yoagent_jobs_payload=lambda: ({"jobs": []}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(yoagent_jobs_payload=lambda: ({"jobs": []}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"jobs": []})]
 
-    handler, calls, writes = route_handler("/api/client-events", app)
-    handler.stream_client_events = lambda: writes.append(("client-events", handler.path))
+    handler, calls, writes = route_handler("/api/client-events?channels=files,status&client_id=client-a", app)
+    handler.stream_client_events = lambda **kwargs: writes.append(("client-events", handler.path, kwargs))
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("client-events", "/api/client-events")]
+    assert writes == [("client-events", "/api/client-events?channels=files,status&client_id=client-a", {"channels": "files,status", "client_id": "client-a"})]
 
     handler, calls, writes = route_handler("/api/summary-stream", app)
     handler.stream_codex_summary = lambda parsed: writes.append(("summary-stream", parsed.path))
@@ -782,18 +1127,22 @@ def share_token_auth_handler(path, method="POST"):
     return handler, writes
 
 
-def test_share_token_post_auth_allows_only_readonly_fs_batch_and_debug_profile(monkeypatch):
+def test_share_token_post_auth_uses_registry_roles_for_readonly_and_mutating_routes(monkeypatch):
     monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
 
     allowed_handler, allowed_writes = share_token_auth_handler("/api/fs/batch")
-    assert Handler.require_auth_for_post(allowed_handler, "/api/fs/batch") is True
+    allowed_route = http_routes.route_for_request("POST", "/api/fs/batch")
+    assert http_routes.route_required_role(allowed_route, allowed_handler, urlparse(allowed_handler.path)) == "readonly"
+    assert Handler.require_auth(allowed_handler, "readonly") is True
     assert allowed_writes == []
     assert allowed_handler.auth_identity().role == "readonly"
     assert allowed_handler.share_token() == "share-token"
     assert allowed_handler.close_connection is False
 
     debug_handler, debug_writes = share_token_auth_handler("/api/share/debug-profile")
-    assert Handler.require_auth_for_post(debug_handler, "/api/share/debug-profile") is True
+    debug_route = http_routes.route_for_request("POST", "/api/share/debug-profile")
+    assert http_routes.route_required_role(debug_route, debug_handler, urlparse(debug_handler.path)) == "readonly"
+    assert Handler.require_auth(debug_handler, "readonly") is True
     assert debug_writes == []
     assert debug_handler.auth_identity().role == "readonly"
     assert debug_handler.share_token() == "share-token"
@@ -812,6 +1161,9 @@ def test_share_token_post_auth_allows_only_readonly_fs_batch_and_debug_profile(m
         "/api/yoagent/chat",
         "/api/yoagent/intent",
         "/api/yoagent/jobs",
+        "/api/chat/send",
+        "/api/chat/typing",
+        "/api/chat/read",
         "/api/fs/write",
         "/api/fs/delete",
         "/api/fs/rename",
@@ -820,7 +1172,12 @@ def test_share_token_post_auth_allows_only_readonly_fs_batch_and_debug_profile(m
     ]
     for path in mutating_paths:
         handler, writes = share_token_auth_handler(path)
-        assert Handler.require_auth_for_post(handler, path) is False, path
+        route = http_routes.route_for_request("POST", path)
+        assert route is not None, path
+        assert route.share_access == http_routes.SHARE_ACCESS_NONE, path
+        required_role = http_routes.route_required_role(route, handler, urlparse(path))
+        assert required_role in {"readonly", "admin"}, path
+        assert Handler.require_auth(handler, required_role) is False, path
         assert writes and writes[0][0] == "json" and writes[0][1] == HTTPStatus.FORBIDDEN, (path, writes)
         assert handler.close_connection is True, path
 
@@ -834,7 +1191,15 @@ def test_test_auth_bypass_does_not_escalate_share_token_to_admin(monkeypatch):
     assert writes == [(
         "json",
         HTTPStatus.FORBIDDEN,
-        {"error": "share token is limited to the shared page and websocket", "role": "readonly"},
+        {
+            "error": "share token is limited to the shared page and websocket",
+            "user_message": {
+                "key": "share.error.pageScope",
+                "params": {},
+                "fallback": "share token is limited to the shared page and websocket",
+            },
+            "role": "readonly",
+        },
     )]
     assert handler.auth_identity().role == "readonly"
     assert handler.share_token() == "share-token"
@@ -849,34 +1214,46 @@ def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
 
     assert "self.start_tmux_signal_event_watcher()" in app_start_body
     assert "self.tmux_signal_cache.clear()" in app_event_body
-    assert "self.client_event_next_tmux_signal_poll_at = 0.0" in app_event_body
-    assert "self.client_watch_wake_event.set()" in app_event_body
+    assert "TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS" in app_event_body
+    assert "record.next_tmux_signal_poll_at = 0.0" in app_event_body
+    assert "record.wake_event.set()" in app_event_body
     assert "self.server.app.start_client_event_watcher()" in stream_body
     assert "self.server.app.stop_client_event_watcher_if_idle()" in stream_body
     assert "self.app.start_client_event_watcher()" not in server_init_body
     assert "self.app.stop_client_event_watcher()" in server_close_body
 
 
+def test_server_bind_failure_preserves_original_os_error():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+
+        with pytest.raises(OSError) as info:
+            server_module.TmuxWebtermHTTPServer(("127.0.0.1", port), object())
+
+    assert info.value.errno == errno.EADDRINUSE
+
+
 def test_share_request_allowed_route_matrix(monkeypatch):
     monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
-    allowed_paths = [
-        "/",
-        "/share/abc",
-        "/static/yolomux.js",
-        "/api/ping",
-        "/api/activity",
-        "/api/fs/batch",
-        "/api/share/debug-profile",
-        "/api/fs/diff?path=/repo/README.md",
-        "/api/fs/watch-diff?since=old-token",
-        "/api/fs/read?path=/repo/README.md",
-        "/api/fs/raw?path=/repo/README.md",
-        "/api/share-stream",
-        "/api/session-metadata",
-        "/api/session-files",
-        "/api/transcripts",
-        "/ws/share-ui",
-        "/ws/share-view",
+    allowed_requests = [
+        ("GET", "/"),
+        ("GET", "/share/abc"),
+        ("GET", "/static/yolomux.js"),
+        ("GET", "/api/ping"),
+        ("GET", "/api/activity"),
+        ("POST", "/api/fs/batch"),
+        ("POST", "/api/share/debug-profile"),
+        ("GET", "/api/fs/diff?path=/repo/README.md"),
+        ("GET", "/api/fs/watch-diff?since=old-token"),
+        ("GET", "/api/fs/read?path=/repo/README.md"),
+        ("GET", "/api/fs/raw?path=/repo/README.md"),
+        ("GET", "/api/session-metadata"),
+        ("GET", "/api/session-files"),
+        ("GET", "/api/transcripts"),
+        ("GET", "/ws/share-ui"),
+        ("GET", "/ws/share-view"),
     ]
     denied_paths = [
         "/api/event",
@@ -894,12 +1271,15 @@ def test_share_request_allowed_route_matrix(monkeypatch):
         "/api/fs/unindex",
     ]
 
-    for path in allowed_paths:
-        handler, _writes = share_token_auth_handler(path, method="GET")
+    for method, path in allowed_requests:
+        handler, _writes = share_token_auth_handler(path, method=method)
         assert Handler.share_request_allowed(handler) is True, path
     for path in denied_paths:
         handler, _writes = share_token_auth_handler(path, method="POST")
         assert Handler.share_request_allowed(handler) is False, path
+
+    unknown_handler, _writes = share_token_auth_handler("/api/share-stream", method="GET")
+    assert Handler.share_request_allowed(unknown_handler) is False
 
 
 def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
@@ -953,7 +1333,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "action": "server-info"})]
 
-    app = SimpleNamespace(preview_yoagent_send_action=lambda payload: ({"ok": True, "preview": payload["session"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(preview_yoagent_send_action=lambda payload: ({"ok": True, "preview": payload["session"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/actions/preview-send", app)
     handler.read_json_body = lambda limit: {"session": "6", "text": "date"}
 
@@ -962,7 +1342,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview": "6"})]
 
-    app = SimpleNamespace(execute_yoagent_send_action=lambda payload: ({"ok": True, "preview_id": payload["preview_id"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(execute_yoagent_send_action=lambda payload: ({"ok": True, "preview_id": payload["preview_id"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/actions/execute-send", app)
     handler.read_json_body = lambda limit: {"preview_id": "ya_1"}
 
@@ -971,7 +1351,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "preview_id": "ya_1"})]
 
-    app = SimpleNamespace(yoagent_intent=lambda payload: ({"ok": True, "intent": payload["type"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(yoagent_intent=lambda payload: ({"ok": True, "intent": payload["type"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/intent", app)
     handler.read_json_body = lambda limit: {"type": "notify_session_idle"}
 
@@ -980,7 +1360,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "intent": "notify_session_idle"})]
 
-    app = SimpleNamespace(create_yoagent_job=lambda payload: ({"ok": True, "job": payload["type"]}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(create_yoagent_job=lambda payload: ({"ok": True, "job": payload["type"]}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs", app)
     handler.read_json_body = lambda limit: {"type": "notify_session_idle"}
 
@@ -989,7 +1369,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "job": "notify_session_idle"})]
 
-    app = SimpleNamespace(confirm_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(confirm_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs/yj_1/confirm", app)
     handler.read_json_body = lambda limit: {}
 
@@ -998,7 +1378,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
-    app = SimpleNamespace(cancel_yoagent_jobs_for_session=lambda session: ({"ok": True, "session": session, "count": 2}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(cancel_yoagent_jobs_for_session=lambda session: ({"ok": True, "session": session, "count": 2}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs/cancel-session", app)
     handler.read_json_body = lambda limit: {"session": "6"}
 
@@ -1007,7 +1387,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "session": "6", "count": 2})]
 
-    app = SimpleNamespace(cancel_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(cancel_yoagent_job=lambda job_id: ({"ok": True, "id": job_id}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/jobs/yj_1/cancel", app)
     handler.read_json_body = lambda limit: {}
 
@@ -1016,7 +1396,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "id": "yj_1"})]
 
-    app = SimpleNamespace(cancel_yoagent_chat=lambda request_id: ({"ok": True, "request_id": request_id, "cancelled": True}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(cancel_yoagent_chat=lambda request_id: ({"ok": True, "request_id": request_id, "cancelled": True}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/chat/chat-abc/cancel", app)
     handler.read_json_body = lambda limit: {}
 
@@ -1025,7 +1405,7 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "request_id": "chat-abc", "cancelled": True})]
 
-    app = SimpleNamespace(clear_yoagent_action_wait=lambda wait_id: ({"ok": True, "id": wait_id}, HTTPStatus.OK))
+    app = SimpleNamespace(yoagent_controller=SimpleNamespace(clear_yoagent_action_wait=lambda wait_id: ({"ok": True, "id": wait_id}, HTTPStatus.OK)))
     handler, calls, writes = route_handler("/api/yoagent/waits/yw_1/clear", app)
     handler.read_json_body = lambda limit: {}
 
@@ -1131,7 +1511,7 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
 
     def path_info(path):
         if path == "/missing":
-            raise server_module.FilesystemError("path not found: /missing", status=404)
+            raise server_module.FilesystemError.path_not_found("/missing")
         return {"path": path, "kind": "dir"}
 
     monkeypatch.setattr(server_module.filesystem, "path_info", path_info)
@@ -1151,17 +1531,47 @@ def test_handle_fs_batch_returns_per_item_results(monkeypatch):
 
     Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
 
-    assert writes == [(HTTPStatus.OK, {"responses": [
+    assert writes[0][0] == HTTPStatus.OK
+    responses = writes[0][1]["responses"]
+    assert responses[:2] == [
         {"id": "root", "ok": True, "status": 200, "payload": {"path": "/repo", "entries": [{"name": "a"}]}},
         {"id": "info", "ok": True, "status": 200, "payload": {"path": "/repo", "kind": "dir"}},
-        {"id": "missing", "ok": False, "status": 404, "error": "path not found: /missing", "path": "/missing"},
-        {"id": "bad", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "write", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "delete", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "rename", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/README.md"},
-        {"id": "mkdir", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo/new"},
-        {"id": "unindex", "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": "/repo"},
-    ]})]
+    ]
+    assert responses[2]["user_message"] == {
+        "key": "common.pathNotFound",
+        "params": {"path": "/missing"},
+        "fallback": "path not found: /missing",
+    }
+    assert all(
+        response["user_message"]["key"] == "request.error.unsupportedFsBatchOperation"
+        for response in responses[3:]
+    )
+
+
+def test_handle_fs_batch_returns_typed_permission_failure_without_raising(monkeypatch):
+    def denied_path_info(_raw_path):
+        raise PermissionError(13, "permission denied", "/restricted/item")
+
+    monkeypatch.setattr(server_module.filesystem.io_ops, "path_info", denied_path_info)
+    handler, writes = batch_handler({"requests": [{"id": "denied", "type": "info", "path": "/restricted/item"}]})
+
+    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+
+    assert writes == [(HTTPStatus.OK, {
+        "responses": [{
+            "id": "denied",
+            "ok": False,
+            "path": "/restricted/item",
+            "status": 403,
+            "error": "filesystem operation failed",
+            "user_message": {
+                "key": "fs.error.operationFailed",
+                "params": {},
+                "fallback": "filesystem operation failed",
+            },
+            "diagnostic": "[Errno 13] permission denied: '/restricted/item'",
+        }],
+    })]
 
 
 def test_handle_fs_batch_records_performance(monkeypatch):
@@ -1189,7 +1599,12 @@ def test_handle_fs_batch_rejects_invalid_shape():
 
     Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
 
-    assert writes == [(HTTPStatus.BAD_REQUEST, {"error": "requests must be a list", "status": 400})]
+    assert writes[0][0] == HTTPStatus.BAD_REQUEST
+    assert writes[0][1]["user_message"] == {
+        "key": "request.error.list",
+        "params": {"field": "requests"},
+        "fallback": "requests must be a list",
+    }
 
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
@@ -1284,7 +1699,7 @@ def test_stream_codex_summary_uses_settings_and_raw_auth_status(monkeypatch):
     app = SimpleNamespace(
         summary_settings=lambda: dict(summary_settings),
         codex_summary_prompt=lambda session, lookback: calls.append(("prompt", session, lookback)) or ({"session": session, "path": "/tmp/codex.jsonl", "prompt": "summarize", "items": 2}, HTTPStatus.OK),
-        log_event=lambda *args: logs.append(args),
+        log_event=lambda *args, **kwargs: logs.append((args, kwargs)),
     )
     handler = object.__new__(Handler)
     handler.server = SimpleNamespace(app=app)
@@ -1310,9 +1725,11 @@ def test_stream_codex_summary_uses_settings_and_raw_auth_status(monkeypatch):
     assert '"summary_model": "gpt-5.4-mini"' in stream
     assert '"summary_effort": "high"' in stream
     assert '"summary_service_tier": "fast"' in stream
-    assert logs[0][1] == "summary_started"
-    assert logs[0][3] == {"lookback_seconds": 7200, "model": "gpt-5.4-mini"}
-    assert logs[1][1] == "summary_finished"
+    assert logs[0][0][1] == "summary_started"
+    assert logs[0][0][3] == {"lookback_seconds": 7200, "model": "gpt-5.4-mini"}
+    assert logs[0][1] == {"message_key": "events.message.summary.started"}
+    assert logs[1][0][1] == "summary_finished"
+    assert logs[1][1] == {"message_key": "events.message.summary.finished"}
 
 
 def test_stream_codex_summary_rejects_logged_out_codex_before_prompt(monkeypatch):
@@ -1340,8 +1757,55 @@ def test_stream_codex_summary_rejects_logged_out_codex_before_prompt(monkeypatch
         HTTPStatus.SERVICE_UNAVAILABLE,
         {
             "error": "Codex summary provider is unavailable because the codex CLI is not logged in. Run `codex login`.",
+            "user_message": {
+                "key": "summary.error.codexLoginRequired",
+                "params": {"command": "codex login"},
+                "fallback": "Codex summary provider is unavailable because the codex CLI is not logged in. Run `codex login`.",
+            },
             "provider": "codex",
             "login_command": "codex login",
+        },
+    )]
+
+
+def test_stream_codex_process_missing_stdout_has_localizable_error_descriptor():
+    events = []
+    handler = object.__new__(Handler)
+    handler.write_sse_json = lambda event, value: events.append((event, value))
+
+    Handler.stream_codex_process(handler, SimpleNamespace(stdout=None))
+
+    assert events == [(
+        "summary_error",
+        {
+            "error": "missing Codex stdout",
+            "user_message": {
+                "key": "summary.error.missingStdout",
+                "params": {},
+                "fallback": "missing Codex stdout",
+            },
+        },
+    )]
+
+
+def test_write_codex_summary_error_event_has_localizable_descriptor():
+    events = []
+    handler = object.__new__(Handler)
+    handler.write_sse_json = lambda event, value: events.append((event, value))
+    provider_event = {"type": "turn.failed", "message": "provider failed"}
+    diagnostic = json.dumps(provider_event, ensure_ascii=False)
+
+    Handler.write_codex_summary_line(handler, diagnostic)
+
+    assert events == [(
+        "summary_error",
+        {
+            "error": diagnostic,
+            "user_message": {
+                "key": "summary.stream.failed",
+                "params": {},
+                "fallback": diagnostic,
+            },
         },
     )]
 
@@ -1485,15 +1949,128 @@ def test_share_pointer_events_are_coalesced_server_side():
 
     assert "if msg_type == SHARE_MIRROR_FRAME_POINTER:" in ui_body
     assert "self.server.queue_share_pointer(token, payload, sender=sender)" in ui_body
-    assert "self.share_pointer_latest[clean_token]" in queue_body
+    assert "self.share_pointer_records.setdefault(clean_token, SharePointerRecord())" in queue_body
     assert "SHARE_POINTER_CLICK_QUEUE_LIMIT" in queue_body
     assert "threading.Thread(target=self.share_pointer_loop" in queue_body
+    assert "self.share_pointer_records.get(token) is not record" in loop_body
     assert "signature != last_sent" in loop_body
     assert '"type": SHARE_MIRROR_FRAME_POINTER' in loop_body
     assert "skip_client_id=sender" in loop_body
     assert "SHARE_POINTER_MAX_WRITES_PER_SECOND / viewers" in hz_body
     assert "self.share_ui_client_count(token)" in hz_body
     assert server_module.SHARE_POINTER_MAX_HZ == 30
+
+
+def test_share_pointer_record_coalesces_motion_bounds_clicks_and_reuses_thread(monkeypatch):
+    threads = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target = target
+            self.args = args
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            threads.append(self)
+
+        def start(self):
+            self.started = True
+
+        def is_alive(self):
+            return self.started
+
+    monkeypatch.setattr(server_module.threading, "Thread", FakeThread)
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_records = {}
+
+    server.queue_share_pointer("share-token", {"x": 1, "y": 2}, sender="host")
+    for index in range(server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 3):
+        server.queue_share_pointer("share-token", {"x": index, "y": 3, "click": True}, sender="host")
+
+    record = server.share_pointer_records["share-token"]
+    assert len(threads) == 1
+    assert threads[0].args == ("share-token", record)
+    assert record.thread is threads[0]
+    assert record.latest == {"x": server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 2, "y": 3, "sender": "host"}
+    assert len(record.clicks) == server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT
+    assert record.clicks[0]["x"] == 3
+    assert record.clicks[-1]["x"] == server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 2
+
+
+def test_share_pointer_loop_coalesces_unchanged_motion_and_cleans_record():
+    class TwoTicks:
+        def __init__(self):
+            self.ticks = 0
+
+        def is_set(self):
+            return self.ticks >= 2
+
+        def wait(self, _timeout):
+            self.ticks += 1
+            return False
+
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_stop = TwoTicks()
+    server.share_pointer_hz = lambda _token: 30
+    broadcasts = []
+    server.broadcast_share_ui = lambda token, message, skip_client_id="": broadcasts.append((token, message, skip_client_id))
+    record = server_module.SharePointerRecord(
+        latest={"x": 2, "sender": "host"},
+        clicks=[{"x": 1, "sender": "host", "click": True}, {"x": 2, "sender": "host", "click": True}],
+    )
+    server.share_pointer_records = {"share-token": record}
+
+    server.share_pointer_loop("share-token", record)
+
+    assert [message["payload"] for _token, message, _skip in broadcasts] == [
+        {"x": 2, "sender": "host"},
+        {"x": 1, "sender": "host", "click": True},
+        {"x": 2, "sender": "host", "click": True},
+    ]
+    assert all(skip == "host" for _token, _message, skip in broadcasts)
+    assert server.share_pointer_records == {}
+
+
+def test_share_pointer_invalid_token_is_rejected_without_retained_state():
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda _token: None)
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_records = {"share-token": server_module.SharePointerRecord()}
+
+    server.queue_share_pointer("share-token", {"x": 1}, sender="host")
+
+    assert server.share_pointer_records == {}
+
+
+def test_share_pointer_old_loop_cannot_delete_replacement_record():
+    class AlreadyStopped:
+        @staticmethod
+        def is_set():
+            return True
+
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    server.share_pointer_lock = server_module.threading.Lock()
+    server.share_pointer_stop = AlreadyStopped()
+    old_record = server_module.SharePointerRecord(latest={"x": 1})
+    replacement = server_module.SharePointerRecord(latest={"x": 2})
+    server.share_pointer_records = {"share-token": replacement}
+
+    server.share_pointer_loop("share-token", old_record)
+
+    assert server.share_pointer_records == {"share-token": replacement}
+
+
+def test_share_pointer_parallel_state_maps_are_retired():
+    source = Path(server_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.share_pointer_latest" not in source
+    assert "self.share_pointer_clicks" not in source
+    assert "self.share_pointer_threads" not in source
 
 
 def test_share_ui_socket_wires_write_clients_and_host_broadcasts():
@@ -1819,10 +2396,7 @@ def test_share_replay_keyframe_cache_fans_out_to_late_viewers_and_prunes():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
 
     server.record_share_replay_keyframe("share-token", {
         "type": "dom-keyframe",
@@ -1857,23 +2431,20 @@ def test_share_replay_keyframe_cache_fans_out_to_late_viewers_and_prunes():
 
     active_tokens.clear()
     assert server.latest_share_replay_keyframe("share-token") is None
-    assert server.share_replay_keyframes == {}
+    assert server.share_replay_records == {}
 
     active_tokens.add("share-token")
     server.record_share_replay_keyframe("share-token", {"type": "dom-keyframe", "payload": {"digest": "sha256:def"}})
     active_tokens.clear()
-    server.prune_inactive_share_replay_keyframes()
-    assert server.share_replay_keyframes == {}
+    server.prune_inactive_share_replay_records()
+    assert server.share_replay_records == {}
 
 
 def test_share_replay_delta_ring_replays_contiguous_frames_to_late_viewer():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
     requests = []
     server.broadcast_share_ui = lambda token, message, skip_client_id="": requests.append((token, message, skip_client_id))
 
@@ -1914,14 +2485,99 @@ def test_share_replay_delta_ring_replays_contiguous_frames_to_late_viewer():
     assert requests == []
 
 
+def test_share_replay_snapshot_never_mixes_keyframe_generations():
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
+    init_share_replay_state(server)
+    snapshot_inside_lock = server_module.threading.Event()
+    release_snapshot = server_module.threading.Event()
+    writer_started = server_module.threading.Event()
+    writer_done = server_module.threading.Event()
+    first_snapshot = []
+    original_contiguous = server.contiguous_share_replay_deltas
+
+    server.record_share_replay_keyframe("share-token", {
+        "type": "dom-keyframe",
+        "payload": {"generation": "old"},
+        "epoch": 1,
+        "sequence": 10,
+    })
+    server.record_share_replay_delta("share-token", {
+        "type": "dom-delta",
+        "payload": {"generation": "old"},
+        "epoch": 1,
+        "sequence": 11,
+        "baseSequence": 10,
+    })
+
+    def hooked_contiguous(record, keyframe):
+        snapshot_inside_lock.set()
+        assert release_snapshot.wait(timeout=1)
+        return original_contiguous(record, keyframe)
+
+    def read_snapshot():
+        first_snapshot.append(server.share_replay_frames_snapshot("share-token"))
+
+    def replace_generation():
+        writer_started.set()
+        server.record_share_replay_keyframe("share-token", {
+            "type": "dom-keyframe",
+            "payload": {"generation": "new"},
+            "epoch": 2,
+            "sequence": 20,
+        })
+        server.record_share_replay_delta("share-token", {
+            "type": "dom-delta",
+            "payload": {"generation": "new"},
+            "epoch": 2,
+            "sequence": 21,
+            "baseSequence": 20,
+        })
+        writer_done.set()
+
+    server.contiguous_share_replay_deltas = hooked_contiguous
+    reader = server_module.threading.Thread(target=read_snapshot)
+    reader.start()
+    assert snapshot_inside_lock.wait(timeout=1)
+    writer = server_module.threading.Thread(target=replace_generation)
+    writer.start()
+    assert writer_started.wait(timeout=1)
+    assert not writer_done.is_set()
+
+    release_snapshot.set()
+    reader.join(timeout=1)
+    writer.join(timeout=1)
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert writer_done.is_set()
+
+    old_keyframe, old_deltas, old_contiguous = first_snapshot[0]
+    assert old_contiguous
+    assert old_keyframe["sequence"] == 10
+    assert [delta["sequence"] for delta in old_deltas] == [11]
+
+    server.contiguous_share_replay_deltas = original_contiguous
+    new_keyframe, new_deltas, new_contiguous = server.share_replay_frames_snapshot("share-token")
+    assert new_contiguous
+    assert new_keyframe["sequence"] == 20
+    assert [delta["sequence"] for delta in new_deltas] == [21]
+
+
+def test_share_replay_parallel_state_maps_are_retired():
+    source = Path(server_module.__file__).read_text(encoding="utf-8")
+
+    assert "self.share_replay_keyframes" not in source
+    assert "self.share_replay_keyframes_lock" not in source
+    assert "self.share_replay_deltas" not in source
+    assert "self.share_replay_deltas_lock" not in source
+    assert "share_replay_deltas_after_keyframe" not in source
+
+
 def test_share_replay_delta_ring_overflow_requests_keyframe_without_partial_deltas():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
     requests = []
     server.broadcast_share_ui = lambda token, message, skip_client_id="": requests.append((token, message, skip_client_id))
 
@@ -1960,10 +2616,7 @@ def test_share_replay_delta_ring_prunes_stopped_shares():
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
     active_tokens = {"share-token"}
     server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_replay_keyframes_lock = server_module.threading.Lock()
-    server.share_replay_keyframes = {}
-    server.share_replay_deltas_lock = server_module.threading.Lock()
-    server.share_replay_deltas = {}
+    init_share_replay_state(server)
 
     server.record_share_replay_keyframe("share-token", {
         "type": "dom-keyframe",
@@ -1978,14 +2631,12 @@ def test_share_replay_delta_ring_prunes_stopped_shares():
         "sequence": 2,
         "baseSequence": 1,
     })
-    assert "share-token" in server.share_replay_deltas
+    assert server.share_replay_records["share-token"].deltas_by_epoch
 
     active_tokens.clear()
-    server.prune_inactive_share_replay_keyframes()
-    server.prune_inactive_share_replay_deltas()
+    server.prune_inactive_share_replay_records()
 
-    assert server.share_replay_keyframes == {}
-    assert server.share_replay_deltas == {}
+    assert server.share_replay_records == {}
 
 
 def test_share_replay_live_delta_overflow_requests_keyframe():

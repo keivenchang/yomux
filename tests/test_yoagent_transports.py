@@ -62,6 +62,16 @@ def test_claude_stream_json_argv_includes_partials_and_optional_tools():
     assert args[args.index("--permission-mode") + 1] == CLAUDE_STREAM_JSON_PERMISSION_MODE
 
 
+def test_claude_model_intent_argv_disables_tools_and_uses_native_schema():
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False}
+
+    args = claude_stream_json_argv({"tools": "", "json_schema": schema})
+
+    assert args[args.index("--tools") + 1] == ""
+    assert "--permission-mode" not in args
+    assert json.loads(args[args.index("--json-schema") + 1]) == schema
+
+
 def test_claude_stream_json_result_falls_back_to_wrapped_text_deltas():
     stdout = "\n".join([
         json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "wrapped "}}}),

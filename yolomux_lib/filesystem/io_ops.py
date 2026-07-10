@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
 import shutil
 import stat
@@ -13,6 +12,7 @@ from typing import Any
 
 from . import git_ops
 from . import paths
+from .errors import raise_os_error
 
 MAX_WRITE_BYTES = 5 * 1024 * 1024  # 5 MB cap on file write
 # Save conflict detection compares the mtime captured when YOLOmux loaded the file with the mtime on
@@ -130,35 +130,20 @@ def _sniff_raw_mime(data: bytes) -> str:
     return ""
 
 
-@contextlib.contextmanager
-def _fs_io_errors():
-    """Map a filesystem IO failure to a FilesystemError with the same status mapping as the old module."""
-    try:
-        yield
-    except PermissionError as exc:
-        raise paths.FilesystemError(str(exc), status=403) from exc
-    except OSError as exc:
-        raise paths.FilesystemError(str(exc), status=500) from exc
-
-
 def read_file(raw_path: str) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
     if not path.exists():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
+        raise paths.FilesystemError.path_not_found(path)
     if path.is_dir():
-        raise paths.FilesystemError(f"is a directory: {path}", status=400)
-    try:
-        file_stat = path.stat()
-        size = file_stat.st_size
-    except OSError as exc:
-        raise paths.FilesystemError(str(exc), status=500) from exc
+        raise paths.FilesystemError.is_directory(path)
+    file_stat = path.stat()
+    size = file_stat.st_size
     if size > paths.MAX_READ_BYTES:
-        raise paths.FilesystemError(f"file too large ({size} bytes; max {paths.MAX_READ_BYTES})", status=413)
-    with _fs_io_errors():
-        with path.open("rb") as fh:
-            raw = fh.read(paths.MAX_READ_BYTES + 1)
+        raise paths.FilesystemError.file_too_large(size, paths.MAX_READ_BYTES)
+    with path.open("rb") as fh:
+        raw = fh.read(paths.MAX_READ_BYTES + 1)
     if paths._looks_binary(raw):
-        raise paths.FilesystemError("file appears to be binary", status=415)
+        raise paths.FilesystemError("file appears to be binary", status=415, message_key="fs.error.binary")
     try:
         content = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -186,12 +171,17 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
     path = paths._validated_path(raw_path)
     paths._ensure_not_configured_root(path, "write")
     if path.exists() and path.is_dir():
-        raise paths.FilesystemError(f"is a directory: {path}", status=400)
+        raise paths.FilesystemError.is_directory(path)
     if not isinstance(content, str):
-        raise paths.FilesystemError("content must be a string", status=400)
+        raise paths.FilesystemError("content must be a string", message_key="fs.error.contentString")
     data = content.encode("utf-8")
     if len(data) > MAX_WRITE_BYTES:
-        raise paths.FilesystemError(f"content too large ({len(data)} bytes; max {MAX_WRITE_BYTES})", status=413)
+        raise paths.FilesystemError(
+            f"content too large ({len(data)} bytes; max {MAX_WRITE_BYTES})",
+            status=413,
+            message_key="fs.error.contentTooLarge",
+            message_params={"size": len(data), "max": MAX_WRITE_BYTES},
+        )
     if expected_mtime is not None and path.exists():
         actual_stat = path.stat()
         actual = int(actual_stat.st_mtime_ns)
@@ -200,11 +190,13 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
             raise paths.FilesystemError(
                 f"file changed on disk (expected mtime {expected_mtime}, got {actual})",
                 status=409,
+                message_key="fs.error.changedOnDisk",
+                message_params={"path": str(path)},
+                diagnostic=f"expected mtime {expected_mtime}, got {actual}",
             )
-    with _fs_io_errors():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("wb") as fh:
-            fh.write(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(data)
     file_stat = path.stat()
     return {
         "path": str(path),
@@ -223,12 +215,12 @@ def _mtime_matches_expected(expected: int, actual_ns: int, actual_legacy: int) -
 
 def _validated_child_name(raw_name: str) -> str:
     if not isinstance(raw_name, str):
-        raise paths.FilesystemError("name must be a string")
+        raise paths.FilesystemError("name must be a string", message_key="fs.error.nameString")
     name = raw_name.strip()
     if not name:
-        raise paths.FilesystemError("name is required")
+        raise paths.FilesystemError("name is required", message_key="fs.error.nameRequired")
     if name in {".", ".."} or "/" in name or "\x00" in name or "\n" in name or "\r" in name:
-        raise paths.FilesystemError("name contains illegal characters")
+        raise paths.FilesystemError("name contains illegal characters", message_key="fs.error.nameIllegal")
     return name
 
 
@@ -236,14 +228,13 @@ def delete_path(raw_path: str) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
     paths._ensure_not_configured_root(path, "delete")
     if not path.exists() and not path.is_symlink():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
-    with _fs_io_errors():
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-            kind = "dir"
-        else:
-            path.unlink()
-            kind = "file"
+        raise paths.FilesystemError.path_not_found(path)
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+        kind = "dir"
+    else:
+        path.unlink()
+        kind = "file"
     return {"path": str(path), "deleted": True, "kind": kind}
 
 
@@ -251,46 +242,43 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
     paths._ensure_not_configured_root(path, "rename")
     if not path.exists() and not path.is_symlink():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
+        raise paths.FilesystemError.path_not_found(path)
     name = _validated_child_name(new_name)
     target = path.with_name(name)
     if target.exists() or target.is_symlink():
-        raise paths.FilesystemError(f"target already exists: {target}", status=409)
+        raise paths.FilesystemError.target_exists(target)
     # A tracked file moves with `git mv` (history-preserving, index-aware); everything else uses a plain rename.
     if not git_ops._git_mv_if_tracked(path, target):
-        with _fs_io_errors():
-            path.rename(target)
+        path.rename(target)
     return {"path": str(target), "old_path": str(path), "name": name}
 
 
 def create_directory(raw_path: str) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
     if path.exists() or path.is_symlink():
-        raise paths.FilesystemError(f"target already exists: {path}", status=409)
-    with _fs_io_errors():
-        path.mkdir()
+        raise paths.FilesystemError.target_exists(path)
+    path.mkdir()
     return {"path": str(path), "created": True, "kind": "dir"}
 
 
 def path_info(raw_path: str) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
-    if not path.exists() and not path.is_symlink():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
-    kind = "dir" if path.is_dir() else "file"
+    exists = path.exists()
+    is_symlink = path.is_symlink()
+    if not exists and not is_symlink:
+        raise paths.FilesystemError.path_not_found(path)
+    kind = "symlink-broken" if is_symlink and not exists else "dir" if path.is_dir() else "file"
     size: int | None = None
     mtime: int | None = None
     mtime_ns: int | None = None
     preview_mime = ""
     if kind == "file":
-        try:
-            file_stat = path.stat()
-            size = int(file_stat.st_size)
-            mtime = int(file_stat.st_mtime)
-            mtime_ns = int(file_stat.st_mtime_ns)
-            with path.open("rb") as fh:
-                preview_mime = _sniff_raw_mime(fh.read(512)) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
-        except OSError:
-            preview_mime = IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
+        file_stat = path.stat()
+        size = int(file_stat.st_size)
+        mtime = int(file_stat.st_mtime)
+        mtime_ns = int(file_stat.st_mtime_ns)
+        with path.open("rb") as fh:
+            preview_mime = _sniff_raw_mime(fh.read(512)) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
     repo_root = git_ops.git_root_for_path(path)
     relative_path = ""
     repo_info: dict[str, Any] | None = None
@@ -333,19 +321,15 @@ def read_raw(raw_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
     """Return (bytes, mime_type) for binary previews. Caller decides whether to serve by extension."""
     path = paths._validated_path(raw_path)
     if not path.exists():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
+        raise paths.FilesystemError.path_not_found(path)
     if path.is_dir():
-        raise paths.FilesystemError(f"is a directory: {path}", status=400)
-    try:
-        size = path.stat().st_size
-    except OSError as exc:
-        raise paths.FilesystemError(str(exc), status=500) from exc
+        raise paths.FilesystemError.is_directory(path)
+    size = path.stat().st_size
     byte_cap = int(max_bytes) if isinstance(max_bytes, (int, float)) and max_bytes > 0 else MAX_RAW_BYTES
     if size > byte_cap:
-        raise paths.FilesystemError(f"file too large ({size} bytes; {byte_cap} byte file transfer size cap)", status=413)
-    with _fs_io_errors():
-        with path.open("rb") as fh:
-            data = fh.read(byte_cap + 1)
+        raise paths.FilesystemError.file_too_large(size, byte_cap)
+    with path.open("rb") as fh:
+        data = fh.read(byte_cap + 1)
     mime = _sniff_raw_mime(data) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
     return data, mime
 
@@ -364,38 +348,29 @@ def _walk_directory_sources(path: Path, size_limit: int | None = None) -> tuple[
     files: list[Path] = []
     total_size = 0
 
-    def on_error(exc: OSError) -> None:
-        status = 403 if isinstance(exc, PermissionError) else 500
-        raise paths.FilesystemError(str(exc), status=status) from exc
-
-    for root, dirnames, filenames in os.walk(path, topdown=True, onerror=on_error, followlinks=False):
+    for root, dirnames, filenames in os.walk(path, topdown=True, onerror=raise_os_error, followlinks=False):
         root_path = Path(root)
         kept_dirnames: list[str] = []
         for dirname in dirnames:
             child = root_path / dirname
-            try:
-                mode = child.lstat().st_mode
-            except PermissionError as exc:
-                raise paths.FilesystemError(str(exc), status=403) from exc
-            except OSError as exc:
-                raise paths.FilesystemError(str(exc), status=500) from exc
+            mode = child.lstat().st_mode
             if stat.S_ISDIR(mode):
                 kept_dirnames.append(dirname)
                 directories.append(child)
         dirnames[:] = kept_dirnames
         for filename in filenames:
             child = root_path / filename
-            try:
-                child_stat = child.lstat()
-            except PermissionError as exc:
-                raise paths.FilesystemError(str(exc), status=403) from exc
-            except OSError as exc:
-                raise paths.FilesystemError(str(exc), status=500) from exc
+            child_stat = child.lstat()
             if not stat.S_ISREG(child_stat.st_mode):
                 continue
             total_size += child_stat.st_size
             if size_limit is not None and total_size > size_limit:
-                raise paths.FilesystemError(_zip_limit_message(path, total_size, size_limit), status=413)
+                raise paths.FilesystemError(
+                    _zip_limit_message(path, total_size, size_limit),
+                    status=413,
+                    message_key="fs.error.folderTooLarge",
+                    message_params={"path": str(path), "size": total_size, "max": size_limit},
+                )
             files.append(child)
     return directories, files, total_size
 
@@ -408,9 +383,9 @@ def _walk_zip_sources(path: Path, max_bytes: int | None = None) -> tuple[list[Pa
 def count_directory_files(raw_path: str) -> dict[str, Any]:
     path = paths._validated_path(raw_path)
     if not path.exists():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
+        raise paths.FilesystemError.path_not_found(path)
     if not path.is_dir():
-        raise paths.FilesystemError(f"is not a directory: {path}", status=400)
+        raise paths.FilesystemError.not_directory(path)
     _directories, files, _total_size = _walk_directory_sources(path)
     return {"path": str(path), "kind": "dir", "files": len(files), "recursive": True}
 
@@ -418,9 +393,9 @@ def count_directory_files(raw_path: str) -> dict[str, Any]:
 def zip_directory(raw_path: str, max_bytes: int | None = None) -> tuple[Any, int]:
     path = paths._validated_path(raw_path)
     if not path.exists():
-        raise paths.FilesystemError(f"path not found: {path}", status=404)
+        raise paths.FilesystemError.path_not_found(path)
     if not path.is_dir():
-        raise paths.FilesystemError(f"is not a directory: {path}", status=400)
+        raise paths.FilesystemError.not_directory(path)
     directories, files, _total_size = _walk_zip_sources(path, max_bytes)
     base_parent = path.parent
     data = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
@@ -429,12 +404,7 @@ def zip_directory(raw_path: str, max_bytes: int | None = None) -> tuple[Any, int
             for directory in directories:
                 archive.write(directory, directory.relative_to(base_parent).as_posix() + "/")
             for file_path in files:
-                try:
-                    archive.write(file_path, file_path.relative_to(base_parent).as_posix())
-                except PermissionError as exc:
-                    raise paths.FilesystemError(str(exc), status=403) from exc
-                except OSError as exc:
-                    raise paths.FilesystemError(str(exc), status=500) from exc
+                archive.write(file_path, file_path.relative_to(base_parent).as_posix())
         size = data.tell()
         data.seek(0)
         return data, size

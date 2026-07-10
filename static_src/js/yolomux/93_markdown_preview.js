@@ -417,11 +417,11 @@ async function loadMermaidApi() {
         if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
         api = await loadMermaidBundleScript({force: true});
         if (mermaidApiIsUsable(api)) return configureMermaidApi(api);
-        bundleError = new Error('Mermaid bundle missing critical exports');
+        bundleError = new Error(t('preview.mermaid.renderFailed'));
       } catch (error) {
         bundleError = error;
       }
-      throw bundleError || new Error('Mermaid unavailable');
+      throw bundleError || new Error(t('preview.mermaid.renderFailed'));
     })();
   }
   try {
@@ -441,14 +441,6 @@ function splitMarkdownResourceUrl(value) {
   };
 }
 
-function safeDecodeMarkdownUrlPath(value) {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
 function markdownPreviewImageTarget(src, markdownPath) {
   const raw = String(src || '').trim();
   if (!raw || !markdownPath) return null;
@@ -460,7 +452,7 @@ function markdownPreviewImageTarget(src, markdownPath) {
   }
   const {path: rawPath} = splitMarkdownResourceUrl(raw);
   if (!rawPath) return null;
-  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeMarkdownUrlPath(rawPath));
+  const resolved = joinAndNormalize(dirnameOf(markdownPath), safeDecodeURIComponent(rawPath));
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
@@ -468,19 +460,9 @@ function markdownImageFallbackNode(path, label = '') {
   const node = document.createElement('span');
   node.className = 'markdown-image-error';
   const text = document.createElement('span');
-  text.textContent = label || `Image unavailable: ${path}`;
+  text.textContent = label || t('preview.markdown.imageUnavailable', {path});
   node.appendChild(text);
-  if (path) {
-    const open = document.createElement('a');
-    open.href = rawFileUrl(path);
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.textContent = 'Open';
-    const download = document.createElement('a');
-    download.href = rawFileDownloadUrl(path);
-    download.textContent = 'Download';
-    node.append(document.createTextNode(' '), open, document.createTextNode(' · '), download);
-  }
+  node.append(...previewFileActionLinks(path, {leadingSeparator: ' '}));
   return node;
 }
 
@@ -496,7 +478,7 @@ function rewriteMarkdownPreviewImages(root, markdownPath) {
     img.setAttribute('src', target.src);
     if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
     img.addEventListener('error', () => {
-      img.replaceWith(markdownImageFallbackNode(target.path, `Image unavailable: ${target.path || original}`));
+      img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
     }, {once: true});
   }
 }
@@ -833,7 +815,26 @@ function markdownPreviewHtml(text) {
   return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
 }
 
+function invalidateMarkdownPreviewArtifacts(container) {
+  // A Markdown source replacement invalidates every derived artifact below it:
+  // Mermaid's async SVG/blob image, rewritten local images, syntax highlighting,
+  // and zoom observers. Mark old Mermaid hosts stale before replacing the DOM so
+  // a slow prior render cannot install its SVG after newer Markdown wins.
+  const generation = Number(container?._markdownPreviewGeneration || 0) + 1;
+  if (container) container._markdownPreviewGeneration = generation;
+  for (const host of Array.from(container?.querySelectorAll?.('.mermaid-preview-host') || [])) {
+    host.dataset.mermaidRenderSeq = `stale-${generation}`;
+    if (typeof disconnectPreviewZoomSurface === 'function') {
+      disconnectPreviewZoomSurface(host, {resetClasses: true});
+    }
+    const source = host.querySelector?.('img.mermaid-preview-image')?.getAttribute?.('src') || '';
+    if (source.startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(source);
+  }
+  return generation;
+}
+
 function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
+  const generation = invalidateMarkdownPreviewArtifacts(container);
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
@@ -844,7 +845,10 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
-  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {context: options.context || ''});
+  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {
+    context: options.context || '',
+    isCurrent: () => container._markdownPreviewGeneration === generation,
+  });
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -1140,9 +1144,25 @@ function styleStandaloneSvgText(svg) {
   });
 }
 
+const STANDALONE_SVG_BLOCKED_TAGS = Object.freeze([
+  'script',
+  'foreignobject',
+  'iframe',
+  'object',
+  'embed',
+  'audio',
+  'video',
+  'canvas',
+  'link',
+  'meta',
+]);
+const STANDALONE_SVG_BLOCKED_TAG_SET = new Set(STANDALONE_SVG_BLOCKED_TAGS);
+const STANDALONE_SVG_BLOCKED_TAG_PATTERN = STANDALONE_SVG_BLOCKED_TAGS.map(escapeRegExpLiteral).join('|');
+const STANDALONE_SVG_BLOCKED_PAIRED_TAG_RE = new RegExp(`<\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\b[\\s\\S]*?<\\s*\\/\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\s*>`, 'gi');
+const STANDALONE_SVG_BLOCKED_SINGLE_TAG_RE = new RegExp(`<\\s*(?:${STANDALONE_SVG_BLOCKED_TAG_PATTERN})\\b[^>]*\\/?\\s*>`, 'gi');
+
 function sanitizeStandaloneSvgNode(root) {
   const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
-  const blocked = new Set(['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta']);
   for (const child of Array.from(root?.childNodes || [])) {
     if (child.nodeType !== elementNode) {
       if (child.nodeType === (globalThis.Node?.COMMENT_NODE || 8)) child.remove();
@@ -1155,7 +1175,7 @@ function sanitizeStandaloneSvgNode(root) {
       else child.remove();
       continue;
     }
-    if (blocked.has(tagName)) {
+    if (STANDALONE_SVG_BLOCKED_TAG_SET.has(tagName)) {
       child.remove();
       continue;
     }
@@ -1185,8 +1205,8 @@ function sanitizeStandaloneSvgNode(root) {
 function sanitizeStandaloneSvgString(svgText) {
   return String(svgText || '')
     .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[\s\S]*?<\s*\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\s*>/gi, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|canvas|link|meta)\b[^>]*\/?\s*>/gi, '')
+    .replace(STANDALONE_SVG_BLOCKED_PAIRED_TAG_RE, '')
+    .replace(STANDALONE_SVG_BLOCKED_SINGLE_TAG_RE, '')
     .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/\s+(?:href|xlink:href|src)\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|(?![#'"])[^\s>]+)/gi, '')
     .replace(/@import[^;]+;?/gi, '')

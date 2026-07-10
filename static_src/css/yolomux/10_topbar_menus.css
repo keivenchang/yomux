@@ -8,11 +8,11 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
-  padding: 3px 8px;
+  gap: var(--space-8);
+  padding: var(--space-3) var(--space-8);
   border-bottom: 1px solid var(--line);
   background: var(--panel2);
-  transition: background 100ms ease;
+  transition: background var(--motion-interaction-standard) ease;
   overflow: visible;
   white-space: nowrap;
 }
@@ -34,20 +34,16 @@
 }
 .brand-cell {
   justify-self: start;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding-top: 1px;
+  padding-top: var(--space-1);
 }
 .brand {
   min-width: 92px;
 }
 .brand-update-badge {
-  margin-inline-start: 8px;
-  padding: 1px 7px;
+  margin-inline-start: var(--space-8);
+  padding: var(--space-1) var(--space-7);
   border: 1px solid var(--active-control-border, var(--line));
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--active-control-text);
   background: var(--active-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
@@ -88,18 +84,18 @@
   left: var(--popover-edge-gap);
   z-index: var(--z-transport-warning);
   width: min(60ch, var(--popover-max-inline-size));
-  padding: 8px 10px;
-  color: #ffd8dc;
-  background: rgba(42, 14, 18, 0.98);
-  border: 1px solid var(--pr-status-failing);
+  padding: var(--space-8) var(--space-10);
+  color: var(--transport-tooltip-text);
+  background: var(--transport-tooltip-surface);
+  border: 1px solid var(--transport-tooltip-border);
   border-radius: 7px;
-  box-shadow: 0 14px 38px rgb(var(--shadow-rgb) / 0.42);
+  box-shadow: 0 14px 38px var(--paint-shadow-42);
   white-space: normal;
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   opacity: 0;
   pointer-events: none;
   transform: translateY(-2px);
-  transition: opacity 100ms ease, transform 100ms ease;
+  transition: opacity var(--motion-interaction-standard) ease, transform var(--motion-interaction-standard) ease;
 }
 .transport-warning:hover::after,
 .transport-warning:focus-visible::after {
@@ -109,23 +105,22 @@
 .actions {
   justify-self: end;
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-top: 1px;
+  padding-top: var(--space-1);
 }
 .actions button {
   width: var(--compact-icon-button-size);
   min-width: var(--compact-icon-button-size);
   max-width: var(--compact-icon-button-size);
   height: var(--compact-icon-button-size);
-  justify-content: center;
+  display: inline-grid;
+  place-items: center;
   padding: 0;
   overflow: hidden;
   font-size: 0;
 }
 .actions button::before {
   content: "";
+  display: block;
   width: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
   height: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
   background: currentColor;
@@ -140,11 +135,6 @@
 }
 #tabMetaToggle {
   --action-icon: var(--icon-tab-meta);
-}
-#tabMetaToggle.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }
 #logoutButton {
   --action-icon: var(--icon-logout);
@@ -172,7 +162,7 @@
   inset-block-start: -5px;
   min-width: 14px;
   height: 14px;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--panel);
   border-radius: var(--radius-pill);
   background: var(--active-control-bg);
@@ -236,7 +226,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 .share-popup-mirror-layer {
   position: absolute;
   inset: 0;
-  z-index: calc(var(--z-share-presence) + 1);
+  z-index: var(--z-share-popup-mirror);
   overflow: hidden;
   pointer-events: none;
   font: inherit;
@@ -272,24 +262,24 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   max-height: none !important;
 }
 .share-popup-mirror-item > .modal.about-open .modal-dialog {
-  width: min(520px, calc(100% - 28px)) !important;
+  width: min(var(--dialog-compact-inline-size), 100%) !important;
 }
 .share-popup-mirror-item > .modal.share-open .modal-dialog {
-  width: min(960px, calc(100% - 28px)) !important;
+  width: min(var(--dialog-wide-inline-size), 100%) !important;
 }
 
 .share-viewer-banner {
   position: fixed;
   left: 50%;
   bottom: 8px;
-  z-index: calc(var(--z-share-presence) + 2);
+  z-index: var(--z-share-viewer-banner);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   justify-content: center;
   min-height: 26px;
   max-width: calc(100vw - 16px);
-  padding: 5px 10px;
+  padding: var(--space-5) var(--space-10);
   border: 1px solid var(--active-control-border);
   border-radius: var(--radius-md);
   background: var(--active-control-soft-bg);
@@ -298,12 +288,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
   transform: translateX(-50%);
   pointer-events: auto;
-}
-.share-viewer-banner-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .share-viewer-mirror-status {
   flex: 0 0 auto;
@@ -327,11 +311,8 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 .share-view-fit-toggle {
   flex: 0 0 auto;
   min-height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
+  padding: 0 var(--space-8);
   background: var(--panel);
-  color: var(--text);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
 }
@@ -350,10 +331,10 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   pointer-events: none;
   opacity: 0;
   transform: translate3d(-9999px, -9999px, 0);
-  transition: transform 45ms linear, opacity 100ms ease;
+  transition: transform 45ms linear, opacity var(--motion-interaction-standard) ease;
   border: 2px solid var(--share-cursor-color, var(--active-control-bg));
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px rgb(var(--shadow-rgb) / 0.45);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.66), 0 2px 8px var(--paint-shadow-45);
 }
 .share-ghost-cursor::before {
   content: "";
@@ -385,7 +366,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   z-index: var(--z-share-presence);
   width: 8px;
   height: 8px;
-  margin: -4px 0 0 -4px;
+  margin: calc(-1 * var(--space-4)) 0 0 calc(-1 * var(--space-4));
   pointer-events: none;
   border: 2px solid var(--share-cursor-color, var(--active-control-bg));
   border-radius: 50%;
@@ -410,18 +391,39 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
 #status:empty {
   display: none;
 }
+.topbar-status-surface {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+  color: var(--muted);
+  font: inherit;
+}
+button.topbar-status-surface {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: var(--compact-control-height);
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-status-surface[hidden] {
+  display: none;
+}
+button.topbar-status-surface:hover,
+button.topbar-status-surface:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  color: var(--text);
+}
 .latency-meter {
   height: 24px;
   min-width: 82px;
   display: inline-grid;
   grid-template-columns: 44px auto;
   align-items: center;
-  gap: 7px;
-  padding: 2px 6px;
-  color: var(--muted);
-  border: 1px solid #273142;
-  border-radius: 8px;
-  background: #10151d;
+  gap: var(--space-7);
+  padding: var(--space-2) var(--space-6);
 }
 .latency-meter.good { color: var(--good); }
 .latency-meter.warn { color: var(--accent-gold); }
@@ -444,14 +446,38 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   text-align: end;
 }
 .app-menu-area {
+  position: relative;
   width: 100%;
   min-width: 0;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px;
+  gap: var(--space-8);
   min-height: var(--compact-control-height);
   overflow: visible;
+}
+/* Keep menu roots, editor navigation, search, and right-side controls in one real flex sequence.
+   An absolutely centered launcher could cover Help while there was still spare space at the right.
+   This order makes Help visible first and puts Search directly between it and the right controls. */
+.topbar-center-tools {
+  /* This is the free middle region between Help and the right-side chrome.  It must own that
+     region so its navigation/search pair can be centered and grow on a wide screen instead of
+     shrink-wrapping immediately after Help. */
+  flex: 1 1 42ch;
+  justify-content: center;
+}
+.topbar-center-tools .topbar-nav {
+  margin-inline-start: 0;
+}
+.topbar-center-tools .topbar-search {
+  margin-inline: 0;
+}
+.topbar-right-tools {
+  /* Status/action controls keep their measured width. The centered Search region owns all shrink;
+     allowing this group to shrink made Language overflow into activity while Search kept a wide,
+     visibly empty flex box. */
+  flex: 0 0 auto;
+  margin-inline-start: 0;
 }
 /* editor back/forward history, immediately before the search box. An auto inline-start margin
    on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
@@ -460,7 +486,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   margin-inline-start: auto;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
 }
 .topbar-nav-button {
   flex: 0 0 auto;
@@ -470,16 +496,13 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   place-items: center;
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--input-bg);
+  border-radius: var(--radius-md);
+  background: var(--topbar-control-surface);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
   line-height: 1;
   cursor: pointer;
-}
-body.theme-light .topbar-nav-button {
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-nav-button:hover:not(:disabled) {
   border-color: var(--accent);
@@ -489,19 +512,17 @@ body.theme-light .topbar-nav-button {
   cursor: default;
 }
 .topbar-search {
+  --topbar-search-min-inline-size: 8ch;
   margin-block: 0;
-  margin-inline: 6px auto;
-  flex: 0 1 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  max-width: 320px;
+  margin-inline: var(--space-6) auto;
+  flex: 1 1 42ch;
+  min-inline-size: var(--topbar-search-min-inline-size);
+  max-inline-size: min(100%, 64ch);
   height: var(--compact-control-height);
-  padding: 0 8px;
+  padding: 0 var(--space-8);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--input-bg);
+  border-radius: var(--radius-md);
+  background: var(--topbar-control-surface);
   color: var(--muted);
   cursor: text;
   font: inherit;
@@ -509,11 +530,6 @@ body.theme-light .topbar-nav-button {
 }
 .topbar-search:hover {
   border-color: var(--accent);
-}
-/* --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
-   In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
-body.theme-light .topbar-search {
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 /* Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
 .topbar-language {
@@ -525,24 +541,16 @@ body.theme-light .topbar-search {
   height: var(--compact-control-height);
   max-width: 140px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--input-bg);
+  border-radius: var(--radius-md);
+  background: var(--topbar-control-surface);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
-  padding: 0 6px;
+  padding: 0 var(--space-6);
   cursor: pointer;
 }
 .topbar-language-menu > .topbar-language {
   min-width: 72px;
-}
-.topbar-language-menu.open > .topbar-language {
-  border-color: var(--active-control-border);
-  background: var(--active-control-bg);
-  color: var(--active-control-text);
-}
-body.theme-light .topbar-language {
-  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-language:hover {
   border-color: var(--accent);
@@ -558,52 +566,22 @@ body.theme-light .topbar-language {
   flex: 1 1 auto;
   text-align: start;
 }
+.topbar-search-label-short {
+  display: none;
+}
 .topbar-search-hint {
   flex: 0 0 auto;
   font: inherit;
   font-size: var(--ui-font-size-3xs, 10px);
   border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-4);
   color: var(--muted);
   background: transparent;
 }
-body.app-vw-lte-1100 .topbar-search-label,
-body.app-vw-lte-1100 .topbar-search-hint {
-  display: none;
-}
-body.app-vw-lte-1100 .topbar-search {
-  max-width: none;
-  padding: 0 6px;
-}
 .topbar-owner-status {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: var(--compact-control-height);
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--panel2) 72%, transparent);
-  color: var(--muted);
-  font: inherit;
-  font-size: var(--ui-font-size-2xs);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.topbar-owner-status[hidden] {
-  display: none;
-}
-.topbar-owner-status:hover {
-  border-color: var(--accent);
-  color: var(--text);
-}
-.topbar-owner-status.has-follower {
-  border-color: color-mix(in srgb, var(--accent-gold) 56%, var(--line));
-}
-.topbar-owner-status.has-error {
-  border-color: var(--accent-gold);
+  gap: var(--space-6);
+  padding: 0 var(--space-8);
 }
 .topbar-owner-status-key {
   color: var(--text-muted-cool);
@@ -621,35 +599,23 @@ body.app-vw-lte-1100 .topbar-search {
 }
 /* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
 .topbar-activity {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: var(--compact-control-height);
-  padding: 0 6px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: var(--ui-font-size-2xs);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.topbar-activity[hidden] {
-  display: none;
-}
-.topbar-activity:hover {
-  border-color: var(--accent);
-  color: var(--text);
+  gap: var(--space-4);
+  padding: 0 var(--space-6);
 }
 .topbar-activity.has-attention {
-  border-color: var(--brand-green);
+  border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
+  background: color-mix(in srgb, var(--danger-strong) 12%, var(--panel2));
+  color: var(--text);
+}
+.topbar-activity.has-attention:hover,
+.topbar-activity.has-attention:focus-visible {
+  border-color: var(--danger-strong);
+  background: color-mix(in srgb, var(--danger-strong) 18%, var(--panel2));
 }
 .topbar-activity-count {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
   font-weight: 600;
 }
 .topbar-activity-count-number {
@@ -667,27 +633,142 @@ body.app-vw-lte-1100 .topbar-search {
   display: inline-flex;
   align-items: center;
   line-height: 1;
-  margin-inline: -1px;
+  margin-inline: calc(-1 * var(--space-1));
   opacity: 0.5;
 }
-body.app-vw-lte-1100 .topbar-activity-idle {
+/* Pointer affordances remain independent from capacity. The measured packing pass below owns
+   every visibility decision, so locale, zoom, and dynamic status content cannot strand spare space. */
+body.app-topbar-touch-compact .topbar {
+  gap: var(--space-6);
+}
+body.app-topbar-touch-compact .app-menu-area {
+  gap: var(--space-6);
+}
+/* The compact Menus root is the only route to File/View/tmux/Tabs/Help on a phone. Give that
+   real button a reliable touch target instead of relying on its short desktop menu-row height. */
+body.app-topbar-touch-compact .app-menu-button {
+  min-height: 36px;
+  touch-action: manipulation;
+}
+body.app-topbar-touch-compact .topbar-center-tools,
+body.app-topbar-touch-compact .topbar-right-tools {
+  gap: var(--space-6);
+}
+/* Compact activity is a state on the control itself, not an incidental touch/menu selector.
+   The existing status-dot renderer remains the color owner; this changes only count geometry. */
+.topbar-activity--mobile-count-balls {
+  display: inline-flex;
+  gap: var(--space-3);
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+.topbar-activity--mobile-count-balls .topbar-activity-count:not(.active),
+.topbar-activity--mobile-count-balls .topbar-activity-idle,
+.topbar-activity--mobile-count-balls .topbar-activity-sep {
   display: none;
 }
-body.app-vw-lte-760 .topbar-search {
+.topbar-activity--mobile-count-balls .topbar-activity-count.active {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  inline-size: 20px;
+  block-size: 20px;
+}
+.topbar-activity--mobile-count-balls .topbar-activity-ball.agent-window-activity {
+  --agent-status-ball-size-base: 20px;
+  position: absolute;
+  inset: 0;
+  inline-size: var(--agent-status-ball-size);
+  block-size: var(--agent-status-ball-size);
+}
+.topbar-activity--mobile-count-balls .topbar-activity-count-number {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: var(--z-inline-control);
+  min-inline-size: 0;
+  color: var(--paint-black);
+  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
+  font-variant-numeric: tabular-nums;
+  /* Grid centers the line box, not the glyph's optical center. Keep the count horizontally exact
+     and move Safari's high-rendering mono digits down by one physical pixel. */
+  transform: translateY(1px);
+  pointer-events: none;
+}
+/* The packer starts full, walks these semantic reductions on actual overflow, then tests each
+   removed option again. No viewport breakpoint owns a topbar visibility decision. */
+body.topbar-pack-hide-version .topbar .brand-version {
+  display: none;
+}
+body.topbar-pack-compact-brand .topbar .brand {
+  min-width: 0;
+}
+body.topbar-pack-compact-brand .topbar .brand-title > :not(.brand-yolo) {
+  display: none;
+}
+body.topbar-pack-hide-latency #latencyMeter,
+body.topbar-pack-hide-logout #logoutButton,
+body.topbar-pack-hide-notify #notifyToggle,
+body.topbar-pack-hide-notify #tabMetaToggle,
+body.topbar-pack-hide-language .topbar-language,
+body.topbar-pack-hide-owner .topbar-owner-status,
+body.topbar-pack-hide-nav .topbar-nav {
+  display: none;
+}
+body.topbar-pack-compact-search .topbar-search {
+  display: inline-flex;
+  flex: 0 1 8ch;
+  min-inline-size: 7ch;
+  max-inline-size: 8ch;
+  margin-inline: var(--space-6) 0;
+}
+body.topbar-pack-compact-search .topbar-search-label {
+  display: inline-flex;
+  min-inline-size: 0;
+}
+body.topbar-pack-compact-search .topbar-search-label-long,
+body.topbar-pack-compact-search .topbar-search-hint {
+  display: none;
+}
+body.topbar-pack-compact-search .topbar-search-label-short {
+  display: inline;
+}
+body.topbar-pack-icon-search .topbar-center-tools {
+  flex: 0 0 auto;
+}
+body.topbar-pack-icon-search .topbar-search {
+  flex: 0 0 var(--compact-control-height);
+  inline-size: var(--compact-control-height);
+  min-inline-size: var(--compact-control-height);
+  max-inline-size: var(--compact-control-height);
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+body.topbar-pack-icon-search .topbar-search-label,
+body.topbar-pack-icon-search .topbar-search-hint {
+  display: none;
+}
+/* Compact activity stays left of Ping and every action button in the real actions rail. */
+.actions > .topbar-activity--mobile-count-balls {
+  display: inline-flex;
+  inline-size: auto;
+  min-inline-size: 0;
+  max-inline-size: none;
+  block-size: var(--compact-icon-button-size);
+  padding: 0;
+  overflow: visible;
+  font-size: inherit;
+}
+.actions > .topbar-activity--mobile-count-balls::before {
   display: none;
 }
 .app-menu-area.drag-over {
   outline: 1px dashed var(--drop-outline);
   outline-offset: 2px;
   border-radius: 7px;
-}
-.app-menu-bar {
-  flex: 0 0 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  overflow: visible;
 }
 .app-menu {
   position: relative;
@@ -697,12 +778,12 @@ body.app-vw-lte-760 .topbar-search {
   min-height: var(--compact-control-height);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   padding: 0 0.46em;
-  color: var(--pane-tab-text);
+  color: var(--menu-button-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font: 600 var(--ui-font-size)/1 var(--ui-font);
   white-space: nowrap;
 }
@@ -712,32 +793,37 @@ body.app-vw-lte-760 .topbar-search {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   color: var(--active-control-text);
   background: var(--active-control-bg);
   border: 1px solid var(--active-control-border);
   border-radius: var(--radius-pill);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
-.app-menu-button::after {
+.app-menu-button::before {
   content: "";
   width: 0;
   height: 0;
-  border-inline-start: 4px solid transparent;
-  border-inline-end: 4px solid transparent;
-  border-top: 5px solid currentColor;
-  opacity: 0.62;
+  border-block: 4px solid transparent;
+  border-inline-start: 5px solid var(--disclosure-triangle-collapsed-color);
+  opacity: 0.9;
+  transform-origin: center;
+  transition: border-color var(--motion-disclosure) ease, transform var(--motion-disclosure) ease;
 }
 .app-menu-button:hover,
 .app-menu-button:focus-visible,
 .app-menu.open > .app-menu-button {
-  color: var(--pane-tab-panel-head-text);
-  background: #1d2531;
-  border-color: var(--sep-muted);
+  color: var(--menu-button-hover-text);
+  background: var(--menu-button-hover-surface);
+  border-color: var(--menu-button-hover-border);
   outline: 0;
 }
 .app-menu.open > .app-menu-button {
   border-color: var(--accent-gold);
+}
+.app-menu.open > .app-menu-button::before {
+  border-inline-start-color: var(--disclosure-triangle-expanded-color);
+  transform: rotate(90deg);
 }
 .app-menu-popover {
   visibility: hidden;
@@ -750,42 +836,63 @@ body.app-vw-lte-760 .topbar-search {
   max-height: var(--app-menu-max-block-size);
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 7px;
-  color: var(--chrome-text-strong);
-  background: var(--overlay-surface);
-  border: 1px solid var(--sep-muted);
-  border-radius: 8px;
-  box-shadow:
-    0 -3px 12px rgba(0, 0, 0, 0.30),
-    var(--shadow-popover);
+  padding: var(--space-7);
+  color: var(--menu-popover-text);
+  background: var(--menu-popover-surface);
+  border: 1px solid var(--menu-popover-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--menu-popover-shadow);
   transform: translate(var(--app-menu-fit-offset, 0), -2px);
   transition:
-    opacity 90ms ease,
-    transform 90ms ease,
-    visibility 0s linear 90ms;
-}
-.app-menu-popover {
+    opacity var(--motion-interaction-fast) ease,
+    transform var(--motion-interaction-fast) ease,
+    visibility 0s linear var(--motion-interaction-fast);
   top: 100%;
   left: 0;
 }
+.notification-delivery-popover {
+  top: auto;
+  left: auto;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: none;
+}
 .app-menu[data-app-menu="tabs"] > .app-menu-popover {
   max-height: var(--app-menu-tab-max-block-size);
+}
+/* The phone/iPad Menus root is an accordion, not a desktop-width dropdown. Keep its open sheet inside
+   the visual viewport; command rows may handle their own compact overflow without clipping the page. */
+body.app-topbar-touch-compact .app-menu--nested-root > .app-menu-popover {
+  position: fixed;
+  inset-block: calc(var(--topbar-height) + var(--space-4)) var(--space-4);
+  inset-inline: var(--space-4);
+  width: auto !important;
+  max-width: none;
+  max-height: none;
+  overflow: auto;
+  transform: none !important;
+}
+body.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
+  width: 100% !important;
+  max-width: none;
+  box-sizing: border-box;
+  margin-inline: 0;
 }
 .app-submenu-popover {
   display: none;
   --app-submenu-inline-offset: 22px;
   width: var(--app-menu-fit-width, max-content);
   max-width: calc(100% - var(--app-submenu-inline-offset));
-  margin-block: 2px 5px;
+  margin-block: var(--space-2) var(--space-5);
   margin-inline: var(--app-submenu-inline-offset) 0;
-  padding: 4px;
-  color: var(--chrome-text-strong);
-  background: #0d131b;
-  border: 1px solid #2f3a4b;
+  padding: var(--space-4);
+  color: var(--menu-popover-text);
+  background: var(--menu-submenu-surface);
+  border: 1px solid var(--menu-submenu-border);
   border-radius: 7px;
-  box-shadow:
-    0 -2px 10px rgba(0, 0, 0, 0.28),
-    0 12px 32px rgba(0, 0, 0, 0.40);
+  box-shadow: var(--menu-submenu-shadow);
 }
 .app-menu.open > .app-menu-popover {
   visibility: visible;
@@ -794,14 +901,14 @@ body.app-vw-lte-760 .topbar-search {
   transform: translate(var(--app-menu-fit-offset, 0), 0);
   transition-delay: 0s;
 }
-.app-menu-submenu-wrap:hover > .app-submenu-popover,
-.app-menu-submenu-wrap:focus-within > .app-submenu-popover,
+.app-menu:not(.app-menu--nested-root) .app-menu-submenu-wrap:hover > .app-submenu-popover,
+.app-menu:not(.app-menu--nested-root) .app-menu-submenu-wrap:focus-within > .app-submenu-popover,
 .app-menu-submenu-wrap.open > .app-submenu-popover {
   display: block;
 }
 .app-menu-section {
-  padding: 4px 7px 5px;
-  color: var(--pr-status-closed);
+  padding: var(--space-4) var(--space-7) var(--space-5);
+  color: var(--menu-section-text);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   letter-spacing: 0;
@@ -809,11 +916,43 @@ body.app-vw-lte-760 .topbar-search {
 }
 .app-menu-separator {
   height: 1px;
-  margin: 6px 2px;
+  margin: var(--space-6) var(--space-2);
   background: var(--divider);
 }
 .app-menu-submenu-wrap {
   position: relative;
+}
+.app-menu-command-pair {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-4);
+  max-width: 100%;
+  overflow-x: auto;
+}
+.app-menu-command-separator {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--muted);
+  font: var(--ui-font-size)/1 var(--mono-font);
+}
+.app-menu-command-row-label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-inline: var(--space-6);
+  color: var(--menu-command-text);
+  font: 600 var(--ui-font-size)/1.2 var(--ui-font);
+  white-space: nowrap;
+}
+.app-menu-command-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-4);
+  max-width: 100%;
+  overflow-x: auto;
 }
 .app-menu-command {
   width: 100%;
@@ -822,12 +961,12 @@ body.app-vw-lte-760 .topbar-search {
   display: grid;
   grid-template-columns: 4px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  padding: 5px 7px;
-  color: var(--pane-tab-text);
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-7);
+  color: var(--menu-command-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   text-align: start;
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
@@ -846,24 +985,145 @@ body.app-vw-lte-760 .topbar-search {
   opacity: 1;
   background: var(--active-control-bg);
 }
+.app-menu-command[data-partial="true"] .app-menu-check {
+  opacity: 1;
+  background: color-mix(in srgb, var(--active-control-bg) 48%, transparent);
+}
 .app-menu-command + .app-menu-command,
 .app-menu-submenu-wrap + .app-menu-command,
 .app-menu-command + .app-menu-submenu-wrap,
-.app-menu-submenu-wrap + .app-menu-submenu-wrap {
-  margin-top: 2px;
+.app-menu-submenu-wrap + .app-menu-submenu-wrap,
+.app-menu-command + .app-menu-command-pair,
+.app-menu-command-pair + .app-menu-command,
+.app-menu-command-pair + .app-menu-command-pair,
+.app-menu-submenu-wrap + .app-menu-command-pair,
+.app-menu-command-pair + .app-menu-submenu-wrap,
+.app-menu-command + .app-menu-command-row,
+.app-menu-command-row + .app-menu-command,
+.app-menu-command-row + .app-menu-command-row,
+.app-menu-submenu-wrap + .app-menu-command-row,
+.app-menu-command-row + .app-menu-submenu-wrap {
+  margin-top: var(--space-2);
+}
+.app-menu-command-pair .app-menu-command {
+  width: auto;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 30px;
+  padding-inline: var(--space-6);
+}
+.app-menu-command-pair .app-menu-command + .app-menu-command {
+  margin-top: 0;
+}
+.app-menu-command-row .app-menu-command {
+  width: auto;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 30px;
+  padding-inline: var(--space-6);
+}
+.app-menu-command-row .app-menu-command + .app-menu-command {
+  margin-top: 0;
+}
+.app-menu-command-row .app-menu-check,
+.app-menu-command-row .app-menu-detail {
+  display: none;
+}
+.app-menu-command-row .app-menu-content {
+  display: block;
+}
+.app-menu-command-row .app-menu-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.app-menu-command-row-label .app-menu-icon {
+  min-width: 24px;
+}
+.app-menu-command-row .app-menu-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+.app-menu-command-pair .app-menu-check {
+  display: none;
+}
+.app-menu-command-pair .app-menu-content {
+  display: block;
+}
+.app-menu-command-pair .app-menu-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.app-menu-command-pair .app-menu-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+.app-menu-command-pair .app-menu-detail {
+  display: none;
+}
+/* Agent launches remain two separate touch targets. The full-access button uses the localized action
+   name; its exact bypass flags stay in the accessible label/title rather than consuming the whole sheet. */
+body.app-topbar-touch-compact .app-menu-command-pair {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+body.app-topbar-touch-compact .app-menu-command-pair .app-menu-command {
+  min-height: 44px;
+}
+body.app-topbar-touch-compact .app-menu-command-row,
+body.app-topbar-touch-compact .app-menu-command-row .app-menu-command,
+body.app-topbar-touch-compact .app-menu-command-row-label {
+  min-height: 44px;
+}
+/* Shell choices are explicit commands, not a second toolbar. Keep their desktop treatment close to
+   text so the launch row does not spend width on pill borders; the touch override below restores
+   a usable hit target without bringing back separators. */
+.app-menu-command-row--shells {
+  gap: var(--space-2);
+  scrollbar-width: thin;
+}
+.app-menu-command-row--shells .app-menu-command-row-label {
+  gap: var(--space-2);
+  padding-inline: var(--space-3);
+}
+.app-menu-command-row--shells .app-menu-command-row-label .app-menu-icon {
+  min-width: auto;
+}
+.app-menu-command-row--shells .app-menu-command {
+  min-width: 0;
+  min-height: 24px;
+  padding-inline: var(--space-3);
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+.app-menu-command-row--shells .app-menu-command:hover:not(:disabled),
+.app-menu-command-row--shells .app-menu-command:focus-visible {
+  border-color: var(--accent-gold);
+}
+body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command,
+body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-row-label {
+  min-height: 40px;
 }
 .app-menu-command:hover:not(:disabled),
 .app-menu-command:focus-visible,
 .app-menu-command.share-mirror-active:not(:disabled),
 .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
-.app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
-  color: var(--pane-tab-panel-head-text);
-  background: #273140;
-  border-color: var(--accent-gold);
+.app-menu-submenu-wrap.open > .app-menu-command:not(:disabled),
+.app-menu-tab-command:hover:not(:disabled),
+.app-menu-tab-command:focus-visible {
+  color: var(--menu-command-hover-text);
+  background: var(--menu-command-hover-surface);
+  border-color: var(--menu-command-hover-border);
   outline: 0;
 }
 .app-menu-command:disabled {
-  color: #748093;
+  color: var(--menu-command-disabled-text);
   cursor: default;
 }
 .app-menu-setting-row {
@@ -873,31 +1133,22 @@ body.app-vw-lte-760 .topbar-search {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 5px 7px 5px 17px;
-  color: var(--pane-tab-text);
+  gap: var(--space-10);
+  padding: var(--space-5) var(--space-7) var(--space-5) 17px;
+  color: var(--menu-command-text);
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
 .app-menu-setting-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 600;
-}
-.app-menu-setting-control {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
 }
 .app-menu-setting-control input[type="number"] {
   width: 8ch;
   min-width: 0;
   height: var(--compact-control-height);
-  padding: 0 5px;
+  padding: 0 var(--space-5);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--input-bg);
+  border-radius: var(--radius-md);
+  background: var(--menu-input-surface);
   color: var(--text);
   font: var(--ui-font-size-sm)/1 var(--mono-font);
 }
@@ -916,13 +1167,7 @@ body.app-vw-lte-760 .topbar-search {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-.app-menu-line {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .app-menu-icon {
   flex: 0 0 auto;
@@ -942,10 +1187,21 @@ body.app-vw-lte-760 .topbar-search {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #c8d2df;
-  background: var(--panel2);
+  color: var(--menu-icon-text);
+  background: var(--menu-icon-surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
+}
+.app-menu-ui-icon:hover,
+.app-menu-ui-icon:focus-visible {
+  color: var(--menu-icon-hover-text);
+  background: var(--menu-icon-hover-surface);
+  border-color: var(--menu-icon-hover-border);
+}
+.app-menu-ui-icon.active:hover,
+.app-menu-ui-icon.active:focus-visible {
+  background: var(--menu-active-icon-hover-surface);
+  border-color: var(--menu-active-icon-hover-border);
 }
 .app-menu-ui-icon::before {
   content: "";
@@ -954,11 +1210,6 @@ body.app-vw-lte-760 .topbar-search {
   background: currentColor;
   -webkit-mask: var(--app-menu-ui-icon) center / contain no-repeat;
   mask: var(--app-menu-ui-icon) center / contain no-repeat;
-}
-.app-menu-ui-icon.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }
 .app-menu-ui-icon-notify {
   --app-menu-ui-icon: var(--icon-notify);
@@ -1015,8 +1266,24 @@ body.app-vw-lte-760 .topbar-search {
      line the fit-width grows to the longest detail (capped at max-width), so the menu is wider + shorter.
      Full text stays available via the item's title/aria-label. */
   max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
-  color: var(--pr-status-closed);
+  color: var(--menu-detail-text);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+/* File destinations are navigation, not cards: icon, name, explanation, and shortcut/state share
+   one row. The detail is still titled and in the accessible name when it has to ellipsize. */
+.app-menu-file-destination .app-menu-content {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-6);
+}
+.app-menu-file-destination .app-menu-line {
+  min-width: 0;
+}
+.app-menu-file-destination .app-menu-detail {
+  min-width: 0;
+  max-width: none;
+  text-align: end;
 }
 .app-menu-rich {
   min-width: 0;
@@ -1033,15 +1300,15 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-tab-command {
   min-height: 20px;
   grid-template-columns: 4px minmax(0, 1fr);
-  gap: 4px;
-  padding: 1px 5px;
+  gap: var(--space-4);
+  padding: var(--space-1) var(--space-5);
   border-radius: var(--radius-control);
   font-size: var(--ui-font-size-sm);
   line-height: 1;
 }
 .app-menu-tab-command + .app-menu-tab-command {
-  margin-top: 1px;
-  border-top-color: rgba(174, 184, 199, 0.16);
+  margin-top: var(--space-1);
+  border-top-color: var(--menu-tab-row-separator);
 }
 .app-menu-tab-command .app-menu-content {
   gap: 0;
@@ -1054,10 +1321,10 @@ body.app-vw-lte-760 .topbar-search {
 .app-menu-tab-command .session-button-text {
   min-width: 0;
   height: 16px;
-  gap: 3px;
+  gap: var(--space-3);
 }
 .app-menu-tab-command .session-button-prefix {
-  gap: 1px;
+  gap: var(--space-1);
 }
 .app-menu-tab-command .pane-tab-core > .session-yolo-marker {
   min-width: 16px;
@@ -1085,15 +1352,23 @@ body.app-vw-lte-760 .topbar-search {
 }
 .app-menu-tab-command .session-state-badge {
   min-width: 20px;
-  padding: 0 2px;
-  border-radius: 3px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
   font-size: var(--ui-font-size-3xs);
 }
 .app-menu-tab-command .ci-indicator {
   min-width: 15px;
   height: 13px;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   font-size: var(--ui-font-size-3xs);
+}
+.app-menu-tab-command,
+.app-menu-tab-command .app-menu-rich,
+.app-menu-tab-command .pane-tab-core,
+.app-menu-tab-command .session-button-text,
+.app-menu-tab-command .session-button-prefix,
+.app-menu-tab-command .session-button-dir {
+  color: var(--menu-tab-rich-text);
 }
 .app-menu-yolo-session-command {
   min-inline-size: min(42ch, var(--app-menu-max-inline-size));
@@ -1116,139 +1391,4 @@ body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
 .app-menu-submenu-wrap:focus-within > .app-menu-command .app-menu-submenu-arrow,
 .app-menu-submenu-wrap.open > .app-menu-command .app-menu-submenu-arrow {
   transform: rotate(90deg);
-}
-body.theme-light .topbar {
-  background: var(--panel2);
-}
-body.theme-light .topbar:hover,
-body.theme-light .topbar:focus-within {
-  background: var(--pane-tab-strip-bg);
-}
-/* light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
-   on the light neutral/hover-green bar. */
-body.theme-light #tabMetaToggle.active {
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
-body.theme-light .app-menu-button-badge {
-  border-color: var(--active-control-border);
-}
-body.theme-light .transport-warning::after {
-  color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
-  background: #fdeaec;
-  border-color: var(--danger-border-soft);
-}
-body.theme-light .app-menu-tab-command + .app-menu-tab-command {
-  border-top-color: rgba(70, 80, 95, 0.22);  /* a visible row separator on the white menu */
-}
-body.theme-light .app-menu-button {
-  color: var(--text);
-}
-body.theme-light .app-menu-button:hover,
-body.theme-light .app-menu-button:focus-visible,
-body.theme-light .app-menu.open > .app-menu-button {
-  color: var(--pc-control-hover-fg);
-  background: #dfe7f2;
-  border-color: var(--pc-control-border);
-}
-body.theme-light .app-menu-popover {
-  color: var(--text);
-  background: #ffffff;
-  border-color: var(--pc-control-border);
-  box-shadow:
-    0 -3px 12px rgb(var(--overlay-slate-rgb) / 0.10),
-    var(--shadow-popover);
-}
-body.theme-light .app-submenu-popover {
-  color: var(--text);
-  background: var(--app-submenu-light-bg);
-  border-color: var(--line);
-  box-shadow:
-    0 -2px 10px rgb(var(--overlay-slate-rgb) / 0.10),
-    0 12px 32px rgb(var(--overlay-slate-rgb) / 0.18);
-}
-body.theme-light .app-menu-section,
-body.theme-light .app-menu-detail {
-  color: var(--muted);
-}
-body.theme-light .app-menu-separator {
-  background: var(--line);
-}
-body.theme-light .app-menu-command {
-  color: var(--text);
-}
-body.theme-light .app-menu-setting-row {
-  color: var(--text);
-}
-body.theme-light .app-menu-setting-control input[type="number"] {
-  background: #ffffff;
-}
-body.theme-light .app-menu-command[data-checked="true"] {
-  background: var(--active-control-soft-bg);
-  border-color: transparent;
-}
-body.theme-light .app-menu-command:hover:not(:disabled),
-body.theme-light .app-menu-command:focus-visible,
-body.theme-light .app-menu-command.share-mirror-active:not(:disabled),
-body.theme-light .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
-body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
-  color: var(--pc-control-hover-fg);
-  background: #e8f0fb;
-  border-color: var(--menu-accent);
-}
-body.theme-light .app-menu-command:disabled {
-  color: var(--text-muted-strong);
-}
-body.theme-light .app-menu-ui-icon {
-  color: var(--text);
-  background: var(--pane-tab-control-bg);
-  border-color: var(--line);
-}
-/* #251 (image 032): finish the light-mode coverage so NO app-menu icon button shows a dark fill. The
-   default + hover/open + ui-icon base are handled above; the active and hover/focus icon-button states
-   still kept dark-mode fills. Active stays green (the on-state cue) but tuned for a white topbar. */
-body.theme-light .app-menu-ui-icon:hover,
-body.theme-light .app-menu-ui-icon:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: #dfe7f2;
-  border-color: var(--pc-control-border);
-}
-body.theme-light .app-menu-ui-icon.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
-}
-body.theme-light .app-menu-ui-icon.active:hover,
-body.theme-light .app-menu-ui-icon.active:focus-visible {
-  background: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
-  border-color: var(--active-control-border);
-}
-/* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
-   `.app-menu-command`), so the light text/hover overrides above never reach them — their text children
-   kept dark-mode grays on the white popover and read as washed out. Force dark text + a visible hover. */
-body.theme-light .app-menu-tab-command,
-body.theme-light .app-menu-tab-command .app-menu-rich,
-body.theme-light .app-menu-tab-command .pane-tab-core,
-body.theme-light .app-menu-tab-command .session-button-text,
-body.theme-light .app-menu-tab-command .session-button-prefix,
-body.theme-light .app-menu-tab-command .session-button-dir {
-  color: var(--text);
-}
-body.theme-light .app-menu-tab-command:hover:not(:disabled),
-body.theme-light .app-menu-tab-command:focus-visible {
-  color: var(--pc-control-hover-fg);
-  background: #e8f0fb;
-  border-color: var(--menu-accent);
-}
-body.theme-light .latency-meter {
-  background: #ffffff;
-  border-color: var(--line);
-}
-/* this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
-   concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
-   toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
-.notify-toggle.active {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
 }

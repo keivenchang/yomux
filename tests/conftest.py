@@ -9,6 +9,8 @@ general.language) can leave a *persistent* shared config dir mutated across runs
 """
 
 import os
+from pathlib import Path
+import re
 import socket
 import tempfile
 
@@ -33,27 +35,32 @@ from yolomux_lib import file_index
 
 
 SLOWEST_FIRST_TESTS = (
-    "tests/test_browser_layout.py::test_dockview_drag_splits_tab_to_right_pane_and_measures_geometry",
-    "tests/test_browser_layout.py::test_preview_popout_toolbar_and_state_sync",
-    "tests/test_browser_layout.py::test_dockview_pinned_tab_invalid_non_pinned_target_shows_red_dashes",
-    "tests/test_browser_layout.py::test_dockview_root_left_drag_shows_full_span_preview_before_drop",
-    "tests/test_browser_layout.py::test_preferences_scroll_defers_passive_rerender",
-    "tests/test_browser_layout.py::test_platform_controls_use_pc_glyphs",
-    "tests/test_browser_layout.py::test_dockview_tab_hover_shows_session_detail_popover",
-    "tests/test_browser_layout.py::test_sync_mode_quick_access_does_not_snap_back_until_explicit_input",
-    "tests/test_browser_layout.py::test_dockview_tab_container_background_swaps_whole_panes",
-    "tests/test_browser_layout.py::test_dockview_drag_reorders_tabs_in_same_pane",
-    "tests/test_browser_layout.py::test_diff_overview_matches_actual_file_explorer_visible_rows_after_scroll",
-    "tests/test_browser_layout.py::test_editor_search_button_toggles_pressed_state_with_codemirror_panel",
-    "tests/test_browser_layout.py::test_dockview_first_pinned_tab_drags_after_second_pinned_tab",
-    "tests/test_browser_layout.py::test_dockview_root_top_drag_preview_preserves_docked_finder_column",
-    "tests/test_browser_layout.py::test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs",
+    "tests/test_browser_share.py::test_generated_share_link_mirrors_interactive_ui_surface_matrix",
+    "tests/test_browser_dockview.py::test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid",
+    "tests/test_browser_dockview.py::test_differ_reopen_keeps_dragged_file_tab_home",
+    "tests/test_browser_layout.py::test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
+    "tests/test_browser_dockview.py::test_dockview_yellow_window_ball_click_switches_and_acknowledges",
     "tests/test_node_suite.py::test_node_layout_suite_passes",
 )
 
 SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}
 
 _SOCKET_AVAILABILITY: tuple[bool, str] | None = None
+_SELENIUM_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+selenium(?:\.|\s|$)|pytest\.importorskip\([\"']selenium", re.MULTILINE)
+
+
+def _test_path(item) -> Path:
+    return Path(str(getattr(item, "path", getattr(item, "fspath", ""))))
+
+
+def _automatic_test_markers(path: Path) -> tuple[str, ...]:
+    return ("browser", "socket") if path.name.startswith("test_browser_") else ()
+
+
+def _test_path_imports_selenium(path: Path) -> bool:
+    if path.suffix != ".py" or not path.is_file():
+        return False
+    return bool(_SELENIUM_IMPORT_RE.search(path.read_text(encoding="utf-8")))
 
 
 @pytest.fixture
@@ -106,7 +113,11 @@ def local_socket_capability() -> tuple[bool, str]:
 
 
 @pytest.fixture(autouse=True)
-def isolated_file_index_background_hooks():
+def isolated_file_index_background_hooks(monkeypatch):
+    # The real indexer is intentionally detached and persistent. Test cases
+    # use a temporary state directory that pytest removes at process exit, so
+    # never leave a detached child pointed at that vanished state behind.
+    monkeypatch.setattr(app_module.SearchIndexerClient, "ensure_started", lambda self: False)
     file_index.set_background_owner_checker(None)
     file_index.set_background_owner_refresh_requester(None)
     file_index.set_background_owner_bytes_recorder(None)
@@ -121,6 +132,13 @@ def isolated_file_index_background_hooks():
 
 
 def pytest_collection_modifyitems(config, items):
+    for item in items:
+        path = _test_path(item)
+        for marker_name in _automatic_test_markers(path):
+            item.add_marker(getattr(pytest.mark, marker_name))
+        if _test_path_imports_selenium(path) and item.get_closest_marker("browser") is None:
+            raise pytest.UsageError(f"{path}: Selenium tests must carry the browser marker")
+
     indexed = list(enumerate(items))
 
     def sort_key(pair):

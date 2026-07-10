@@ -519,9 +519,10 @@ CODEX_CAPTURED_STATUS_RE = re.compile(
 )
 CODEX_CAPTURED_PROMPT_RE = re.compile(r"^\s*[›>]\s+(?!\d+[.:]\s+)\S.*$")
 CLAUDE_CAPTURED_WORKING_RE = re.compile(
-    r"^(?P<marker>\S)\s+(?P<verb>[^…]+)…\s+\((?P<elapsed>[^)]*?)\s+·\s+↓\s+(?P<tokens>\d+)\s+tokens\)",
+    r"^(?P<marker>\S)\s+(?P<verb>.+?)(?:…|\.{3})\s+\((?P<elapsed>[^)]*?)\s+·\s+(?P<direction>[↑↓])\s+(?P<tokens>\d+(?:\.\d+)?)(?P<token_suffix>[kKmM]?)\s+tokens\)",
     re.IGNORECASE,
 )
+CLAUDE_CAPTURED_LABELLED_SEPARATOR_RE = re.compile(r"^\s*[─━═]{3,}\s+(?P<label>\S.*?\S)\s+[─━═]+\s*$")
 # Enterprise identity lines shown under the robot in the real welcome box.
 WELCOME_ORG_LINE = "· GPU Corporation - Power Users"
 WELCOME_PLAN_LABEL = "Claude Enterprise"
@@ -712,11 +713,10 @@ def print_thinking(seconds: float = 0.5, tokens: int = 39) -> None:
         tok_shown = min(tokens, max(1, int(elapsed * (tokens / max(0.1, seconds)))))
         frame = FRAMES[i % len(FRAMES)]
         line = f"{frame} {verb}… ({sec_shown}s · ↓ {tok_shown} tokens · thinking with {EFFORT} effort · esc to interrupt)"
-        sys.stdout.write("\r\x1b[2K" + line)
-        sys.stdout.flush()
+        write_anchored_working_status_block([line])
         if i < total_ticks:
             time.sleep(tick)
-    sys.stdout.write("\r\x1b[2K")
+    sys.stdout.write("\x1b7\r\x1b[2K\x1b8")
     sys.stdout.flush()
 
 
@@ -1103,6 +1103,16 @@ def parse_working_elapsed_seconds(value: str) -> int:
     return max(0, int(total))
 
 
+def parse_working_token_count(value: str, suffix: str = "") -> int:
+    count = float(value)
+    normalized_suffix = suffix.lower()
+    if normalized_suffix == "k":
+        count *= 1000
+    elif normalized_suffix == "m":
+        count *= 1000000
+    return max(0, int(count))
+
+
 CODEX_WORKING_ELAPSED_RE = re.compile(r"[•◦]\s+Working\s+\((?P<elapsed>[^()]*?)\s+•\s+esc to interrupt\)", re.IGNORECASE)
 
 
@@ -1142,17 +1152,42 @@ def claude_fixture_working_fields(case: dict[str, object]) -> dict[str, str]:
         "verb": "Clauding",
         "base_seconds": "1",
         "base_tokens": "1",
+        "token_suffix": "",
+        "token_decimals": "0",
+        "direction": "↓",
         "footer_status": "  ⏸ plan mode on (shift+tab to cycle) · esc to interrupt",
+        "status_lines": "",
+        "composer_label": "",
     }
-    for line in capture.splitlines():
+    capture_lines = capture.splitlines()
+    working_index = -1
+    for index, line in enumerate(capture_lines):
         match = CLAUDE_CAPTURED_WORKING_RE.match(plain_capture_line(line).strip())
         if not match:
             continue
+        working_index = index
         fields["marker"] = match.group("marker")
         fields["verb"] = match.group("verb").strip() or fields["verb"]
         fields["base_seconds"] = str(parse_working_elapsed_seconds(match.group("elapsed")))
-        fields["base_tokens"] = match.group("tokens")
-    for line in reversed(capture.splitlines()):
+        token_text = match.group("tokens")
+        fields["base_tokens"] = str(parse_working_token_count(token_text, match.group("token_suffix")))
+        fields["token_suffix"] = match.group("token_suffix").lower()
+        fields["token_decimals"] = str(len(token_text.partition(".")[2]))
+        fields["direction"] = match.group("direction")
+    if working_index >= 0:
+        status_lines: list[str] = []
+        for line in capture_lines[working_index + 1:]:
+            plain = plain_capture_line(line)
+            separator = CLAUDE_CAPTURED_LABELLED_SEPARATOR_RE.match(plain)
+            if separator:
+                fields["composer_label"] = separator.group("label").strip()
+                break
+            if re.fullmatch(r"\s*[─━═]+\s*", plain):
+                break
+            if plain.strip():
+                status_lines.append(plain)
+        fields["status_lines"] = "\n".join(status_lines)
+    for line in reversed(capture_lines):
         plain = plain_capture_line(line).strip()
         if "shift+tab to cycle" in plain and "esc to interrupt" in plain:
             fields["footer_status"] = plain_capture_line(line)
@@ -1179,7 +1214,19 @@ def claude_working_line(seconds: float, state: dict[str, str]) -> str:
     token_delta = max(0, int((elapsed - base_seconds) * 24))
     marker = claude_working_marker(elapsed, state)
     verb = state.get("claude_working_verb", "Clauding") or "Clauding"
-    return f"{marker} {verb}… ({format_working_elapsed(elapsed)} · ↓ {base_tokens + token_delta} tokens)"
+    token_count = base_tokens + token_delta
+    suffix = state.get("claude_working_token_suffix", "")
+    decimals = max(0, int(state.get("claude_working_token_decimals", "0") or 0))
+    divisor = {"k": 1000, "m": 1000000}.get(suffix)
+    token_text = f"{token_count / divisor:.{decimals}f}{suffix}" if divisor else str(token_count)
+    direction = state.get("claude_working_direction", "↓") or "↓"
+    return f"{marker} {verb}… ({format_working_elapsed(elapsed)} · {direction} {token_text} tokens)"
+
+
+def claude_live_working_block_lines(seconds: float, state: dict[str, str]) -> list[str]:
+    lines = [claude_working_line(seconds, state)]
+    lines.extend(state.get("claude_working_status_lines", "").splitlines())
+    return lines
 
 
 def claude_working_marker(seconds: float, state: dict[str, str]) -> str:
@@ -1210,10 +1257,31 @@ def write_claude_working_block(seconds: float, state: dict[str, str]) -> int:
     text = state.get("claude_working_text", "")
     cursor = max(0, min(len(text), int(state.get("claude_working_cursor", "0") or 0)))
     footer_top = live_composer_footer_top(text, False, state)
-    working_row = max(1, footer_top - 1)
+    status_lines = claude_live_working_block_lines(seconds, state)
+    working_row = max(1, footer_top - len(status_lines))
+    render_signature = "\x1f".join([
+        str(terminal_width()),
+        str(terminal_height()),
+        text,
+        str(cursor),
+        str(footer_top),
+        str(working_row),
+        state.get("claude_working_status_lines", ""),
+        state.get("claude_working_composer_label", ""),
+        state.get("claude_working_footer_status", ""),
+    ])
+    if state.get("claude_working_render_signature") == render_signature:
+        # The real Claude TUI leaves its composer and cursor in place while the spinner advances.
+        # Redraw only the working rows, restoring the terminal cursor after each frame.
+        for offset, line in enumerate(status_lines):
+            row = working_row + offset
+            if row < footer_top:
+                sys.stdout.write(f"\x1b7\x1b[{row};1H\x1b[2K{clipped(line, terminal_width())}\x1b8")
+        sys.stdout.flush()
+        return working_row
     if "claude_working_body_lines" in state:
         body_text = state.get("claude_working_body_lines", "")
-        render_lines_above_row(body_text.split("\n") if body_text else [], max(1, footer_top - 2))
+        render_lines_above_row(body_text.split("\n") if body_text else [], max(1, working_row - 1))
     try:
         previous_working_row = int(state.get("claude_working_row", str(working_row)) or working_row)
     except ValueError:
@@ -1223,11 +1291,14 @@ def write_claude_working_block(seconds: float, state: dict[str, str]) -> int:
         sys.stdout.write(f"\x1b[{row};1H\x1b[2K")
     state["live_composer_footer_top"] = str(clear_top)
     render_live_composer(text, cursor, state=state)
-    line = clipped(claude_working_line(seconds, state), terminal_width())
-    sys.stdout.write(f"\x1b7\x1b[{working_row};1H\x1b[2K{line}\x1b8")
+    for offset, line in enumerate(status_lines):
+        row = working_row + offset
+        if row < footer_top:
+            sys.stdout.write(f"\x1b7\x1b[{row};1H\x1b[2K{clipped(line, terminal_width())}\x1b8")
     bottom = max(1, working_row - 1)
     sys.stdout.write(f"\x1b7\x1b[1;{bottom}r\x1b8")
     state["claude_working_row"] = str(working_row)
+    state["claude_working_render_signature"] = render_signature
     sys.stdout.flush()
     return working_row
 
@@ -1242,6 +1313,7 @@ def clear_claude_working_block(state: dict[str, str], working_row: int | None = 
         previous_working_row = working_row
     state.pop("claude_working", None)
     state.pop("claude_working_row", None)
+    state.pop("claude_working_render_signature", None)
     state.pop("claude_working_body_lines", None)
     prefill = state.get("composer_prefill", "")
     idle_footer_top = live_composer_footer_top(prefill, False, state)
@@ -1289,9 +1361,14 @@ def start_claude_live_working_mock(state: dict[str, str], case: dict[str, object
     state["claude_working_started_at"] = f"{time.time():.6f}"
     state["claude_working_base_seconds"] = fields["base_seconds"]
     state["claude_working_base_tokens"] = fields["base_tokens"]
+    state["claude_working_token_suffix"] = fields["token_suffix"]
+    state["claude_working_token_decimals"] = fields["token_decimals"]
     state["claude_working_marker"] = fields["marker"]
     state["claude_working_verb"] = fields["verb"]
+    state["claude_working_direction"] = fields["direction"]
     state["claude_working_footer_status"] = fields["footer_status"]
+    state["claude_working_status_lines"] = fields["status_lines"]
+    state["claude_working_composer_label"] = fields["composer_label"]
     state["claude_working_text"] = ""
     state["claude_working_cursor"] = "0"
     if sys.stdout.isatty():
@@ -1300,7 +1377,8 @@ def start_claude_live_working_mock(state: dict[str, str], case: dict[str, object
         body_lines = strip_claude_captured_working_footer(clipped_source_lines)
         state["claude_working_body_lines"] = "\n".join(body_lines)
         footer_top = live_composer_footer_top("", False, {**state, "claude_working": "1"})
-        render_lines_above_row(body_lines, max(1, footer_top - 2))
+        status_line_count = len(claude_live_working_block_lines(float(state["claude_working_base_seconds"]), state))
+        render_lines_above_row(body_lines, max(1, footer_top - status_line_count - 1))
         write_claude_working_block(float(state["claude_working_base_seconds"]), state)
 
 
@@ -1407,17 +1485,25 @@ def agent_working_status_lines(frame: int, started_at: float, verb: str, tip: st
     return claude_working_status_lines(frame, started_at, verb, tip)
 
 
-def write_working_status_block(lines: list[str]) -> None:
-    sys.stdout.write("\r\x1b[2K" + lines[0])
+def write_anchored_working_status_block(lines: list[str]) -> None:
+    """Update a transient status block without moving an application's input cursor."""
+    if not lines:
+        return
+    sys.stdout.write("\x1b7\r\x1b[2K" + lines[0])
     for line in lines[1:]:
         sys.stdout.write("\n\r\x1b[2K" + line)
     if len(lines) > 1:
         sys.stdout.write(f"\x1b[{len(lines) - 1}A")
+    sys.stdout.write("\x1b8")
     sys.stdout.flush()
 
 
 def finish_working_status_block(lines: list[str]) -> None:
-    write_working_status_block(lines)
+    if not lines:
+        return
+    sys.stdout.write("\r\x1b[2K" + lines[0])
+    for line in lines[1:]:
+        sys.stdout.write("\n\r\x1b[2K" + line)
     if len(lines) > 1:
         sys.stdout.write(f"\x1b[{len(lines) - 1}B")
     sys.stdout.write("\n")
@@ -1426,11 +1512,18 @@ def finish_working_status_block(lines: list[str]) -> None:
 
 def agent_working_status(stop_event: threading.Event, started_at: float, verb: str, tip: str) -> None:
     frame = 0
+    codex_render_key: tuple[object, ...] | None = None
+    codex_start_row: int | None = None
     while not stop_event.is_set():
         if PERMISSION_STYLE == "codex":
-            write_codex_working_block(max(1, time.time() - started_at), background=True)
+            codex_start_row, _line_count, codex_render_key = refresh_codex_working_block(
+                max(1, time.time() - started_at),
+                background=True,
+                previous_key=codex_render_key,
+                previous_start_row=codex_start_row,
+            )
         else:
-            write_working_status_block(agent_working_status_lines(frame, started_at, verb, tip))
+            write_anchored_working_status_block(agent_working_status_lines(frame, started_at, verb, tip))
         frame += 1
         stop_event.wait(0.12)
 
@@ -2075,10 +2168,17 @@ def live_composer_separator_rows(armed_exit: bool = False, state: dict[str, str]
     return rows
 
 
-def live_composer_separator_line() -> str:
+def live_composer_separator_line(label: str = "") -> str:
     # Full-width separator glyphs leave xterm in autowrap state, which can leak
     # reset/control output into the next footer row.
-    return ANSI_DIM + ("─" * max(1, terminal_width() - 1)) + ANSI_RESET
+    width = max(1, terminal_width() - 1)
+    label = str(label or "").strip()
+    if not label or width < 8:
+        return ANSI_DIM + ("─" * width) + ANSI_RESET
+    suffix_width = 4
+    visible_label = ellipsize_plain(label, max(1, width - suffix_width - 1))
+    suffix = f" {visible_label} ──"
+    return ANSI_DIM + ("─" * max(1, width - len(suffix))) + suffix + ANSI_RESET
 
 
 def live_composer_footer_top(text: str = "", armed_exit: bool = False, state: dict[str, str] | None = None) -> int:
@@ -2171,9 +2271,12 @@ def render_live_composer(text: str, cursor: int, armed_exit: bool = False, state
     prompt_row, status_start, status_lines = live_composer_layout(armed_exit, state)
     prompt_display, status_display, cursor_col = composer_render_parts(text, cursor, armed_exit, state)
     clear_live_composer_footer(text, armed_exit, state)
-    separator = live_composer_separator_line()
     separator_rows = live_composer_separator_rows(armed_exit, state)
     for row in separator_rows:
+        label = ""
+        if state and state.get("claude_working") == "1" and row == prompt_row - 1:
+            label = state.get("claude_working_composer_label", "")
+        separator = live_composer_separator_line(label)
         sys.stdout.write(f"\x1b[{row};1H\x1b[2K{separator}")
     sys.stdout.write(f"\x1b[{prompt_row};1H\x1b[2K{prompt_display}")
     for index, status_line in enumerate(status_lines):

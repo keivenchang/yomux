@@ -4,7 +4,6 @@ const {
   UI_PINS,
   vm,
   FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST,
-  DEFAULT_TEST_SETTINGS,
   TestClassList,
   TestStyle,
   testDatasetKeyForAttribute,
@@ -13,6 +12,8 @@ const {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
+  deferredFetch,
+  settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,
   loadYolomuxWithFileExplorerClosed,
@@ -33,8 +34,842 @@ const {
   runSuites,
   finishSuite,
 } = require('./layout_test_helper');
+const {spawn} = require('node:child_process');
+const {runSuite} = require('./layout_url.test.js');
 
 async function runLayoutAsyncSuite() {
+  await testAsync('node shard launcher rejects a SIGKILL without a summary', async () => {
+    const result = await runSuite('signal-kill-stub', () => spawn(process.execPath, ['-e', "process.kill(process.pid, 'SIGKILL')"]));
+    assert.equal(result.status, 1, 'a signal-killed shard is never reported as successful');
+    assert.ok(result.output.includes('without a suite summary'), 'a killed shard reports the missing terminal summary');
+  });
+
+  await testAsync('session metadata distinguishes fetch failure from a client apply failure', async () => {
+    const api = loadYolomux('', ['1']);
+    const fetchFailure = await api.fetchAndApplySessionMetadataForTest(
+      () => Promise.reject(new Error('network unavailable')),
+      () => { throw new Error('must not apply after a fetch failure'); },
+    );
+    assert.equal(fetchFailure.stage, 'fetch', 'a rejected metadata request is classified as fetch failure');
+
+    const applyFailure = await api.fetchAndApplySessionMetadataForTest(
+      () => Promise.resolve({sessions: {}}),
+      () => { throw new Error('render failed'); },
+    );
+    assert.equal(applyFailure.stage, 'apply', 'a successful metadata response with a client exception is classified as apply failure');
+    api.setTranscriptMetadataLoadErrorForTest(api.transcriptMetadataLoadErrorSnapshotForTest(applyFailure.error, applyFailure.stage));
+    assert.equal(api.transcriptMetadataLoadErrorTextForTest(), 'render failed', 'the client apply error remains visible instead of becoming a fake transcript lookup failure');
+    assert.equal(api.transcriptMetadataLoadErrorLabelForTest(), 'render failed', 'the pane header uses the actual apply error rather than the transcript lookup label');
+  });
+
+  await testAsync('background-owner request record rejects stale HTTP completions and lets pushes win', async () => {
+    const pending = [];
+    const api = loadYolomux();
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/background/status');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const first = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
+    const second = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
+    assert.equal(pending.length, 1, 'a forced refresh joins the in-flight snapshot instead of starting a replacement generation');
+    pending[0].resolve(jsonResponse({marker: 'new-http'}));
+    await first;
+    assert.equal(api.backgroundOwnerStatusStateForTest().payload.marker, 'new-http', 'older HTTP completion cannot replace the newer generation');
+    assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'only the current request clears the record handle');
+
+    const third = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
+    api.applyBackgroundOwnerStatusPayloadForTest({marker: 'push'}, {render: false});
+    pending[1].resolve(jsonResponse({marker: 'stale-after-push'}));
+    await third;
+    assert.equal(api.backgroundOwnerStatusStateForTest().payload.marker, 'push', 'an SSE payload invalidates the older HTTP generation');
+
+    const fourth = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
+    pending[2].reject(new Error('owner offline'));
+    await fourth;
+    assert.ok(api.backgroundOwnerStatusStateForTest().error, 'the current request records its failure');
+    assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'current failure releases the request handle');
+  });
+
+  await testAsync('auto-approve startup snapshots share one in-flight request', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/auto-approve');
+      return new Promise(resolve => pending.push(resolve));
+    });
+    const boot = api.loadAutoStatusesForTest({render: false});
+    const ready = api.loadAutoStatusesForTest({render: false});
+    assert.equal(boot, ready, 'boot and SSE ready share one auto-approve snapshot owner');
+    assert.equal(pending.length, 1, 'duplicate startup consumers issue exactly one auto-approve request');
+    pending[0](jsonResponse({sessions: {}}));
+    await boot;
+
+    await api.loadAutoStatusesForTest({preferFresh: true, render: false});
+    assert.equal(pending.length, 1, 'a ready event immediately after boot reuses the fresh auto-approve snapshot');
+  });
+
+  await testAsync('Tabber snapshot owner coalesces repeated rendering consumers', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFileExplorerModeForTest('tabber');
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity?'));
+      return new Promise(resolve => pending.push(resolve));
+    });
+    const first = api.fetchTabberActivityForTest({visible: true});
+    const second = api.fetchTabberActivityForTest({visible: true});
+    const third = api.fetchTabberActivityForTest({visible: true});
+    assert.equal(pending.length, 1, 'repeated Tabber renders start exactly one /api/activity request');
+    pending[0](jsonResponse({activity: {}, agents: []}));
+    await Promise.all([first, second, third]);
+  });
+
+  await testAsync('activity-summary request record rejects stale responses after a newer push', async () => {
+    const pending = [];
+    const api = loadYolomux();
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity-summary?'));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const first = api.refreshActivitySummaryForTest({force: true, localeChange: true});
+    const second = api.refreshActivitySummaryForTest({force: true, localeChange: true});
+    pending[1].resolve(jsonResponse({marker: 'new-http', sessions: {}, global: {lines: []}}));
+    await second;
+    pending[0].reject(new Error('stale request failed'));
+    await first;
+    assert.equal(api.activitySummaryStateForTest().payload.marker, 'new-http', 'a stale failure cannot replace the newer forced response');
+
+    const third = api.refreshActivitySummaryForTest({force: true, localeChange: true});
+    api.applyActivitySummaryPayloadFromPushForTest({marker: 'push', sessions: {}, global: {lines: []}});
+    pending[2].resolve(jsonResponse({marker: 'stale-after-push', sessions: {}, global: {lines: []}}));
+    await third;
+    assert.equal(api.activitySummaryStateForTest().payload.marker, 'push', 'an SSE push invalidates the older HTTP generation');
+    assert.equal(api.activitySummaryStateForTest().refreshing, false, 'the push completes the shared refresh state');
+  });
+
+  await testAsync('Finder filesystem resource records reject stale fresh and invalidated completions', async () => {
+    for (const resource of [
+      {
+        type: 'list',
+        path: '/home/test/list',
+        fetch: (api, path, options) => api.fetchDirectoryForTest(path, options),
+        payload: marker => ({entries: [{name: `${marker}.txt`, kind: 'file'}]}),
+        marker: value => value[0].name.replace('.txt', ''),
+      },
+      {
+        type: 'info',
+        path: '/home/test/info',
+        fetch: (api, path, options) => api.fetchFilePathInfoForTest(path, options),
+        payload: marker => ({marker, path: '/home/test/info', kind: 'dir'}),
+        marker: value => value.marker,
+      },
+    ]) {
+      const api = loadYolomux();
+      const batches = [];
+      api.setFetchForTest((url, options = {}) => {
+        assert.equal(String(url), '/api/fs/batch');
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        const batch = {...deferredFetch(), requests};
+        batches.push(batch);
+        return batch.promise;
+      });
+      const resolveBatch = (index, marker, ok = true) => {
+        const batch = batches[index];
+        batch.resolve(jsonResponse({
+          responses: batch.requests.map(request => ok
+            ? {id: request.id, ok: true, status: 200, payload: resource.payload(marker)}
+            : {id: request.id, ok: false, status: 500, error: marker}),
+        }));
+      };
+
+      const older = resource.fetch(api, resource.path, {fresh: true});
+      const olderFlush = api.flushFileExplorerFsBatchForTest();
+      assert.equal(batches.length, 1);
+      const newer = resource.fetch(api, resource.path, {fresh: true});
+      const newerFlush = api.flushFileExplorerFsBatchForTest();
+      assert.equal(batches.length, 2, `${resource.type}: independent fresh reads stay independently batched`);
+      resolveBatch(1, 'new');
+      await newerFlush;
+      assert.equal(resource.marker(await newer), 'new');
+      resolveBatch(0, 'old');
+      await olderFlush;
+      assert.equal(resource.marker(await older), 'old', `${resource.type}: the original caller still receives its own response`);
+      assert.equal(resource.marker(await resource.fetch(api, resource.path, {})), 'new', `${resource.type}: the slower older response cannot overwrite the newer cache generation`);
+
+      const invalidated = resource.fetch(api, resource.path, {fresh: true});
+      const invalidatedFlush = api.flushFileExplorerFsBatchForTest();
+      assert.equal(batches.length, 3);
+      api.invalidateFileExplorerFsCachesForTest();
+      resolveBatch(2, 'retired');
+      await invalidatedFlush;
+      assert.equal(resource.marker(await invalidated), 'retired');
+      assert.equal(api.fileExplorerFsResourceRecordsForTest().length, 0, `${resource.type}: invalidated completion cannot recreate its retired resource record`);
+
+      const current = resource.fetch(api, resource.path, {fresh: true});
+      const currentFlush = api.flushFileExplorerFsBatchForTest();
+      resolveBatch(3, 'current');
+      await currentFlush;
+      assert.equal(resource.marker(await current), 'current');
+      const records = api.fileExplorerFsResourceRecordsForTest();
+      assert.equal(records.length, 1);
+      assert.equal(records[0].hasValue, true);
+      assert.equal(records[0].requestActive, false);
+      assert.equal(resource.marker(records[0].value), 'current', `${resource.type}: only the current generation publishes a reusable value`);
+    }
+  });
+
+  await testAsync('Finder filesystem current failure releases the shared resource request', async () => {
+    const api = loadYolomux();
+    const batches = [];
+    api.setFetchForTest((url, options = {}) => {
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      const batch = {...deferredFetch(), requests};
+      batches.push(batch);
+      return batch.promise;
+    });
+    const failed = api.fetchFilePathInfoForTest('/home/test/failure', {fresh: true});
+    const failedFlush = api.flushFileExplorerFsBatchForTest();
+    batches[0].resolve(jsonResponse({responses: batches[0].requests.map(request => ({id: request.id, ok: false, status: 500, error: 'failed'}))}));
+    await failedFlush;
+    await assert.rejects(failed, /failed/);
+    let records = api.fileExplorerFsResourceRecordsForTest();
+    assert.equal(records[0].requestActive, false, 'current failure clears its request handle');
+    assert.equal(records[0].hasValue, false, 'current failure is not cached as a value');
+
+    const retry = api.fetchFilePathInfoForTest('/home/test/failure');
+    const retryFlush = api.flushFileExplorerFsBatchForTest();
+    assert.equal(batches.length, 2, 'failure cleanup allows an immediate replacement request');
+    batches[1].resolve(jsonResponse({responses: batches[1].requests.map(request => ({id: request.id, ok: true, status: 200, payload: {marker: 'retry'}}))}));
+    await retryFlush;
+    assert.equal((await retry).marker, 'retry');
+    records = api.fileExplorerFsResourceRecordsForTest();
+    assert.equal(records[0].requestActive, false);
+    assert.equal(records[0].value.marker, 'retry');
+  });
+
+  {
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.equal((source.match(/const fileExplorerFsResourceRecords = new Map\(\);/g) || []).length, 1, 'Finder list/info resource state has one record-map owner');
+    for (const retired of ['fileExplorerDirListingCache', 'fileExplorerDirListingInflight', 'fileExplorerPathInfoCache', 'fileExplorerPathInfoInflight']) {
+      assert.ok(!source.includes(retired), `${retired} retired after list/info state moved into one resource record`);
+    }
+  }
+
+  await testAsync('client-event transport record owns connection, frame queue, and reconnect timer', async () => {
+    const frames = [];
+    const cancelledFrames = [];
+    const timers = [];
+    const clearedTimers = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        const id = 40 + frames.length + 1;
+        frames.push({id, callback});
+        return id;
+      },
+      cancelAnimationFrame(id) { cancelledFrames.push(id); },
+      setTimeout(callback, delay) {
+        const id = 80 + timers.length + 1;
+        timers.push({id, callback, delay});
+        return id;
+      },
+      clearTimeout(id) { clearedTimers.push(id); },
+    });
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({sessions: {}, session_order: []})));
+
+    api.queueClientPushEventForTest('noop', {session: '1', marker: 1});
+    api.queueClientPushEventForTest('noop', {session: '1', marker: 2});
+    assert.equal(api.clientEventTransportStateForTest().queued, 1, 'same-session events coalesce in the record queue');
+    assert.equal(api.clientEventTransportStateForTest().frame, 41, 'the record owns the scheduled foreground frame');
+    frames[0].callback();
+    assert.equal(api.clientEventTransportStateForTest().queued, 0, 'the foreground frame consumes the record queue');
+    assert.equal(api.clientEventTransportStateForTest().frame, 0, 'the consumed frame clears its record field');
+
+    api.queueClientPushEventForTest('noop-a', {session: '1'});
+    api.setDocumentVisibilityForTest('hidden');
+    api.queueClientPushEventForTest('noop-b', {session: '1'});
+    assert.deepStrictEqual(cancelledFrames, [42], 'hidden delivery cancels the pending foreground frame');
+    assert.equal(api.clientEventTransportStateForTest().queued, 0, 'hidden delivery flushes immediately');
+    assert.equal(api.clientEventTransportStateForTest().frame, 0, 'hidden delivery clears the frame field');
+
+    api.setDocumentVisibilityForTest('visible');
+    api.installClientEventStreamForTest();
+    const source = api.clientEventTransportStateForTest().source;
+    source.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
+    assert.equal(api.clientEventTransportStateForTest().connected, true, 'ready marks the record connected');
+    source.onerror();
+    assert.equal(api.clientEventTransportStateForTest().connected, false, 'error marks the same record disconnected');
+    source.listeners.get('ping')[0]({data: '{}', type: 'ping', lastEventId: ''});
+    assert.equal(api.clientEventTransportStateForTest().connected, true, 'later traffic marks the record connected again');
+
+    const reconnectTimerStart = timers.length;
+    api.scheduleReconnectResyncForTest('visible');
+    api.scheduleReconnectResyncForTest('online');
+    const firstReconnectTimer = timers[reconnectTimerStart];
+    const secondReconnectTimer = timers[reconnectTimerStart + 1];
+    assert.deepStrictEqual(clearedTimers, [firstReconnectTimer.id], 'replacement reconnect debounce clears the prior record timer');
+    assert.equal(api.clientEventTransportStateForTest().resyncTimer, secondReconnectTimer.id, 'the record owns the replacement reconnect timer');
+    secondReconnectTimer.callback();
+    assert.equal(api.clientEventTransportStateForTest().resyncTimer, null, 'firing consumes the reconnect timer');
+    await flushAsyncWork();
+  });
+
+  test('frontend request and transport records keep retired parallel globals absent', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    for (const name of [
+      'backgroundOwnerStatusPayload', 'backgroundOwnerStatusLoading', 'backgroundOwnerStatusLoaded', 'backgroundOwnerStatusError', 'backgroundOwnerStatusRefreshPromise',
+      'activitySummaryPayload', 'activitySummaryRefreshing', 'activitySummaryLastRefreshTs', 'activitySummaryGuard',
+      'infoPanelRenderPending', 'infoPanelLastRenderSignature', 'infoPanelLastRenderHtml',
+      'clientEventsSource', 'clientEventsConnected', 'clientPushEventQueue', 'clientPushEventFrame', 'reconnectResyncTimer',
+    ]) assert.equal(source.includes(name), false, `${name} remains retired`);
+    for (const owner of ['backgroundOwnerStatusState', 'activitySummaryState', 'infoPanelRenderCache', 'clientEventTransportState']) {
+      assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
+    }
+  });
+
+  await testAsync('transcript metadata record lets direct push payloads invalidate older HTTP work', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/session-metadata'));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const first = api.refreshSessionMetadataForTest({refreshAuto: false, refreshActivity: false});
+    api.refreshSessionMetadataForTest({refreshAuto: false, refreshActivity: false});
+    assert.equal(pending.length, 1, 'overlapping metadata callers share one request');
+    await api.applySessionMetadataPayloadForTest({marker: 'push', session_order: [], sessions: {}}, {
+      refreshAuto: false,
+      refreshActivity: false,
+      refreshContext: false,
+    });
+    pending[0].resolve(jsonResponse({marker: 'stale-http', session_order: [], sessions: {}}));
+    await first;
+    assert.equal(api.transcriptMetadataStateForTest().payload.marker, 'push', 'direct payload invalidates the older HTTP generation');
+    assert.equal(api.transcriptMetadataStateForTest().request, null, 'settled stale HTTP work releases its own handle');
+    assert.equal(api.transcriptMetadataStateForTest().loading, false, 'direct payload and final cleanup leave loading settled');
+
+    const failed = api.refreshSessionMetadataForTest({refreshAuto: false, refreshActivity: false});
+    pending[1].reject(new Error('metadata offline'));
+    await failed;
+    assert.equal(api.transcriptMetadataStateForTest().error.stage, 'fetch', 'the current fetch failure remains classified');
+    assert.ok(api.vmConsoleErrorsForTest().some(message => message.includes('session metadata fetch failed')), 'the expected transport diagnostic is captured by this test instead of printed in a green run');
+  });
+
+  await testAsync('Search and Runs records reject stale query and refresh completions', async () => {
+    const pendingSearch = [];
+    const pendingRuns = [];
+    const api = loadYolomux();
+    api.setFetchForTest(url => {
+      const value = String(url);
+      if (value.startsWith('/api/search?')) {
+        const request = {...deferredFetch(), url: value};
+        pendingSearch.push(request);
+        return request.promise;
+      }
+      if (value === '/api/run-history') {
+        const request = deferredFetch();
+        pendingRuns.push(request);
+        return request.promise;
+      }
+      throw new Error(`unexpected URL ${value}`);
+    });
+
+    const oldSearch = api.runSearchHistoryQueryForTest('old');
+    const newSearch = api.runSearchHistoryQueryForTest('new');
+    pendingSearch[1].resolve(jsonResponse({query: 'new', marker: 'new', results: []}));
+    await newSearch;
+    pendingSearch[0].resolve(jsonResponse({query: 'old', marker: 'old', results: []}));
+    await oldSearch;
+    assert.equal(api.searchHistoryStateForTest().query, 'new', 'visible query remains the newest input');
+    assert.equal(api.searchHistoryStateForTest().payload.marker, 'new', 'older query results cannot replace the newest payload');
+    assert.equal(api.searchHistoryStateForTest().loading, false, 'only the current search clears loading');
+
+    const staleAfterEmpty = api.runSearchHistoryQueryForTest('will-clear');
+    await api.runSearchHistoryQueryForTest('');
+    pendingSearch[2].resolve(jsonResponse({query: 'will-clear', results: [{title: 'stale'}]}));
+    await staleAfterEmpty;
+    assert.equal(api.searchHistoryStateForTest().query, '', 'empty query reset remains current');
+    assert.deepStrictEqual(canonical(api.searchHistoryStateForTest().payload.results), [], 'empty query invalidates older results');
+
+    const oldRuns = api.refreshRunHistoryDataForTest();
+    const newRuns = api.refreshRunHistoryDataForTest();
+    pendingRuns[1].resolve(jsonResponse({marker: 'new-runs', runs: []}));
+    await newRuns;
+    pendingRuns[0].reject(new Error('stale runs failed'));
+    await oldRuns;
+    assert.equal(api.runHistoryStateForTest().payload.marker, 'new-runs', 'stale run-history failure cannot replace current rows');
+    assert.equal(api.runHistoryStateForTest().error, null, 'stale run-history failure stays silent');
+  });
+
+  await testAsync('YO!agent jobs record lets forced loads and direct pushes replace older hydration', async () => {
+    const pending = [];
+    const api = loadYolomux();
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/yoagent/jobs');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const oldLoad = api.loadYoagentJobsForTest({silent: true});
+    const newLoad = api.loadYoagentJobsForTest({force: true, silent: true});
+    pending[1].resolve(jsonResponse({jobs: [{id: 'new'}]}));
+    await newLoad;
+    pending[0].resolve(jsonResponse({jobs: [{id: 'old'}]}));
+    await oldLoad;
+    assert.equal(api.yoagentJobsStateForTest().items[0].id, 'new', 'forced replacement rejects the older job list');
+
+    const staleAfterPush = api.loadYoagentJobsForTest({force: true, silent: true});
+    api.applyYoagentJobsPayloadForTest({jobs: [{id: 'push'}]});
+    pending[2].resolve(jsonResponse({jobs: [{id: 'stale'}]}));
+    await staleAfterPush;
+    assert.equal(api.yoagentJobsStateForTest().items[0].id, 'push', 'direct job payload invalidates older hydration');
+    assert.equal(api.yoagentJobsStateForTest().loading, false, 'job record loading settles after stale request cleanup');
+  });
+
+  await testAsync('YO!agent conversation record does not drop forced or pushed updates during hydration', async () => {
+    const pending = [];
+    const api = loadYolomux();
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/yoagent/conversation');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const oldLoad = api.loadYoagentConversationForTest({silent: true, render: false});
+    const newLoad = api.loadYoagentConversationForTest({force: true, silent: true, render: false});
+    assert.equal(pending.length, 2, 'forced conversation refresh starts a replacement generation instead of being dropped');
+    pending[1].resolve(jsonResponse({messages: [{content: 'new'}], pending_waits: [], transcript_path: '/new.jsonl'}));
+    await newLoad;
+    pending[0].resolve(jsonResponse({messages: [{content: 'old'}], pending_waits: [{id: 'old-wait'}], transcript_path: '/old.jsonl'}));
+    await oldLoad;
+    assert.equal(api.yoagentConversationStateForTest().messages[0].content, 'new', 'older hydration cannot replace the forced conversation');
+    assert.equal(api.yoagentConversationStateForTest().path, '/new.jsonl', 'transcript path belongs to the same current record generation');
+
+    const staleAfterPush = api.loadYoagentConversationForTest({force: true, silent: true, render: false});
+    api.applyYoagentConversationPayloadForTest({messages: [{content: 'push'}], pending_waits: [], transcript_path: '/push.jsonl'});
+    pending[2].resolve(jsonResponse({messages: [{content: 'stale'}], pending_waits: [{id: 'stale-wait'}]}));
+    await staleAfterPush;
+    assert.equal(api.yoagentConversationStateForTest().messages[0].content, 'push', 'direct conversation payload invalidates older hydration');
+    assert.deepStrictEqual(canonical(api.yoagentConversationStateForTest().pendingWaits), [], 'stale hydration cannot resurrect cleared waits');
+    assert.equal(api.yoagentConversationStateForTest().loading, false, 'conversation loading settles after stale cleanup');
+  });
+
+  test('data request records keep retired parallel globals absent', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.equal(/\btranscriptMeta\b/.test(source), false, 'transcriptMeta remains retired');
+    assert.equal(/\byoagentJobs\b/.test(source), false, 'yoagentJobs remains retired');
+    for (const name of ['yoagentMessages', 'yoagentPendingWaits', 'yoagentConversationLoaded', 'yoagentConversationLoading', 'yoagentConversationPath', 'yoagentConversationDisplayPath', 'yoagentStreamingMessages']) {
+      assert.equal(source.includes(name), false, `${name} remains retired`);
+    }
+    for (const name of [
+      'transcriptMetaLoading', 'transcriptMetaLoaded', 'transcriptMetaLoadError', 'transcriptMetaRefreshPromise',
+      'searchHistoryQuery', 'searchHistoryPayload', 'searchHistoryLoading', 'searchHistoryError',
+      'runHistoryPayload', 'runHistoryLoading', 'runHistoryError', 'yoagentJobsLoading',
+    ]) assert.equal(source.includes(name), false, `${name} remains retired`);
+    for (const owner of ['transcriptMetadataState', 'searchHistoryState', 'runHistoryState', 'yoagentConversationState', 'yoagentJobsState']) {
+      assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
+    }
+  });
+
+  await testAsync('Finder Sync record cancels stale root work and resets manual ownership atomically', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerSyncStateForTest({inFlightSignature: 'old-plan', appliedPlanKey: 'old-plan', generation: 4});
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const request = {
+        ...deferredFetch(),
+        requests: JSON.parse(options.body || '{}').requests || [],
+      };
+      pending.push(request);
+      return request.promise;
+    });
+    const reply = pendingRequest => jsonResponse({
+      responses: pendingRequest.requests.map(request => ({
+        id: request.id,
+        ok: true,
+        status: 200,
+        payload: {path: request.path, entries: [{name: 'README.md', kind: 'file'}]},
+      })),
+    });
+
+    const staleOpen = api.openFileExplorerAtForTest('/home/test/old-root', {syncSelection: true, refreshPanels: false});
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(pending.length, 1, 'the old sync root has one pending directory transaction');
+    const manualOpen = api.openFileExplorerAtForTest('/home/test/new-root', {manualSelection: true, refreshPanels: false});
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(pending.length, 2, 'manual root selection starts a newer directory transaction');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncStateForTest()), {
+      inFlightSignature: '',
+      appliedPlanKey: '',
+      generation: 5,
+    }, 'manual selection invalidates the entire prior Finder Sync transaction record');
+
+    pending[1].resolve(reply(pending[1]));
+    assert.equal(await manualOpen, true, 'the manual root applies');
+    pending[0].resolve(reply(pending[0]));
+    assert.equal(await staleOpen, false, 'the older root completion is rejected');
+    assert.equal(api.fileExplorerRootForTest(), '/home/test/new-root', 'stale root work cannot replace the manual root');
+    const settled = api.fileExplorerSyncStateForTest();
+    assert.equal(settled.inFlightSignature, '', 'manual root completion leaves no stale in-flight signature');
+    assert.equal(settled.appliedPlanKey, '', 'manual root completion leaves no stale applied plan');
+  });
+
+  test('Finder Sync target record keeps expanded and manual-collapse state atomic through switches and eviction', () => {
+    const api = loadYolomux('', ['1']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerVisibleSyncTargetForTest('1', '/repo/a');
+    api.resetFileExplorerSyncManualCollapsesForTest({session: '1', root: '/repo/a'});
+    api.setFileExplorerExpandedForTest(['/repo/a/src']);
+    api.rememberFileExplorerSyncExpandedStateForTest('1', '/repo/a');
+    api.rememberFileExplorerSyncManualCollapseForTest('/repo/a/src');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/a')), {
+      expandedPaths: ['/repo/a/src'],
+      manualCollapsedPaths: ['/repo/a/src'],
+    }, 'one target record owns both disclosure fields');
+
+    api.setFileExplorerVisibleSyncTargetForTest('1', '/repo/b');
+    api.resetFileExplorerSyncManualCollapsesForTest({session: '1', root: '/repo/b'});
+    api.setFileExplorerExpandedForTest(['/repo/b/lib']);
+    api.rememberFileExplorerSyncExpandedStateForTest('1', '/repo/b');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/b')), {
+      expandedPaths: ['/repo/b/lib'],
+      manualCollapsedPaths: [],
+    }, 'a second target receives an independent complete record');
+
+    api.resetFileExplorerSyncManualCollapsesForTest({session: '1', root: '/repo/a'});
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncManualCollapsedPathsForTest()), ['/repo/a/src'], 'switching back restores the same manual-collapse set owned by target A');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/a').expandedPaths), ['/repo/a/src'], 'switching manual state cannot evict the paired expansion field');
+
+    for (let index = 0; index <= api.fileExplorerMemoryCacheLimitForTest; index += 1) {
+      api.touchFileExplorerSyncTargetRecordForTest(`synthetic-${index}`);
+    }
+    assert.equal(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/a'), null, 'bounded eviction removes the complete old target record');
+    assert.equal(api.fileExplorerSyncTargetRecordKeysForTest().length, api.fileExplorerMemoryCacheLimitForTest, 'combined target cache keeps the shared bound');
+
+    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.equal(source.includes('fileExplorerExpandedBySyncTarget'), false, 'retired expansion map stays absent');
+    assert.equal(source.includes('fileExplorerSyncManualCollapsedByTarget'), false, 'retired manual-collapse map stays absent');
+    assert.ok(source.includes('const fileExplorerSyncTargetRecords = new Map()'), 'one target-record map remains');
+  });
+
+  await testAsync('Tabber activity cache treats direct snapshots as newer than in-flight HTTP work', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFileExplorerModeForTest('tabber');
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/activity?'));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const request = api.fetchTabberActivityForTest({visible: true});
+    assert.equal(api.tabberActivityStateForTest().requestGeneration, 1, 'the HTTP request owns the first generation');
+    assert.equal(api.applyTabberActivityPayloadForTest({marker: 'push', activity: {}, agents: []}), true, 'a direct snapshot applies');
+    assert.equal(api.tabberActivityStateForTest().appliedGeneration, 2, 'the direct snapshot advances the shared generation');
+    pending[0].resolve(jsonResponse({marker: 'stale-http', activity: {}, agents: []}));
+    await request;
+    assert.equal(api.tabberActivityPayloadForTest().marker, 'push', 'the older HTTP completion cannot replace the direct snapshot');
+    assert.equal(api.tabberActivityStateForTest().request, null, 'identity-safe cleanup releases the completed request handle');
+
+    const failed = api.fetchTabberActivityForTest({visible: true});
+    pending[1].reject(new Error('activity offline'));
+    await failed;
+    const failedState = api.tabberActivityStateForTest();
+    assert.equal(failedState.request, null, 'a failed current request releases its handle');
+    assert.equal(failedState.loaded, true, 'a failed attempt remains settled so rendering does not create a retry loop');
+    assert.equal(api.tabberActivityPayloadForTest().marker, 'push', 'a failed refresh preserves the last good snapshot');
+  });
+
+  await testAsync('Quick Open record aborts path listings and rejects close-reopen stale completions', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.installCommandPaletteFixtureForTest();
+    api.setFetchForTest((url, options = {}) => {
+      const request = {
+        ...deferredFetch(),
+        url: String(url),
+        signal: options.signal,
+      };
+      pending.push(request);
+      return request.promise;
+    });
+
+    const stale = api.refreshFileQuickOpenCandidatesForTest('/tmp/old');
+    assert.ok(pending[0].url.startsWith('/api/fs/list?path='), 'absolute path mode uses a directory listing');
+    assert.ok(pending[0].signal, 'path-mode listing receives the record abort signal');
+    api.abortFileQuickOpenSearchForTest();
+    assert.equal(pending[0].signal.aborted, true, 'closing/cancelling aborts the path-mode request');
+
+    const current = api.refreshFileQuickOpenCandidatesForTest('/tmp/new');
+    pending[1].resolve(jsonResponse({path: '/tmp', entries: [{name: 'new.txt', kind: 'file'}]}));
+    await current;
+    pending[0].resolve(jsonResponse({path: '/tmp', entries: [{name: 'old.txt', kind: 'file'}]}));
+    await stale;
+    const state = api.fileQuickOpenStateForTest();
+    assert.deepStrictEqual(canonical(state.candidates.map(item => item.path)), ['/tmp/new.txt'], 'stale completion after cancel/restart cannot replace current candidates');
+    assert.equal(state.loading, false, 'the current request settles loading');
+    assert.equal(state.abortController, null, 'the current request releases its abort controller');
+    assert.equal(state.error, '', 'stale completion cannot add an error to the current result');
+  });
+
+  test('Quick Open debounce replacement has one timer owner and consumes its handle', () => {
+    const timers = [];
+    const cleared = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const id = timers.length + 1;
+        timers.push({id, callback, delay});
+        return id;
+      },
+      clearTimeout(id) { cleared.push(id); },
+    });
+    api.setCommandPaletteQueryForTest('>command');
+    api.scheduleFileQuickOpenSearchForTest();
+    api.scheduleFileQuickOpenSearchForTest();
+    assert.deepStrictEqual(cleared, [1], 'replacement debounce clears the prior record timer');
+    assert.equal(api.fileQuickOpenStateForTest().debounce, 2, 'the record owns only the replacement timer');
+    timers[1].callback();
+    assert.equal(api.fileQuickOpenStateForTest().debounce, null, 'running the debounce consumes its record handle');
+  });
+
+  await testAsync('YO!agent chat record drains queued asks after action work finishes', async () => {
+    const pendingAction = [];
+    const calls = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+    api.applyYoagentConversationPayloadForTest({messages: [], pending_waits: []});
+    api.setFetchForTest((url, options = {}) => {
+      const path = String(url);
+      calls.push(path);
+      if (path === '/api/yoagent/actions/execute-send') {
+        return new Promise(resolve => pendingAction.push(resolve));
+      }
+      if (path === '/api/yoagent/agents') return Promise.resolve(jsonResponse({agents: [{key: 'codex', available: true}]}));
+      if (path === '/api/yoagent/chat') {
+        const body = JSON.parse(options.body || '{}');
+        return Promise.resolve(jsonResponse({
+          answer: 'queued done',
+          backend: 'codex',
+          backend_used: 'codex',
+          conversation: {messages: [{role: 'user', content: body.message}, {role: 'assistant', content: 'queued done'}], pending_waits: []},
+        }));
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    });
+
+    const action = api.executeYoagentActionSendForTest('preview-1');
+    assert.equal(api.yoagentChatStateForTest().busy, true, 'action work marks the shared chat record busy');
+    await api.sendYoagentChatMessageForTest('after action');
+    assert.deepStrictEqual(canonical(api.yoagentChatQueueForTest().map(item => item.text)), ['after action'], 'a prompt submitted during action work enters the shared queue');
+    pendingAction[0](jsonResponse({session: '1', transport: 'tmux', conversation: {messages: [], pending_waits: []}}));
+    await action;
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(calls.filter(path => path === '/api/yoagent/chat').length, 1, 'finishing action work drains the queued ask through the normal chat path');
+    assert.equal(api.yoagentChatQueueForTest().length, 0, 'the drained queue is empty');
+    assert.equal(api.yoagentChatStateForTest().busy, false, 'the shared busy state settles after the queued ask');
+    assert.equal(api.yoagentChatStateForTest().activeRequest, null, 'the active request is cleared with the busy state');
+  });
+
+  await testAsync('YO!agent startup record freezes snapshots and keeps prewarm one-shot', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+    api.setActivitySummaryPayloadForTest({global: {headline: 'old activity'}, sessions: {}, session_order: []});
+    assert.equal(api.showYoagentStartupInfoOnceForTest(), true, 'startup info shows once');
+    api.applyActivitySummaryPayloadFromPushForTest({global: {headline: 'new activity'}, sessions: {}, session_order: []});
+    assert.equal(api.yoagentStartupStateForTest().activityPayload.global.headline, 'old activity', 'later activity pushes do not mutate the frozen startup snapshot');
+    api.hideYoagentStartupInfoForTest();
+    assert.equal(api.showYoagentStartupInfoOnceForTest(), false, 'hiding does not reset the one-shot');
+    assert.equal(api.yoagentStartupStateForTest().infoVisible, false, 'the hidden startup block stays hidden');
+    assert.equal(api.showYoagentStartupInfoForLatestActivityForTest(), true, 'explicit latest-activity refresh resets the one-shot');
+    assert.equal(api.yoagentStartupStateForTest().activityPayload.global.headline, 'new activity', 'explicit refresh captures the latest snapshot');
+
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/yoagent/prewarm');
+      return new Promise(resolve => pending.push(resolve));
+    });
+    const first = api.prewarmYoagentForTest();
+    const duplicate = api.prewarmYoagentForTest();
+    await duplicate;
+    assert.equal(pending.length, 1, 'duplicate prewarm calls share the startup one-shot');
+    let startup = api.yoagentStartupStateForTest();
+    assert.equal(startup.prewarmStarted, true, 'the startup record remembers that prewarm began');
+    assert.equal(startup.prewarming, true, 'the startup record owns the visible prewarm state');
+    assert.equal(startup.llmRequested, true, 'the first empty startup requests one visible answer');
+    api.applyYoagentStreamPayloadForTest({stream_id: 'startup', done: true});
+    assert.equal(api.yoagentStartupStateForTest().prewarming, false, 'stream completion settles the same prewarm state');
+    pending[0](jsonResponse({conversation: {messages: [], pending_waits: []}}));
+    await first;
+    startup = api.yoagentStartupStateForTest();
+    assert.equal(startup.prewarming, false, 'prewarm completion remains settled');
+    assert.equal(startup.prewarmStarted, true, 'completion preserves one-shot ownership until Clear explicitly resets it');
+  });
+
+  test('UI transaction records keep retired parallel globals absent', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    for (const name of [
+      'fileExplorerSyncPathInFlight', 'fileExplorerLastAppliedSyncPlanKey', 'fileExplorerSyncGeneration',
+      'tabberActivityRequestGeneration', 'tabberActivityAppliedRequestGeneration', 'tabberActivityLoaded', 'tabberActivityFetchPromise',
+      'fileQuickOpenRoot', 'fileQuickOpenCandidates', 'fileQuickOpenLoading', 'fileQuickOpenError', 'fileQuickOpenRequestId', 'fileQuickOpenDebounce', 'fileQuickOpenAbortController',
+      'yoagentBusy', 'yoagentActiveChatRequest', 'yoagentChatQueue', 'yoagentChatQueueSerial', 'yoagentError', 'yoagentDraft', 'yoagentHistoryCursor', 'yoagentHistoryDraft', 'yoagentNotice',
+      'yoagentStartupActivitySummaryPayload', 'yoagentPrewarming', 'yoagentPrewarmStarted', 'yoagentStartupLlmRequested', 'yoagentStartupInfoShown', 'yoagentStartupInfoVisible',
+    ]) assert.equal(source.includes(name), false, `${name} remains retired`);
+    for (const owner of ['fileExplorerSyncState', 'tabberActivityState', 'fileQuickOpenState', 'yoagentChatState', 'yoagentStartupState']) {
+      assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
+    }
+  });
+
+  test('layout URL record consumes pending state once and owns one refresh timer', () => {
+    const timers = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const id = timers.length + 1;
+        timers.push({id, callback, delay});
+        return id;
+      },
+    });
+    assert.equal(api.applyLayoutUrlStateSeedForTest({preferences: {searchText: 'first'}}), true, 'a deep-link seed enters the record');
+    assert.equal(api.layoutUrlStateForTest().applied, false, 'a replacement seed is pending');
+    assert.equal(api.applyPendingLayoutUrlStateForTest(), true, 'the pending state applies once');
+    assert.equal(api.applyPendingLayoutUrlStateForTest(), false, 'the same state cannot replay');
+    assert.equal(api.layoutUrlStateForTest().applied, true, 'the consumed marker advances with the pending state');
+
+    api.scheduleLayoutUrlStateRefreshForTest();
+    api.scheduleLayoutUrlStateRefreshForTest();
+    assert.equal(timers.length, 1, 'duplicate URL refresh schedules share one record timer');
+    assert.equal(api.layoutUrlStateForTest().refreshTimer, 1, 'the record owns the scheduled timer');
+    timers[0].callback();
+    assert.equal(api.layoutUrlStateForTest().refreshTimer, null, 'firing consumes only the matching record timer');
+  });
+
+  test('editor field application has one normalizer for URL restore and share replay', () => {
+    const editor = {
+      globalThemeMode: 'light',
+      terminalThemeMode: 'light',
+      themeMode: 'github-light',
+      previewDisplayMode: 'vanilla',
+      wrapEnabled: true,
+      lineNumbersEnabled: false,
+      blameEnabled: true,
+      diffExpandUnchanged: true,
+      previewFontSize: 27,
+      modes: [{path: '/tmp/ignored.txt', mode: 'edit'}],
+    };
+    const fromUrl = loadYolomux('', ['1']);
+    const urlModes = [];
+    fromUrl.applyEditorStateFieldsForTest(editor, {applyModeEntry: entry => urlModes.push(entry)});
+    const fromShare = loadYolomux('', ['1']);
+    fromShare.applyShareEditorStateForTest(editor);
+    assert.deepEqual(canonical(fromUrl.editorStateFieldsSnapshotForTest()), canonical(fromShare.editorStateFieldsSnapshotForTest()), 'URL and share apply every common editor field through the same normalizer');
+    assert.deepEqual(canonical(urlModes), canonical(editor.modes), 'the shared normalizer delegates each per-file mode to its transport-specific owner');
+  });
+
+  await testAsync('session-files record lets an accepted push invalidate older HTTP work', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/session-files?'));
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+
+    const request = api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    assert.equal(api.fileExplorerSessionFilesStateForTest().loading, true, 'the HTTP generation owns loading');
+    assert.equal(api.applySessionFilesPayloadFromPushForTest({
+      session: '1',
+      loaded: true,
+      marker: 'push',
+      repos: [{repo: '/push'}],
+      files: [],
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    }, {session: '1', from_ref: 'HEAD', to_ref: 'current'}), true, 'the matching push applies');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().loading, false, 'the push settles visible loading');
+    pending[0].resolve(jsonResponse({
+      session: '1',
+      loaded: true,
+      marker: 'stale-http',
+      repos: [{repo: '/stale'}],
+      files: [],
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    }));
+    await request;
+    const state = api.fileExplorerSessionFilesStateForTest();
+    assert.equal(state.payload.repos[0].repo, '/push', 'the older HTTP completion cannot replace the pushed payload');
+    assert.equal(state.loading, false, 'stale finally cannot change the settled push state');
+    assert.equal(state.signature, api.sessionFilesPayloadSignatureForPayloadForTest(state.payload), 'payload and signature remain one record snapshot');
+  });
+
+  test('command-palette record resets query, cursor, and rendered items together on open', () => {
+    const api = loadYolomux('', ['1']);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('command', 'stale query');
+    api.invokeCommandPaletteItemForTest({run() {}});
+    api.openCommandPaletteForTest({mode: 'command'});
+    const state = api.commandPaletteStateForTest();
+    assert.equal(state.query, '', 'open clears the prior query');
+    assert.equal(state.index, 0, 'open resets the cursor');
+    assert.ok(Array.isArray(state.items), 'rendered items stay owned by the same record');
+    assert.equal(state.node.hidden, false, 'the record node is the opened palette');
+    api.closeCommandPaletteForTest();
+    assert.equal(api.commandPaletteStateForTest().node.hidden, true, 'close hides the same record node');
+  });
+
+  test('drag record prevents file payload leakage into a later tab drag and clears atomically', () => {
+    const api = loadYolomux('', ['1']);
+    api.beginFileDragForTest({path: '/tmp/a.txt', paths: ['/tmp/a.txt'], kind: 'file'});
+    assert.equal(api.dragStateForTest().filePayload.path, '/tmp/a.txt', 'file drag payload belongs to the shared record');
+    const source = tabElement('1', 0, 100);
+    const event = dragEvent(10, '1');
+    event.currentTarget = source;
+    api.startSessionDrag(event, '1', 'left');
+    assert.equal(api.dragStateForTest().filePayload, null, 'starting a tab drag clears the prior file payload');
+    assert.equal(api.dragStateForTest().item, '1', 'the tab identity is current');
+    api.endSessionDrag(event);
+    const state = api.dragStateForTest();
+    for (const field of ['item', 'sourceSlot', 'paneSlot', 'filePayload', 'customPreview', 'nativePreview', 'tabRectCache']) {
+      assert.equal(state[field], null, `${field} clears with the drag operation`);
+    }
+  });
+
+  test('UI shell and drag records keep retired parallel globals absent', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    for (const name of [
+      'layoutUrlStateFromQuery', 'layoutUrlStateApplied', 'layoutUrlStateRefreshTimer',
+      'fileExplorerSessionFilesPayload', 'fileExplorerSessionFilesPayloadSignature', 'fileExplorerSessionFilesLoading', 'fileExplorerSessionFilesGuard',
+      'commandPaletteNode', 'commandPaletteQuery', 'commandPaletteIndex', 'commandPaletteItemsCache',
+      'dragSession', 'dragSourceSlot', 'dragPaneSlot', 'dragFilePayloadState', 'customDragPreview', 'customDragPreviewOffset', 'nativeDragImagePreview', 'transparentDragImage', 'dragTabRectCache',
+    ]) assert.equal(source.includes(name), false, `${name} remains retired`);
+    for (const owner of ['layoutUrlState', 'fileExplorerSessionFilesState', 'commandPaletteState', 'dragState']) {
+      assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
+    }
+  });
+
     {
       const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
       const transcriptPath = '/home/test/.local/state/yolomux/yoagent/conversation.jsonl';
@@ -86,6 +921,70 @@ async function runLayoutAsyncSuite() {
       assert.equal(watchCalls[0].method, 'POST', 'watch-root sync still sends the server registration');
     }
 
+    await testAsync('watch-root synchronization record owns debounce, renewal, and fetch state', async () => {
+      const timers = [];
+      const cleared = [];
+      let resolveFetch = null;
+      const calls = [];
+      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        setTimeout(callback, delay) {
+          const id = timers.length + 1;
+          timers.push({id, callback, delay});
+          return id;
+        },
+        clearTimeout(id) { cleared.push(id); },
+      });
+      api.setClientEventsSourceForTest({readyState: 1});
+      api.setFileExplorerRootForTest('/repo');
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), options});
+        return new Promise(resolve => { resolveFetch = resolve; });
+      });
+
+      api.syncServerWatchRootsForTest({renew: true});
+      api.syncServerWatchRootsForTest({immediate: true});
+      assert.deepStrictEqual(canonical(api.serverWatchRootsStateForTest().pendingOptions), {immediate: true, renew: true}, 'adjacent options merge into one record');
+      assert.deepStrictEqual(cleared, [1], 'replacement debounce clears the prior record timer');
+      timers[1].callback();
+      assert.equal(api.serverWatchRootsStateForTest().timer, null, 'firing consumes the record timer');
+      assert.deepStrictEqual(canonical(api.serverWatchRootsStateForTest().pendingOptions), {}, 'firing consumes merged options once');
+      assert.equal(api.serverWatchRootsStateForTest().inFlight, true, 'the same record owns active fetch state');
+      api.syncServerWatchRootsNowForTest();
+      assert.equal(calls.length, 1, 'an in-flight registration suppresses duplicate fetches');
+      resolveFetch(jsonResponse({ok: true}));
+      await flushAsyncWork();
+      await flushAsyncWork();
+      assert.equal(api.serverWatchRootsStateForTest().inFlight, false, 'completion clears in-flight state');
+      assert.ok(api.serverWatchRootsStateForTest().syncedAt > 0, 'success records the renewal timestamp');
+
+      api.syncServerWatchRootsNowForTest({renew: true});
+      assert.equal(calls.length, 1, 'a fresh identical registration does not renew early');
+      api.setServerWatchRootsSyncedAtForTest(Date.now() - 240001);
+      api.setFetchForTest((url, options = {}) => {
+        calls.push({url: String(url), options});
+        return Promise.resolve(jsonResponse({ok: true}));
+      });
+      api.syncServerWatchRootsNowForTest({renew: true});
+      await flushAsyncWork();
+      assert.equal(calls.length, 2, 'an expired identical registration renews through the same record');
+
+      api.setFileExplorerRootForTest('/repo-failed');
+      api.setFetchForTest(() => Promise.reject(new Error('offline')));
+      api.syncServerWatchRootsNowForTest();
+      await flushAsyncWork();
+      await flushAsyncWork();
+      assert.equal(api.serverWatchRootsStateForTest().inFlight, false, 'failure releases the synchronization record');
+      assert.equal(api.serverWatchRootsStateForTest().signature, '', 'failure invalidates the signature so the next registration retries');
+    });
+
+    test('watch-root synchronization: retired parallel globals stay absent', () => {
+      const src = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+      for (const name of ['serverWatchRootsSignature', 'serverWatchRootsInFlight', 'serverWatchRootsSyncedAt', 'serverWatchRootsTimer', 'serverWatchRootsPendingOptions']) {
+        assert.equal(src.includes(name), false, `${name} remains retired`);
+      }
+      assert.ok(src.includes('const serverWatchRootsState = {'), 'one watch-root synchronization owner remains');
+    });
+
     await testAsync('hidden Finder/Differ refresh work is skipped', async () => {
       const hiddenApi = loadYolomuxWithFileExplorerClosed('', ['1']);
       const hiddenSlots = hiddenApi.emptyLayoutSlots();
@@ -119,7 +1018,7 @@ async function runLayoutAsyncSuite() {
       const visibleApi = loadYolomux('', ['1']);
       const visibleSlots = visibleApi.emptyLayoutSlots();
       visibleSlots[visibleApi.layoutTreeKey] = visibleApi.splitNode('row', visibleApi.leafNode('left'), visibleApi.leafNode('right'));
-      visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.fileExplorerItemId], visibleApi.fileExplorerItemId);
+      visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.differItemId], visibleApi.differItemId);
       visibleSlots.right = visibleApi.paneStateWithTabs(['1'], '1');
       visibleApi.setLayoutSlotsForTest(visibleSlots);
       visibleApi.setFileExplorerRootForTest('/repo');
@@ -138,7 +1037,8 @@ async function runLayoutAsyncSuite() {
       const visibleState = visibleApi.clientServerWatchStateForTest();
       assert.deepStrictEqual(canonical(visibleState.roots), ['/repo', '/repo/src'], 'visible Differ registers only session-files roots while the Finder tree is hidden');
       assert.deepStrictEqual(canonical(visibleState.session_files), [{session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current', repo_refs: null}], 'visible Differ registers the current session-files request');
-      visibleApi.setFileExplorerModeForTest('tabber');
+      visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.tabberItemId], visibleApi.tabberItemId);
+      visibleApi.setLayoutSlotsForTest(visibleSlots);
       const tabberState = visibleApi.clientServerWatchStateForTest();
       assert.deepStrictEqual(canonical(tabberState.roots), [], 'visible Tabber does not inherit hidden Finder/Differ roots');
       assert.equal(Object.prototype.hasOwnProperty.call(tabberState, 'session_files'), false, 'visible Tabber does not register session-files work');
@@ -385,7 +1285,7 @@ async function runLayoutAsyncSuite() {
       api.setFileExplorerModeForTest('tabber');
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
-      slots.left = api.paneStateWithTabs(['1'], '1');
+      slots.left = api.paneStateWithTabs(['1', api.tabberItemId], '1');
       slots.right = api.paneStateWithTabs(['2'], '2');
       api.setLayoutSlotsForTest(slots);
       api.setFocusedPanelItem('1');
@@ -462,10 +1362,10 @@ async function runLayoutAsyncSuite() {
       const shareTopbarApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share-yolo-badge', mode: 'ro', session: '1', sessions: ['1']},
       });
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '0', 'share viewers start with 0 running YO jobs before the host snapshot');
+      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, undefined, 'Tabs never shows a running-YOLO circle');
       await shareTopbarApi.applyShareUiStateForTest({autoApprove: autoSnapshot});
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, '1', 'share viewers mirror the host running YO badge from UI state');
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO on', 'share viewers mirror host tmux YO state from UI state');
+      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, undefined, 'host UI state cannot restore the removed Tabs circle in a share viewer');
+      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (YOLO auto approve) tmux', 'share viewers mirror host tmux YO state from UI state');
     }
 
     {
@@ -797,7 +1697,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(shareDifferApi.i18nActiveLocaleId(), 'zh-Hant', 'DOIT.67: mirrored appearance frames apply the host language to read-only viewers');
       const afterLocaleFrame = shareDifferApi.fileExplorerChangesPanelHtml();
       assert.ok(afterLocaleFrame.includes('data-open-change-file="/repo/app/README.md"'), 'DOIT.67: Differ rows stay visible after a mirrored language frame');
-      assert.ok(afterLocaleFrame.includes(zhHant['changes.refresh']), 'DOIT.67: Differ chrome is localized after a mirrored language frame');
+      assert.ok(afterLocaleFrame.includes(zhHant['common.reload']), 'DOIT.67: Differ chrome is localized after a mirrored language frame');
       assert.equal(afterLocaleFrame.includes('No Differ results for this session.'), false, 'DOIT.67: Differ does not blank to the empty-state during mirrored locale apply');
     }
 
@@ -837,7 +1737,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(shareEditorApi.fileEditorViewStateForTest(item).scrollLeft, 9, 'DOIT.68: read-only share UI-state seeds host editor horizontal scroll');
       const target = `editor:${item}:editor`;
       shareEditorApi.applyShareScrollStateForTest({target, kind: 'editor', path, item, source: 'editor', top: 712, left: 13, anchor: 80, head: 81});
-      assert.deepStrictEqual({...shareEditorApi.shareLastAppliedScrollForTest(target)}, {top: 712, left: 13}, 'DOIT.68: host editor scroll frames are remembered before a DOM scroller exists');
+      assert.deepStrictEqual({...shareEditorApi.shareScrollTargetPositionForTest(target)}, {top: 712, left: 13}, 'DOIT.68: host editor scroll frames are remembered before a DOM scroller exists');
       assert.equal(shareEditorApi.fileEditorViewStateForTest(item).scrollTop, 712, 'DOIT.68: host editor scroll frames update the editor view-state cache');
       assert.equal(shareEditorApi.fileEditorViewStateForTest(item).anchor, 80, 'DOIT.68: host editor scroll frames update the editor selection anchor');
     }
@@ -989,27 +1889,42 @@ async function runLayoutAsyncSuite() {
 
     {
       const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
+      const dirtyMissingPath = '/home/test/yolomux.dev1/unsaved.md';
       const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';
       const validatingDoitApi = loadYolomux('', ['1']);
       const validatingDoitItem = validatingDoitApi.registerFileEditorLayoutItemForTest(staleDoitPath);
+      const dirtyMissingItem = validatingDoitApi.registerFileEditorLayoutItemForTest(dirtyMissingPath);
       const validatingDoitSlots = validatingDoitApi.emptyLayoutSlots();
-      validatingDoitSlots.left = validatingDoitApi.paneStateWithTabs([validatingDoitItem], validatingDoitItem);
+      validatingDoitSlots.left = validatingDoitApi.paneStateWithTabs([validatingDoitItem, dirtyMissingItem], validatingDoitItem);
       validatingDoitApi.setLayoutSlotsForTest(validatingDoitSlots);
+      validatingDoitApi.setOpenFileStateForTest(dirtyMissingPath, {
+        kind: 'text',
+        original: '# original\n',
+        content: '# unsaved\n',
+        dirty: true,
+        externalMissing: true,
+        externalMissingCheckedAt: Date.now(),
+      });
       validatingDoitApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
         {name: 'DOIT.57.md', path: realDoitPath, relative_path: 'DOIT.57.md', indexed_root: '/home/test/yolomux.dev2', kind: 'file'},
       ]);
       validatingDoitApi.setCommandPaletteStateForTest('files', 'doit57');
       const validationCalls = [];
+      let staleDoitExists = false;
       validatingDoitApi.setFetchForTest((url, options = {}) => {
+        if (String(url).startsWith('/api/fs/read')) {
+          return Promise.resolve(jsonResponse({content: '# restored\n', size: 11, mtime_ns: 12}));
+        }
         const body = JSON.parse(options.body || '{}');
         validationCalls.push({url: String(url), requests: body.requests || []});
         return Promise.resolve(jsonResponse({
-          responses: (body.requests || []).map(request => request.path === staleDoitPath
+          responses: (body.requests || []).map(request => request.path === staleDoitPath && !staleDoitExists
             ? {id: request.id, ok: false, status: 404, error: 'path not found'}
             : {id: request.id, ok: true, status: 200, payload: {path: request.path, kind: 'file'}}),
         }));
       });
       assert.ok(validatingDoitApi.commandPaletteItems().some(item => item.targetItem === validatingDoitItem), 'unknown file tabs remain visible before path-info validation resolves');
+      assert.ok(validatingDoitApi.commandPaletteItems().some(item => item.targetItem === dirtyMissingItem), 'dirty missing tabs remain reachable through quick search');
       await validatingDoitApi.flushFileExplorerFsBatchForTest();
       await flushAsyncWork();
       const validatedDoitItems = validatingDoitApi.commandPaletteItems();
@@ -1020,6 +1935,20 @@ async function runLayoutAsyncSuite() {
         || (item.searchFields || []).includes(staleDoitPath));
       assert.deepStrictEqual(canonical(validatedStaleDoitRows), [], '404-validated stale file paths are removed from quick search results');
       assert.ok(validatedDoitItems.some(item => item.category === 'file' && item.path === realDoitPath), 'the real DOIT.57 file result remains after stale tab validation');
+      assert.equal(validatingDoitApi.currentFileStateForTest(staleDoitPath).externalMissing, true, 'the shared file record owns the validated missing state');
+
+      staleDoitExists = true;
+      validatingDoitApi.setOpenFileStateForTest(staleDoitPath, {
+        ...validatingDoitApi.currentFileStateForTest(staleDoitPath),
+        externalMissingCheckedAt: 0,
+      });
+      validatingDoitApi.commandPaletteItems();
+      await validatingDoitApi.flushFileExplorerFsBatchForTest();
+      await flushAsyncWork();
+      const recoveredDoitItems = validatingDoitApi.commandPaletteItems();
+      assert.ok(recoveredDoitItems.some(item => item.targetItem === validatingDoitItem), 'a recreated clean file tab returns to quick search after shared-state revalidation');
+      assert.equal(validatingDoitApi.currentFileStateForTest(staleDoitPath).externalMissing, undefined, 'recreated clean files clear shared missing state');
+      assert.equal(validatingDoitApi.currentFileStateForTest(staleDoitPath).content, '# restored\n', 'recreated clean files reload through the normal file-state owner');
     }
 
     {
@@ -1042,6 +1971,21 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(canonical(treeApi.fileExplorerExpandedForTest()), ['/repo/src', '/repo/src/lib'], 'Finder Expand all flips the full directory expansion state');
       await treeApi.setAllFileTreeDirectoriesExpandedForTest(null, false);
       assert.deepStrictEqual(canonical(treeApi.fileExplorerExpandedForTest()), [], 'Finder Collapse all clears the directory expansion state');
+    }
+
+    {
+      const restoredApi = loadYolomux('', ['1']);
+      const container = new TestElement('restored-finder-tree');
+      restoredApi.setFileExplorerExpandedForTest(['/repo/vortex']);
+      restoredApi.renderTreeChildrenForTest(container, '/repo', [{name: 'vortex', kind: 'dir'}], 0);
+      const row = container.children.find(node => node?.dataset?.path === '/repo/vortex');
+      assert.equal(row.getAttribute('aria-expanded'), 'true', 'a restored expanded directory points down immediately');
+      assert.equal(row.classList.contains('loading-children'), true, 'a restored expanded directory with no children rendered yet shows the moving loading indicator');
+
+      restoredApi.renderTreeChildrenForTest(container, '/repo', [{name: 'vortex', kind: 'dir'}], 0, [
+        ['/repo/vortex', [{name: 'child.txt', kind: 'file'}]],
+      ]);
+      assert.equal(row.classList.contains('loading-children'), false, 'the restored directory clears the loading indicator once its child listing is available');
     }
 
     {
@@ -1308,8 +2252,8 @@ async function runLayoutAsyncSuite() {
       assert.equal(calls[0].body.fields[0].filename, generatedName);
       assert.deepStrictEqual(sent[0], {
         type: 'input',
-        data: `[Image #1] '/home/test/${generatedName}' `,
-      }, 'pasted image upload inserts the image reference into xterm');
+        data: `[Image #1] '/home/test/${generatedName}'`,
+      }, 'pasted image upload inserts the image reference into xterm without trailing whitespace');
     }
 
     // DOIT.78 payload-matrix contract (78.5): the ONE shared image-payload detector/extractor used by BOTH
@@ -1864,6 +2808,108 @@ async function runLayoutAsyncSuite() {
     }
 
     {
+      const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-misses'}});
+      const fileRef = {type: 'file', path: 'missing.js', text: 'missing.js'};
+      let requestCount = 0;
+      api.setFetchForTest((_url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        requestCount += body.requests.length;
+        return Promise.resolve(jsonResponse({
+          responses: body.requests.map(request => ({id: request.id, ok: false, status: 404, error: 'not found'})),
+        }));
+      });
+      const firstTarget = api.terminalFileReferenceTarget('1', fileRef, {fresh: false});
+      const concurrentTarget = api.terminalFileReferenceTarget('1', fileRef, {fresh: false});
+      assert.equal(await firstTarget, null, 'missing passive terminal file refs resolve to null');
+      assert.equal(await concurrentTarget, null, 'concurrent missing terminal file refs share the in-flight resolution');
+      const requestsAfterFirstResolution = requestCount;
+      assert.ok(requestsAfterFirstResolution > 0, 'the first missing terminal file ref checks its context-derived paths');
+      assert.equal(await api.terminalFileReferenceTarget('1', fileRef, {fresh: false}), null, 'negative terminal file target results are cached');
+      assert.equal(requestCount, requestsAfterFirstResolution, 'repeated passive missing-file scans perform no backend lookups');
+      assert.equal(api.terminalFileReferenceTargetCacheSizeForTest(), 1, 'one missing terminal file token occupies one bounded target-cache entry');
+      assert.equal(await api.terminalFileReferenceTarget('1', fileRef), null, 'fresh user resolution still reports the missing target');
+      assert.ok(requestCount > requestsAfterFirstResolution, 'fresh context-menu resolution bypasses a passive cached miss');
+      api.invalidateTerminalFileReferenceTargetsForTest(['/home/test/cache-misses']);
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', fileRef), false, 'filesystem changes invalidate matching cached terminal misses before their TTL');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-ttl'}});
+      let now = 1_000_000;
+      let requestCount = 0;
+      api.setFetchForTest((_url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        requestCount += body.requests.length;
+        return Promise.resolve(jsonResponse({
+          responses: body.requests.map(request => ({
+            id: request.id,
+            ok: request.path.endsWith('positive.js'),
+            status: request.path.endsWith('positive.js') ? 200 : 404,
+            payload: request.path.endsWith('positive.js') ? {kind: 'file', name: 'positive.js', path: request.path} : undefined,
+            error: request.path.endsWith('positive.js') ? undefined : 'not found',
+          })),
+        }));
+      });
+      const clock = () => now;
+      const missing = {type: 'file', path: 'negative.js', text: 'negative.js'};
+      const existing = {type: 'file', path: 'positive.js', text: 'positive.js'};
+
+      assert.equal(await api.terminalFileReferenceTarget('1', missing, {fresh: false, now: clock}), null, 'the fake-clock negative lookup initially misses');
+      const afterNegative = requestCount;
+      now += 4_999;
+      assert.equal(await api.terminalFileReferenceTarget('1', missing, {fresh: false, now: clock}), null, 'a negative result remains cached before its bounded TTL expires');
+      assert.equal(requestCount, afterNegative, 'the fake-clock pre-expiry negative lookup sends no new fs batch request');
+      now += 1;
+      assert.equal(await api.terminalFileReferenceTarget('1', missing, {fresh: false, now: clock}), null, 'an expired negative result is resolved again');
+      assert.ok(requestCount > afterNegative, 'the fake clock proves missing candidates retry only after their TTL');
+
+      assert.ok(await api.terminalFileReferenceTarget('1', existing, {fresh: false, now: clock}), 'the fake-clock positive lookup resolves');
+      const afterPositive = requestCount;
+      now += 29_999;
+      assert.ok(await api.terminalFileReferenceTarget('1', existing, {fresh: false, now: clock}), 'a positive result remains cached before its longer TTL expires');
+      assert.equal(requestCount, afterPositive, 'the fake-clock pre-expiry positive lookup sends no new fs batch request');
+      now += 1;
+      api.invalidateFileExplorerFsCachesForTest();
+      assert.ok(await api.terminalFileReferenceTarget('1', existing, {fresh: false, now: clock}), 'an expired positive result is resolved again');
+      assert.ok(requestCount > afterPositive, 'the fake clock proves existing candidates retry only after their TTL');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-lru'}});
+      let requestCount = 0;
+      api.setFetchForTest((_url, options = {}) => {
+        const body = JSON.parse(options.body || '{}');
+        requestCount += body.requests.length;
+        return Promise.resolve(jsonResponse({
+          responses: body.requests.map(request => ({
+            id: request.id,
+            ok: true,
+            payload: {kind: 'file', name: request.path.split('/').pop(), path: request.path},
+          })),
+        }));
+      });
+      const ref = index => ({type: 'file', path: `cache-${index}.js`, text: `cache-${index}.js`});
+      await Promise.all(Array.from({length: 512}, (_unused, index) => (
+        api.terminalFileReferenceTarget('1', ref(index), {fresh: false})
+      )));
+      assert.equal(requestCount, 512, 'the first 512 distinct terminal file refs each resolve once');
+      assert.equal(api.terminalFileReferenceTargetCacheSizeForTest(), 512, 'terminal file target LRU reaches the shared cache limit');
+      await api.terminalFileReferenceTarget('1', ref(0), {fresh: false});
+      assert.equal(requestCount, 512, 'reusing the oldest target is a cache hit that refreshes its LRU recency');
+      await api.terminalFileReferenceTarget('1', ref(512), {fresh: false});
+      assert.equal(api.terminalFileReferenceTargetCacheSizeForTest(), 512, 'adding another target evicts instead of growing beyond the shared limit');
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', ref(0)), true, 'the recently reused oldest target survives the LRU eviction');
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', ref(1)), false, 'the least-recently-used target is the entry that gets evicted');
+      await api.terminalFileReferenceTarget('1', ref(0), {fresh: false});
+      assert.equal(requestCount, 513, 'the recently reused oldest target survives the LRU eviction');
+      await api.terminalFileReferenceTarget('1', ref(1), {fresh: false});
+      assert.equal(api.terminalFileReferenceTargetCacheHasForTest('1', ref(1)), true, 're-resolving the evicted target returns it to the bounded target cache');
+    }
+
+    {
       const source = fs.readFileSync('static/yolomux.js', 'utf8');
       assert.ok(/Promise\.all\(directories\.map\(async directory =>/.test(source), 'periodic Finder refresh starts watched directory checks together so fs/list can batch');
     }
@@ -1988,7 +3034,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           availableAgents: [],
           agentAuth: {},
-          settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {yoagent: {backend: 'claude'}}, mtime_ns: 1},
+          settingsPayload: settingsOverride({yoagent: {backend: 'claude'}}),
         },
       });
       assert.equal(api.yoagentResolvedBackendForTest(), 'deterministic', 'without installed-agent metadata, explicit Claude cannot be attempted yet');
@@ -2006,7 +3052,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           availableAgents: ['claude'],
           agentAuth: {claude: {installed: true, logged_in: false}},
-          settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {yoagent: {backend: 'claude'}}, mtime_ns: 1},
+          settingsPayload: settingsOverride({yoagent: {backend: 'claude'}}),
         },
       });
       assert.equal(api.yoagentResolvedBackendForTest(), 'claude', 'explicit Claude selection stays explicit when the CLI exists');
@@ -2114,6 +3160,10 @@ async function runLayoutAsyncSuite() {
         stream_id: 'stream-thinking',
         phase: 'delta',
         content: 'partial answer',
+        stream_items: [
+          {kind: 'thinking', text: thinkingLine, labelKey: 'yoagent.stream.thinking', fallback: 'thinking'},
+          {kind: 'tool', text: 'tool output: command: collected files', labelKey: 'yoagent.stream.toolOutput', fallback: 'tool output'},
+        ],
         auxiliary_lines: [thinkingLine, 'tool output: command: collected files'],
         auxiliary_preview: `${thinkingLine}\ntool output: command: collected files`,
         hidden_work_active: true,
@@ -2157,8 +3207,13 @@ async function runLayoutAsyncSuite() {
           role: 'assistant',
           content: 'answer',
           createdAt: '2026-06-20T00:00:00Z',
-          auxiliaryLines: ['thinking... (~200 tokens)'],
-          auxiliaryText: 'thinking... (~200 tokens)',
+          streamItems: [{
+            kind: 'thinking',
+            text: '',
+            labelKey: 'yoagent.stream.thinking',
+            fallback: 'thinking',
+            tokenCount: 200,
+          }],
         }],
       });
       const tokenProgressHtml = api.yoagentChatHtml();
@@ -2166,7 +3221,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(tokenProgressHtml.includes('thinking (2 words)…'), false, 'Claude token-only thinking progress does not use the text word counter');
       assert.equal(tokenProgressHtml.includes('thinking: thinking'), false, 'Claude token-only thinking progress does not duplicate the thinking prefix');
       assert.ok(tokenProgressHtml.includes('did not expose readable thinking text'), 'Claude token-only thinking progress explains why no words are shown');
-      assert.equal(tokenProgressHtml.includes('<pre class="yoagent-auxiliary-stream">thinking... (~200 tokens)</pre>'), false, 'Claude token-only progress is metadata, not fake thinking body text');
+      assert.equal(tokenProgressHtml.includes('<pre class="yoagent-auxiliary-stream">'), false, 'Claude token-only progress is metadata, not fake thinking body text');
     }
 
     {
@@ -2175,13 +3230,16 @@ async function runLayoutAsyncSuite() {
         stream_id: 'stream-multiline-tool',
         phase: 'tool',
         content: 'partial answer',
+        stream_items: [
+          {kind: 'tool', text: 'tool output: command: line 1\nline 2', labelKey: 'yoagent.stream.toolOutput', fallback: 'tool output'},
+        ],
         auxiliary_lines: ['tool output: command: line 1\nline 2'],
         auxiliary_preview: 'tool output: command: line 1\nline 2',
         tool_active: true,
       });
       const html = api.yoagentChatHtml();
       assert.equal(html.includes('Details…'), false, 'multiline tool output continuation lines do not leak into the thinking details preview');
-      assert.ok(html.includes('Tool call'), 'multiline tool output still renders in the Tool call block');
+      assert.ok(html.includes('yoagent-toolcall-details'), 'multiline tool output still renders in the structured tool-call block');
       assert.ok(html.includes('tool output: command: line 1\nline 2'), 'tool-call pre preserves real multiline output');
     }
 
@@ -2209,7 +3267,7 @@ async function runLayoutAsyncSuite() {
       assert.ok(ordered.every(index => index >= 0), 'interleaved YO!agent stream rows all render');
       assert.deepStrictEqual(ordered, [...ordered].sort((left, right) => left - right), 'thinking/tool rows and assistant text render in stream order');
       assert.ok(html.includes('yoagent-message-stream'), 'interleaved stream uses the ordered message stream renderer');
-      assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
+      assert.equal((html.match(/<details class="[^"]*yoagent-stream-detail/g) || []).length, 2, 'thinking and tool-call stream rows remain independently collapsible');
     }
 
     {
@@ -2264,7 +3322,7 @@ async function runLayoutAsyncSuite() {
       });
       const html = api.yoagentChatHtml();
       assert.ok(html.includes('thinking (5 words)…'), 'coalesced thinking stream label counts the full merged thinking run');
-      assert.equal((html.match(/<details class="[^"]*yoagent-message-details/g) || []).length, 1, 'adjacent thinking stream rows coalesce into one collapsible');
+      assert.equal((html.match(/<details class="[^"]*yoagent-stream-detail/g) || []).length, 1, 'adjacent thinking stream rows coalesce into one collapsible');
     }
 
     {
@@ -2296,15 +3354,39 @@ async function runLayoutAsyncSuite() {
       assert.ok(html.includes('Result from tmux session') && html.includes('done'), 'clearing a stale wait preserves recorded result messages');
     }
 
-    test('server/client version mismatch asks whether to reload the browser', async () => {
+    {
+      const frames = [];
+      const api = loadYolomux('', ['1'], 'http:', 'iPhone', 'admin', {coarsePointer: true});
+      api.registerTerminalForTest('1', {focus() {}}, {
+        readyState: WebSocket.OPEN,
+        send(frame) { frames.push(JSON.parse(frame)); },
+      });
+      assert.equal(api.terminalMobileAccessoryDataForTest('1', 'escape'), '\x1b', 'mobile accessory maps Esc to the terminal escape byte');
+      assert.equal(api.terminalMobileAccessoryDataForTest('1', 'arrow-up'), '\x1b[A', 'mobile accessory uses the normal cursor sequence outside application-cursor mode');
+      assert.equal(api.terminalMobileAccessoryRepeatsForTest('arrow-up'), true, 'holding an arrow is repeatable like a hardware cursor key');
+      assert.equal(api.terminalMobileAccessoryRepeatsForTest('tmux-scroll-down'), true, 'holding PgDown repeats tmux scrolling without closing the palette');
+      assert.equal(api.terminalMobileAccessoryRepeatsForTest('tab'), false, 'Tab remains a one-shot key');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher opens the palette without sending terminal bytes');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'palette visibility belongs to the same per-session accessory record');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher toggles the existing palette closed');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'interrupt'), true, 'mobile Ctrl-C sends through the shared terminal transport');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}], 'mobile Ctrl-C preserves the terminal interrupt byte');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
+      assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
+      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
+      assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, '\x1bx', 'Alt prefixes the next key with Escape');
+      assert.ok(api.terminalMobileAccessoryHtmlForTest('1').includes('⌘P') && api.terminalMobileAccessoryHtmlForTest('1').includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
+    }
+
+    await testAsync('server/client version mismatch asks whether to reload the browser', async () => {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
         },
       });
       api.maybeHandleServerVersionChangeForTest('0.4.19');
@@ -2312,11 +3394,13 @@ async function runLayoutAsyncSuite() {
       assert.ok(banner, 'server/client patch rollback mismatch shows the existing reload banner');
       assert.equal(banner.dataset.version, '0.4.19', 'reload banner stores the mismatched server version');
       assert.ok(banner.children[0].textContent.includes('Do you want to reload the browser?'), 'reload banner asks the user whether to reload');
-      assert.equal(banner.children[1].textContent, 'Reload', 'reload banner keeps the existing Reload action');
-      assert.equal(banner.children[2].textContent, 'Keep', 'reload banner keeps the existing dismiss action as Keep');
+      const actions = banner.children[1];
+      assert.equal(actions.className, 'toast-control-row server-update-banner-actions', 'reload banner groups actions through the shared toast control row');
+      assert.equal(actions.children[0].textContent, 'Reload', 'reload banner keeps the existing Reload action');
+      assert.equal(actions.children[1].textContent, 'Keep', 'reload banner keeps the existing dismiss action as Keep');
       api.maybeHandleServerVersionChangeForTest('0.4.19');
       assert.equal(api.bodyChildren().filter(node => node.id === 'serverUpdateBanner').length, 1, 'same mismatched version does not spawn repeated banners');
-      banner.children[2].listeners.get('click')[0]();
+      actions.children[1].listeners.get('click')[0]();
       assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'Keep dismisses the mismatch banner');
       api.maybeHandleServerVersionChangeForTest('0.4.19');
       assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'dismissed same mismatch does not immediately reopen');
@@ -2324,26 +3408,18 @@ async function runLayoutAsyncSuite() {
       const reloadApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
         },
       });
       reloadApi.maybeHandleServerVersionChangeForTest('0.4.21');
       const reloadBanner = reloadApi.bodyChildren().find(node => node.id === 'serverUpdateBanner');
-      reloadBanner.children[1].listeners.get('click')[0]();
+      reloadBanner.children[1].children[0].listeners.get('click')[0]();
       assert.equal(reloadApi.reloadCountForTest(), 1, 'Reload action reloads the browser');
 
       const autoApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: true}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: true}}),
         },
       });
       autoApi.setOpenFileStateForTest('/repo/app.py', {kind: 'text', content: 'dirty', original: 'clean', dirty: true});
@@ -2352,16 +3428,12 @@ async function runLayoutAsyncSuite() {
       assert.ok(autoApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), 'dirty auto-reload fallback still shows the existing reload banner');
     });
 
-    test('server/client bundle revision mismatch asks whether to reload the browser', async () => {
+    await testAsync('server/client bundle revision mismatch asks whether to reload the browser', async () => {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: false}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
         },
       });
       api.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
@@ -2376,11 +3448,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: true, reload_on_update_auto: true}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: true}}),
         },
       });
       autoApi.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
@@ -2390,11 +3458,7 @@ async function runLayoutAsyncSuite() {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
-          settingsPayload: {
-            defaults: {general: {reload_on_update: false, reload_on_update_auto: true}},
-            settings: {},
-            mtime_ns: 1,
-          },
+          settingsPayload: settingsOverride({}, {general: {reload_on_update: false, reload_on_update_auto: true}}),
         },
       });
       disabledApi.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
@@ -2402,7 +3466,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(disabledApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'disabled reload-on-update suppresses bundle revision banner');
     });
 
-    test('self-update: Update Now removes toast and reloads after restart ping', async () => {
+    await testAsync('self-update: Update Now removes toast and reloads after restart ping', async () => {
       const api = loadYolomux('', ['1']);
       api.setConfirmForTest(() => true);
       const toasts = [];
@@ -2422,7 +3486,13 @@ async function runLayoutAsyncSuite() {
       api.setFetchForTest((url, options = {}) => {
         fetchCalls.push({url: String(url), method: options.method || 'GET'});
         if (String(url).startsWith('/api/self-update')) {
-          return Promise.resolve(jsonResponse({ok: true, restarting: true, message: 'updated; restarting now', target: '0.4.18'}));
+          return Promise.resolve(jsonResponse({
+            ok: true,
+            restarting: true,
+            error: 'updated; restarting now',
+            user_message: {key: 'update.result.restarting', params: {}, fallback: 'updated; restarting now'},
+            target: '0.4.18',
+          }));
         }
         if (String(url).startsWith('/api/ping')) return Promise.resolve(jsonResponse({ok: true}));
         return Promise.reject(new Error(`unexpected fetch ${url}`));
@@ -2438,6 +3508,7 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       assert.deepStrictEqual(canonical(fetchCalls[0]), {method: 'POST', url: '/api/self-update'}, 'self-update posts immediately after confirmation');
       assert.ok(toasts.some(item => item.title === 'Installing update...'), 'successful restarting update shows installing status');
+      assert.ok(toasts.some(item => item.lines[0] === 'YOLOmux was updated and is restarting now.'), 'self-update resolves the server descriptor through the active locale instead of showing its raw fallback');
       assert.deepStrictEqual(canonical(api.selfUpdateReloadStateForTest()), {
         attempts: 0,
         deferredToastShown: false,
@@ -2452,7 +3523,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.reloadCountForTest(), 1, 'reachable restarted server triggers automatic reload');
     });
 
-    test('self-update: dirty edits and active typing defer automatic reload safely', async () => {
+    await testAsync('self-update: dirty edits and active typing defer automatic reload safely', async () => {
       const dirtyApi = loadYolomux('', ['1']);
       const dirtyToasts = [];
       dirtyApi.setShowToastForTest((title, lines) => {
@@ -2484,6 +3555,50 @@ async function runLayoutAsyncSuite() {
       await typingApi.pollSelfUpdateReloadForTest();
       assert.equal(typingApi.reloadCountForTest(), 0, 'active typing blocks self-update auto reload');
       assert.ok(typingToasts.some(item => item.title === 'Software Update' && String(item.lines[0]).includes('active typing')), 'typing deferral shows a self-update-specific toast');
+    });
+
+    await testAsync('self-update: restart polling record replaces timers and terminates one attempt', async () => {
+      const timers = [];
+      const cleared = [];
+      const toasts = [];
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        setTimeout(callback, delay) {
+          const id = timers.length + 1;
+          timers.push({id, callback, delay});
+          return id;
+        },
+        clearTimeout(id) { cleared.push(id); },
+      });
+      api.setShowToastForTest((title, lines) => {
+        toasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
+        return null;
+      });
+      api.setFetchForTest(() => Promise.reject(new Error('server restarting')));
+
+      api.startSelfUpdateReloadPollingForTest('0.4.20');
+      api.startSelfUpdateReloadPollingForTest('0.4.21');
+      assert.deepStrictEqual(canonical(api.selfUpdateReloadStateForTest()), {
+        attempts: 0,
+        deferredToastShown: false,
+        pending: true,
+        serverVersionReloadHandled: '0.4.21',
+        target: '0.4.21',
+      }, 'a new attempt resets the complete record and owns the latest target');
+      assert.deepStrictEqual(cleared, [1], 'restarting polling clears the prior attempt timer');
+      assert.equal(timers.at(-1).delay, 0, 'replacement polling is scheduled immediately');
+
+      for (let attempt = 0; attempt < 120; attempt += 1) await api.pollSelfUpdateReloadForTest();
+      assert.equal(api.selfUpdateReloadStateForTest().pending, false, 'the complete attempt stops at the retry bound');
+      assert.equal(api.selfUpdateReloadStateForTest().attempts, 120, 'the retry count belongs to the stopped attempt');
+      assert.ok(toasts.some(item => item.lines[0] === 'Update installed, but YOLOmux did not answer after restart. Reload when it is reachable.'), 'terminal failure reports the bounded timeout');
+    });
+
+    test('self-update: retired parallel reload scalars stay absent', () => {
+      const src = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+      for (const name of ['selfUpdateReloadPending', 'selfUpdateReloadTarget', 'selfUpdateReloadAttempts', 'selfUpdateReloadTimer', 'selfUpdateReloadDeferredToastShown']) {
+        assert.equal(src.includes(name), false, `${name} remains retired`);
+      }
+      assert.ok(src.includes('const selfUpdateReloadState = {'), 'one reload-state owner remains');
     });
 
     test('self-update: topbar update badge + dryrun wiring present', () => {

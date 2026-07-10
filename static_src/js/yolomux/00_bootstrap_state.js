@@ -1,7 +1,9 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
-// The exact launch command per agent (with --dangerously-* flags in YOLO mode) for the new-session menu.
+const terminalCommands = Array.isArray(bootstrap.terminalCommands) ? bootstrap.terminalCommands : [];
+const fullAccessAgentLaunchesEnabled = bootstrap.dangerouslyYolo === true;
+// The exact normal/full-access launch commands per agent for the new-session menu.
 const agentLaunchCommands = bootstrap.agentLaunchCommands || {};
 // per-agent {installed, logged_in} login status (probed + cached server-side). Used to
 // grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
@@ -32,6 +34,7 @@ function applyAgentAvailabilityPayload(payload = {}) {
   return true;
 }
 const accessRole = bootstrap.accessRole || 'admin';
+const authUsername = String(bootstrap.authUsername || '');
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
 const shareBootstrap = bootstrap.share && typeof bootstrap.share === 'object' ? bootstrap.share : null;
@@ -85,30 +88,14 @@ function randomShareViewerId() {
 const shareViewerId = (() => {
   if (!shareViewMode) return '';
   const key = `yolomux.share.viewer.${shareBootstrap?.id || 'current'}`;
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
+  return sessionScopedId(key);
 })();
 const shareClientId = (() => {
   if (shareViewMode && shareViewerId) return shareViewerId;
   const key = shareViewMode
     ? `yolomux.share.client.${shareBootstrap?.id || 'current'}`
     : 'yolomux.share.hostClient';
-  try {
-    const existing = sessionStorage.getItem(key);
-    if (existing) return existing;
-    const created = randomShareViewerId();
-    sessionStorage.setItem(key, created);
-    return created;
-  } catch (_) {
-    return randomShareViewerId();
-  }
+  return sessionScopedId(key);
 })();
 function shareBootstrapFinderState() {
   return shareViewMode && shareBootstrap?.finder && typeof shareBootstrap.finder === 'object'
@@ -133,39 +120,71 @@ function shareBootstrapFinderSession() {
   const session = String(shareBootstrapFinderState().session || '').trim();
   return session && sessions.includes(session) ? session : '';
 }
-const shareHostDimensions = new Map();
+// One lifecycle record owns all state associated with a share sender/session.  In
+// particular, teardown removes the record rather than trying to remember every
+// independent replay map that may have acquired state for that key.
+const shareSenderRecords = new Map();
+function shareSenderRecord(key, options = {}) {
+  const cleanKey = String(key || '').trim();
+  if (!cleanKey) return null;
+  let record = shareSenderRecords.get(cleanKey) || null;
+  if (!record && options.create !== false) {
+    record = {
+      connection: null,
+      dimensions: null,
+      lastFrame: null,
+      pointer: null,
+      popupSequence: 0,
+      replayScrollPublish: null,
+      scrollPublish: null,
+      scrollTarget: null,
+    };
+    shareSenderRecords.set(cleanKey, record);
+  }
+  return record;
+}
+function deleteShareSenderRecord(key) {
+  const cleanKey = String(key || '').trim();
+  const record = shareSenderRecords.get(cleanKey);
+  if (!record) return;
+  for (const state of [record.pointer, record.scrollPublish, record.replayScrollPublish]) {
+    if (state?.hideTimer) clearTimeout(state.hideTimer);
+    if (state?.timer) clearTimeout(state.timer);
+  }
+  record.pointer?.ghost?.remove?.();
+  shareSenderRecords.delete(cleanKey);
+}
+function shareSenderRecordEntries(field) {
+  return Array.from(shareSenderRecords.entries()).filter(([, record]) => record?.[field] != null);
+}
 if (shareViewMode && shareBootstrap?.session && shareBootstrap?.hostDims) {
-  shareHostDimensions.set(String(shareBootstrap.session), {
+  shareSenderRecord(shareBootstrap.session).dimensions = {
     rows: Number(shareBootstrap.hostDims.rows) || 0,
     cols: Number(shareBootstrap.hostDims.cols) || 0,
-  });
+  };
 }
 if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.hostDimsBySession === 'object') {
   for (const [session, dims] of Object.entries(shareBootstrap.hostDimsBySession)) {
-    shareHostDimensions.set(String(session), {
+    shareSenderRecord(session).dimensions = {
       rows: Number(dims?.rows) || 0,
       cols: Number(dims?.cols) || 0,
-    });
+    };
   }
 }
 let activeShare = null;
 let activeShares = [];
-let shareHostSockets = new Map();
-let shareHostQueues = new Map();
+let shareCreateErrorPayload = null;
 let shareMirrorEpoch = 1;
 let shareMirrorSequence = 0;
 let shareReplayMirrorEpoch = 1;
 let shareReplayMirrorSequence = 0;
-const shareMirrorLastFrameBySender = new Map();
 let shareUiStatePublishTimer = null;
 let shareViewportPublishTimer = null;
 let shareAppearancePublishTimer = null;
 let sharePointerFramePending = false;
 let sharePointerLastEvent = null;
 let sharePointerLastPublishedAt = -Infinity;
-const shareScrollPublishTimers = new Map();
-const shareScrollRestoreFrameTimers = new Map();
-let shareGeometryDigestTimer = null;
+let shareScrollSnapshotGeneration = 0;
 let shareDebugSequence = 0;
 let shareDebugReports = [];
 const shareDebugReportLimit = 20;
@@ -176,10 +195,6 @@ let shareGeometryResyncInFlight = false;
 let shareGeometryResyncLastStartedAt = 0;
 let shareGeometryRepairInFlight = false;
 const shareAppliedTextWrapMetricsByKey = new Map();
-let sharePointerGhost = null;
-let sharePointerGhosts = new Map();
-let sharePointerHideTimer = null;
-let sharePointerHideTimers = new Map();
 let applyingShareRemoteScroll = false;
 let applyingShareRemoteUiState = 0;
 let sharePopupLayerNode = null;
@@ -213,8 +228,6 @@ let shareReplayHostKeyframeSuppressedCount = 0;
 let shareReplayTopologyKeyframeTimer = null;
 let shareReplayTopologyKeyframeQueuedAt = 0;
 let shareReplayTopologyMutationPauseTimer = null;
-const sharePopupLayerLastSeqBySender = new Map();
-const shareLastAppliedScrollByTarget = new Map();
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -230,17 +243,7 @@ const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
 const notifyToggle = document.getElementById('notifyToggle');
 const refreshMeta = document.getElementById('refreshMeta');
-const tabMetaToggle = (() => {
-  const button = document.createElement('button');
-  button.id = 'tabMetaToggle';
-  button.className = 'tab-meta-toggle';
-  button.type = 'button';
-  button.textContent = '#';
-  button.title = 'Hide tab metadata';
-  button.setAttribute('aria-label', 'Hide tab metadata');
-  button.setAttribute('aria-pressed', 'true');
-  return button;
-})();
+const tabMetaToggle = makeButton({id: 'tabMetaToggle', className: 'tab-meta-toggle', label: '#', pressed: true});
 const logoutButton = document.getElementById('logoutButton');
 const httpsWarning = document.getElementById('httpsWarning');
 const fileExplorer = document.getElementById('fileExplorer');
@@ -265,6 +268,7 @@ const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.mig
 const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
 const fileExplorerOpenIntentStorageKey = 'yolomux.fileExplorerOpen.v1';
 const fileExplorerTabberCollapsedStorageKey = 'yolomux.fileExplorer.tabberCollapsed.v1';
+const fileExplorerTabberExpandedStorageKey = 'yolomux.fileExplorer.tabberExpanded.v1';
 const fileExplorerTabberLookbackHoursStorageKey = 'yolomux.fileExplorer.tabberLookbackHours.v1';
 const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
@@ -331,9 +335,13 @@ const TERMINAL_THEMES = {
     brightWhite: '#ffffff',
   },
 };
+function yolomuxEditorSchemeLabel(mode) {
+  return `${t('app.documentTitle')} ${t(`pref.appearance.theme.${mode}`)}`;
+}
+
 const EDITOR_SCHEMES = {
   dark: {
-    id: 'dark', label: 'YOLOmux Dark', dark: true,
+    id: 'dark', get label() { return yolomuxEditorSchemeLabel('dark'); }, dark: true,
     bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(96, 165, 250, 0.38)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
     syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ffffff', emphasis: '#ffffff', invalid: '#ff6673'},
@@ -382,7 +390,7 @@ const EDITOR_SCHEMES = {
     diff: {addFg: '#116329', removeFg: '#82071e'},
   },
   'yolomux-light': {
-    id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
+    id: 'yolomux-light', get label() { return yolomuxEditorSchemeLabel('light'); }, dark: false,
     bg: '#ffffff', fg: '#000000', cursor: '#000000', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f7fb',
     gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
     syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#0451a5', number: '#098658', function: '#267f2e', type: '#008080', variable: '#5f3b00', tag: '#800000', heading: '#000000', headingBg: '#ffffff', link: '#0451a5', inlineCode: '#a31515', inlineCodeBg: '#f3f3f3', inlineCodeBorder: '#d4d4d4', atom: '#0000ff', property: '#5f3b00', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
@@ -487,13 +495,13 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.srt': 'text',
     '.vtt': 'text',
   }},
-  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Image format is recognized but not previewable in this browser', mimeByExtension: {
+  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
     '.tif': 'image/tiff',
     '.tiff': 'image/tiff',
     '.heic': 'image/heic',
     '.heif': 'image/heif',
   }},
-  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Document format is recognized but not safely previewable', mimeByExtension: {
+  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
     '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.ppt': 'application/vnd.ms-powerpoint',
@@ -501,7 +509,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.xls': 'application/vnd.ms-excel',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   }},
-  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Data format is recognized but needs an external viewer', mimeByExtension: {
+  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
     '.sqlite': 'application/vnd.sqlite3',
     '.sqlite3': 'application/vnd.sqlite3',
     '.db': 'application/vnd.sqlite3',
@@ -509,7 +517,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.arrow': 'application/vnd.apache.arrow.file',
     '.feather': 'application/vnd.apache.arrow.file',
   }},
-  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitle: 'Archive preview is not expanded in YOLOmux', mimeByExtension: {
+  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
     '.zip': 'application/zip',
     '.tar': 'application/x-tar',
     '.gz': 'application/gzip',
@@ -535,9 +543,6 @@ for (const renderer of PREVIEW_RENDERERS) {
     }
   }
 }
-const IMAGE_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'image')?.extensions || []);
-const PDF_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'pdf')?.extensions || []);
-const MERMAID_EXTENSIONS = new Set(PREVIEW_RENDERERS.find(renderer => renderer.id === 'mermaid')?.extensions || []);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
   '.md': 'markdown', '.markdown': 'markdown',
@@ -560,13 +565,13 @@ const openFiles = fileState;  // compatibility alias during the file-state migra
 const fileIdentityByPath = new Map();  // display path -> backend physical-file identity
 const openFilePathByIdentity = new Map();  // backend physical-file identity -> primary open display path
 const fileOpenPromisesByPath = new Map();  // display path -> in-flight text-editor open promise
-const fileExplorerDirectorySignatures = new Map();
-const fileExplorerKnownEntryNames = new Map();
+const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {signature, knownEntryNames}
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
-const fileExplorerRefreshIdleMs = 1500;
+const fileExplorerRefreshIdleMs = 1501;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
 const pendingFileEditorFocus = new Set();
@@ -575,9 +580,11 @@ const pendingPaneViewStateCaptures = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 const pendingFileEditorLineTargets = new Map();  // layout item -> line target to apply after async CodeMirror load
 const fileEditorDiffExpandOverrides = new Map();  // layout item -> per-editor diff context expansion
-let layoutUrlStateFromQuery = null;
-let layoutUrlStateApplied = false;
-let layoutUrlStateRefreshTimer = null;
+const layoutUrlState = {
+  pending: null,
+  applied: false,
+  refreshTimer: null,
+};
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = shareBootstrapFinderRoot() || null;
@@ -612,30 +619,80 @@ let preferencesResetConfirmVisible = false;
 const preferencesScrollRenderDeferMs = 200;
 let preferencesScrollActiveUntil = 0;
 let preferencesScrollFlushTimer = null;
+const PREFERENCE_SECTION_IDS = Object.freeze({
+  general: 'general',
+  appearance: 'appearance',
+  terminalEditor: 'terminal_editor',
+  notifications: 'notifications',
+  chat: 'chat',
+  fileExplorer: 'file_explorer',
+  uploads: 'uploads',
+  performance: 'performance',
+  github: 'github',
+  yoagent: 'yoagent',
+  share: 'share',
+  yolo: 'yolo',
+});
+const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
+  PREFERENCE_SECTION_IDS.general,
+  PREFERENCE_SECTION_IDS.appearance,
+  PREFERENCE_SECTION_IDS.performance,
+  PREFERENCE_SECTION_IDS.notifications,
+  PREFERENCE_SECTION_IDS.terminalEditor,
+  PREFERENCE_SECTION_IDS.fileExplorer,
+  PREFERENCE_SECTION_IDS.uploads,
+]);
+const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
+  General: PREFERENCE_SECTION_IDS.general,
+  Appearance: PREFERENCE_SECTION_IDS.appearance,
+  Performance: PREFERENCE_SECTION_IDS.performance,
+  Notifications: PREFERENCE_SECTION_IDS.notifications,
+  'Terminal / Editor': PREFERENCE_SECTION_IDS.terminalEditor,
+  'File Explorer': PREFERENCE_SECTION_IDS.fileExplorer,
+  Finder: PREFERENCE_SECTION_IDS.fileExplorer,
+  'Uploads/Downloads': PREFERENCE_SECTION_IDS.uploads,
+  GitHub: PREFERENCE_SECTION_IDS.github,
+  'YO!agent': PREFERENCE_SECTION_IDS.yoagent,
+  'YO!chat': PREFERENCE_SECTION_IDS.chat,
+  'YO!share': PREFERENCE_SECTION_IDS.share,
+  YOLO: PREFERENCE_SECTION_IDS.yolo,
+});
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 const changesFolderAutoCollapsed = new Set();
-// Tabber (Finder pane 3rd mode) COLLAPSED set, keyed by synthetic node path (s_<id>/w_<i>/r_<n>).
-// The Tabber defaults to fully expanded; collapsing a node adds it here (like the Differ's
-// changesFolderCollapsed). Persisted so the open/closed tree survives reloads. Threaded through the
-// shared row pipeline as options.collapsedSet.
+// Tabber session rows start expanded while each sub-window's directory branch starts collapsed.
+// Persist both explicit choices, so a refresh cannot undo a user's disclosure click.
 const fileExplorerTabberCollapsed = readStoredSet(fileExplorerTabberCollapsedStorageKey);
+const fileExplorerTabberExpanded = readStoredSet(fileExplorerTabberExpandedStorageKey);
 // Tabber activity ledger snapshot (GET /api/activity): {activity: {sessionKey|session:window: ActivityRecord}}.
 // Drives per-row recency timestamps + most-recent-first sort. Refreshed only while the Tabber is open.
 let tabberActivityPayload = {activity: {}, agents: []};
 let tabberActivityRefreshMs;
 let tabberLaunchWarmupStarted = false;
+const tabberActivityState = {
+  requestGeneration: 0,
+  appliedGeneration: 0,
+  loaded: false,
+  request: null,
+};
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
-let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
-let fileExplorerSessionFilesPayloadSignature = '';
-let fileExplorerSessionFilesLoading = false;
-const fileExplorerSessionFilesGuard = makeGenerationGuard();
-let fileExplorerExplicitSyncSession = shareBootstrapFinderSession();
+const fileExplorerSessionFilesState = {
+  payload: {session: '', files: [], repos: [], errors: []},
+  signature: '',
+  loading: false,
+  guard: makeGenerationGuard(),
+};
+// One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
+// auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
+// A Finder/Differ click changes `item` but preserves the terminal context it is inspecting.
+const explicitPaneFocusState = {
+  item: shareBootstrapFinderSession(),
+  tmuxSession: shareBootstrapFinderSession(),
+};
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
-const fileExplorerExpandedBySyncTarget = new Map();
+const fileExplorerSyncTargetRecords = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
-const fileExplorerSyncManualCollapsedByTarget = new Map();
 let fileExplorerSyncManualCollapsedPaths = new Set();
 let fileExplorerVisibleSyncSession = '';
 let fileExplorerVisibleSyncRoot = '';
@@ -648,38 +705,48 @@ let sessionFilesSortMode = 'newest';
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
-const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
+let fileExplorerIndexExcludePaths = new Set();
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
+const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
-let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
+// Legacy URL/share compatibility value while old clients are still in circulation. Live panels are
+// identified by one of the fixed triplet item IDs below; do not use this to render a panel.
 let fileExplorerMode = shareBootstrapFinderMode(readStoredFileExplorerMode());
-let commandPaletteNode = null;
+let sidePaneLayoutWasConstrained = false;
+const commandPaletteState = {
+  node: null,
+  query: '',
+  index: 0,
+  items: [],
+  // An empty peer pane can request that its next quick-open lands in that exact slot. The palette
+  // remains the one chooser; this is only its transient placement context, never a second opener.
+  targetSlot: '',
+};
 let keyboardShortcutsNode = null;
 let pendingGlobalShortcutChord = null;
 let pendingGlobalShortcutChordTimer = null;
 const globalShortcutChordTimeoutMs = 4000;
 let commandPaletteMode = 'command';
-let commandPaletteQuery = '';
-let commandPaletteIndex = 0;
-let commandPaletteItemsCache = [];
 const commandPaletteRecentKeys = new Map();
 let commandPaletteRecentSequence = 0;
-let fileQuickOpenRoot = '';
-let fileQuickOpenCandidates = [];
-let fileQuickOpenLoading = false;
-let fileQuickOpenError = '';
-let fileQuickOpenRequestId = 0;
-let fileQuickOpenDebounce = null;
-let fileQuickOpenAbortController = null;
+// Fill workspace is a temporary pane-layout view. Keep the complete pre-fill tree here so Restore
+// returns every tab, split, and placeholder exactly as the user left it.
+let filledWorkspaceLayout = null;
+const fileQuickOpenState = {
+  root: '',
+  candidates: [],
+  loading: false,
+  error: '',
+  requestId: 0,
+  debounce: null,
+  abortController: null,
+};
 let tabsMenuSearchText = '';
-// P0 menu-bar: how the Tabs ▾ navigator orders its list — 'default' (tmux/editors/other), 'attention'
-// (needs-* sessions first, the "Needs me" view), or 'name'. Persisted; set from View → Sort tab list.
-const tabsMenuSortModes = ['default', 'attention', 'name'];
-let tabsMenuSortMode = tabsMenuSortModes.includes(storageGet('yolomux.tabsMenuSort.v1')) ? storageGet('yolomux.tabsMenuSort.v1') : 'default';
 let fileExplorerShortcutRestoreSlots = null;
 let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
@@ -718,13 +785,12 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
-const promptAttentionClears = new Map();
-const attentionAcknowledgementTimers = new Map();
+const attentionAcknowledgementRecords = new Map();
+const attentionAcknowledgementRecordLimit = 1024;
 const documentTitleIdleThresholdMs = 120000;
 const tmuxSignalActivityWindowMs = documentTitleIdleThresholdMs;
 let documentTitleIdleSinceMs = null;
-const uploadResultsBySession = new Map();
-const uploadCleanupTimers = new Map();
+const uploadResultRecords = new Map();
 let uploadResultSequence = 0;
 const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
@@ -761,11 +827,13 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms');
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-let serverWatchRootsSignature = '';
-let serverWatchRootsInFlight = false;
-let serverWatchRootsSyncedAt = 0;
-let serverWatchRootsTimer = null;
-let serverWatchRootsPendingOptions = {};
+const serverWatchRootsState = {
+  signature: '',
+  inFlight: false,
+  syncedAt: 0,
+  timer: null,
+  pendingOptions: {},
+};
 let fileExplorerFilesystemWatchToken = '';
 let fileExplorerFilesystemLastFullAt = 0;
 const fileExplorerFilesystemKeyframeMs = 60001;
@@ -797,14 +865,31 @@ const layoutTreeKey = '__tree';
 const layoutTreeParamPrefix = 'tree:';
 
 const defaultSplitPercent = 50;
-const fileExplorerSplitPercent = 22;
+const sidePaneDefaultWidthPercent = 22;
+const sidePaneMaxWidthPercent = 100 / 3;
 const minNonFileExplorerSplitPercent = 30;
+// Phone layout is deliberately a touch-device policy: a resized desktop must preserve its layout.
+// 760px covers portrait phones and narrow iPad split view; 960x520 catches phone landscape without
+// collapsing a full-size tablet.
+const mobileSinglePaneMaxWidthPx = 760;
+const mobileSinglePaneLandscapeMaxWidthPx = 960;
+const mobileSinglePaneLandscapeMaxHeightPx = 520;
+const mobileSinglePaneTabLimit = 3;
+// This is a conservative touch breakpoint: narrow tablets use one column before a two-pane
+// layout becomes cramped, even though desktop users may manually create 300px panes.
+const narrowTouchSingleColumnMaxWidthPx = 680;
+const tabletDesktopLayoutMinWidthPx = 900;
 const defaultLayoutMode = 'split';
 const layoutModeValues = ['single', 'split', 'grid'];
 const legacyLayoutModeValues = [...layoutModeValues, 'wall'];
 const layoutBoundaryDropFraction = 0.08;
 const layoutBoundaryDropMinPx = 28;
 const layoutBoundaryDropMaxPx = 64;
+// Dockview keeps a small gutter between neighboring leaf groups. Directional tab actions compare
+// their rendered edges with this shared allowance instead of assuming touching DOM rectangles.
+const directionalPaneAdjacencyTolerancePx = 8;
+const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 300;
+const MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX = 220;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
@@ -814,18 +899,100 @@ function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 function yoagentTabLabel() { return t('brand.tab.agent'); }
+const chatItemId = '__chat__';
+function chatTabLabel() { return t('brand.tab.chat'); }
 // Legacy share/deeplink compatibility only. YO!info and YO!agent are separate tabs.
 let infoPanelSubTab = readStoredInfoSubTab();
-const fileExplorerItemId = '__files__';
+const finderItemId = '__finder__';
+const differItemId = '__differ__';
+const tabberItemId = '__tabber__';
+const fileExplorerItemIds = Object.freeze([finderItemId, differItemId, tabberItemId]);
+const fileSurfaceItems = fileExplorerItemIds;
+const paneRoleGeneric = 'generic';
+const paneRoleSide = 'side';
+const paneSideLeft = 'left';
+const paneSideRight = 'right';
+const paneSideValues = Object.freeze([paneSideLeft, paneSideRight]);
+const panePlacementGenericOnly = 'generic-only';
+const panePlacementSideAllowed = 'side-allowed';
+const panePlacementSideRequired = 'side-required';
+const paneRoleParamPrefix = '@side-';
+const genericPaneRoleDefinition = Object.freeze({
+  kind: paneRoleGeneric,
+  side: null,
+  controls: 'standard',
+  tabSizing: 'preference',
+  preserveWidth: false,
+  maxViewportFraction: 1,
+  outermost: false,
+});
+// A Side Pane is deliberately a specialization of the generic pane definition. Keep every shared
+// behavior inherited here; consumers ask for a role definition instead of restating side cases.
+const sidePaneRoleDefinition = Object.freeze({
+  ...genericPaneRoleDefinition,
+  kind: paneRoleSide,
+  controls: 'minimize-only',
+  tabSizing: 'intrinsic',
+  preserveWidth: true,
+  maxViewportFraction: 1 / 3,
+  outermost: true,
+});
+const paneRoleDefinitions = Object.freeze({
+  [paneRoleGeneric]: genericPaneRoleDefinition,
+  [paneRoleSide]: sidePaneRoleDefinition,
+});
+const legacyFileExplorerItemId = '__files__';
+// Compatibility for older helpers while their callers migrate. This is a live Finder identity,
+// never the legacy __files__ layout item.
+const fileExplorerItemId = finderItemId;
+const fileExplorerTripletRegistry = Object.freeze({
+  [finderItemId]: Object.freeze({view: 'finder', key: 'finder', icon: 'finder'}),
+  [differItemId]: Object.freeze({view: 'differ', key: 'differ', icon: 'changes'}),
+  [tabberItemId]: Object.freeze({view: 'tabber', key: 'tabber', icon: 'tab-meta'}),
+});
+function fileExplorerViewForItem(item) {
+  return fileExplorerTripletRegistry[item]?.view || '';
+}
+function fileExplorerItemForView(view) {
+  const normalized = String(view || '').toLowerCase();
+  if (normalized === 'files' || normalized === 'finder') return finderItemId;
+  if (normalized === 'diff' || normalized === 'differ' || normalized === 'changes') return differItemId;
+  if (normalized === 'tabber') return tabberItemId;
+  return '';
+}
+function isFileExplorerItem(item) {
+  return fileExplorerItemIds.includes(item);
+}
+const isFileSurfaceItem = isFileExplorerItem;
+function fileExplorerItemLabel(item) {
+  const view = fileExplorerViewForItem(item);
+  if (view === 'differ') return t('brand.tab.changes');
+  if (view === 'tabber') return t('tabber.title');
+  return fileExplorerLabel();
+}
 const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
+const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
+  {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
+  {itemId: searchHistoryItemId},
+  {itemId: infoItemId},
+  {itemId: yoagentItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.yoagent},
+  {itemId: debugPaneItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.performance},
+  {itemId: chatItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.chat},
+]);
+const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze([
+  ...FILE_MENU_PANEL_DEFINITIONS.map(item => item.preferenceSectionId).filter(Boolean),
+  PREFERENCE_SECTION_IDS.share,
+]);
 const emptyPaneParam = '__empty_pane__';
+const intentionalEmptyPaneParam = '__empty_pane_v2__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
 const imageViewerItemPrefix = 'image:';
+const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
 function urlFlagEnabled(name) {
   try {
@@ -833,6 +1000,82 @@ function urlFlagEnabled(name) {
   } catch (_) {
     return false;
   }
+}
+
+function browserUsesCoarsePointer() {
+  const media = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: coarse)') : null;
+  if (media?.matches === true) return true;
+  const navigatorValue = globalThis.navigator || {};
+  return Number(navigatorValue.maxTouchPoints || 0) > 0
+    && /Android|iPad|iPhone|iPod|Mobile/i.test(String(navigatorValue.userAgent || navigatorValue.platform || ''));
+}
+
+let browserCursorHoverObserved = false;
+
+function browserHasCursorHover(event = null) {
+  const pointerType = String(event?.pointerType || '');
+  if (pointerType === 'mouse' || pointerType === 'pen') {
+    // Some tablet browsers emit the real mouse/trackpad event before `any-hover` updates.
+    // Remembering that capability keeps the follow-on focus work on the same gesture consistent.
+    browserCursorHoverObserved = true;
+    return true;
+  }
+  if (pointerType === 'touch') return false;
+  const media = typeof window.matchMedia === 'function' ? window.matchMedia('(any-hover: hover)') : null;
+  if (media?.matches === true) return true;
+  if (browserCursorHoverObserved) return true;
+  // Keep desktop/fallback browsers functional when the media feature is unavailable. A touch-first
+  // browser with no hover-capable pointer must not leave a hover popup permanently open.
+  return !browserUsesCoarsePointer();
+}
+
+function autoFocusCanFollowCursor(event = null) {
+  return autoFocusEnabled && browserHasCursorHover(event);
+}
+
+function browserUsesTabletViewport() {
+  const navigatorValue = globalThis.navigator || {};
+  const userAgent = String(navigatorValue.userAgent || '');
+  const platform = String(navigatorValue.platform || '');
+  const touchPoints = Number(navigatorValue.maxTouchPoints || 0);
+  return /iPad|Tablet/i.test(userAgent)
+    || (/Macintosh|MacIntel/i.test(platform) && touchPoints > 1)
+    || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
+}
+
+function tabletUsesDesktopLayout(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
+  return width >= tabletDesktopLayoutMinWidthPx && width > height;
+}
+
+function fileExplorerUsesNormalTabMovement() {
+  return !sidePanesAvailable();
+}
+
+function phoneLikeMobileViewport(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer() || browserUsesTabletViewport()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
+  return width <= mobileSinglePaneMaxWidthPx
+    || (width <= mobileSinglePaneLandscapeMaxWidthPx && height <= mobileSinglePaneLandscapeMaxHeightPx);
+}
+
+function mobileSinglePaneMode(viewport = nativeViewport()) {
+  return phoneLikeMobileViewport(viewport);
+}
+
+function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
+  if (!browserUsesCoarsePointer()) return false;
+  const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  return phoneLikeMobileViewport(viewport)
+    || (browserUsesTabletViewport() && !tabletUsesDesktopLayout(viewport))
+    || width <= narrowTouchSingleColumnMaxWidthPx;
+}
+
+function narrowSingleColumnMode(viewport = nativeViewport()) {
+  return narrowTouchSingleColumnViewport(viewport);
 }
 const jsDebugCollectionEnabled = true;
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
@@ -843,6 +1086,7 @@ let jsDebugEventSeq = 0;
 let jsDebugEvents = [];
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
+let jsDebugRenderForce = false;
 const clientPerfCounterLimit = 80;
 const clientPerfLongTaskSampleLimit = 40;
 const clientPerfCounters = new Map();
@@ -957,13 +1201,23 @@ function fileEditorCopyItemPath(item) {
   return path.startsWith('/') ? path : null;
 }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
-function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank}) {
-  const matchPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
-  return {
+const virtualPanelTabDefaults = Object.freeze({
+  aliases: [], sortRank: 0, detail: () => '', rowHtml: (item, options) => paneInfoTabHtml(item, options), canPopout: false, popoutRenderer: null, openPopout: null, renderAttached: null,
+  cleanup: null, relocalize: null, focusSearch: null, icon: 'document', minWidth: () => minSplitPaneWidthPx(), prunePriority: () => 0});
+function virtualPanelTabType(spec) {
+  const prefixes = Array.isArray(spec.prefixes) && spec.prefixes.length ? spec.prefixes : [spec.prefix].filter(Boolean), aliases = spec.aliases || (prefixes.length ? [] : [spec.key, ...(spec.id ? [spec.id] : [])]), label = spec.label;
+  return {...virtualPanelTabDefaults, ...spec, aliases, prefixes,
+    match: spec.match || (spec.id ? item => item === spec.id : item => typeof item === 'string' && prefixes.some(prefix => item.startsWith(prefix))), shortLabel: spec.shortLabel || label,
+    terminalTitle: spec.terminalTitle || (() => t('tab.unavailableFor', {name: label()})), param: spec.param || (() => spec.key),
+    popoutDisabledReason: spec.popoutDisabledReason || (() => t('pane.popout.interactiveDisabled', {name: label()})), className: spec.className || (() => spec.key)};
+}
+function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
+  const itemPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
+  return virtualPanelTabType({
     key,
     prefix,
-    prefixes: matchPrefixes,
-    match: item => typeof item === 'string' && matchPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
+    prefixes: itemPrefixes,
+    match: item => typeof item === 'string' && itemPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
     label: item => basenameOf(fileItemPath(item)),
     shortLabel,
     terminalTitle,
@@ -972,25 +1226,26 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     detail: item => compactHomePath(fileItemPath(item)),
     rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
     createPanel: item => createFileEditorPanel(item),
+    relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
       const path = fileItemPath(item);
       return Boolean(path && editorPreviewModeAvailable(path, openFiles.get(path)));
     },
-    popoutDisabledReason: item => fileItemPath(item)
-      ? 'file editor popout needs a preview-capable file'
-      : 'file editor popout needs a file path',
+    popoutDisabledReason: item => t(fileItemPath(item)
+      ? 'pane.popout.filePreviewRequired'
+      : 'pane.popout.filePathRequired'),
     openPopout: item => {
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
     },
+    focusSearch,
     className,
-    icon: 'document',
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
     prunePriority: () => 1,
-  };
+  });
 }
 const TAB_TYPES = [
-  {
+  virtualPanelTabType({
     // YO!info and YO!agent are independent virtual tabs. Legacy yoagent/yosup aliases
     // resolve to the standalone YO!agent item below.
     key: 'info',
@@ -998,35 +1253,32 @@ const TAB_TYPES = [
     aliases: ['info', 'info2', 'yo-info2', 'yoinfo2', infoItemId, '__info2__'],
     match: item => item === infoItemId || item === '__info2__',
     label: () => infoTabLabel(),
-    shortLabel: () => infoTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
-    param: () => 'info',
     detail: () => t('menu.file.info.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     canPopout: true,
     popoutRenderer: item => panePopoutPanelSnapshot(item),
     renderAttached: () => {
       renderInfoPanel();
     },
+    relocalize: (_item, panel) => {
+      renderInfoPanel({force: true});
+      relocalizeInfoPanelChrome(panel);
+    },
+    focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-info-search]', {panelSelector: '.info-tree-panel', select: true}),
     className: () => 'info',
     icon: 'branch-info',
+    panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'yoagent',
     id: yoagentItemId,
     aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
     match: item => item === yoagentItemId || item === legacyYosupItemId,
     label: () => yoagentTabLabel(),
-    shortLabel: () => yoagentTabLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: yoagentTabLabel()}),
     sortRank: 0.1,
-    param: () => 'yoagent',
     detail: () => t('menu.file.yoagent.detail'),
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createYoagentPanel(),
     renderAttached: () => {
       renderYoagentPanel({preserveDraft: true, scrollBottom: true});
@@ -1035,80 +1287,130 @@ const TAB_TYPES = [
       loadYoagentJobs({silent: true, scrollBottom: true});
       prewarmYoagent({scrollBottom: true});
     },
+    relocalize: (_item, panel, options = {}) => {
+      renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
+      relocalizeYoagentPanelChrome(panel);
+    },
     className: () => 'yoagent',
     icon: 'yoagent',
-    popoutDisabledReason: 'interactive YO!agent popout is disabled in phase 1',
+    panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
-    key: 'files',
-    id: fileExplorerItemId,
-    aliases: ['files', fileExplorerItemId],
-    match: item => item === fileExplorerItemId,
-    label: () => fileExplorerLabel(),
-    shortLabel: () => fileExplorerLabel(),
-    terminalTitle: () => t('tab.unavailableFor', {name: fileExplorerLabel()}),
+  }),
+  virtualPanelTabType({
+    key: 'chat',
+    id: chatItemId,
+    aliases: ['chat', 'yochat', 'yo!chat', 'yo-chat', chatItemId],
+    label: () => chatTabLabel(),
+    sortRank: 0.2,
+    detail: () => t('menu.file.chat.detail'),
+    createPanel: () => createChatPanel(),
+    renderAttached: () => mountChatPanel(),
+    cleanup: () => clearChatLifecycle({destroy: true, keepalive: true}),
+    relocalize: (_item, panel) => relocalizeChatPanel(panel),
+    focusSearch: (_item, panel) => openChatSearch(panel),
+    className: () => 'chat',
+    icon: 'chat',
+    panePlacement: panePlacementSideAllowed,
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'chat-media',
+    prefix: chatMediaItemPrefix,
+    label: item => chatMediaLabel(chatMediaUrlForItem(item)),
+    shortLabel: () => t('popover.kind.image'),
+    sortRank: 0.21,
+    param: item => item,
+    detail: item => chatMediaUrlForItem(item),
+    createPanel: item => createChatMediaPanel(item),
+    relocalize: (item, panel) => relocalizeChatMediaPanel(panel, item),
+    className: () => 'chat-media',
+    icon: 'image',
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'finder',
+    id: finderItemId,
+    aliases: [legacyFileExplorerItemId, 'files', 'finder', finderItemId],
+    label: () => fileExplorerItemLabel(finderItemId),
     sortRank: 0.5,
-    param: () => 'files',
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
     rowHtml: (item, options) => fileExplorerPaneTabHtml(item, options),
-    createPanel: () => createFileExplorerPanel(),
-    className: () => 'file-explorer',
+    createPanel: item => createFileExplorerPanel(item),
+    relocalize: () => relocalizeFileExplorerPanels(),
+    className: () => 'file-explorer file-explorer-finder',
     icon: 'finder',
-    popoutDisabledReason: 'interactive Finder/Tabber popout is disabled in phase 1',
+    panePlacement: panePlacementSideRequired,
     minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
+    key: 'differ',
+    id: differItemId,
+    aliases: ['changes', '__changes__', 'diff', 'differ', differItemId],
+    label: () => fileExplorerItemLabel(differItemId),
+    sortRank: 0.51,
+    detail: () => t('brand.tab.changes'),
+    createPanel: item => createFileExplorerPanel(item),
+    relocalize: () => relocalizeFileExplorerPanels(),
+    className: () => 'file-explorer file-explorer-differ',
+    icon: 'changes',
+    panePlacement: panePlacementSideRequired,
+    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'tabber',
+    id: tabberItemId,
+    aliases: ['tabber', tabberItemId],
+    label: () => fileExplorerItemLabel(tabberItemId),
+    sortRank: 0.52,
+    detail: () => t('tabber.description'),
+    createPanel: item => createFileExplorerPanel(item),
+    relocalize: () => relocalizeFileExplorerPanels(),
+    className: () => 'file-explorer file-explorer-tabber',
+    icon: 'tab-meta',
+    panePlacement: panePlacementSideRequired,
+    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
     key: 'search-history',
     id: searchHistoryItemId,
     aliases: ['search', 'history', 'run-history', 'search-history', searchHistoryItemId],
-    match: item => item === searchHistoryItemId,
     label: () => searchHistoryTabLabel(),
-    shortLabel: () => t('tab.searchHistory.short'),
-    terminalTitle: () => t('tab.unavailableFor', {name: searchHistoryTabLabel()}),
+    shortLabel: () => t('common.search'),
     sortRank: 0.6,
-    param: () => 'search-history',
     detail: () => t('searchHistory.detail'),
     rowHtml: (item, options) => searchHistoryPaneTabHtml(item, options),
     createPanel: () => createSearchHistoryPanel(),
     renderAttached: () => loadSearchHistoryPanelData({silent: true}),
+    relocalize: (_item, panel) => renderSearchHistoryPanel(panel),
+    focusSearch: (_item, panel) => focusPanelSearchInput(panel, '[data-search-history-query]', {panelSelector: '.search-history-panel', select: true}),
     className: () => 'search-history-item',
     icon: 'document',
-    popoutDisabledReason: 'interactive Search & Runs popout is disabled in phase 1',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'preferences',
     id: prefsItemId,
     aliases: ['prefs', 'preferences', prefsItemId],
-    match: item => item === prefsItemId,
-    label: () => t('tab.preferences'),
+    label: () => t('common.preferences'),
     shortLabel: () => t('tab.preferences.short'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.preferences')}),
     sortRank: 0.65,
     param: () => 'prefs',
     detail: () => compactHomePath(settingsConfigPath()),
     rowHtml: (item, options) => preferencesPaneTabHtml(item, options),
     createPanel: () => createPreferencesPanel(),
-    popoutDisabledReason: 'interactive Preferences popout is disabled in phase 1',
+    relocalize: () => renderPreferencesPanels({force: true}),
+    focusSearch: (_item, panel) => focusPreferencesSearch(panel, {select: true}),
     className: () => 'preferences-item',
     icon: 'gear',
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
-  {
+  }),
+  virtualPanelTabType({
     key: 'debug',
     id: debugPaneItemId,
     aliases: ['debug', 'js-debug', 'jsdebug', debugPaneItemId],
-    match: item => item === debugPaneItemId,
     label: () => t('tab.debug'),
     shortLabel: () => t('tab.debug.short'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.debug')}),
     sortRank: 0.7,
-    param: () => 'debug',
     detail: () => t('menu.file.debug.detail'),
     rowHtml: (item, options) => debugPaneTabHtml(item, options),
     createPanel: () => createDebugPanel(),
@@ -1118,11 +1420,15 @@ const TAB_TYPES = [
       enableDebugMode();
       renderDebugPanels();
     },
+    relocalize: (_item, panel) => {
+      renderDebugPanels({force: true});
+      relocalizeDebugPanelChrome(panel);
+    },
     className: () => 'debug-item',
     icon: 'tab-meta',
+    panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
-    prunePriority: () => 0,
-  },
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1135,13 +1441,30 @@ const TAB_TYPES = [
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
     prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix],
-    shortLabel: () => t('editor.mode.edit'),
+    shortLabel: () => t('common.edit'),
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.text')}),
     sortRank: 0.75,
     className: () => 'file-editor-item',
+    focusSearch: (_item, panel) => focusFileEditorSearch(panel),
   }),
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
+function paneRoleDefinition(kind = paneRoleGeneric, side = null) {
+  const normalizedKind = kind === paneRoleSide && paneSideValues.includes(side) ? paneRoleSide : paneRoleGeneric;
+  const definition = paneRoleDefinitions[normalizedKind] || genericPaneRoleDefinition;
+  return normalizedKind === paneRoleSide ? Object.freeze({...definition, side}) : definition;
+}
+function panePlacementForItem(item) {
+  return tabTypeForItem(item)?.panePlacement || panePlacementGenericOnly;
+}
+function paneRoleAllowsItem(role, item, options = {}) {
+  if (!isLayoutItem(item) && !(options.allowCandidate === true && tabTypeForItem(item))) return false;
+  const definition = paneRoleDefinition(role?.kind || role?.paneRole, role?.side);
+  const placement = panePlacementForItem(item);
+  if (definition.kind === paneRoleSide) return placement !== panePlacementGenericOnly;
+  if (placement !== panePlacementSideRequired) return true;
+  return options.allowRequiredInGeneric === true;
+}
 function tabTypeForParam(value) {
   const text = String(value || '');
   return TAB_TYPES.find(type => {
@@ -1151,8 +1474,9 @@ function tabTypeForParam(value) {
   }) || null;
 }
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
-function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
+function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
+function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
@@ -1237,6 +1561,8 @@ function platformCloseButtonClass(baseClass) {
   return `${baseClass} ${platformWindowControlClass('close')}`;
 }
 
+// Test/bootstrap compatibility only. File surfaces no longer render this bespoke close class;
+// their pane headers use the shared minimize/expand controls.
 function fileExplorerPanelCloseClass() {
   return platformCloseButtonClass('file-explorer-panel-close');
 }
@@ -1261,74 +1587,115 @@ function applyFileExplorerStaticLabels() {
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
+const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  return [infoItemId, yoagentItemId, fileExplorerItemId, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  if (!shareViewMode) items.splice(2, 0, chatItemId);
+  return [...items, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
-let transcriptMeta = {};
-let transcriptMetaLoading = false;
-let transcriptMetaLoaded = false;
-let transcriptMetaLoadError = '';
-let transcriptMetaRefreshPromise = null;
-let infoPanelRenderPending = false;
-let infoPanelLastRenderSignature = '';
-let infoPanelLastRenderHtml = '';
-let clientEventsSource = null;
-let clientEventsConnected = false;
-const clientPushEventQueue = new Map();
-let clientPushEventFrame = 0;
-let reconnectResyncTimer = null;
+const transcriptMetadataState = {
+  payload: {},
+  loading: false,
+  loaded: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+function setTranscriptMetadataPayload(payload, options = {}) {
+  if (options.invalidateRequest !== false) transcriptMetadataState.guard.invalidate();
+  transcriptMetadataState.payload = payload && typeof payload === 'object' ? payload : {};
+  return transcriptMetadataState.payload;
+}
+const infoPanelRenderCache = {signature: '', html: ''};
+const clientEventTransportState = {
+  source: null,
+  connected: false,
+  enabled: false,
+  demand: null,
+  demandSignature: '',
+  demandTimer: null,
+  queue: new Map(),
+  frame: 0,
+  resyncTimer: null,
+};
 const reconnectResyncDebounceMs = 751;
 let serverVersionReloadHandled = '';
-let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
-let activitySummaryRefreshing = false;
-let activitySummaryLastRefreshTs = 0;
-const activitySummaryGuard = makeGenerationGuard();
-let backgroundOwnerStatusPayload = null;
-let backgroundOwnerStatusLoading = false;
-let backgroundOwnerStatusLoaded = false;
-let backgroundOwnerStatusError = '';
-let backgroundOwnerStatusRefreshPromise = null;
-let yoagentStartupActivitySummaryPayload = null;
-let yoagentMessages = [];
-let yoagentPendingWaits = [];
-let yoagentJobs = [];
-let yoagentJobsLoading = false;
-let yoagentConversationLoaded = false;
-let yoagentConversationLoading = false;
-let yoagentConversationPath = '';
-let yoagentConversationDisplayPath = '';
-let yoagentBusy = false;
-let yoagentPrewarming = false;
-let yoagentPrewarmStarted = false;
-let yoagentStartupLlmRequested = false;
-let yoagentStreamingMessages = new Map();
-let yoagentActiveChatRequest = null;
-let yoagentChatQueue = [];
-let yoagentChatQueueSerial = 0;
-let yoagentError = '';
-let yoagentDraft = '';
-let yoagentHistoryCursor = null;
-let yoagentHistoryDraft = '';
-let yoagentNotice = null;
+const activitySummaryState = {
+  payload: {sessions: {}, global: {lines: []}, session_order: []},
+  refreshing: false,
+  guard: makeGenerationGuard(),
+};
+const backgroundOwnerStatusState = {
+  payload: null,
+  loading: false,
+  error: '',
+  request: null,
+  updatedAt: 0,
+  guard: makeGenerationGuard(),
+};
+const yoagentStartupState = {
+  activityPayload: null,
+  prewarming: false,
+  prewarmStarted: false,
+  llmRequested: false,
+  infoShown: false,
+  infoVisible: false,
+};
+const yoagentConversationState = {
+  messages: [],
+  pendingWaits: [],
+  loaded: false,
+  loading: false,
+  path: '',
+  displayPath: '',
+  streamingMessages: new Map(),
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentJobsState = {
+  items: [],
+  loading: false,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const yoagentChatState = {
+  busy: false,
+  activeRequest: null,
+  queue: [],
+  queueSerial: 0,
+  error: null,
+  draft: '',
+  historyCursor: null,
+  historyDraft: '',
+  notice: null,
+};
 let yoagentScrollbackLocked = false;
-let yoagentStartupInfoShown = false;
-let yoagentStartupInfoVisible = false;
-let searchHistoryQuery = '';
-let searchHistoryPayload = {query: '', results: []};
-let searchHistoryLoading = false;
-let searchHistoryError = '';
-let runHistoryPayload = {runs: []};
-let runHistoryLoading = false;
-let runHistoryError = '';
-let notificationsEnabled = false;
-const sessionStateKeys = new Map();
-const notificationLastSent = new Map();
-const attentionAlertTimers = new Map();
-const metadataBadgePulseUntil = new Map();
+const searchHistoryState = {
+  query: '',
+  payload: {query: '', results: []},
+  loading: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const runHistoryState = {
+  payload: {runs: []},
+  loading: false,
+  error: null,
+  request: null,
+  guard: makeGenerationGuard(),
+};
+const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
+const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
+let notificationDelivery = {...notificationDeliveryDefaults};
+const sessionStatusRecords = new Map();
+const watchedPrNotificationLastSent = new Map();
+const toastRecords = new Map();
+const browserNotificationsByTarget = new Map();
 const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
@@ -1342,6 +1709,33 @@ function setLimitedMapEntry(map, key, value, limit) {
   }
 }
 
+function sessionStatusRecord(session, create = false) {
+  const key = String(session || '').trim();
+  if (!key) return null;
+  let record = sessionStatusRecords.get(key) || null;
+  if (!record && create) {
+    record = {
+      state: null,
+      notificationLastSent: new Map(),
+      workingAgentNotificationTones: new Map(),
+      workingAgentTransitionNotificationPending: new Map(),
+      metadataBadgePulseUntil: new Map(),
+    };
+    sessionStatusRecords.set(key, record);
+  }
+  return record;
+}
+
+function sessionNotificationLastSentAt(session, key) {
+  return Number(sessionStatusRecord(session)?.notificationLastSent.get(key) || 0);
+}
+
+function recordSessionNotificationSent(session, key, sentAt) {
+  const record = sessionStatusRecord(session, true);
+  if (!record) return;
+  setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);
+}
+
 let shareInfoBranchRowsOverride = null;
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
@@ -1350,9 +1744,17 @@ let focusedPanelItem = null;
 let lastActivePaneItem = null;
 let lastActiveNonFileExplorerPaneItem = null;
 let lastFocusedTmuxSession = null;
-let dragSession = null;
-let dragSourceSlot = null;
-let dragPaneSlot = null;
+const dragState = {
+  item: null,
+  sourceSlot: null,
+  paneSlot: null,
+  filePayload: null,
+  customPreview: null,
+  customPreviewOffset: {x: 0, y: 0},
+  nativePreview: null,
+  transparentImage: null,
+  tabRectCache: null,
+};
 // While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
@@ -1361,18 +1763,17 @@ let pendingPreferencesRender = false;
 // panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
-let dragFilePayloadState = null;
-let customDragPreview = null;
-let customDragPreviewOffset = {x: 0, y: 0};
-let nativeDragImagePreview = null;
-let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
-let dragTabRectCache = null;
 // one global editor navigation history (Popular IDE-style back/forward through visited files).
 // stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
 // back/forward re-open is in flight (so it doesn't push a new entry).
 const editorNav = {stack: [], index: -1, navigating: false};
+// One interaction record owns hover detail, context actions, and touch long-press for every tab
+// surface.  Keeping these together prevents a mobile action gesture from drifting into a tab click.
+let tabInteractionController = null;
+const tabTouchLongPressDelayMs = 500;
+const tabTouchLongPressMoveThresholdPx = 10;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
@@ -1401,6 +1802,8 @@ let authRedirectStarted = false;
 let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
-let fileExplorerSyncPathInFlight = '';
-let fileExplorerLastAppliedSyncPlanKey = '';
-let fileExplorerSyncGeneration = 0;
+const fileExplorerSyncState = {
+  inFlightSignature: '',
+  appliedPlanKey: '',
+  generation: 0,
+};

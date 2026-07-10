@@ -42,10 +42,10 @@ function updateEditorModeControl(control, path, state, item = null) {
 }
 
 function editorModeLabel(mode) {
-  if (mode === 'diff') return t('editor.diff');
-  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'diff') return t('common.diff');
+  if (mode === 'preview') return t('common.preview');
   if (mode === 'split') return t('editor.mode.split');
-  return t('editor.mode.edit');
+  return t('common.edit');
 }
 
 function editorModeIconClass(mode) {
@@ -99,7 +99,7 @@ function editorPreviewThemeStateLabel(state = editorPreviewThemeState()) {
 
 function editorPreviewThemeShortLabel(state = editorPreviewThemeState()) {
   if (state === 'vanilla') return t('editor.previewVanillaShort');
-  return state === 'light' ? t('editor.previewBrightShort') : t('editor.previewDarkShort');
+  return state === 'light' ? t('editor.previewBrightShort') : t('common.theme.dark');
 }
 
 function editorSchemeCssVariables(scheme = activeEditorScheme()) {
@@ -278,15 +278,198 @@ function updateEditorWrapButton(button) {
   setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
+function previewFindPanelForHost(host = null) {
+  return host?.querySelector?.('.file-editor-preview-find-panel') || null;
+}
+
+function fileEditorFindOverviewForHost(host = null) {
+  return host?.querySelector?.('.file-editor-find-overview') || null;
+}
+
+function clearFileEditorFindOverview(host = null) {
+  const overview = fileEditorFindOverviewForHost(host);
+  if (!overview) return;
+  overview.replaceChildren();
+  overview.hidden = true;
+}
+
+function updateFileEditorFindOverview(host = null, positions = [], activeIndex = -1) {
+  const overview = fileEditorFindOverviewForHost(host);
+  if (!overview || !positions.length) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  positions.forEach((position, index) => {
+    const tick = document.createElement('span');
+    tick.className = 'file-editor-find-overview-tick';
+    tick.classList.toggle(CLS.active, index === activeIndex);
+    tick.style.top = `${Math.max(0, Math.min(100, Number(position) || 0))}%`;
+    fragment.append(tick);
+  });
+  overview.replaceChildren(fragment);
+  overview.hidden = false;
+}
+
+function previewFindStateForHost(host = null, create = false) {
+  if (!host) return null;
+  if (!host._previewFindState && create) host._previewFindState = {query: '', matches: [], index: -1};
+  return host._previewFindState || null;
+}
+
+function previewFindClearMatches(host = null) {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  if (!preview) return;
+  for (const match of preview.querySelectorAll('.file-editor-preview-find-match')) {
+    const parent = match.parentNode;
+    match.replaceWith(document.createTextNode(match.textContent || ''));
+    parent?.normalize?.();
+  }
+  clearFileEditorFindOverview(host);
+}
+
+function previewFindUpdateOverview(host = null) {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  const state = previewFindStateForHost(host);
+  if (!preview || !state?.matches.length) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const previewRect = preview.getBoundingClientRect();
+  const scrollHeight = Math.max(1, Number(preview.scrollHeight || 0));
+  const positions = state.matches.map(match => {
+    const offset = preview.scrollTop + match.getBoundingClientRect().top - previewRect.top;
+    return (offset / scrollHeight) * 100;
+  });
+  updateFileEditorFindOverview(host, positions, state.index);
+}
+
+function refreshCodeMirrorFindOverview(host = null) {
+  if (!host || fileEditorPanelMode(host) === 'preview') return;
+  const view = host._cmView;
+  const panel = codeMirrorSearchPanelForHost(host);
+  const query = panel?.querySelector?.('input[name="search"]')?.value || '';
+  const text = view?.state?.doc?.toString?.() || '';
+  const matches = codeMirrorSearchMatches(text, query, codeMirrorSearchCheckboxState(panel));
+  if (!matches.length || !view?.state?.doc) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const totalLines = Math.max(1, Number(view.state.doc.lines || 1));
+  const positions = matches.map(match => ((view.state.doc.lineAt(match.from).number - 1) / totalLines) * 100);
+  const summary = codeMirrorSearchMatchSummary(text, query, view.state.selection.main || {}, codeMirrorSearchCheckboxState(panel));
+  updateFileEditorFindOverview(host, positions, summary.current - 1);
+}
+
+function previewFindUpdatePanel(host = null) {
+  const panel = previewFindPanelForHost(host);
+  const state = previewFindStateForHost(host);
+  if (!panel || !state) return;
+  const count = state.matches.length;
+  const current = count && state.index >= 0 ? state.index + 1 : 0;
+  const countNode = panel.querySelector('.file-editor-preview-find-count');
+  if (countNode) countNode.textContent = state.query ? `${current}/${count}` : '';
+  panel.querySelectorAll('[data-preview-find-move]').forEach(button => { button.disabled = count === 0; });
+}
+
+function previewFindSelectMatch(host = null, index = 0) {
+  const state = previewFindStateForHost(host);
+  if (!state?.matches.length) return false;
+  state.index = (index + state.matches.length) % state.matches.length;
+  state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
+  state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  previewFindUpdateOverview(host);
+  previewFindUpdatePanel(host);
+  return true;
+}
+
+function previewFindApplyQuery(host = null, query = '') {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  const state = previewFindStateForHost(host, true);
+  if (!preview || !state) return false;
+  previewFindClearMatches(host);
+  state.query = String(query || '');
+  state.matches = [];
+  state.index = -1;
+  const needle = state.query.toLocaleLowerCase();
+  if (needle) {
+    const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const folded = text.toLocaleLowerCase();
+      let from = 0;
+      let index = folded.indexOf(needle, from);
+      if (index < 0) continue;
+      const fragment = document.createDocumentFragment();
+      while (index >= 0) {
+        fragment.append(document.createTextNode(text.slice(from, index)));
+        const match = document.createElement('mark');
+        match.className = 'file-editor-preview-find-match';
+        match.textContent = text.slice(index, index + needle.length);
+        fragment.append(match);
+        state.matches.push(match);
+        from = index + needle.length;
+        index = folded.indexOf(needle, from);
+      }
+      fragment.append(document.createTextNode(text.slice(from)));
+      node.replaceWith(fragment);
+    }
+  }
+  if (state.matches.length) previewFindSelectMatch(host, 0);
+  else previewFindUpdatePanel(host);
+  return true;
+}
+
+function previewFindOpenForHost(host = null) {
+  return previewFindPanelForHost(host)?.hidden === false;
+}
+
+function openPreviewFind(host = null) {
+  const panel = previewFindPanelForHost(host);
+  if (!panel) return false;
+  panel.hidden = false;
+  const input = panel.querySelector('input');
+  previewFindApplyQuery(host, input?.value || '');
+  input?.focus();
+  input?.select();
+  return true;
+}
+
+function closePreviewFind(host = null) {
+  const panel = previewFindPanelForHost(host);
+  if (!panel) return false;
+  previewFindClearMatches(host);
+  const state = previewFindStateForHost(host, true);
+  state.matches = [];
+  state.index = -1;
+  panel.hidden = true;
+  previewFindUpdatePanel(host);
+  return true;
+}
+
+function refreshPreviewFind(host = null) {
+  if (!previewFindOpenForHost(host)) return;
+  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '');
+}
+
 function updateEditorFindButton(button, state, host = null) {
   if (!button) return;
   const visible = state?.kind === 'text';
   button.hidden = !visible;
   button.disabled = false;
-  const label = `Find in file (${appShortcutText('F')})`;
+  const label = t('editor.findInFile', {shortcut: appShortcutText('F')});
   button.title = label;
   button.setAttribute('aria-label', label);
-  button.setAttribute('aria-pressed', codeMirrorSearchPanelOpenForHost(host) ? 'true' : 'false');
+  const previewMode = fileEditorPanelMode(host) === 'preview';
+  button.setAttribute('aria-pressed', previewMode ? String(previewFindOpenForHost(host)) : String(codeMirrorSearchPanelOpenForHost(host)));
+  if (!previewMode) refreshCodeMirrorFindOverview(host);
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
@@ -326,9 +509,9 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const visible = fileEditorGitActionControlsVisible(path, state, item);
   button.hidden = !visible;
   button.disabled = !visible || (!active && loading);
-  const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
+  const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('common.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
-  button.textContent = 'Differ';
+  button.textContent = t('brand.tab.changes');
 }
 
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
@@ -373,13 +556,25 @@ async function closeEditorFind(host = null) {
     syncCodeMirrorFindButtonForView(view);
     return true;
   } catch (error) {
-    setFileEditorPanelStatus(host, `Find unavailable: ${error}`, 'error');
+    setFileEditorPanelStatus(host, t('editor.findUnavailable', {error}), 'error');
   }
   return false;
 }
 
 async function toggleEditorFind(host = null) {
+  if (fileEditorPanelMode(host) === 'preview') return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);
   return codeMirrorSearchPanelOpenForHost(host) ? closeEditorFind(host) : openEditorFind(host);
+}
+
+async function openEditorFindShortcut(host = null) {
+  if (fileEditorPanelMode(host) === 'preview') return openPreviewFind(host);
+  return openEditorFind(host);
+}
+
+async function focusFileEditorSearch(panel = null) {
+  const opened = await openEditorFindShortcut(panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(panel)), panel);
+  return opened;
 }
 
 function applyEditorWrapPreference() {
@@ -729,7 +924,7 @@ function applyCssSettings() {
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
-  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 180)}px`);
+  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 172)}px`);
   // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
   // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
@@ -747,7 +942,17 @@ function applyCssSettings() {
   const statusPulsePeriodMs = Math.max(1, agentStatusPulsePeriodMs);
   root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
   root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
-  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 250))));
+  // Quantize the opacity pulse into ~125ms steps (steps(N) timing): step size = period / N with
+  // N = round(period / 125). 125ms (~8 opacity updates/sec at the 1.55s default) was chosen over:
+  //   - 250ms (the old value): ~4/sec read as a perceptible staircase on the 0.16->1 ramp;
+  //   - 50ms: ~20/sec is near-continuous but pays close to full 60fps repaint cost on EVERY status
+  //     ball (per-window, tabs, YO!info, topbar) -- the stepping exists to avoid exactly that;
+  //   - 500ms: ~3 samples per cycle looks like a strobe, not a breathing pulse.
+  // 125ms is the smoothness/cost midpoint: visibly smoother than 250ms yet still far fewer repaints
+  // than a per-frame animation. We pin the STEP size (not a fixed step count) so repaint rate and
+  // perceived smoothness stay ~constant across the whole 250-10000ms period preference; a fixed
+  // count would over-repaint short periods and look chunky on long ones.
+  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 125))));
   if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
@@ -845,10 +1050,15 @@ function refreshActiveTerminalCursor() {
   }
 }
 
-function refreshMetaButtonTitle() {
+function refreshMetaButtonChrome() {
   if (!refreshMeta) return;
+  const loading = transcriptMetadataState.loading === true;
   const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.title = t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
+  refreshMeta.textContent = t('common.refresh');
+  refreshMeta.title = loading
+    ? t('info.loadingRepo')
+    : t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
+  refreshMeta.setAttribute('aria-label', loading ? t('info.loadingRepo') : t('meta.refreshAria'));
 }
 
 function applySettingsPayload(payload, options = {}) {
@@ -857,6 +1067,7 @@ function applySettingsPayload(payload, options = {}) {
   if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
+  const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
   clientSettingsPayload = payload;
   clientSettingsMetadataDeferred = payload.deferred_metadata === true;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
@@ -881,6 +1092,7 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
+  reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
   shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
   shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
@@ -912,6 +1124,12 @@ function applySettingsPayload(payload, options = {}) {
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
+  if (previousAgentStatusPulsePeriodMs !== agentStatusPulsePeriodMs) {
+    // Retiming an existing stepped CSS animation is browser-dependent. Reuse the status owner to
+    // clear phase state and restart only these animations after the new duration is on :root.
+    if (typeof restartAgentWindowActivityPulseAnimations === 'function') restartAgentWindowActivityPulseAnimations();
+    else if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync();
+  }
   if (typeof updateEditorPreviewFontControls === 'function') updateEditorPreviewFontControls();
   if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
   applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
@@ -920,14 +1138,13 @@ function applySettingsPayload(payload, options = {}) {
   applyTerminalRuntimeSettings();
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
-  refreshMetaButtonTitle();
+  refreshMetaButtonChrome();
   renderPreferencesPanels();
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
   if (previousDateTimeHourCycle !== dateTimeHourCycle) {
-    if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-    if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
+    rerenderDateTimeFormatSurfaces();
   }
   if (previousEditorSchemeId !== activeEditorScheme().id || previousCursorColor !== fileEditorCursorColor) {
     // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
@@ -963,14 +1180,16 @@ function scheduleDeferredSettingsMetadataRefresh() {
 
 async function refreshSettings(options = {}) {
   try {
-    const response = await apiFetch('/api/settings', {cache: 'no-store'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/settings', {cache: 'no-store'});
     const changed = applySettingsPayload(payload, {force: options.force === true});
     if (changed) refreshYoloRulesStatus({silent: true});
     if (changed && !options.silent) statusEl.textContent = t('status.settingsReloaded');
   } catch (error) {
-    if (!options.silent) statusErr(localizedHtml('status.settingsReloadFailed', {error}));
+    if (!options.silent) {
+      statusErr(localizedHtml('status.settingsReloadFailed', {
+        error: userMessageText(error, t('common.requestFailed')),
+      }));
+    }
   }
 }
 
@@ -986,7 +1205,7 @@ function resetRuntimeInterval(name, callback, delay) {
   const existing = runtimeIntervals.get(name);
   if (existing?.delay === normalizedDelay) {
     existing.callback = callback;
-    return;
+    return existing;
   }
   if (existing) {
     existing.active = false;
@@ -1010,14 +1229,20 @@ function resetRuntimeInterval(name, callback, delay) {
   };
   scheduleNext();
   runtimeIntervals.set(name, state);
+  return state;
 }
 
 function clearRuntimeInterval(name) {
   const existing = runtimeIntervals.get(name);
-  if (!existing) return;
+  if (!existing) return false;
   existing.active = false;
   clearTimeout(existing.timer);
   runtimeIntervals.delete(name);
+  return true;
+}
+
+function runtimeIntervalActive(name) {
+  return runtimeIntervals.get(name)?.active === true;
 }
 
 function renewServerWatchRootsFromRuntime() {
@@ -1030,12 +1255,15 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('auto-approve', () => {
-    if (clientEventsConnected === true) return null;
+    if (document.visibilityState === 'hidden') return null;
+    if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
   resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
-  if (fileExplorerMode === 'tabber') {
-    resetRuntimeInterval('tabber-activity', () => { if (fileExplorerMode === 'tabber') fetchTabberActivity(); }, tabberActivityRefreshMs);
+  if (itemInLayout(tabberItemId)) {
+    resetRuntimeInterval('tabber-activity', () => { if (itemInLayout(tabberItemId)) fetchTabberActivity(); }, tabberActivityRefreshMs);
+  } else {
+    clearRuntimeInterval('tabber-activity');
   }
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);

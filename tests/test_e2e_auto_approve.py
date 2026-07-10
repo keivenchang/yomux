@@ -25,6 +25,7 @@ import yolomux_lib.app as app_module
 import yolomux_lib.common as common
 import yolomux_lib.control as control_module
 import yolomux_lib.yoagent.conversation as yoagent_conversation_module
+import yolomux_lib.yoagent.transports as transport_module
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
@@ -186,11 +187,13 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         "codex": f"ymx-{os.getpid()}-{uuid.uuid4().hex[:6]}",
     }
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    mock_cwd = tmp_path / "mock-cwd"
+    mock_cwd.mkdir()
 
     for agent, session in sessions.items():
         created = _tmux(
             socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
+            f"cd {mock_cwd} && exec python3 {REPO_ROOT}/tools/{agent}.py --mock",
         )
         assert created.returncode == 0, f"tmux new-session failed for {agent}: {created.stderr or created.stdout}"
 
@@ -203,7 +206,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         app = TmuxWebtermApp(list(sessions.values()), dangerously_yolo=False)
         sent: dict[str, tuple[dict, dict]] = {}
         for agent, session in sessions.items():
-            preview, preview_status = app.create_yoagent_action_preview({
+            preview, preview_status = app.yoagent_controller.create_yoagent_action_preview({
                 "type": "send_prompt",
                 "session": session,
                 "text": "date",
@@ -213,14 +216,14 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
             assert preview_status == 200
             assert preview["status"] == "ready", preview
             assert preview["target"]["agent_kind"] == agent
-            result, result_status = app.execute_yoagent_send_action(
+            result, result_status = app.yoagent_controller.execute_yoagent_send_action(
                 {"preview_id": preview["id"]},
                 persist_result=True,
                 start_result_watch=False,
             )
             assert result_status == 200, result
             assert result["sent"] is True
-            app.register_yoagent_action_wait(f"wait-{agent}", preview, result["result_marker"])
+            app.yoagent_controller.register_yoagent_action_wait(f"wait-{agent}", preview, result["result_marker"])
             sent[agent] = (preview, result["result_marker"])
 
         waiting = app.yoagent_conversation_payload()["pending_waits"]
@@ -240,7 +243,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
             assert completed, f"{agent}.py --mock did not show date output after approval:\n{pane}"
 
         for agent, (preview, marker) in sent.items():
-            result = app.run_yoagent_action_result_watcher(
+            result = app.yoagent_controller.run_yoagent_action_result_watcher(
                 preview,
                 marker,
                 watch_id=f"wait-{agent}",
@@ -261,6 +264,66 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         _stop_app(app)
         _tmux(socket_path, "kill-server")
         shutil.rmtree(sock_base, ignore_errors=True)
+
+
+def test_e2e_yoagent_roster_job_sends_exact_command_once(monkeypatch, tmp_path):
+    if not shutil.which("tmux"):
+        pytest.skip("tmux is not installed")
+    sock_base = Path("/tmp") / f"yoroster-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    control_dir = sock_base / "control"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    _isolate_state(monkeypatch, tmp_path, control_dir)
+    socket_path = sock_base / "s"
+    sessions = ["1", "2", "3", "4"]
+    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    mock_cwd = tmp_path / "mock-cwd"
+    mock_cwd.mkdir()
+    for session in sessions:
+        created = _tmux(
+            socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
+            f"cd {mock_cwd} && exec python3 {REPO_ROOT}/tools/claude.py --mock",
+        )
+        assert created.returncode == 0, f"tmux new-session failed for {session}: {created.stderr or created.stdout}"
+
+    app = None
+    original_send = transport_module.send_prompt
+    sent = []
+
+    def recording_send(target, text, **kwargs):
+        sent.append((dict(target), text, dict(kwargs)))
+        return original_send(target, text, **kwargs)
+
+    monkeypatch.setattr(transport_module, "send_prompt", recording_send)
+    try:
+        for session in sessions:
+            booted, pane = _wait_until(socket_path, session, lambda text: "❯" in text, 20)
+            assert booted, f"claude.py --mock did not boot session {session}:\n{pane}"
+        app = TmuxWebtermApp(sessions, dangerously_yolo=False)
+        created, status = app.yoagent_controller.create_yoagent_job({
+            "type": "wait_roster_then_send",
+            "roster": sessions,
+            "action": {"session": "1", "text": "/app-tps-report 1 2 3 4 EOD", "return_result": False},
+            "quiet_seconds": 0,
+        })
+        fired = app.yoagent_controller.poll_yoagent_jobs_once()
+        arrived, pane = _wait_until(socket_path, "1", lambda text: 'I don\'t know how to handle "/app-tps-report 1 2 3 4 EOD"' in text, 20)
+        jobs, jobs_status = app.yoagent_controller.yoagent_jobs_payload()
+    finally:
+        _stop_app(app)
+        _tmux(socket_path, "kill-server")
+        shutil.rmtree(sock_base, ignore_errors=True)
+
+    assert status == 200
+    assert fired == [created["job"]["id"]]
+    assert arrived, pane
+    assert "❯ /app-tps-report 1 2 3 4 EOD" in pane
+    assert jobs_status == 200
+    assert jobs["jobs"][0]["status"] == "fired"
+    assert len(sent) == 1
+    target, text, kwargs = sent[0]
+    assert target["session"] == "1"
+    assert text == "/app-tps-report 1 2 3 4 EOD"
+    assert kwargs["verify_submit"] is True
 
 
 @pytest.mark.parametrize("agent,steps", [("claude", 3), ("codex", 2)])
@@ -304,8 +367,9 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
         worker, status = app.start_auto_approve_worker(session, takeover=True)
         assert worker is not None, f"auto-approve worker did not start: {status}"
 
-        # The worker now runs hands-free in its own thread — NO manual keystrokes. Poll for completion.
-        completed, pane = _wait_until(socket_path, session, lambda t: "complete" in t.lower(), 60)
+        # Claude can paint its completion line before the worker observes the final queued prompt.
+        # Completion is only useful evidence once the requested hands-free approvals arrived too.
+        completed, pane = _wait_until(socket_path, session, lambda t: "complete" in t.lower() and worker.approved >= steps, 60)
         assert completed, (
             f"YO did not auto-approve {agent}.py --mock hands-free; "
             f"approved={worker.approved} blocked={worker.blocked} last_action={worker.last_action!r}\n{pane}"

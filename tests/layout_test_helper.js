@@ -2,6 +2,16 @@ const assert = require('assert');
 const fs = require('fs');
 const UI_PINS = JSON.parse(fs.readFileSync('tests/ui_pins.json', 'utf8'));  // shared color pins (see test_ui_pins.py)
 const vm = require('vm');
+
+// Node harness contract: this is a pure-logic VM, not a browser. It has no CSS engine or real layout;
+// getComputedStyle only supplies direction and default element rects are synthetic. ResizeObserver,
+// MutationObserver, scrolling metrics, and boot-section wiring are intentionally absent. Tests that need
+// computed paint, observer delivery, scroll geometry, or rendered placement belong in Selenium.
+const BUNDLE_SOURCE = fs.readFileSync('static/yolomux.js', 'utf8');
+const EN_CATALOG = Object.freeze(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')));
+const BUNDLE_BOOT_START = BUNDLE_SOURCE.indexOf("if (refreshMeta) {");
+assert.ok(BUNDLE_BOOT_START > 0, 'could not find browser boot section');
+let bundleScript = null;
 const FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST = 'yolomux.fileExplorerOpen.v1';
 const DEFAULT_TEST_SETTINGS = Object.freeze({
   appearance: Object.freeze({}),
@@ -252,10 +262,24 @@ class TestElement {
     return this.children.some(child => child?.contains?.(node));
   }
   getBoundingClientRect() { return this.rect; }
-  insertAdjacentHTML() {}
+  insertAdjacentHTML(position, html) {
+    if (position !== 'beforeend') throw new Error(`TestElement.insertAdjacentHTML does not support ${position}`);
+    this._innerHTML += String(html || '');
+  }
   matches(selector) {
     if (selector.includes(',')) return selector.split(',').some(part => this.matches(part.trim()));
-    if (selector === String(this.localName || '').toLowerCase()) return true;
+    const descendantMatch = selector.match(/^(.+?)\s+(.+)$/);
+    if (descendantMatch) {
+      const [, ancestorSelector, nodeSelector] = descendantMatch;
+      if (!this.matches(nodeSelector)) return false;
+      let ancestor = this.parentElement;
+      while (ancestor) {
+        if (ancestor.matches?.(ancestorSelector)) return true;
+        ancestor = ancestor.parentElement;
+      }
+      return false;
+    }
+    if (/^[A-Za-z][A-Za-z0-9-]*$/.test(selector)) return selector === String(this.localName || '').toLowerCase();
     if (selector === ':hover') return this.hovered === true;
     if (selector.startsWith('#')) return this.id === selector.slice(1);
     const dataPaneTabMatch = selector.match(/^\.pane-tab\[data-pane-tab="([^"]+)"\]$/);
@@ -279,6 +303,17 @@ class TestElement {
       const key = testDatasetKeyForAttribute(attrName);
       return this.dataset[key] !== undefined && (attrValue === undefined || this.dataset[key] === attrValue);
     }
+    const attributeMatch = selector.match(/^\[([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
+    if (attributeMatch) {
+      const [, attributeName, attributeValue] = attributeMatch;
+      return this.attributes[attributeName] !== undefined && (attributeValue === undefined || this.attributes[attributeName] === attributeValue);
+    }
+    const tagDataMatch = selector.match(/^([A-Za-z][A-Za-z0-9-]*)\[data-([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
+    if (tagDataMatch) {
+      const [, tagName, attrName, attrValue] = tagDataMatch;
+      const key = testDatasetKeyForAttribute(attrName);
+      return this.localName === tagName && this.dataset[key] !== undefined && (attrValue === undefined || this.dataset[key] === attrValue);
+    }
     if (selector === 'textarea[data-setting-path]') return this.localName === 'textarea' && this.dataset.settingPath !== undefined;
     if (selector === 'input[type="text"][data-setting-path]') return this.localName === 'input' && this.attributes.type === 'text' && this.dataset.settingPath !== undefined;
     if (selector === '[role="tree"]') return this.attributes.role === 'tree';
@@ -289,8 +324,8 @@ class TestElement {
     if (/^\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/.test(selector)) {
       return selector.slice(1).split('.').every(className => this.classList.contains(className));
     }
-    if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
-    return false;
+    if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return this.classList.contains(selector.slice(1));
+    throw new Error(`TestElement.matches does not support selector: ${selector}`);
   }
   closest(selector) {
     let node = this;
@@ -416,24 +451,67 @@ function assertSingleCiBadge(html, label) {
   assert.equal((html.match(/>CI<\/span>/g) || []).length, 1, `${label} renders exactly one CI badge`);
 }
 
+function sourceBetween(text, startMarker, endMarker) {
+  const start = text.indexOf(startMarker);
+  const end = text.indexOf(endMarker, start + String(startMarker).length);
+  assert.ok(start >= 0 && end > start, `missing source range ${startMarker} -> ${endMarker}`);
+  return text.slice(start, end);
+}
+
+function makeCatalogT(catalog) {
+  return (key, params = {}) => String(catalog[String(key)] || key).replace(/\{(\w+)\}/g, (_match, name) => params[name] ?? '');
+}
+
+function deferredFetch() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return {promise, resolve, reject};
+}
+
+function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
+  return {defaults, settings, mtime_ns: 1};
+}
+
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
-  const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  const bootStart = source.indexOf("if (refreshMeta) {");
-  assert.ok(bootStart > 0, 'could not find browser boot section');
-  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts'].includes(key)));
+  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort', 'coarsePointer', 'hoverCapable', 'viewport'].includes(key)));
   const fireAllTimeouts = options.fireAllTimeouts === true;
+  const coarsePointer = options.coarsePointer === true;
+  const hoverCapable = options.hoverCapable === undefined ? !coarsePointer : options.hoverCapable === true;
+  const viewport = options.viewport || {};
+  const viewportWidth = Number.isFinite(Number(viewport.width)) ? Number(viewport.width) : 1200;
+  const viewportHeight = Number.isFinite(Number(viewport.height)) ? Number(viewport.height) : 800;
 
   const bootstrapPayload = {
     sessions,
     availableAgents: [],
+    agentLaunchCommands: {
+      claude: {normal: 'claude', full_access: 'claude --dangerously-skip-permissions'},
+      codex: {normal: 'codex', full_access: 'codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust'},
+      term: {normal: 'bash', full_access: 'bash'},
+    },
+    terminalCommands: ['bash', 'tsh', 'zsh'],
+    dangerouslyYolo: true,
     accessRole,
     homePath: '/home/test',
     repoRoot: '/home/test/yolomux.dev',
     maxSessionTabs: 99,
     serverHostname: 'test-host',
+    localeRegistry: {
+      fallback: 'en',
+      pseudo: 'en-XA',
+      systemPreference: 'system',
+      systemLocale: 'en',
+      locales: [
+        ['en', 'English', 'ltr'], ['zh-Hant', '繁體中文', 'ltr'], ['zh-Hans', '简体中文', 'ltr'], ['ja', '日本語', 'ltr'], ['ko', '한국어', 'ltr'], ['es', 'Español', 'ltr'], ['de', 'Deutsch', 'ltr'], ['fr', 'Français', 'ltr'], ['it', 'Italiano', 'ltr'], ['pt-BR', 'Português (BR)', 'ltr'], ['pl', 'Polski', 'ltr'], ['nl', 'Nederlands', 'ltr'], ['he', 'עברית', 'rtl'], ['ar', 'العربية', 'rtl'], ['ru', 'Русский', 'ltr'], ['hi', 'हिन्दी', 'ltr'], ['vi', 'Tiếng Việt', 'ltr'], ['th', 'ไทย', 'ltr'], ['tr', 'Türkçe', 'ltr'],
+      ].map(([id, endonym, direction]) => ({id, endonym, direction})),
+    },
     // Seed the en catalog the way production inlines bootstrap.strings, so localized labels (the brand
     // tab labels infoTabLabel()/yoagentTabLabel() etc.) resolve synchronously at first render under en.
-    strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))},
+    strings: {en: EN_CATALOG},
     settingsPayload: {defaults: DEFAULT_TEST_SETTINGS, settings: {}, mtime_ns: 1},
     ...bootstrapOverrides,
   };
@@ -453,20 +531,35 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setItem(key, value) { sessionStorageMap.set(String(key), String(value)); },
     removeItem(key) { sessionStorageMap.delete(String(key)); },
   };
+  const locationPort = String(options.locationPort || '7770');
   const location = {
     search,
     pathname: '/',
     hash: '',
     protocol,
     hostname: 'localhost',
-    port: '7777',
-    host: 'localhost:7777',
+    port: locationPort,
+    host: `localhost:${locationPort}`,
     reload() { context.__reloadCount = (context.__reloadCount || 0) + 1; },
   };
-  const testSetTimeout = (callback, ms) => {
+  const testSetTimeout = options.setTimeout || ((callback, ms) => {
     if ((fireAllTimeouts || ms === 8) && typeof callback === 'function') return setImmediate(callback);
     return 0;
+  });
+  const testClearTimeout = options.clearTimeout || (() => {});
+  const testSetInterval = options.setInterval || (() => {});
+  const testClearInterval = options.clearInterval || (() => {});
+  // Product code deliberately logs recoverable transport failures. Capture those VM logs so green
+  // node runs stay readable and the test which triggers a failure can assert its diagnostic.
+  const vmConsoleErrors = [];
+  const vmConsole = {
+    log() {},
+    info() {},
+    debug() {},
+    warn(...args) { vmConsoleErrors.push(args.map(String).join(' ')); },
+    error(...args) { vmConsoleErrors.push(args.map(String).join(' ')); },
   };
+  const notification = {permission: 'denied'};
   const element = id => {
     if (!elements.has(id)) elements.set(id, new TestElement(id));
     const node = elements.get(id);
@@ -474,15 +567,17 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     return node;
   };
   const context = {
-    console,
+    console: vmConsole,
     EventSource: TestEventSource,
     File: TestFile,
     FormData: TestFormData,
+    URL,
     URLSearchParams,
     WebSocket: TestWebSocket,
     __testWebSocketInstances: TestWebSocket.instances,
-    clearInterval() {},
-    clearTimeout() {},
+    AbortController,
+    clearInterval: testClearInterval,
+    clearTimeout: testClearTimeout,
     document: {
       __listeners: documentListeners,
       addEventListener(type, listener) {
@@ -528,6 +623,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     navigator: {
       platform: navigatorPlatform,
       userAgent: navigatorPlatform,
+      maxTouchPoints: coarsePointer ? 5 : 0,
       clipboard: {
         writeText(text) {
           context.__clipboardText = String(text ?? '');
@@ -535,10 +631,11 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
         },
       },
     },
-    Notification: {permission: 'denied'},
+    Notification: notification,
     performance: {now: () => 0},
-    requestAnimationFrame(callback) { return callback(); },
-    setInterval() {},
+    requestAnimationFrame: options.requestAnimationFrame || (callback => callback()),
+    cancelAnimationFrame: options.cancelAnimationFrame || (() => {}),
+    setInterval: testSetInterval,
     // The bundle schedules the batched /api/fs/batch directory-listing flush via
     // setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs) — and 8ms is UNIQUE to that flush
     // (verified: no other bundle timer uses an 8ms delay). All other bundle timers (polls, debounces,
@@ -550,15 +647,16 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setTimeout: testSetTimeout,
     window: {
       __listeners: windowListeners,
+      Notification: notification,
       addEventListener(type, listener) {
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(listener);
       },
-      clearTimeout() {},
+      clearTimeout: testClearTimeout,
       confirm: () => true,
       EventSource: TestEventSource,
-      innerHeight: 800,
-      innerWidth: 1200,
+      innerHeight: viewportHeight,
+      innerWidth: viewportWidth,
       location,
       localStorage,
       open(url, name, features) {
@@ -593,6 +691,10 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
         const listeners = windowListeners.get(type) || [];
         windowListeners.set(type, listeners.filter(item => item !== listener));
       },
+      matchMedia(query) {
+        const mediaQuery = String(query || '');
+        return {matches: (coarsePointer && mediaQuery.includes('pointer: coarse')) || (hoverCapable && mediaQuery.includes('any-hover: hover')), addEventListener() {}, addListener() {}};
+      },
       setTimeout: testSetTimeout,
     },
     localStorage,
@@ -601,18 +703,29 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     // the OSC 52 clipboard bridge decodes base64 UTF-8; expose the host implementations.
     atob,
     btoa,
+    TextEncoder,
     TextDecoder,
     Uint8Array,
   };
   context.globalThis = context;
   context.__openedWindows = [];
   vm.createContext(context);
-  vm.runInContext(`${source.slice(0, bootStart)}
+  (bundleScript ||= new vm.Script(`${BUNDLE_SOURCE.slice(0, BUNDLE_BOOT_START)}
 globalThis.__layoutTestApi = {
+  safeDecodeURIComponent,
+  utf8ByteLength,
+  performanceNow,
+  domDataAttributeName,
+  singleLineText,
   activeItemForSide,
   agentErrorIsBlocking,
   appModifier,
   appMenuTree,
+  topbarMenuTreeForTest: topbarMenuTree,
+  topbarFullNavigationFitsForTest: topbarFullNavigationFits,
+  topbarFullMenuFitsAvailableSpaceForTest: topbarFullMenuFitsAvailableSpace,
+  topbarNavigationShouldBeCompactForTest: topbarNavigationShouldBeCompact,
+  compactTopbarForViewportForTest: compactTopbarForViewport,
   appShortcutText,
   aboutBrandHtml,
   showAboutModal,
@@ -625,6 +738,7 @@ globalThis.__layoutTestApi = {
   yoagentInlineMarkdown,
   yoagentTightMarkdown,
   joinAndNormalize,
+  i18nNormalizeLocale,
   resolveLocalePref,
   i18nLocaleChoices,
   i18nIsRtl,
@@ -645,13 +759,46 @@ globalThis.__layoutTestApi = {
   createTopbarOwnerStatusForTest: createTopbarOwnerStatus,
   showBackgroundOwnerContextMenuForTest: showBackgroundOwnerContextMenu,
   setBackgroundOwnerStatusPayloadForTest(payload) {
-    backgroundOwnerStatusPayload = payload;
-    backgroundOwnerStatusLoaded = Boolean(payload);
-    backgroundOwnerStatusLoading = false;
-    backgroundOwnerStatusError = '';
+    backgroundOwnerStatusState.guard.invalidate();
+    backgroundOwnerStatusState.payload = payload;
+    backgroundOwnerStatusState.updatedAt = Date.now();
+    backgroundOwnerStatusState.loading = false;
+    backgroundOwnerStatusState.error = '';
+  },
+  refreshBackgroundOwnerStatusForTest: refreshBackgroundOwnerStatus,
+  loadAutoStatusesForTest: loadAutoStatuses,
+  applyBackgroundOwnerStatusPayloadForTest: applyBackgroundOwnerStatusPayload,
+  backgroundOwnerStatusStateForTest() {
+    return {
+      payload: backgroundOwnerStatusState.payload,
+      loading: backgroundOwnerStatusState.loading,
+      error: backgroundOwnerStatusState.error,
+      request: backgroundOwnerStatusState.request,
+      updatedAt: backgroundOwnerStatusState.updatedAt,
+    };
   },
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
+  transcriptItemHtmlForTest: transcriptItemHtml,
+  transcriptAgentErrorTextForTest: transcriptAgentErrorText,
+  transcriptContextLoadErrorTextForTest: transcriptContextLoadErrorText,
+  transcriptMetadataLoadErrorTextForTest: transcriptMetadataLoadErrorText,
+  transcriptMetadataLoadErrorLabelForTest: transcriptMetadataLoadErrorLabel,
+  transcriptMetadataLoadErrorSnapshotForTest: transcriptMetadataLoadErrorSnapshot,
+  fetchAndApplySessionMetadataForTest: fetchAndApplySessionMetadata,
+  setTranscriptMetadataLoadErrorForTest(value) { transcriptMetadataState.error = value; },
+  refreshSessionMetadataForTest: refreshSessionMetadata,
+  applySessionMetadataPayloadForTest: applySessionMetadataPayload,
+  transcriptMetadataStateForTest() {
+    return {
+      payload: transcriptMetadataState.payload,
+      loading: transcriptMetadataState.loading,
+      loaded: transcriptMetadataState.loaded,
+      error: transcriptMetadataState.error,
+      request: transcriptMetadataState.request,
+    };
+  },
+  repoComparisonErrorHtmlForTest: repoComparisonErrorHtml,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
   updateNotificationAllowsVersionForTest: updateNotificationAllowsVersion,
   normalizeUpdateNotificationLevelForTest: normalizeUpdateNotificationLevel,
@@ -672,6 +819,7 @@ globalThis.__layoutTestApi = {
   updateCodeMirrorCursorStatusForTest: updateCodeMirrorCursorStatus,
   codeMirrorSearchMatches,
   codeMirrorSearchMatchSummary,
+  codeMirrorPhraseValues,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
   editorNav,
@@ -692,6 +840,8 @@ globalThis.__layoutTestApi = {
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
   fileIndexStatusFromPayloadForTest: fileIndexStatusFromPayload,
+  showFileIndexPartialCoverageWarningForTest: showFileIndexPartialCoverageWarning,
+  clearFileIndexPartialWarningsForTest() { fileIndexPartialWarningRoots.clear(); },
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
   gitStatusRowClass,
@@ -699,6 +849,9 @@ globalThis.__layoutTestApi = {
   fileStateCanRenderDiffView,
   diffModeShouldFallBackToEdit,
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
+  setFileExplorerIndexExcludePathsForTest(paths) {
+    fileExplorerIndexExcludePaths = new Set((paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
+  },
   setFileExplorerIndexStatusForTest(root, status) { fileExplorerIndexStatus.set(normalizeStoredFileExplorerIndexedDir(root), status); },
   createTopbarSearch,
   createTopbarNav,
@@ -727,16 +880,38 @@ globalThis.__layoutTestApi = {
   setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
   changesGroupsSnapshotHtmlForTest: changesGroupsSnapshotHtml,
   fetchSessionFilesForTest: fetchSessionFiles,
+  fileExplorerSessionFilesStateForTest() { return {...fileExplorerSessionFilesState}; },
+  sessionFilesPayloadSignatureForPayloadForTest: sessionFilesPayloadSignatureForPayload,
   fileExplorerChangesCollapseToggleHtml,
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
   toggleAllFileExplorerChangesForTest: toggleAllFileExplorerChanges,
   projectMetaHtml,
+  paneInfoBarMetaPartsForTest: paneInfoBarMetaParts,
   paneInfoBarMetaHtml,
   cycleSessionRepoDisplayForTest: cycleSessionRepoDisplay,
   diffRefControlsHtml,
   diffRefResetButtonHtml,
   diffRefSelectOptionsHtml,
   diffRefPopoverItems,
+  ensureDiffRefPopoverForTest: ensureDiffRefPopover,
+  hideDiffRefPopoverForTest: hideDiffRefPopover,
+  handleDiffRefPopoverKeydownForTest: handleDiffRefPopoverKeydown,
+  setDiffRefPopoverStateForTest(input, items = [], activeIndex = -1) {
+    diffRefPopoverState.input = input;
+    diffRefPopoverState.items = items;
+    diffRefPopoverState.activeIndex = activeIndex;
+    if (diffRefPopoverState.node) diffRefPopoverState.node.hidden = false;
+  },
+  diffRefPopoverStateForTest() {
+    return {
+      hasNode: Boolean(diffRefPopoverState.node),
+      input: diffRefPopoverState.input,
+      itemCount: diffRefPopoverState.items.length,
+      activeIndex: diffRefPopoverState.activeIndex,
+      listenersInstalled: diffRefPopoverState.listenersInstalled,
+      hidden: diffRefPopoverState.node?.hidden !== false,
+    };
+  },
   diffRefCompactDisplayForTest: diffRefCompactDisplay,
   diffRefPopoverSubjectPartsForTest: diffRefPopoverSubjectParts,
   diffRefParams,
@@ -754,18 +929,24 @@ globalThis.__layoutTestApi = {
   yoagentResolvedBackendForTest: yoagentResolvedBackend,
   yoagentAvailableBackendOptionsForTest: yoagentAvailableBackendOptions,
   yoagentChatEnabledForTest: yoagentChatEnabled,
-  setYoagentDraftForTest(value) { yoagentDraft = String(value || ''); },
-  setYoagentBusyForTest(value) { yoagentBusy = Boolean(value); },
-  setYoagentActiveChatRequestForTest(value) { yoagentActiveChatRequest = value; },
-  yoagentActiveChatRequestForTest() { return yoagentActiveChatRequest; },
-  yoagentChatQueueForTest() { return yoagentChatQueue.slice(); },
+  setYoagentDraftForTest(value) { yoagentChatState.draft = String(value || ''); },
+  setYoagentBusyForTest(value) { yoagentChatState.busy = Boolean(value); },
+  setYoagentActiveChatRequestForTest(value) { yoagentChatState.activeRequest = value; },
+  yoagentActiveChatRequestForTest() { return yoagentChatState.activeRequest; },
+  yoagentChatQueueForTest() { return yoagentChatState.queue.slice(); },
+  yoagentChatStateForTest() { return {...yoagentChatState, queue: yoagentChatState.queue.slice()}; },
+  yoagentStartupStateForTest() { return {...yoagentStartupState}; },
   cancelQueuedYoagentChatMessageForTest: cancelQueuedYoagentChatMessage,
   cancelActiveYoagentChatRequestForTest: cancelActiveYoagentChatRequest,
   sendYoagentChatMessageForTest: sendYoagentChatMessage,
-  setYoagentErrorForTest(value) { yoagentError = String(value || ''); },
-  setYoagentNoticeForTest(value) { yoagentNotice = value; },
-  setYoagentMessagesForTest(value) { yoagentMessages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
+  executeYoagentActionSendForTest: executeYoagentActionSend,
+  prewarmYoagentForTest: prewarmYoagent,
+  clearYoagentConversationForTest: clearYoagentConversation,
+  setYoagentErrorForTest(value) { yoagentChatState.error = value && typeof value === 'object' ? value : String(value || ''); },
+  setYoagentNoticeForTest(value) { yoagentChatState.notice = value; },
+  setYoagentMessagesForTest(value) { yoagentConversationState.guard.invalidate(); yoagentConversationState.messages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
   applyYoagentStreamPayloadForTest: applyYoagentStreamPayload,
+  refreshActivitySummaryForTest: refreshActivitySummary,
   showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
   showYoagentStartupInfoForLatestActivityForTest: showYoagentStartupInfoForLatestActivity,
   hideYoagentStartupInfoForTest: hideYoagentStartupInfo,
@@ -776,9 +957,25 @@ globalThis.__layoutTestApi = {
   yoagentNavigateChatHistoryForTest: yoagentNavigateChatHistory,
   resetYoagentComposerHistoryForTest: resetYoagentComposerHistory,
   applyYoagentConversationPayloadForTest: applyYoagentConversationPayload,
+  loadYoagentConversationForTest: loadYoagentConversation,
+  yoagentConversationStateForTest() {
+    return {
+      messages: yoagentConversationState.messages,
+      pendingWaits: yoagentConversationState.pendingWaits,
+      loaded: yoagentConversationState.loaded,
+      loading: yoagentConversationState.loading,
+      path: yoagentConversationState.path,
+      displayPath: yoagentConversationState.displayPath,
+      streamingCount: yoagentConversationState.streamingMessages.size,
+      request: yoagentConversationState.request,
+    };
+  },
   applyYoagentJobsPayloadForTest: applyYoagentJobsPayload,
   yoagentJobsHtmlForTest: yoagentJobsHtml,
   loadYoagentJobsForTest: loadYoagentJobs,
+  yoagentJobsStateForTest() {
+    return {items: yoagentJobsState.items, loading: yoagentJobsState.loading, request: yoagentJobsState.request};
+  },
   confirmYoagentJobForTest: confirmYoagentJob,
   cancelYoagentJobForTest: cancelYoagentJob,
   clearYoagentPendingWaitForTest: clearYoagentPendingWait,
@@ -792,6 +989,27 @@ globalThis.__layoutTestApi = {
   commonAncestorPath,
   cancelPendingFileExplorerActiveSync,
   fileExplorerSyncPlanForTest: fileExplorerSyncPlan,
+  fileExplorerSyncStateForTest() { return {...fileExplorerSyncState}; },
+  setFileExplorerVisibleSyncTargetForTest: setFileExplorerVisibleSyncTarget,
+  rememberFileExplorerSyncExpandedStateForTest: rememberFileExplorerSyncExpandedState,
+  resetFileExplorerSyncManualCollapsesForTest: resetFileExplorerSyncManualCollapsesIfNeeded,
+  rememberFileExplorerSyncManualCollapseForTest: rememberFileExplorerSyncManualCollapse,
+  fileExplorerSyncManualCollapsedPathsForTest() { return Array.from(fileExplorerSyncManualCollapsedPaths).sort(); },
+  fileExplorerSyncTargetRecordForTest(targetKey, create = false, touch = false) {
+    const record = fileExplorerSyncTargetRecord(targetKey, create, touch);
+    return record ? {
+      expandedPaths: [...record.expandedPaths],
+      manualCollapsedPaths: [...record.manualCollapsedPaths].sort(),
+    } : null;
+  },
+  touchFileExplorerSyncTargetRecordForTest(targetKey) { return Boolean(fileExplorerSyncTargetRecord(targetKey, true, true)); },
+  fileExplorerSyncTargetRecordKeysForTest() { return [...fileExplorerSyncTargetRecords.keys()]; },
+  fileExplorerMemoryCacheLimitForTest: fileExplorerMemoryCacheLimit,
+  setFileExplorerSyncStateForTest(value = {}) {
+    fileExplorerSyncState.inFlightSignature = String(value.inFlightSignature || '');
+    fileExplorerSyncState.appliedPlanKey = String(value.appliedPlanKey || '');
+    fileExplorerSyncState.generation = Number(value.generation || 0);
+  },
   fileExplorerSessionHighlightClassForPath,
   fileExplorerSessionHighlightClassForTest(path, kind = 'dir', preferredItem = null) {
     return fileExplorerSessionHighlightClassForPath(path, kind, {sessionHighlightSets: fileExplorerSessionHighlightSets(preferredItem)});
@@ -815,11 +1033,38 @@ globalThis.__layoutTestApi = {
   visibleFileEditorWatchFilesForTest: visibleFileEditorWatchFiles,
   backgroundFileEditorWatchFilesForTest: backgroundFileEditorWatchFiles,
   clientServerWatchStateForTest: clientServerWatchState,
+  clientEventDemandDescriptorForTest: clientEventDemandDescriptor,
+  syncClientEventDemandForTest: syncClientEventDemand,
+  applyClientEventDemandForTest: applyClientEventDemand,
   clientPushCanSupplyDataForTest: clientPushCanSupplyData,
   readOnlyModeForTest() { return readOnlyMode; },
-  setClientEventsSourceForTest(value = {}) { clientEventsSource = value; },
+  setClientEventsSourceForTest(value = {}) { clientEventTransportState.source = value; },
+  clientEventTransportStateForTest() {
+    return {
+      source: clientEventTransportState.source,
+      connected: clientEventTransportState.connected,
+      enabled: clientEventTransportState.enabled,
+      demand: clientEventTransportState.demand,
+      demandSignature: clientEventTransportState.demandSignature,
+      queued: clientEventTransportState.queue.size,
+      frame: clientEventTransportState.frame,
+      resyncTimer: clientEventTransportState.resyncTimer,
+    };
+  },
   syncServerWatchRootsForTest: syncServerWatchRoots,
+  syncServerWatchRootsNowForTest: syncServerWatchRootsNow,
+  serverWatchRootsStateForTest() {
+    return {
+      signature: serverWatchRootsState.signature,
+      inFlight: serverWatchRootsState.inFlight,
+      syncedAt: serverWatchRootsState.syncedAt,
+      timer: serverWatchRootsState.timer,
+      pendingOptions: {...serverWatchRootsState.pendingOptions},
+    };
+  },
+  setServerWatchRootsSyncedAtForTest(value) { serverWatchRootsState.syncedAt = Number(value) || 0; },
   fileExplorerPaneTabHtml,
+  makeButtonForTest: makeButton,
   fetchDirectoryForTest: fetchDirectory,
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
@@ -837,6 +1082,7 @@ globalThis.__layoutTestApi = {
   filePopoverRows,
   fuzzySearchScore,
   fuzzyHighlightHtml,
+  sessionScopedIdForTest: sessionScopedId,
   fuzzySubsequenceMatch,
   fuzzySubsequenceScore,
   lineDiffRows,
@@ -846,20 +1092,77 @@ globalThis.__layoutTestApi = {
   debugModeExplicitUrlEnabledForTest() { return debugModeExplicitUrlEnabled; },
   debugPaneItemId,
   debugPanelHtmlForTest: debugPanelHtml,
+  debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
+  debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
+  debugGraphEventRecordsForTest() {
+    return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
+      id,
+      bucketStartMs: Number(record?.bucket?.startMs || 0),
+      responseBytes: Number(record?.responseBytes || 0),
+      lastSeenAt: Number(record?.lastSeenAt || 0),
+    }));
+  },
+  compactJsDebugGraphBucketsForTest: compactJsDebugGraphBuckets,
+  recordApiDebugResponseBytesForGraphForTest: recordApiDebugResponseBytesForGraph,
   debugGraphAgentTokenDisplayBucketsForTest: debugGraphAgentTokenDisplayBuckets,
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
+  debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
+  debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
+  debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
+  debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
+  debugGraphInnerHtmlForTest: debugGraphInnerHtml,
+  debugGraphGeometryForTest() { return {...jsDebugGraphGeometry}; },
+  debugGraphPlotYForValueForTest: debugGraphPlotYForValue,
+  debugGraphGridLineYForTest: debugGraphGridLineY,
+  debugGraphPlotOverlayRectHtmlForTest: debugGraphPlotOverlayRectHtml,
+  debugGraphBarVerticalGeometryForTest: debugGraphBarVerticalGeometry,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
+  jsDebugStatsPollingStateForTest() {
+    return {
+      firstSampleReceived: jsDebugStatsPollState.firstSampleReceived,
+      inFlight: jsDebugStatsPollState.inFlight,
+      pending: jsDebugStatsPollState.pending,
+      pendingForceGraphRefresh: jsDebugStatsPollState.pendingForceGraphRefresh,
+      historyStartSeconds: jsDebugHistoryReadiness.loadedStartSeconds,
+      historyReadiness: jsDebugHistoryReadinessSnapshot(),
+    };
+  },
+  jsDebugHistoryReadinessForTest: jsDebugHistoryReadinessSnapshot,
+  setJsDebugHistoryReadinessForTest: setJsDebugHistoryReadiness,
+  applyJsDebugHistoryCoverageForTest: applyJsDebugHistoryCoverage,
+  jsDebugHistoryCoverageNeedsRefreshForTest: jsDebugHistoryCoverageNeedsRefresh,
+  jsDebugHistoryCoverageResolutionSecondsForTest: jsDebugHistoryCoverageResolutionSeconds,
+  jsDebugHistoryRequestWindowForTest: jsDebugHistoryRequestWindow,
+  debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
+  resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
+  retryJsDebugHistoryForTest: retryJsDebugHistory,
+  startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
+  syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
+  stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
   flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
+  clearJsDebugServerHistoryForTest: clearJsDebugServerHistory,
+  jsDebugStatsUploadStateForTest() {
+    return {
+      timer: jsDebugStatsUploadState.timer,
+      worker: Boolean(jsDebugStatsUploadState.worker),
+      generation: jsDebugStatsUploadState.generation,
+      pendingBuckets: jsDebugGraphPendingServerBuckets.size,
+    };
+  },
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
+  pollJsDebugClientHealthForTest: pollJsDebugClientHealth,
   jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
   recordJsDebugClientEventsConnectionStateForTest: recordJsDebugClientEventsConnectionState,
   recordJsDebugDisconnectedSpanForTest: recordJsDebugDisconnectedSpan,
   recordJsDebugStatsSampleForTest: recordJsDebugStatsSample,
   bindDebugPanelForTest: bindDebugPanel,
-  setDebugGraphScaleForTest: setDebugGraphScale,
+  setDebugSubTabForTest: setDebugSubTab,
   setDebugGraphRangeForTest: setDebugGraphRange,
+  setDebugGraphResolutionOverrideForTest: setDebugGraphResolutionOverride,
+  setDebugGraphZoomDomainForTest(startMs, endMs) { jsDebugGraphZoomDomain = {startMs, endMs}; },
+  setDebugGraphChartVisibleForTest: setDebugGraphChartVisible,
   clearDebugGraphZoomForTest: clearDebugGraphZoom,
   clearJsDebugEventsForTest: clearJsDebugEvents,
   jsDebugEventsForTest() { return jsDebugEvents.map(event => ({...event})); },
@@ -867,13 +1170,17 @@ globalThis.__layoutTestApi = {
   jsDebugTextForClipboardForTest: jsDebugTextForClipboard,
   recordSseDebugEventForTest: recordSseDebugEvent,
   recordClientPerfCounterForTest: recordClientPerfCounter,
+  clientPerfSummaryForTest: clientPerfSummary,
+  clearClientPerfCountersForTest: clearClientPerfCounters,
   shareDebugTextForClipboardForTest: shareDebugTextForClipboard,
   shareDebugProfileUploadPayloadForTest: shareDebugProfileUploadPayload,
   recordJsDebugEventForTest: recordJsDebugEvent,
   inactiveTabItems,
   infoItemId,
   infoRelationshipRecords,
+  infoPanelRenderSignatureForTest: infoPanelRenderSignature,
   infoGroupTree,
+  infoDimensionCountTextForTest: infoDimensionCountText,
   infoGroupDimensions,
   infoGroupDimensionsForLevel,
   infoGroupingControlsHtmlForTest: infoGroupingControlsHtml,
@@ -900,13 +1207,21 @@ globalThis.__layoutTestApi = {
   runSearchHistoryQueryForTest: runSearchHistoryQuery,
   refreshRunHistoryDataForTest: refreshRunHistoryData,
   setSearchHistoryStateForTest(query = '', searchPayload = {query: '', results: []}, historyPayload = {runs: []}) {
-    searchHistoryQuery = String(query || '');
-    searchHistoryPayload = searchPayload || {query: '', results: []};
-    runHistoryPayload = historyPayload || {runs: []};
-    searchHistoryLoading = false;
-    runHistoryLoading = false;
-    searchHistoryError = '';
-    runHistoryError = '';
+    searchHistoryState.guard.invalidate();
+    runHistoryState.guard.invalidate();
+    searchHistoryState.query = String(query || '');
+    searchHistoryState.payload = searchPayload || {query: '', results: []};
+    runHistoryState.payload = historyPayload || {runs: []};
+    searchHistoryState.loading = false;
+    runHistoryState.loading = false;
+    searchHistoryState.error = '';
+    runHistoryState.error = '';
+  },
+  searchHistoryStateForTest() {
+    return {...searchHistoryState};
+  },
+  runHistoryStateForTest() {
+    return {...runHistoryState};
   },
   infoPanelSubTabForTest() { return infoPanelSubTab; },
   setInfoPanelSubTabForTest(value) { infoPanelSubTab = normalizedInfoSubTab(value); },
@@ -931,9 +1246,30 @@ globalThis.__layoutTestApi = {
   layoutSlotKeys,
   largestPaneSlotForFileEditor,
   layoutWithFileExplorerDockedLeft,
+  layoutWithSidePaneItems,
+  layoutWithDefaultLeftSidePane,
+  layoutSlotsForTest() { return cloneLayoutSlots(layoutSlots); },
+  mobileSinglePaneModeForTest: mobileSinglePaneMode,
+  narrowSingleColumnModeForTest: narrowSingleColumnMode,
+  fileExplorerUsesNormalTabMovementForTest: fileExplorerUsesNormalTabMovement,
+  tabletUsesDesktopLayoutForTest: tabletUsesDesktopLayout,
+  phoneLikeMobileViewportForTest: phoneLikeMobileViewport,
+  narrowTouchSingleColumnViewportForTest: narrowTouchSingleColumnViewport,
+  mobileRecentTmuxItemsForTest: mobileRecentTmuxItems,
+  mobileSinglePaneLayoutSlotsForTest: mobileSinglePaneLayoutSlots,
+  compactCurrentLayoutSlotsForTest: compactCurrentLayoutSlots,
+  availableLayoutModesForTest: availableLayoutModes,
   layoutWithReplacedItem,
   layoutWithoutItem,
   layoutWithItems,
+  tabSplitCapabilities,
+  tabDirectionalActionCapabilities,
+  moveLayoutItemDirectional,
+  swapLayoutItemDirectional,
+  splitLayoutItemDirectional,
+  tabCanFillWorkspace,
+  tabWorkspaceIsFilled,
+  toggleTabWorkspaceFill,
   applyLayoutMode,
   setLayoutToSinglePane,
   setLayoutToSplitPanes,
@@ -941,10 +1277,77 @@ globalThis.__layoutTestApi = {
   setLayoutToWallPanes,
   layoutModeValues,
   layoutTabsParamValue,
+  layoutTabStatesFromParam,
   layoutTreeKey,
   leafNode,
   yoagentItemId,
+  chatItemId,
+  finderItemId,
+  differItemId,
+  tabberItemId,
   fileExplorerItemId,
+  virtualTabItems,
+  conversationClampSelectionToGraphemesForTest: conversationClampSelectionToGraphemes,
+  conversationInsertAtSelectionForTest: conversationInsertAtSelection,
+  chatNotificationSnippetForTest: chatNotificationSnippet,
+  chatNotificationTimestampForTest: chatNotificationTimestamp,
+  chatMessageNotificationEligibleForTest: chatMessageNotificationEligible,
+  chatNotificationLinesForTest: chatNotificationLines,
+  chatMessageTimestampForTest: chatMessageTimestamp,
+  chatPreciseRelativeTimeFormatForTest: chatPreciseRelativeTimeFormat,
+  setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
+  debugGraphTimeLabelForTest: debugGraphTimeLabel,
+  debugGraphExactTimeLabelForTest: debugGraphExactTimeLabel,
+  chatEmojiSearchTextForTest: chatEmojiSearchText,
+  chatRecentEmojiForTest: chatRecentEmoji,
+  rememberChatEmojiForTest: rememberChatEmoji,
+  chatMessageHtmlForTest: chatMessageHtml,
+  chatMediaUrlMatchesForTest: chatMediaUrlMatches,
+  chatMediaKindForTest: chatMediaKind,
+  chatMediaItemForTest: chatMediaItemFor,
+  chatMediaUrlForItemForTest: chatMediaUrlForItem,
+  chatMediaActionItemsForTest: chatMediaActionItems,
+  chatAuthorToneAssignmentsForTest: chatAuthorToneAssignments,
+  chatIntroductionHtmlForTest: chatIntroductionHtml,
+  chatIntroductionGreetingKeyForTest: chatIntroductionGreetingKey,
+  chatYoagentQueryForTest: chatYoagentQuery,
+  openChatSearchForTest: openChatSearch,
+  replaceChatTypingForTest: replaceChatTyping,
+  conversationAutosizeTextareaForTest: conversationAutosizeTextarea,
+  chatPanelIsEngagedForTest: chatPanelIsEngaged,
+  chatStatusTonesForTest: chatStatusTones,
+  chatTypingTextForTest: chatTypingText,
+  chatStatusMarkerHtmlForTest: chatStatusMarkerHtml,
+  chatMergeMessagesForTest: chatMergeMessages,
+  loadChatBootstrapForTest: loadChatBootstrap,
+  loadChatDeltaForTest: loadChatDelta,
+  loadOlderChatMessagesForTest: loadOlderChatMessages,
+  chatRequestStateForTest() {
+    return {
+      loaded: chatState.loaded,
+      loading: chatState.loadingRequest !== null,
+      loadingRequest: chatState.loadingRequest ? {...chatState.loadingRequest} : null,
+      requestGeneration: chatState.requestGeneration,
+      olderGeneration: chatState.olderGeneration,
+      contextGeneration: chatState.contextGeneration,
+      messageIds: [...chatState.messages.keys()],
+    };
+  },
+  setChatStateForTest(value = {}) {
+    if (value.loaded !== undefined) chatState.loaded = value.loaded === true;
+    if (value.loading === false) chatState.loadingRequest = null;
+    if (value.requestGeneration !== undefined) chatState.requestGeneration = Number(value.requestGeneration) || 0;
+    if (value.olderGeneration !== undefined) chatState.olderGeneration = Number(value.olderGeneration) || 0;
+    if (value.clientIp !== undefined) chatState.clientIp = String(value.clientIp || '');
+    if (value.contextGeneration !== undefined) chatState.contextGeneration = Number(value.contextGeneration) || 0;
+    if (value.olderCursor !== undefined) chatState.olderCursor = String(value.olderCursor || '');
+    if (value.hasMore !== undefined) chatState.hasMore = value.hasMore === true;
+    if (Array.isArray(value.messages)) chatState.messages = new Map(value.messages.map(message => [Number(message.id), message]));
+    if (Array.isArray(value.typing)) chatState.typing = value.typing;
+    if (Array.isArray(value.unread)) chatState.unread = new Map(value.unread.map(message => [Number(message.id), message]));
+    if (value.acknowledgedTone !== undefined) chatState.acknowledgedTone = String(value.acknowledgedTone || '');
+    if (value.acknowledgementStartedAt !== undefined) chatState.acknowledgementStartedAt = Number(value.acknowledgementStartedAt) || 0;
+  },
   prefsItemId,
   menuTabCommand,
   activateTerminalDetailTabForTest: activateTab,
@@ -953,6 +1356,9 @@ globalThis.__layoutTestApi = {
   adjacentPaneTabPosition,
   selectAdjacentPaneTab,
   currentSessionActionTarget,
+  currentTmuxMenuTargetForTest: currentTmuxMenuTarget,
+  explicitPaneFocusItemForTest: explicitPaneFocusItem,
+  setExplicitPaneFocusItemForTest: setExplicitPaneFocusItem,
   setFocusedPanelItem,
   setFocusedTerminal,
   clearFocusedTerminal,
@@ -963,6 +1369,9 @@ globalThis.__layoutTestApi = {
   focusedPanelItemForTest() { return focusedPanelItem; },
   setAutoFocusEnabledForTest(value) { autoFocusEnabled = Boolean(value); },
   autoFocusEnabledForTest() { return autoFocusEnabled; },
+  browserHasCursorHoverForTest: browserHasCursorHover,
+  autoFocusCanFollowCursorForTest: autoFocusCanFollowCursor,
+  notificationTargetIsFocusedForTest: notificationTargetIsFocused,
   selectSession,
   selectPanelOnHover,
   claimVisibleTerminalResizeAuthorityForTest: claimVisibleTerminalResizeAuthority,
@@ -970,6 +1379,19 @@ globalThis.__layoutTestApi = {
   focusPanel,
   focusTerminalFromUserAction,
   handleTerminalDataForTest: handleTerminalData,
+  terminalMobileAccessoryHtmlForTest: terminalMobileAccessoryHtml,
+  terminalMobileAccessoryDataForTest: terminalMobileAccessoryData,
+  terminalMobileAccessoryStateForTest(session) {
+    const state = terminalMobileAccessoryState(session);
+    return state ? {...state} : null;
+  },
+  toggleTerminalMobileAccessoryStateForTest: toggleTerminalMobileAccessoryState,
+  dismissTerminalMobileAccessoriesForTest: dismissTerminalMobileAccessories,
+  beginTerminalMobileAccessoryLauncherPressForTest: beginTerminalMobileAccessoryLauncherPress,
+  endTerminalMobileAccessoryLauncherPressForTest: endTerminalMobileAccessoryLauncherPress,
+  consumeTerminalMobileAccessoryLauncherClickForTest: consumeTerminalMobileAccessoryLauncherClick,
+  sendTerminalMobileAccessoryInputForTest: sendTerminalMobileAccessoryInput,
+  terminalMobileAccessoryRepeatsForTest: terminalMobileAccessoryRepeats,
   toggleFileExplorerShortcut,
   clearFileExplorerShortcutRestoreSlotsForTest() { fileExplorerShortcutRestoreSlots = null; },
   focusedTerminalForTest() { return focusedTerminal; },
@@ -977,6 +1399,7 @@ globalThis.__layoutTestApi = {
   globalShortcutTargetAllowsFinderShortcut,
   globalShortcutShouldToggleFinderForTest: globalShortcutShouldToggleFinder,
   installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
+  handleTerminalTmuxHistoryNavigationKeydownForTest: handleTerminalTmuxHistoryNavigationKeydown,
   osc52ClipboardText,
   installTerminalOsc52BridgeForTest: installTerminalOsc52Bridge,
   rememberTerminalAppClipboardTextForTest: rememberTerminalAppClipboardText,
@@ -985,9 +1408,24 @@ globalThis.__layoutTestApi = {
   clearTerminalVisibleSelectionForTest: clearTerminalVisibleSelection,
   apiFetchJsonQuietForTest: apiFetchJsonQuiet,
   setFetchForTest(fn) { globalThis.fetch = fn; },
+  setClipboardForTest(clipboard, ClipboardItemType = class {}) {
+    navigator.clipboard = clipboard;
+    globalThis.ClipboardItem = ClipboardItemType;
+  },
+  setSaveBlobDownloadForTest(fn) { saveBlobDownload = fn; },
   setConfirmForTest(fn) { window.confirm = fn; },
   setShowToastForTest(fn) { showToast = fn; },
+  notificationEventDefinitionsForTest() {
+    return Object.fromEntries(Object.entries(notificationEventDefinitions).map(([key, value]) => [key, {...value}]));
+  },
+  emitNotificationForTest: emitNotification,
+  copyImageFileToClipboardForTest: copyImageFileToClipboard,
+  triggerFileDownloadForTest: triggerFileDownload,
+  triggerFolderZipDownloadForTest: triggerFolderZipDownload,
+  applyAndSaveGlobalThemeForTest: applyAndSaveGlobalTheme,
   reloadCountForTest() { return globalThis.__reloadCount || 0; },
+  yoagentJobNotificationTitleForTest: yoagentJobNotificationTitle,
+  yoagentJobNotificationBodyForTest: yoagentJobNotificationBody,
   applyUpdateAvailableForTest: applyUpdateAvailable,
   triggerSelfUpdateForTest: triggerSelfUpdate,
   maybeHandleServerVersionChangeForTest: maybeHandleServerVersionChange,
@@ -996,10 +1434,10 @@ globalThis.__layoutTestApi = {
   reloadIsSafeForTest: reloadIsSafe,
   selfUpdateReloadStateForTest() {
     return {
-      pending: selfUpdateReloadPending,
-      target: selfUpdateReloadTarget,
-      attempts: selfUpdateReloadAttempts,
-      deferredToastShown: selfUpdateReloadDeferredToastShown,
+      pending: selfUpdateReloadState.pending,
+      target: selfUpdateReloadState.target,
+      attempts: selfUpdateReloadState.attempts,
+      deferredToastShown: selfUpdateReloadState.deferredToastShown,
       serverVersionReloadHandled,
     };
   },
@@ -1033,6 +1471,11 @@ globalThis.__layoutTestApi = {
   setDocumentQuerySelectorForTest(fn) { document.querySelector = fn; },
   setDocumentQuerySelectorAllForTest(fn) { document.querySelectorAll = fn; },
   setDocumentVisibilityForTest(value) { Object.defineProperty(document, 'visibilityState', {value: String(value || 'visible'), configurable: true}); },
+  setNotificationDeliveryForTest(value = {}) { notificationDelivery = {inApp: value.inApp === true, system: value.system === true}; },
+  queueClientPushEventForTest: queueClientPushEvent,
+  flushQueuedClientPushEventsForTest: flushQueuedClientPushEvents,
+  scheduleReconnectResyncForTest: scheduleReconnectResync,
+  installClientEventStreamForTest: installClientEventStream,
   commandPaletteItemScore,
   commandPaletteRankItems,
   commandPaletteCandidateItems,
@@ -1041,12 +1484,13 @@ globalThis.__layoutTestApi = {
   commandPaletteCommandItems,
   commandPaletteItems,
   invokeCommandPaletteItemForTest(item, event = null) {
-    commandPaletteItemsCache = item ? [item] : [];
-    commandPaletteIndex = 0;
+    commandPaletteState.items = item ? [item] : [];
+    commandPaletteState.index = 0;
     return invokeCommandPaletteSelection(event);
   },
   dedupeFileSearchResults,
-  setCommandPaletteStateForTest(mode, query) { commandPaletteMode = mode; commandPaletteQuery = query || ''; },
+  setCommandPaletteStateForTest(mode, query) { commandPaletteMode = mode; commandPaletteState.query = query || ''; },
+  commandPaletteStateForTest() { return {...commandPaletteState, items: commandPaletteState.items.slice()}; },
   commandPaletteMatches,
   openFileQuickOpen,
   testElementForId(id) { return document.getElementById(id); },
@@ -1059,33 +1503,128 @@ globalThis.__layoutTestApi = {
   terminalAttentionQuestionRowForTest: terminalAttentionQuestionRow,
   syncTerminalAttentionHighlightForTest: syncTerminalAttentionHighlight,
   clearTerminalAttentionHighlightForTest: clearTerminalAttentionHighlight,
-  transcriptInfoForTest(session) { return transcriptMeta.sessions?.[session]; },
+  transcriptInfoForTest(session) { return transcriptMetadataState.payload.sessions?.[session]; },
   applyTranscriptsPayloadForTest: applyTranscriptsPayload,
   applyTmuxSignalsPayloadForTest: applyTmuxSignalsPayload,
   syncAgentWindowActivityAnimationDelaysForTest: syncAgentWindowActivityAnimationDelays,
+  restartAgentWindowActivityPulseAnimationsForTest: restartAgentWindowActivityPulseAnimations,
   scheduleTmuxWindowReadbackForTest: scheduleTmuxWindowReadback,
   setTmuxWindowActiveIndexOverrideForTest: setTmuxWindowActiveIndexOverride,
   setTmuxWindowActiveIndexPendingForTest: setTmuxWindowActiveIndexPending,
   tmuxWindowActiveIndexOverrideForTest: tmuxWindowActiveIndexOverride,
+  tmuxWindowNavigationRecordForTest(session) {
+    const record = tmuxWindowNavigationRecord(session);
+    return record ? {
+      activeIndexOverride: record.activeIndexOverride,
+      sequence: record.sequence,
+      directTargetGuard: record.directTargetGuard ? {...record.directTargetGuard} : null,
+    } : null;
+  },
+  expireTmuxWindowDirectTargetGuardForTest(session) {
+    const record = tmuxWindowNavigationRecord(session);
+    if (record?.directTargetGuard) record.directTargetGuard.guardUntilMs = 0;
+    return tmuxWindowDirectTargetGuard(session);
+  },
   activeTmuxSignalWindowForSessionForTest: activeTmuxSignalWindowForSession,
+  seedSessionLifecycleStateForTest(session) {
+    const record = sessionStatusRecord(session, true);
+    record.state = {key: 'needs-input', reason: 'test attention', signature: 'needs-input:test attention'};
+    record.notificationLastSent.set('state:needs-input:test attention', 123);
+    record.workingAgentNotificationTones.set('0::codex', 'working');
+    record.workingAgentTransitionNotificationPending.set('0::codex', {session, tone: 'attention', timer: 79});
+    record.metadataBadgePulseUntil.set('pr', Date.now() + 5000);
+    autoApproveStates.set(session, {enabled: true});
+    paneViewState.set(session, {scrollTop: 9});
+    pasteCounters.set(session, 4);
+    sessionRepoDisplayRoot.set(session, '/repo/test');
+    tabLastActivatedAt.set(session, 100);
+    tmuxStatusModes.set(session, 'top');
+    terminalAppClipboardText.set(session, {text: 'copied text', timestamp: Date.now()});
+    tmuxWindowNavigationRecords.set(session, {activeIndexOverride: '1', sequence: 9, directTargetGuard: null});
+    terminalTmuxInputStates.set(session, {prefixPending: true, repeatUntilMs: Date.now() + 900});
+    altScreenWheelRemainder.set(session, 0.5);
+    attentionAcknowledgementRecords.set(
+      attentionAcknowledgementKey(['prompt', session, 'seed']),
+      {recordedAt: null, timer: 84, pending: false},
+    );
+    agentWindowActivityRecords.set(session + ':0::codex', {
+      activity: {state: 'working'},
+      stoppedRefresh: {timer: 81, untilMs: Date.now() + 1000},
+      transitionPulseRefresh: {timer: 82, untilMs: Date.now() + 1000},
+      acknowledgedStoppedAt: 0,
+      acknowledgementVisual: {timer: 83, untilMs: Date.now() + 1000},
+    });
+  },
+  seedSessionToastForTest(session, kind = 'attention', timer = 71) {
+    const id = ++attentionAlertSequence;
+    const node = document.createElement('div');
+    node.className = 'toast';
+    node.dataset.alertId = String(id);
+    node.dataset.toastKind = kind;
+    node.dataset.toastSession = session;
+    attentionAlerts.appendChild(node);
+    toastRecords.set(id, {node, timer});
+    return id;
+  },
+  toastStateForTest(id) {
+    const record = toastRecords.get(id);
+    return record ? {session: record.node.dataset.toastSession || '', timer: Boolean(record.timer)} : null;
+  },
   seedSessionTeardownStateForTest(session) {
     const closed = {transcript: 0, summary: 0};
     transcriptStreams.set(session, {close() { closed.transcript += 1; }});
     summaryStreams.set(session, {close() { closed.summary += 1; }});
-    autoApproveStates.set(session, {enabled: true});
-    uploadResultsBySession.set(session, [{text: 'uploaded'}]);
-    uploadCleanupTimers.set(session, 123);
+    this.seedSessionLifecycleStateForTest(session);
+    uploadResultRecords.set(session, {entries: [{text: 'uploaded'}], cleanupTimer: 123});
     return closed;
   },
+  showUploadResultForTest(session, payload, inserted) {
+    return emitNotification('uploadResult', {session, uploadPayload: payload, inserted}).inApp;
+  },
+  renderUploadResultForTest: renderUploadResult,
+  keepUploadResultForTest: keepUploadResult,
+  hideUploadResultForTest: hideUploadResult,
+  uploadResultRecordForTest(session) {
+    const record = uploadResultRecord(session);
+    return record ? {entries: record.entries, cleanupTimer: record.cleanupTimer} : null;
+  },
+  seedUploadResultRecordForTest(session, entries, cleanupTimer = null) {
+    uploadResultRecords.set(session, {entries: Array.from(entries || []), cleanupTimer});
+  },
   stopSessionUiForTest: stopSessionUi,
+  sessionLifecycleStateForTest(session) {
+    const record = sessionStatusRecord(session);
+    return {
+      statusRecord: Boolean(record),
+      trackedState: record?.state?.key || '',
+      notificationCount: record?.notificationLastSent.size || 0,
+      toneCount: record?.workingAgentNotificationTones.size || 0,
+      pendingTransitionCount: record?.workingAgentTransitionNotificationPending.size || 0,
+      pendingTransitionSessions: Array.from(record?.workingAgentTransitionNotificationPending.values() || []).map(pending => pending.session).sort().join(','),
+      pulseCount: record?.metadataBadgePulseUntil.size || 0,
+      autoApprove: autoApproveStates.has(session),
+      paneScrollTop: paneViewState.get(session)?.scrollTop ?? null,
+      pasteCount: pasteCounters.get(session) ?? null,
+      repoDisplayRoot: sessionRepoDisplayRoot.get(session) || '',
+      lastActivatedAt: tabLastActivatedAt.get(session) ?? null,
+      tmuxStatusMode: tmuxStatusModes.get(session) || '',
+      clipboardText: terminalAppClipboardText.get(session)?.text || '',
+      navigation: tmuxWindowNavigationRecords.has(session),
+      terminalInput: terminalTmuxInputStates.has(session),
+      wheelRemainder: altScreenWheelRemainder.has(session),
+      agentActivityCount: Array.from(agentWindowActivityRecords.keys()).filter(key => key.startsWith(session + ':')).length,
+      acknowledgementCount: Array.from(attentionAcknowledgementRecords.keys()).filter(key => attentionAcknowledgementKeySession(key) === session).length,
+    };
+  },
   sessionTeardownStateForTest(session) {
+    const uploadRecord = uploadResultRecord(session);
     return {
       terminal: terminals.has(session),
       transcript: transcriptStreams.has(session),
       summary: summaryStreams.has(session),
-      autoApprove: autoApproveStates.has(session),
-      uploads: uploadResultsBySession.has(session),
-      uploadTimer: uploadCleanupTimers.has(session),
+      uploads: Boolean(uploadRecord),
+      uploadTimer: uploadRecord?.cleanupTimer !== null && uploadRecord?.cleanupTimer !== undefined,
+      ...this.sessionLifecycleStateForTest(session),
     };
   },
   tmuxSessionActionCommands,
@@ -1104,6 +1643,7 @@ globalThis.__layoutTestApi = {
   dropActionDisplayLabel,
   composeDropSuggestion,
   insertedDropActionText,
+  runDropActionForTest: runDropAction,
   customDropActionFromLine,
   commandPaletteDropActionItems,
   normalizeLayoutSlots,
@@ -1153,6 +1693,9 @@ globalThis.__layoutTestApi = {
   },
   paneIsPlaceholder,
   panelControlsHtml,
+  paneFrameControlsHtml,
+  dockviewHeaderActionsHtml,
+  syncPaneRoleDom,
   setPanelDetailsCollapsedForTest: setPanelDetailsCollapsed,
   platformWindowControlClass,
   positionPaneTabPopover,
@@ -1180,6 +1723,28 @@ globalThis.__layoutTestApi = {
   paneSwapIntentAllowed,
   swapPaneSlots,
   directoryEntriesSignature,
+  fileExplorerDirectoryRecordForTest(path) {
+    const record = fileExplorerDirectoryRecord(path);
+    return record ? {
+      signature: record.signature,
+      knownEntryNames: Array.from(record.knownEntryNames || []),
+    } : null;
+  },
+  recordDirectorySignatureForTest: recordDirectorySignature,
+  markNewDirectoryEntriesForTest: markNewDirectoryEntries,
+  fileExplorerEntryIsNewForTest: fileExplorerEntryIsNew,
+  invalidateFileExplorerFsCachesForTest: invalidateFileExplorerFsCaches,
+  invalidateFileExplorerRootsForTest: invalidateFileExplorerRoots,
+  fileExplorerFsResourceRecordsForTest() {
+    return [...fileExplorerFsResourceRecords.entries()].map(([key, record]) => ({
+      key,
+      generation: record.generation,
+      hasValue: record.value !== undefined,
+      value: record.value,
+      storedAt: record.storedAt,
+      requestActive: Boolean(record.request),
+    }));
+  },
   editorModeLabel,
   editorWrapValue,
   editorViewModeFor,
@@ -1225,6 +1790,19 @@ globalThis.__layoutTestApi = {
   cycleEditorThemeMode,
   fileEditorThemeModeForTest() { return fileEditorThemeMode; },
   fileEditorPreviewDisplayModeForTest() { return fileEditorPreviewDisplayMode; },
+  editorStateFieldsSnapshotForTest() {
+    return {
+      globalThemeMode,
+      terminalThemeMode,
+      themeMode: fileEditorThemeMode,
+      previewDisplayMode: fileEditorPreviewDisplayMode,
+      wrapEnabled: fileEditorWrapEnabled,
+      lineNumbersEnabled: fileEditorLineNumbersEnabled,
+      blameEnabled: fileEditorBlameEnabled,
+      diffExpandUnchanged,
+      previewFontSize: editorPreviewFontSize,
+    };
+  },
   fileEditorCursorStyleForTest() { return fileEditorCursorStyle; },
   setFileEditorCursorStyleForTest(value) { fileEditorCursorStyle = value; },
   editorVisualHighlightHtml,
@@ -1238,7 +1816,16 @@ globalThis.__layoutTestApi = {
   globalThemeModeForTest() { return globalThemeMode; },
   setGlobalThemeModeForTest(value) { globalThemeMode = normalizeGlobalThemeMode(value); },
   resolvedGlobalThemeModeForTest: resolvedGlobalThemeMode,
-  setSystemPrefersDarkForTest(value) { window.matchMedia = () => ({matches: value === true, addEventListener() {}, addListener() {}}); },
+  setSystemPrefersDarkForTest(value) {
+    const previousMatchMedia = window.matchMedia;
+    window.matchMedia = query => {
+      const mediaQuery = String(query || '');
+      const matches = mediaQuery.includes('prefers-color-scheme')
+        ? value === true
+        : previousMatchMedia?.(query)?.matches === true;
+      return {matches, addEventListener() {}, addListener() {}};
+    };
+  },
   shareResolvedGlobalThemeModeForTest() { return shareResolvedGlobalThemeMode; },
   terminalThemeModeForTest() { return terminalThemeMode; },
   setTerminalThemeModeForTest(value) { terminalThemeMode = normalizeTerminalThemeMode(value); },
@@ -1247,8 +1834,24 @@ globalThis.__layoutTestApi = {
   sessionConfirmedGone,
   globalActivityCounts,
   globalActivityStatusLineHtml,
+  openTabberActivityOverviewForTest: openTabberActivityOverview,
   clearPromptAttentionForSessionForTest(session, options = {}) { return clearPromptAttentionForSession(session, {...options, localOnly: options.localOnly !== false}); },
   attentionAcknowledgementKeyIsRecordedForTest: attentionAcknowledgementKeyIsRecorded,
+  applyAttentionAcknowledgementResponseForTest: applyAttentionAcknowledgementResponse,
+  acknowledgeAttentionKeysForTest: acknowledgeAttentionKeys,
+  postAttentionAcknowledgementKeysForTest: postAttentionAcknowledgementKeys,
+  setAttentionAcknowledgementPendingForTest(key) {
+    const record = attentionAcknowledgementRecord(key, true);
+    if (!record) return null;
+    record.pending = true;
+    return {...record};
+  },
+  clearSessionAttentionAcknowledgementRecordsForTest: clearSessionAttentionAcknowledgementRecords,
+  attentionAcknowledgementRecordForTest(key) {
+    const record = attentionAcknowledgementRecord(key);
+    return record ? {...record} : null;
+  },
+  attentionAcknowledgementRecordCountForTest() { return attentionAcknowledgementRecords.size; },
   terminalDataShouldAcknowledgeAttentionForTest: terminalDataShouldAcknowledgeAttention,
   updateSessionButtonStatesForTest: updateSessionButtonStates,
   browserFaviconBadgeCount,
@@ -1257,6 +1860,7 @@ globalThis.__layoutTestApi = {
   tmuxSignalAgentStateForSession,
   setTmuxSignalStateForTest(payload) { tmuxSignalState = payload; },
   setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
+  applyAutoApprovePayloadForTest: applyAutoApprovePayload,
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
   tabsToEvictForCap,
@@ -1264,6 +1868,7 @@ globalThis.__layoutTestApi = {
   setTabLastActivatedForTest(item, ts) { tabLastActivatedAt.set(item, ts); },
   infoBranchRows,
   fileContextMenuState,
+  fileExplorerIndexContextAction,
   fileEditorItemFor,
   fileEditorCopyItemFor,
   fileEditorDiffPreviewItemFor,
@@ -1281,11 +1886,18 @@ globalThis.__layoutTestApi = {
   markdownPreviewHtml,
   markdownPreviewImageTarget,
   sanitizeStandaloneSvg,
+  sanitizeStandaloneSvgString,
+  standaloneSvgBlockedTagsForTest() { return Array.from(STANDALONE_SVG_BLOCKED_TAGS); },
   isMermaidFenceLanguage,
   keyboardShortcutsHtml,
   openFileEditorItems,
   pullRequestStatusLabel,
   pullRequestStatusDisplay,
+  pullRequestStatusClass,
+  pullRequestInlineStatusDisplay,
+  pullRequestCiState,
+  pullRequestCiStatus,
+  pullRequestChecksHtml,
   pullRequestLinkLabel,
   pullRequestApprovalIndicatorHtml,
   pullRequestCompactBadgesHtml,
@@ -1293,6 +1905,10 @@ globalThis.__layoutTestApi = {
   pullRequestReviewInlineHtml,
   sessionStateHtml,
   openFileStatus,
+  fileErrorStateForTest: fileErrorState,
+  missingFileStateForTest: missingFileState,
+  tooLargeFileStateForTest: tooLargeFileState,
+  fileErrorTextForTest: fileErrorText,
   fileInspectionErrorMessageForTest: fileInspectionErrorMessage,
   setOpenFileOwner,
   renderTransportWarning,
@@ -1315,7 +1931,21 @@ globalThis.__layoutTestApi = {
   terminalTabLabel,
   terminalTabTitle,
   terminalTabDisplayLabel,
+  terminalTmuxPrefixWindowShortcutForTest: terminalTmuxPrefixWindowShortcut,
+  terminalTmuxAltWindowShortcutForTest: terminalTmuxAltWindowShortcut,
+  terminalTmuxInputStateForTest(session) {
+    const state = terminalTmuxInputState(session);
+    return state ? {...state} : null;
+  },
+  expireTerminalTmuxRepeatForTest(session) {
+    const state = terminalTmuxInputState(session);
+    if (state) state.repeatUntilMs = 0;
+    return pruneTerminalTmuxInputState(session);
+  },
   tmuxWindowForTest: tmuxWindow,
+  activateTmuxWindowFromUserActionForTest(session, windowIndex, label = '', options = {}) {
+    return activateTmuxWindowFromUserAction(session, windowIndex, label, {...options, localOnly: options.localOnly !== false});
+  },
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { setFileState(path, state); },
   currentFileStateForTest(path) {
@@ -1342,6 +1972,7 @@ globalThis.__layoutTestApi = {
   changesRepoCollapsedForTest() { return Array.from(changesRepoCollapsed).sort(); },
   rawFileUrl,
   rawFileDownloadUrl,
+  previewFileActionLinksForTest: previewFileActionLinks,
   zipFileDownloadUrl,
   downloadFilenameFromContentDisposition,
   displayQuickAccessPath,
@@ -1356,7 +1987,8 @@ globalThis.__layoutTestApi = {
   paneTabDisplayContext,
   fileTabParentDisambiguators,
   ensureFileTabStateForItem,
-  setDragSessionForTest(session) { dragSession = session; },
+  setDragSessionForTest(session) { dragState.item = session; },
+  dragStateForTest() { return {...dragState}; },
   pendingTabStripRenderForTest() { return pendingTabStripRender; },
   renderSessionButtonsForTest: renderSessionButtons,
   sessionButtonsForTest() { return sessionButtons; },
@@ -1402,26 +2034,68 @@ globalThis.__layoutTestApi = {
   registerImageViewerLayoutItem,
   requestFileEditorPanelFocus,
   focusFileEditorPanelIfReady,
+  openFileSurfacePane,
   minimizePaneFromLayout,
   removePaneFromLayout,
+  canCloseEmptyPane,
+  closeEmptyPaneFromLayout,
   removeSessionFromLayout,
+  closePaneFrameItem,
   runtimeIntervalDelay,
+  resetRuntimeIntervalForTest: resetRuntimeInterval,
+  clearRuntimeIntervalForTest: clearRuntimeInterval,
+  runtimeIntervalActiveForTest: runtimeIntervalActive,
+  runtimeIntervalStateForTest(name) {
+    const state = runtimeIntervals.get(name);
+    return state ? {active: state.active === true, delay: state.delay, timer: state.timer} : null;
+  },
   sessionPopoverHtml,
   setFileQuickOpenCandidatesForTest(root, files) {
-    fileQuickOpenRoot = root;
-    fileQuickOpenCandidates = files;
-    fileQuickOpenLoading = false;
-    fileQuickOpenError = '';
+    fileQuickOpenState.root = root;
+    fileQuickOpenState.candidates = files;
+    fileQuickOpenState.loading = false;
+    fileQuickOpenState.error = '';
     commandPaletteMode = 'files';
   },
   setFileQuickOpenLoadingForTest(loading) {
-    fileQuickOpenLoading = Boolean(loading);
-    fileQuickOpenError = '';
+    fileQuickOpenState.loading = Boolean(loading);
+    fileQuickOpenState.error = '';
     commandPaletteMode = 'files';
   },
+  setFileQuickOpenErrorForTest(error) {
+    fileQuickOpenState.candidates = [];
+    fileQuickOpenState.loading = false;
+    fileQuickOpenState.error = error;
+    commandPaletteMode = 'files';
+  },
+  fileQuickOpenStateForTest() { return {...fileQuickOpenState, candidates: fileQuickOpenState.candidates.slice()}; },
+  installCommandPaletteFixtureForTest() {
+    const node = document.createElement('div');
+    node.className = 'app-modal-overlay command-palette';
+    const dialog = document.createElement('div');
+    dialog.className = 'command-palette-dialog';
+    const input = document.createElement('input');
+    input.className = 'command-palette-input';
+    input.focus = () => {};
+    const status = document.createElement('div');
+    status.className = 'command-palette-status';
+    const results = document.createElement('div');
+    results.className = 'command-palette-results';
+    dialog.appendChild(input);
+    dialog.appendChild(status);
+    dialog.appendChild(results);
+    node.appendChild(dialog);
+    commandPaletteState.node = node;
+    return node;
+  },
+  openCommandPaletteForTest: openCommandPalette,
+  closeCommandPaletteForTest: closeCommandPalette,
+  scheduleFileQuickOpenSearchForTest: scheduleFileQuickOpenSearch,
+  refreshFileQuickOpenCandidatesForTest: refreshFileQuickOpenCandidates,
+  abortFileQuickOpenSearchForTest: abortFileQuickOpenSearch,
   setCommandPaletteQueryForTest(value) {
-    commandPaletteQuery = String(value || '');
-    commandPaletteIndex = 0;
+    commandPaletteState.query = String(value || '');
+    commandPaletteState.index = 0;
   },
   commandPaletteResultsHtmlForTest() {
     const query = commandPaletteSearchQuery();
@@ -1449,7 +2123,10 @@ globalThis.__layoutTestApi = {
   fileImagePreviewMinShowDelayMs,
   splitPercentForNewItem,
   sessionNotificationTitleForTest: sessionNotificationTitle,
+  attentionToastLineForTest: attentionToastLine,
   handleDropDragOver,
+  classifyLayoutDragForTest: classifyLayoutDrag,
+  applyLayoutDragIntentForTest: applyLayoutDragIntent,
   installFilePathDropTarget,
   showPaneTabDropPreview,
   showDropPreview,
@@ -1457,6 +2134,8 @@ globalThis.__layoutTestApi = {
   shouldPreserveSourceSlotForSplit,
   startSessionDrag,
   startPaneDrag,
+  beginFileDragForTest: beginFileDrag,
+  cancelDragOperationStateForTest: cancelDragOperationState,
   paneDragPayload,
   endSessionDrag,
   startFileTreeDrag,
@@ -1467,6 +2146,38 @@ globalThis.__layoutTestApi = {
   tabSearchScore,
   TAB_TYPES,
   tabTypeForItem,
+  tabTypeForParam,
+  paneRoleGeneric,
+  paneRoleSide,
+  paneSideLeft,
+  paneSideRight,
+  panePlacementGenericOnly,
+  panePlacementSideAllowed,
+  panePlacementSideRequired,
+  genericPaneRoleDefinition,
+  sidePaneRoleDefinition,
+  paneRoleDefinition,
+  panePlacementForItem,
+  paneRoleAllowsItem,
+  paneRoleForState,
+  paneRoleForSlot,
+  sidePaneSlots,
+  sidePaneSlotsForSide,
+  sidePaneSlot,
+  slotIsSidePane,
+  sidePaneMinimumViewportWidthPx,
+  sidePanesAvailable,
+  sidePaneConstrainedMode,
+  layoutHasSidePane,
+  layoutSidePaneRootSplit,
+  clampSidePaneWidthPercent,
+  sidePaneWidthPercent,
+  paneRoleAllowsItemTransfer,
+  paneStateWithTabs,
+  emptyPaneState,
+  emptyPlaceholderPaneState,
+  shareLayoutSeed,
+  shareSlotDigestSnapshot,
   terminalWheelSignedLines,
   sessionPaneIsAlternateScreen,
   terminalWrappedLineLinks,
@@ -1474,9 +2185,13 @@ globalThis.__layoutTestApi = {
   terminalReferenceAtPosition,
   terminalReferenceProviderLinks,
   terminalFileReferenceUnderlineSegments,
+  terminalFileReferenceUnderlineIsActiveForTest: terminalFileReferenceUnderlineIsActive,
   installTerminalFileReferenceUnderlines,
   terminalFileReferenceAbsolutePath,
   terminalFileReferenceTarget,
+  terminalFileReferenceTargetCacheSizeForTest: () => terminalFileReferenceTargetCache.size,
+  terminalFileReferenceTargetCacheHasForTest: (session, reference) => terminalFileReferenceTargetCache.has(terminalFileReferenceCacheKey(session, reference)),
+  invalidateTerminalFileReferenceTargetsForTest: invalidateTerminalFileReferenceTargets,
   terminalPositionFromClientPoint,
   requestFileEditorLineTarget,
   applyPendingFileEditorLineTarget,
@@ -1496,22 +2211,58 @@ globalThis.__layoutTestApi = {
   dockviewTabStripEndDropIntent,
   dockviewTabDropViolatesPinnedPartitionForTest: dockviewTabDropViolatesPinnedPartition,
   windowStepButtonFromEvent,
+  tmuxWindowStepTargetForTest: tmuxWindowStepTarget,
   tmuxWindowRecords,
   tmuxWindowBarLabelMode,
   tmuxWindowBarHtml,
   updatePanelInfoBarMetaForTest: updatePanelInfoBarMeta,
   updatePanelWindowStepButtonsForTest: updatePanelWindowStepButtons,
+  agentWindowVisibleTonesForTest() { return [...AGENT_WINDOW_VISIBLE_TONES]; },
+  agentWindowAggregateTonesForTest() { return [...AGENT_WINDOW_AGGREGATE_TONES]; },
+  agentWindowVisibleToneForTest: agentWindowVisibleTone,
+  agentWindowStatusToneForItemForTest: agentWindowStatusToneForItem,
+  agentWindowStatusItemVisualRankForTest: agentWindowStatusItemVisualRank,
+  agentWindowActivityToneWrapperClassForTest: agentWindowActivityToneWrapperClass,
+  agentWindowStatusSampleItemForTest: agentWindowStatusSampleItem,
+  agentWindowStatusDotHtmlForToneForTest: agentWindowStatusDotHtmlForTone,
+  agentWindowStatusDotHtmlForTest: agentWindowStatusDotHtml,
+  agentWindowActivityStyleAttributeForTest: agentWindowActivityStyleAttribute,
   agentWindowActivityIconForTest: agentWindowActivityIcon,
+  agentWindowActivityRecordForTest(key) {
+    const record = agentWindowActivityRecord(key);
+    if (!record) return null;
+    const visual = record.acknowledgementVisual;
+    return {
+      activity: record.activity ? {...record.activity} : null,
+      stoppedRefreshUntilMs: Number(record.stoppedRefresh?.untilMs || 0),
+      transitionPulseRefreshUntilMs: Number(record.transitionPulseRefresh?.untilMs || 0),
+      acknowledgedStoppedAt: Number(record.acknowledgedStoppedAt || 0),
+      acknowledgementVisual: visual ? {
+        startedAtMs: Number(visual.startedAtMs || 0),
+        untilMs: Number(visual.untilMs || 0),
+        durationMs: Number(visual.durationMs || 0),
+        acknowledgementKey: String(visual.acknowledgementKey || ''),
+        refreshed: visual.refreshed === true,
+      } : null,
+    };
+  },
+  topbarActivityCountBallHtmlForTest: topbarActivityCountBallHtml,
+  keyboardLegendStatusSampleForTest: keyboardLegendStatusSample,
+  preferencesStatusPulseExampleHtmlForTest: preferencesStatusPulseExampleHtml,
   setWorkflowTransitionGlowSecondsForTest(value) { workflowTransitionGlowSeconds = Math.max(0, Number(value) || 0); },
   acknowledgeAgentWindowActivityForTest(session, windowIndex = null, options = {}) { return acknowledgeAgentWindowActivity(session, windowIndex, {...options, localOnly: options.localOnly !== false}); },
+  acknowledgeTerminalAttentionFromUserActionForTest(session, windowIndex = null, options = {}) { return acknowledgeTerminalAttentionFromUserAction(session, windowIndex, {...options, localOnly: options.localOnly !== false}); },
   acknowledgeAgentWindowStoppedTransitionForTest: acknowledgeAgentWindowStoppedTransition,
+  agentWindowAcknowledgementVisualActiveForTest: agentWindowAcknowledgementVisualActive,
   agentWindowActivityIconHtmlForStatusForTest: agentWindowActivityIconHtmlForStatus,
+  sessionAgentWindowStatusModelForTest: sessionAgentWindowStatusModel,
   sessionAgentWindowStatusPayloadsForTest: sessionAgentWindowStatusPayloads,
+  sessionAgentWindowStatusSummaryForTest: sessionAgentWindowStatusSummary,
+  infoTabGroupStatusRecordForTest: infoTabGroupStatusRecord,
   tmuxWindowCanonicalLabelForTest: tmuxWindowCanonicalLabel,
   buildTabberTreeForTest: buildTabberTree,
   tabMenuItems,
   sortTabItemsForMenu,
-  setTabsMenuSortMode,
   tmuxPaneTabHtml,
   paneTabs,
   paneStateWithTabs,
@@ -1521,6 +2272,7 @@ globalThis.__layoutTestApi = {
   markdownTextWithTaskLineToggled,
   markdownPreviewBlockedTagsForTest() { return Array.from(MARKDOWN_PREVIEW_BLOCKED_TAGS); },
   moveSessionToSlot,
+  dropItemCanBeDraggedForTest: dropItemCanBeDragged,
   openFileEditorPane,
   onFileTreeRowClick,
   pathRelativeToDirectory,
@@ -1534,6 +2286,7 @@ globalThis.__layoutTestApi = {
   handleFileExplorerArrowNavForTest: handleFileExplorerArrowNav,
   activeTabberRowPathForTest: activeTabberRowPath,
   syncTabberTreeActiveSelectionForTest: syncTabberTreeActiveSelection,
+  syncTabberTreeLayoutStateForTest: syncTabberTreeLayoutState,
   tabberTreeSelectionForTest() {
     return {
       paths: Array.from(tabberTreeSelectedPaths).sort(),
@@ -1564,20 +2317,25 @@ globalThis.__layoutTestApi = {
   setFileExplorerRootForTest(path) { fileExplorerRoot = normalizeDirectoryPath(path); },
   fileExplorerRootForTest() { return fileExplorerRoot; },
   setFileExplorerDirListingForTest(path, entries) {
-    fileExplorerDirListingCache.set(normalizeDirectoryPath(path), {entries, at: Date.now()});
+    setFileExplorerFsResourceValue('list', path, entries);
   },
   setAutoApproveStateForTest(session, payload) {
     autoApproveStates.set(session, payload);
   },
   setTranscriptInfoForTest(session, info) {
-    transcriptMeta.sessions = {...(transcriptMeta.sessions || {}), [session]: info};
+    transcriptMetadataState.payload.sessions = {...(transcriptMetadataState.payload.sessions || {}), [session]: info};
   },
   setTranscriptSessionOrderForTest(values) {
-    transcriptMeta.session_order = Array.isArray(values) ? values.map(value => String(value)) : [];
+    transcriptMetadataState.payload.session_order = Array.isArray(values) ? values.map(value => String(value)) : [];
   },
   setActivitySummaryPayloadForTest(payload) {
-    activitySummaryPayload = payload;
-    yoagentStartupActivitySummaryPayload = null;
+    activitySummaryState.guard.invalidate();
+    activitySummaryState.payload = payload;
+    activitySummaryState.refreshing = false;
+    yoagentStartupState.activityPayload = null;
+  },
+  activitySummaryStateForTest() {
+    return {payload: activitySummaryState.payload, refreshing: activitySummaryState.refreshing};
   },
   yoagentRecentAgentsHtmlForTest: yoagentRecentAgentsHtml,
   applyServerMetadataPulsesForTest(session, pulses) {
@@ -1590,6 +2348,17 @@ globalThis.__layoutTestApi = {
   windowListenersForTest(type) { return [...(window.__listeners?.get?.(type) || [])]; },
   appRootForTest: appRootElement,
   appViewport,
+  viewportDiagnosticsSnapshotForTest: viewportDiagnosticsSnapshot,
+  viewportDiagnosticsTextForTest: viewportDiagnosticsText,
+  renderViewportDiagnosticsForTest: renderViewportDiagnostics,
+  nativeViewport,
+  nativeUsableViewportHeightForTest: nativeUsableViewportHeight,
+  syncNativeAppViewportForTest: syncNativeAppViewport,
+  setNativeViewportForTest({width, height, visualHeight = null, scale = 1} = {}) {
+    if (Number.isFinite(Number(width))) window.innerWidth = Number(width);
+    if (Number.isFinite(Number(height))) window.innerHeight = Number(height);
+    window.visualViewport = visualHeight == null ? null : {height: Number(visualHeight), scale: Number(scale)};
+  },
   effectiveViewportWidthForTest: effectiveViewportWidth,
   setAppViewportOverrideForTest: setAppViewportOverride,
   appSpaceRect,
@@ -1605,8 +2374,18 @@ globalThis.__layoutTestApi = {
   shareCreatePayloadFromFormForTest: shareCreatePayloadFromForm,
   shareBuildUiMessageForTest: shareBuildUiMessage,
   setActiveSharesForTest(shares) { setActiveShares(shares || []); },
-  setShareHostSocketForTest(token, socket) { shareHostSockets.set(String(token || ''), socket); },
-  shareHostQueueForTest(token) { return [...(shareHostQueues.get(String(token || '')) || [])]; },
+  shareHostStatusBackupPollDueForTest: shareHostStatusBackupPollDue,
+  setShareHostSocketForTest(token, socket) {
+    const record = shareHostConnectionRecord(token, {create: true});
+    if (record) record.socket = socket;
+  },
+  shareHostQueueForTest(token) { return [...(shareHostConnectionRecord(token)?.queue || [])]; },
+  shareHostConnectionCountForTest() { return shareSenderRecordEntries('connection').length; },
+  shareHostConnectionRecordForTest(token) { return shareHostConnectionRecord(token); },
+  shareSenderRecordForTest(key) { return shareSenderRecord(key, {create: false}); },
+  enqueueShareHostMessageForTest: enqueueShareHostMessage,
+  ensureShareHostSocketForTest: ensureShareHostSocket,
+  ensureShareHostSocketsForTest: ensureShareHostSockets,
   sharePublishPointerEventForTest: sharePublishPointerEvent,
   applyShareUiMessageForTest: applyShareUiMessage,
   shareMirrorProtocolForTest: shareMirrorProtocol,
@@ -1640,6 +2419,14 @@ globalThis.__layoutTestApi = {
   scheduleShareReplayScrollPublishForElementForTest: scheduleShareReplayScrollPublishForElement,
   shareReplayPointerPayloadForTest: shareReplayPointerPayload,
   shareReplayApplyPointerForTest: shareReplayApplyPointer,
+  renderSharePointerGhostForTest: renderSharePointerGhost,
+  sharePointerRecordsForTest() {
+    return shareSenderRecordEntries('pointer').map(([sender, record]) => ({
+      sender,
+      ghost: record.pointer.ghost,
+      hideTimer: record.pointer.hideTimer,
+    }));
+  },
   shareReplayDeltaSequenceStatusForTest: shareReplayDeltaSequenceStatus,
   shareReplayDeltaCanApplyBestEffortForTest: shareReplayDeltaCanApplyBestEffort,
   applyShareReplayKeyframeForTest: applyShareReplayKeyframe,
@@ -1676,13 +2463,13 @@ globalThis.__layoutTestApi = {
   shareMirrorLastFrameForTest(sender = '', family = '') {
     const cleanSender = String(sender || 'host');
     const key = family ? cleanSender + ':' + family : cleanSender;
-    const state = shareMirrorLastFrameBySender.get(key) || null;
+    const state = shareSenderRecord(key, {create: false})?.lastFrame || null;
     return state ? {...state} : null;
   },
   shareCreateUiStateSnapshotForTest: shareCreateUiStateSnapshot,
   sharePopupLayerPayloadForTest: sharePopupLayerPayload,
   applySharePopupLayerForTest: applySharePopupLayer,
-  sharePopupLayerLastSeqForTest(owner = '') { return sharePopupLayerLastSeqBySender.get(String(owner || 'host')) || 0; },
+  sharePopupLayerLastSeqForTest(owner = '') { return shareSenderRecord(String(owner || 'host'), {create: false})?.popupSequence || 0; },
   sharePopupLayerNodeForTest() { return sharePopupLayerNode; },
   shareUiStateSnapshotForTest: shareUiStateSnapshot,
   shareGeometryDigestSnapshotForTest: shareGeometryDigestSnapshot,
@@ -1696,23 +2483,28 @@ globalThis.__layoutTestApi = {
   shareWrappedTextDigestSnapshotForTest: shareWrappedTextDigestSnapshot,
   applyShareUiStateForTest: applyShareUiState,
   applyShareScrollStateForTest: applyShareScrollState,
+  applyShareScrollSnapshotForTest: applyShareScrollSnapshot,
   shareCanPublishUiForTest: shareCanPublishUi,
   shareCanPublishScrollForTest: shareCanPublishScroll,
-  setShareLastAppliedScrollForTest(target, state, payload = {}) {
+  setShareScrollTargetRecordForTest(target, state, payload = {}) {
     const cleanTarget = String(target || '');
     const cleanState = state || {};
-    shareLastAppliedScrollByTarget.set(cleanTarget, {
-      ...cleanState,
-      payload: {...payload, target: cleanTarget, ...cleanState},
-    });
+    const record = shareScrollTargetRecord(cleanTarget);
+    record.top = Number(cleanState.top || 0);
+    record.left = Number(cleanState.left || 0);
+    record.payload = {...payload, target: cleanTarget, ...cleanState};
   },
-  shareLastAppliedScrollForTest(target) {
-    const state = shareLastAppliedScrollByTarget.get(String(target || ''));
+  shareScrollTargetPositionForTest(target) {
+    const state = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget;
     return state ? {top: state.top, left: state.left} : null;
   },
-  shareLastAppliedScrollPayloadForTest(target) {
-    const state = shareLastAppliedScrollByTarget.get(String(target || ''))?.payload;
+  shareScrollTargetPayloadForTest(target) {
+    const state = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget?.payload;
     return state ? {...state} : null;
+  },
+  shareScrollTargetRecordForTest(target) {
+    const record = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget;
+    return record ? {...record, payload: {...record.payload}} : null;
   },
   restoreShareReadonlyScrollTargetForTest: restoreShareReadonlyScrollTarget,
   restoreShareScrollTargetByKeyForTest: restoreShareScrollTargetByKey,
@@ -1726,20 +2518,26 @@ globalThis.__layoutTestApi = {
   shareReadonlyShouldPreventDefault,
   blockShareReadonlyInteraction,
   setSessionFilesPayloadForTest(payload) {
-    fileExplorerSessionFilesPayload = payload;
+    setSessionFilesPayloadForDestination('finder', payload);
   },
   setSessionFilesPayloadForDestinationForTest(payload) {
     setSessionFilesPayloadForDestination('finder', payload);
   },
   setSessionFilesLoadingForTest(loading) {
-    fileExplorerSessionFilesLoading = Boolean(loading);
+    fileExplorerSessionFilesState.loading = Boolean(loading);
   },
   setFileExplorerSessionFilesPayloadForTest(payload) {
-    fileExplorerSessionFilesPayload = payload;
+    setSessionFilesPayloadForDestination('finder', payload);
   },
   sessionFilesPayloadForTest() {
-    return fileExplorerSessionFilesPayload;
+    return fileExplorerSessionFilesState.payload;
   },
+  applyLayoutUrlStateSeedForTest: applyLayoutUrlStateSeed,
+  applyEditorStateFieldsForTest: applyEditorStateFields,
+  applyShareEditorStateForTest: applyShareEditorState,
+  applyPendingLayoutUrlStateForTest: applyPendingLayoutUrlState,
+  scheduleLayoutUrlStateRefreshForTest: scheduleLayoutUrlStateRefresh,
+  layoutUrlStateForTest() { return {...layoutUrlState}; },
   setSessionFilesCachePayloadForTest(session, payload) {
     fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {
       payload: {...payload, session},
@@ -1747,6 +2545,7 @@ globalThis.__layoutTestApi = {
     });
   },
   applySessionFilesPayloadFromPushForTest: applySessionFilesPayloadFromPush,
+  sessionFilesPanelIsLoadingForTest: sessionFilesPanelIsLoading,
   sessionFilesPushRequestMatchesCurrentForTest: sessionFilesPushRequestMatchesCurrent,
   changedFileOwnerSessionForPathForTest: changedFileOwnerSessionForPath,
   fileTreeChangedAncestorStatsForTest(payload) {
@@ -1781,7 +2580,17 @@ globalThis.__layoutTestApi = {
   fileExplorerTreeSortSelectHtmlForTest: fileExplorerTreeSortSelectHtml,
   fileExplorerModeSwitcherHtml,
   normalizeFileExplorerMode,
-  setTabberActivityForTest(payload) { tabberActivityPayload = payload; },
+  setTabberActivityForTest(payload) {
+    tabberActivityPayload = payload;
+    tabberActivityState.requestGeneration = 0;
+    tabberActivityState.appliedGeneration = 0;
+    tabberActivityState.loaded = true;
+    tabberActivityState.request = null;
+  },
+  applyTabberActivityPayloadForTest: applyTabberActivityPayload,
+  fetchTabberActivityForTest: fetchTabberActivity,
+  tabberActivityPayloadForTest() { return tabberActivityPayload; },
+  tabberActivityStateForTest() { return {...tabberActivityState}; },
   setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
   setTabberSessionFilesForTest(session, files) {
     const state = tabberSessionFilesState(session);
@@ -1797,11 +2606,27 @@ globalThis.__layoutTestApi = {
   },
   setTabberCollapsedForTest(paths) {
     fileExplorerTabberCollapsed.clear();
+    fileExplorerTabberExpanded.clear();
     for (const path of paths || []) fileExplorerTabberCollapsed.add(path);
   },
+  setTabberPathExpandedForTest: setTabberPathExpanded,
   tabberRenderedRowsForTest(options = {}) {
-    // Default-expanded: clearing the collapsed set renders the whole tree.
-    if (options.preserveCollapsed !== true) fileExplorerTabberCollapsed.clear();
+    if (options.preserveCollapsed !== true) {
+      fileExplorerTabberCollapsed.clear();
+      fileExplorerTabberExpanded.clear();
+      if (options.defaultCollapsed !== true) {
+        const {entries, entriesByDir} = buildTabberTree();
+        const expandAll = (list, parent) => {
+          for (const entry of list || []) {
+            if (entry.kind !== 'dir') continue;
+            const path = parent === '/' ? '/' + entry.name : parent + '/' + entry.name;
+            fileExplorerTabberExpanded.add(path);
+            expandAll(entriesByDir.get(normalizeDirectoryPath(path)), path);
+          }
+        };
+        expandAll(entries, '/');
+      }
+    }
     const el = document.createElement('div');
     el.className = 'changes-groups';
     renderTabberTree(el);
@@ -1949,7 +2774,7 @@ globalThis.__layoutTestApi = {
     return globalThis.__layoutTestApi.serialize(defaultLayoutSlots());
   },
   customDragPreviewForTest() {
-    return customDragPreview;
+    return dragState.customPreview;
   },
   clampToViewport,
   createHoverPopoverForTest(options) {
@@ -1961,17 +2786,19 @@ globalThis.__layoutTestApi = {
   bodyClassListForTest() {
     return document.body.classList;
   },
+  syncAppViewportBreakpointClassesForTest: syncAppViewportBreakpointClasses,
   documentElementStyleForTest() {
     return document.documentElement.style;
   },
-};`, context);
+};`, {filename: 'yolomux-test-bundle.js'})).runInContext(context);
   context.document.__listeners = documentListeners;
   const api = context.__layoutTestApi;
   // Mirror production boot: preload the en catalog so t() resolves to English in tests (fetch is
   // disabled here, so the live applyLocale() never runs).
   try {
-    api.i18nSetCatalogForTest('en', JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')));
+    api.i18nSetCatalogForTest('en', EN_CATALOG);
   } catch (_) {}
+  api.vmConsoleErrorsForTest = () => [...vmConsoleErrors];
   return api;
 }
 
@@ -2133,7 +2960,8 @@ function test(label, fn) {
   // Per-test isolation: a failing assertion is recorded and the rest of the suite still runs, so one
   // failure no longer hides every later check. A pass/fail summary + non-zero exit print at the end.
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === 'function') throw new Error('async fn passed to sync test(); use testAsync');
     __testPass++;
   } catch (error) {
     __testFail++;
@@ -2207,6 +3035,10 @@ module.exports = {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
+  sourceBetween,
+  makeCatalogT,
+  deferredFetch,
+  settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,
   loadYolomuxWithFileExplorerClosed,

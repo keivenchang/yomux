@@ -32,11 +32,10 @@ async function apiFetch(url, options = {}) {
   return response;
 }
 
-async function apiFetchJson(url, options = {}) {
-  const response = await apiFetch(url, options);
+async function apiJsonResponse(response) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
     error.status = response.status;
     error.statusText = response.statusText || '';
     error.payload = payload || {};
@@ -46,7 +45,11 @@ async function apiFetchJson(url, options = {}) {
   return payload;
 }
 
-async function apiFetchJsonQuiet(url, options = {}) {
+async function apiFetchJson(url, options = {}) {
+  return apiJsonResponse(await apiFetch(url, options));
+}
+
+async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   if (shareToken) {
@@ -58,25 +61,106 @@ async function apiFetchJsonQuiet(url, options = {}) {
       requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
     }
   }
-  const response = await fetch(url, requestOptions);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
-    error.status = response.status;
-    error.statusText = response.statusText || '';
-    error.payload = payload || {};
-    error.response = response;
-    throw error;
+  const fetchStartedAt = performanceNow();
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } finally {
+    if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.fetchMs = performanceNow() - fetchStartedAt;
   }
-  return payload;
+  const parseStartedAt = performanceNow();
+  try {
+    return await apiJsonResponse(response);
+  } finally {
+    if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.parseMs = performanceNow() - parseStartedAt;
+  }
+}
+
+function messageDescriptorText(descriptor, fallback = '') {
+  const value = descriptor && typeof descriptor === 'object' ? descriptor : {};
+  const key = String(value.key || '').trim();
+  if (key) {
+    const template = i18nResolve(key);
+    if (template !== null) {
+      const rawParams = value.params && typeof value.params === 'object' ? value.params : {};
+      const params = Object.fromEntries(Object.entries(rawParams).map(([name, param]) => [
+        name,
+        param && typeof param === 'object' && ('key' in param || 'fallback' in param)
+          ? messageDescriptorText(param)
+          : param,
+      ]));
+      return i18nInterpolate(template, params);
+    }
+  }
+  return String(value.fallback || fallback || '');
+}
+
+function messageFieldDescriptor(value, field = 'message') {
+  const source = value && typeof value === 'object' ? value : {};
+  const name = String(field || 'message');
+  const params = source[`${name}_params`];
+  return {
+    key: String(source[`${name}_key`] || ''),
+    params: params && typeof params === 'object' ? params : {},
+    fallback: String(source[name] || ''),
+  };
+}
+
+function structuredMessageText(value, field = 'message', fallback = '') {
+  return messageDescriptorText(messageFieldDescriptor(value, field), fallback);
+}
+
+function structuredMessageSnapshot(value, field = 'message') {
+  const descriptor = messageFieldDescriptor(value, field);
+  const name = String(field || 'message');
+  return {
+    [name]: descriptor.fallback,
+    [`${name}_key`]: descriptor.key,
+    [`${name}_params`]: {...descriptor.params},
+  };
+}
+
+function userMessageText(value, fallback = '') {
+  const source = value && typeof value === 'object' ? value : {};
+  const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
+  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
+  return messageDescriptorText(descriptor, payload.error || source.message || fallback || '');
+}
+
+function userMessageSnapshot(value, fallback = '') {
+  const source = value && typeof value === 'object' ? value : {};
+  const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
+  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
+  const fallbackDescriptor = fallback && typeof fallback === 'object' ? fallback : {};
+  const fallbackText = typeof fallback === 'object' ? String(fallbackDescriptor.fallback || '') : String(fallback || '');
+  const key = String(descriptor.key || fallbackDescriptor.key || '');
+  const rawParams = descriptor.key ? descriptor.params : fallbackDescriptor.params;
+  const params = rawParams && typeof rawParams === 'object' ? rawParams : {};
+  const sourceText = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+  const rawFallback = String(payload.error || source.message || sourceText || fallbackText || '');
+  return {
+    error: rawFallback,
+    user_message: {
+      key,
+      params: {...params},
+      fallback: String(descriptor.fallback || rawFallback),
+    },
+  };
+}
+
+function worktreeDisplayText(worktree) {
+  const value = worktree && typeof worktree === 'object' ? worktree : {};
+  const name = String(value.name || value.path || '');
+  const root = String(value.parent_root || '');
+  return root ? t('popover.worktreeOf', {name, root}) : name;
 }
 
 function clientPushCanSupplyData() {
-  return Boolean(clientEventsSource && location.protocol !== 'file:');
+  return Boolean(clientEventTransportState.source && location.protocol !== 'file:');
 }
 
 function clientPushConnectedForData() {
-  return clientPushCanSupplyData() && clientEventsConnected === true;
+  return clientPushCanSupplyData() && clientEventTransportState.connected === true;
 }
 
 function loginRedirectUrlForCurrentLocation() {
@@ -106,27 +190,47 @@ async function redirectToLogin(response) {
   window.location.assign(loginUrl);
 }
 
-function jsDebugPerformanceNow() {
-  if (!jsDebugCollectionEnabled) return 0;
+function performanceNow() {
   const value = globalThis.performance?.now?.();
   return Number.isFinite(value) ? value : Date.now();
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
+function utf8ByteLength(text) {
+  const value = String(text || '');
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+  return value.length;
+}
+
+function domDataAttributeName(key) {
+  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
+}
+
+function singleLineText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function jsDebugPerformanceNow() {
+  if (!jsDebugCollectionEnabled) return 0;
+  return performanceNow();
 }
 
 function jsDebugRequestMethod(options = {}) {
   return String(options?.method || 'GET').toUpperCase();
 }
 
-function jsDebugByteLength(text) {
-  const value = String(text || '');
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
-  return value.length;
-}
-
 function jsDebugRequestBytes(url, options = {}) {
   if (!jsDebugCollectionEnabled) return 0;
-  let bytes = jsDebugByteLength(jsDebugUrlText(url));
+  let bytes = utf8ByteLength(jsDebugUrlText(url));
   const body = options?.body;
-  if (typeof body === 'string') bytes += jsDebugByteLength(body);
+  if (typeof body === 'string') bytes += utf8ByteLength(body);
   else if (body instanceof ArrayBuffer) bytes += body.byteLength;
   else if (body?.byteLength) bytes += Number(body.byteLength) || 0;
   return bytes;
@@ -200,11 +304,6 @@ function recordJsDebugEvent(type, payload = {}) {
   return event;
 }
 
-function clientPerfNow() {
-  const value = globalThis.performance?.now?.();
-  return Number.isFinite(value) ? value : Date.now();
-}
-
 function clientPerfMark(name) {
   if (!name || typeof globalThis.performance?.mark !== 'function') return '';
   const mark = `yolomux:${String(name)}`;
@@ -232,7 +331,7 @@ function clientPerfMeasureSinceMark(counterName, markName, details = {}) {
       ? globalThis.performance.getEntriesByName(markName)
       : [];
     const startedAt = Number(entries?.at?.(-1)?.startTime);
-    if (Number.isFinite(startedAt)) durationMs = clientPerfNow() - startedAt;
+    if (Number.isFinite(startedAt)) durationMs = performanceNow() - startedAt;
   }
   globalThis.performance?.clearMarks?.(markName);
   if (endMark) globalThis.performance?.clearMarks?.(endMark);
@@ -274,12 +373,12 @@ function recordClientPerfCounter(name, durationMs = null, details = {}) {
 }
 
 function clientPerfStart(name) {
-  return {name: String(name || ''), startedAt: clientPerfNow()};
+  return {name: String(name || ''), startedAt: performanceNow()};
 }
 
 function clientPerfEnd(token, details = {}) {
   if (!token?.name) return null;
-  return recordClientPerfCounter(token.name, clientPerfNow() - Number(token.startedAt || 0), details);
+  return recordClientPerfCounter(token.name, performanceNow() - Number(token.startedAt || 0), details);
 }
 
 function clientPerfMeasure(name, fn, details = {}) {
@@ -439,15 +538,19 @@ function clearJsDebugEvents() {
     clearTimeout(jsDebugRenderTimer);
     jsDebugRenderTimer = null;
   }
+  jsDebugRenderForce = false;
   if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
 }
 
-function scheduleJsDebugPanelRefresh() {
+function scheduleJsDebugPanelRefresh(options = {}) {
   if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
+  if (options.force === true) jsDebugRenderForce = true;
   if (jsDebugRenderTimer) return;
   jsDebugRenderTimer = setTimeout(() => {
     jsDebugRenderTimer = null;
-    refreshDebugPanelsFromEvents();
+    const force = jsDebugRenderForce;
+    jsDebugRenderForce = false;
+    refreshDebugPanelsFromEvents({force});
   }, jsDebugRenderDebounceMs);
 }
 
@@ -480,6 +583,15 @@ installJsDebugEventCapture();
 installClientPerfLongTaskObserver();
 
 let appViewportOverride = null;
+const APP_VIEWPORT_CHANGE_EVENT = 'yolomux:app-viewport-change';
+const nativeAppViewportSettleDelayMs = 250;
+const nativeAppViewportState = {
+  height: 0,
+  frame: 0,
+  settleTimer: 0,
+  pendingForce: false,
+  installed: false,
+};
 let appMirrorTransform = {scale: 1, tx: 0, ty: 0};
 
 function normalizeAppViewport(value, fallback = null) {
@@ -493,12 +605,111 @@ function normalizeAppViewport(value, fallback = null) {
 function nativeViewport() {
   const doc = document.documentElement || {};
   const width = Math.max(1, Math.round(Number(window.innerWidth) || Number(doc.clientWidth) || 1)); // static-build-allow-window-viewport
-  const height = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
+  const layoutHeight = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
+  const visualViewport = window.visualViewport;
+  const visualHeight = Math.max(0, Math.round(Number(visualViewport?.height) || 0));
+  const visualScale = Number(visualViewport?.scale);
+  // iPad Safari can retain a short innerHeight after its browser chrome changes while the current
+  // unzoomed visual viewport is taller. Never accept a *smaller* visual height here (that remains
+  // browser chrome or keyboard territory), but accept a larger one so the app reaches the screen.
+  const height = Math.max(1, Number.isFinite(visualScale) && Math.abs(visualScale - 1) <= 0.01 && visualHeight > layoutHeight
+    ? visualHeight
+    : layoutHeight);
   return {width, height, w: width, h: height};
 }
 
+// A soft keyboard shrinks the visual viewport by a large amount; the iPad/iOS Safari
+// toolbar (URL/tab bar) shrinks it by a much smaller amount with NO keyboard present.
+// Only a large reduction is real keyboard geometry — treating the toolbar delta as
+// "usable height" pins --app-root-height below 100vh, so the panes stop short of the
+// screen and leave dead space at the bottom. Ignore reductions at/below this threshold
+// (a real soft keyboard is ~250-400px; Safari chrome is well under 140px).
+const KEYBOARD_MIN_REDUCTION_PX = 140;
+const viewportDiagnosticsState = {node: null};
+
+function viewportDiagnosticsFocusedElementText(element = document.activeElement) {
+  if (!element || element === document.body || element === document.documentElement) return 'none';
+  const tag = String(element.tagName || element.localName || 'element').toLowerCase();
+  const label = String(element.getAttribute?.('aria-label') || element.placeholder || element.id || element.className || '').trim();
+  return label ? `${tag}:${label}` : tag;
+}
+
+function viewportDiagnosticsSnapshot() {
+  const native = nativeViewport();
+  const visual = window.visualViewport;
+  const rootRect = appRootElement()?.getBoundingClientRect?.();
+  const visualWidth = Math.max(0, Math.round(Number(visual?.width) || 0));
+  const visualHeight = Math.max(0, Math.round(Number(visual?.height) || 0));
+  const reduction = visualHeight ? native.height - visualHeight : 0;
+  const scale = Number(visual?.scale);
+  return {
+    layout: native,
+    document: {
+      width: Math.max(0, Math.round(Number(document.documentElement?.clientWidth) || 0)),
+      height: Math.max(0, Math.round(Number(document.documentElement?.clientHeight) || 0)),
+    },
+    visual: {
+      width: visualWidth,
+      height: visualHeight,
+      top: Math.round(Number(visual?.offsetTop) || 0),
+      left: Math.round(Number(visual?.offsetLeft) || 0),
+      scale: Number.isFinite(scale) ? Math.round(scale * 100) / 100 : 0,
+    },
+    reduction,
+    keyboardThreshold: KEYBOARD_MIN_REDUCTION_PX,
+    keyboardHeight: nativeAppViewportState.height,
+    keyboardCandidate: Boolean(visualHeight && Math.abs((Number.isFinite(scale) ? scale : 1) - 1) <= 0.01 && reduction > KEYBOARD_MIN_REDUCTION_PX),
+    root: {
+      width: Math.max(0, Math.round(Number(rootRect?.width) || 0)),
+      height: Math.max(0, Math.round(Number(rootRect?.height) || 0)),
+      bottom: Math.max(0, Math.round(Number(rootRect?.bottom) || 0)),
+    },
+    focused: viewportDiagnosticsFocusedElementText(),
+  };
+}
+
+function viewportDiagnosticsText(snapshot = viewportDiagnosticsSnapshot()) {
+  const {layout, document: documentViewport, visual, root} = snapshot;
+  return [
+    `layout ${layout.width}×${layout.height} · doc ${documentViewport.width}×${documentViewport.height}`,
+    `visual ${visual.width}×${visual.height} @${visual.left},${visual.top} · scale ${visual.scale || 'n/a'}`,
+    `delta ${snapshot.reduction}px · keyboard ${snapshot.keyboardCandidate ? `yes (${snapshot.keyboardHeight}px)` : `no (>${snapshot.keyboardThreshold}px)`}`,
+    `root ${root.width}×${root.height} · bottom ${root.bottom} · focus ${snapshot.focused}`,
+  ].join('\n');
+}
+
+function renderViewportDiagnostics() {
+  if (!debugModeExplicitUrlEnabled || shareViewMode) return false;
+  let node = viewportDiagnosticsState.node;
+  if (!node?.isConnected) {
+    node = document.createElement('output');
+    node.id = 'viewportDiagnostics';
+    node.className = 'viewport-diagnostics';
+    node.setAttribute('aria-live', 'off');
+    document.body?.appendChild(node);
+    viewportDiagnosticsState.node = node;
+  }
+  node.textContent = viewportDiagnosticsText();
+  return true;
+}
+
+function nativeUsableViewportHeight(viewport = nativeViewport()) {
+  const visualViewport = window.visualViewport;
+  if (!visualViewport) return 0;
+  const scale = Number(visualViewport.scale);
+  // A pinch changes visual viewport width/height too. Responsive layout remains tied to the layout
+  // viewport; only an unzoomed visual-height reduction is usable keyboard geometry.
+  if (Number.isFinite(scale) && Math.abs(scale - 1) > 0.01) return 0;
+  const visualHeight = Math.max(1, Math.round(Number(visualViewport.height) || 0));
+  return viewport.height - visualHeight > KEYBOARD_MIN_REDUCTION_PX ? visualHeight : 0;
+}
+
 function appViewport() {
-  return appViewportOverride ? normalizeAppViewport(appViewportOverride, nativeViewport()) : nativeViewport();
+  const native = nativeViewport();
+  if (appViewportOverride) return normalizeAppViewport(appViewportOverride, native);
+  return nativeAppViewportState.height
+    ? normalizeAppViewport({width: native.width, height: nativeAppViewportState.height}, native)
+    : native;
 }
 
 const MIN_VIEWPORT_WIDTH_PX = 320;
@@ -511,16 +722,33 @@ function effectiveViewportWidth(viewport = appViewport(), fallback = DEFAULT_VIE
   return Math.max(MIN_VIEWPORT_WIDTH_PX, width || fallbackWidth);
 }
 
-const appViewportBreakpointPx = [1500, 1280, 1100, 1080, 980, 760, 720];
+const appViewportBreakpointPx = [1500, 1280, 1200, 1100, 1080, 980, 760, 720, 600, 560];
+
+// Topbar presentation is selected by its measured rendered width in syncTopbarPacking(). Keep
+// this compatibility helper for fixture callers; viewport width is deliberately not a topbar input.
+function compactTopbarForViewport(_viewport = appViewport()) {
+  return false;
+}
 
 function syncAppViewportBreakpointClasses() {
   const viewport = appViewport();
+  // Pointer affordances are independent of topbar capacity. The measured packing pass decides
+  // which controls fit for every viewport, font, locale, zoom level, and activity state.
+  const touchTopbar = browserUsesCoarsePointer();
+  // This mirrors the shared phone-only one-pane policy (not the broader narrow-iPad rule), so
+  // phone chrome can reduce a redundant focus surround without changing tablet split geometry.
+  const phoneSinglePane = mobileSinglePaneMode();
+  const coarsePointer = browserUsesCoarsePointer();
   const targets = [document.body, appRootElement()].filter(Boolean);
   for (const target of targets) {
     for (const breakpoint of appViewportBreakpointPx) {
       target.classList?.toggle(`app-vw-lte-${breakpoint}`, viewport.width <= breakpoint);
     }
+    target.classList?.toggle('app-topbar-touch-compact', touchTopbar);
+    target.classList?.toggle('app-topbar-coarse-pointer', coarsePointer);
+    target.classList?.toggle('app-phone-single-pane', phoneSinglePane);
   }
+  if (typeof syncTopbarActivityPlacement === 'function') syncTopbarActivityPlacement();
 }
 
 function appRootElement() {
@@ -528,6 +756,9 @@ function appRootElement() {
 }
 
 function appOverlayRootElement() {
+  // A replay root is deliberately inert until the host publishes its first frame. Local overlays
+  // (for example an async file-browser popover) belong beside that root, never inside it.
+  if (shareReplayShellActive) return document.body;
   const root = appRootElement();
   if (!root || root === document.body) return document.body;
   let overlay = document.getElementById?.('appOverlayRoot');
@@ -541,16 +772,27 @@ function appOverlayRootElement() {
   return overlay;
 }
 
+function cleanupDetachedPopoverAnchor(anchor, keep = null) {
+  const previous = anchor?.__yolomuxDetachedPopover;
+  if (previous && previous !== keep) previous.remove();
+  if (previous && previous !== keep) anchor.__yolomuxDetachedPopover = null;
+}
+
+function cleanupDetachedPopoversWithin(root) {
+  if (!root) return;
+  const anchors = [root, ...Array.from(root.querySelectorAll?.('*') || [])];
+  for (const anchor of anchors) cleanupDetachedPopoverAnchor(anchor);
+}
+
 function applyAppRootViewportSize() {
   const root = appRootElement();
   if (!root?.style) return;
-  if (!appViewportOverride) {
-    root.style.removeProperty('--app-root-width');
-    root.style.removeProperty('--app-root-height');
-    return;
-  }
   const viewport = appViewport();
-  root.style.setProperty('--app-root-width', `${viewport.width}px`);
+  if (appViewportOverride) root.style.setProperty('--app-root-width', `${viewport.width}px`);
+  else root.style.removeProperty('--app-root-width');
+  // Safari's CSS 100vh can be its large viewport while innerHeight is the currently visible
+  // browser viewport. Always publish the measured height so app-root cannot extend below Safari
+  // chrome; keyboard mode merely supplies the smaller visual viewport through appViewport().
   root.style.setProperty('--app-root-height', `${viewport.height}px`);
 }
 
@@ -559,6 +801,143 @@ function setAppViewportOverride(viewport = null) {
   applyAppRootViewportSize();
   syncAppViewportBreakpointClasses();
   return appViewport();
+}
+
+function notifyAppViewportChange() {
+  if (typeof window.dispatchEvent !== 'function' || typeof Event !== 'function') return;
+  window.dispatchEvent(new Event(APP_VIEWPORT_CHANGE_EVENT));
+}
+
+function syncNativeAppViewport(options = {}) {
+  if (appViewportOverride) return false;
+  const nextHeight = nativeUsableViewportHeight();
+  const changed = nextHeight !== nativeAppViewportState.height;
+  nativeAppViewportState.height = nextHeight;
+  if (!changed && options.force !== true) return false;
+  applyAppRootViewportSize();
+  syncAppViewportBreakpointClasses();
+  renderViewportDiagnostics();
+  notifyAppViewportChange();
+  return true;
+}
+
+function scheduleNativeAppViewportSync(options = {}) {
+  nativeAppViewportState.pendingForce ||= options.force === true;
+  if (nativeAppViewportState.frame) return;
+  nativeAppViewportState.frame = requestAnimationFrame(() => {
+    nativeAppViewportState.frame = 0;
+    const force = nativeAppViewportState.pendingForce;
+    nativeAppViewportState.pendingForce = false;
+    syncNativeAppViewport({force});
+  });
+}
+
+function installNativeAppViewportOwner() {
+  if (nativeAppViewportState.installed) return;
+  nativeAppViewportState.installed = true;
+  const resize = () => scheduleNativeAppViewportSync({force: true});
+  const settle = () => {
+    resize();
+    if (nativeAppViewportState.settleTimer) clearTimeout(nativeAppViewportState.settleTimer);
+    nativeAppViewportState.settleTimer = setTimeout(() => {
+      nativeAppViewportState.settleTimer = 0;
+      resize();
+    }, nativeAppViewportSettleDelayMs);
+  };
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', settle);
+  window.visualViewport?.addEventListener?.('resize', resize);
+  window.visualViewport?.addEventListener?.('scroll', resize);
+  // Re-fit when the tab returns to the foreground: a viewport change made while
+  // this tab was backgrounded (e.g. Safari showing/hiding its tab bar when a
+  // second tab opens/closes) is missed by the resize listeners, leaving a stale
+  // --app-root-height that clips the toolbar. settle() recomputes immediately and
+  // once more after the geometry settles.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) settle(); });
+  window.addEventListener('pageshow', settle);
+  if (debugModeExplicitUrlEnabled) {
+    document.addEventListener('focusin', renderViewportDiagnostics, true);
+    document.addEventListener('focusout', () => requestAnimationFrame(renderViewportDiagnostics), true);
+  }
+}
+
+// Mobile browsers do not reliably dispatch contextmenu for a long touch (iOS Safari
+// often claims it for selection/callout), while the app's actions already have one
+// contextmenu owner per surface. Bridge a stationary touch into that existing event
+// instead of creating a second menu implementation for Finder, tabs, and terminals.
+const TOUCH_CONTEXT_MENU_DELAY_MS = 550;
+const TOUCH_CONTEXT_MENU_MOVE_TOLERANCE_PX = 12;
+const touchContextMenuSyntheticEvents = new WeakSet();
+const touchContextMenuState = {
+  installed: false,
+  timer: 0,
+  pointerId: null,
+  target: null,
+  x: 0,
+  y: 0,
+  suppressTarget: null,
+  suppressUntil: 0,
+};
+
+function clearTouchContextMenuTimer() {
+  if (!touchContextMenuState.timer) return;
+  clearTimeout(touchContextMenuState.timer);
+  touchContextMenuState.timer = 0;
+}
+
+function dispatchTouchContextMenu(target, x, y) {
+  if (!target?.dispatchEvent || target.isConnected === false) return false;
+  const event = new MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+  });
+  touchContextMenuSyntheticEvents.add(event);
+  return !target.dispatchEvent(event);
+}
+
+function installTouchContextMenuOwner() {
+  if (touchContextMenuState.installed) return;
+  touchContextMenuState.installed = true;
+  const cancel = event => {
+    if (event?.pointerId != null && event.pointerId !== touchContextMenuState.pointerId) return;
+    clearTouchContextMenuTimer();
+    touchContextMenuState.pointerId = null;
+    touchContextMenuState.target = null;
+  };
+  document.addEventListener('pointerdown', event => {
+    if (event.pointerType !== 'touch' || event.isPrimary === false || Number(event.button || 0) !== 0) return;
+    cancel();
+    touchContextMenuState.pointerId = event.pointerId;
+    touchContextMenuState.target = event.target;
+    touchContextMenuState.x = event.clientX;
+    touchContextMenuState.y = event.clientY;
+    touchContextMenuState.timer = setTimeout(() => {
+      touchContextMenuState.timer = 0;
+      const target = touchContextMenuState.target;
+      const handled = dispatchTouchContextMenu(target, touchContextMenuState.x, touchContextMenuState.y);
+      if (handled) {
+        // Block the delayed native event so one long press cannot open both menus.
+        touchContextMenuState.suppressTarget = target;
+        touchContextMenuState.suppressUntil = performance.now() + TOUCH_CONTEXT_MENU_DELAY_MS;
+      }
+      touchContextMenuState.pointerId = null;
+      touchContextMenuState.target = null;
+    }, TOUCH_CONTEXT_MENU_DELAY_MS);
+  }, {capture: true, passive: true});
+  document.addEventListener('pointermove', event => {
+    if (event.pointerId !== touchContextMenuState.pointerId) return;
+    if (Math.hypot(event.clientX - touchContextMenuState.x, event.clientY - touchContextMenuState.y) > TOUCH_CONTEXT_MENU_MOVE_TOLERANCE_PX) cancel(event);
+  }, {capture: true, passive: true});
+  document.addEventListener('pointerup', cancel, true);
+  document.addEventListener('pointercancel', cancel, true);
+  document.addEventListener('contextmenu', event => {
+    if (touchContextMenuSyntheticEvents.has(event) || performance.now() > touchContextMenuState.suppressUntil) return;
+    if (!touchContextMenuState.suppressTarget?.contains?.(event.target) && event.target !== touchContextMenuState.suppressTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
 }
 
 function appMirrorTransformState() {
@@ -977,7 +1356,7 @@ function setFileConflictDialogOpen(path, open) {
 // Normalized view of a session's transcript metadata — prevents each call site from re-implementing
 // the same `?.[session]?.project?.git?.root` chain differently.
 function sessionTranscriptInfo(session) {
-  const info = transcriptMeta.sessions?.[session] || {};
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const git = info.project?.git || {};
   return {
     gitRoot: git.root || '',
@@ -1108,7 +1487,22 @@ function writeStoredEditorLineNumbers(value) {
 }
 
 function defaultCollapsedPreferenceSections() {
-  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads/Downloads']);
+  return new Set(DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS);
+}
+
+function normalizeCollapsedPreferenceSections(values, sections = []) {
+  const validIds = new Set(Object.values(PREFERENCE_SECTION_IDS));
+  const legacyTitleIds = new Map(Object.entries(LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE));
+  for (const section of sections) {
+    const id = String(section?.id || '');
+    const title = String(section?.title || '');
+    if (validIds.has(id) && title) legacyTitleIds.set(title, id);
+  }
+  return new Set(Array.from(values || [], value => {
+    const text = String(value || '');
+    if (validIds.has(text)) return text;
+    return legacyTitleIds.get(text) || '';
+  }).filter(Boolean));
 }
 
 function readStoredCollapsedPreferenceSections() {
@@ -1117,7 +1511,7 @@ function readStoredCollapsedPreferenceSections() {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
-    return new Set(parsed.filter(item => typeof item === 'string' && item));
+    return normalizeCollapsedPreferenceSections(parsed);
   } catch (_) {
     return defaultCollapsedPreferenceSections();
   }
@@ -1125,6 +1519,17 @@ function readStoredCollapsedPreferenceSections() {
 
 function writeStoredCollapsedPreferenceSections() {
   storageSet(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
+}
+
+function setCollapsedPreferenceSections(values, options = {}) {
+  const previousIds = Array.from(collapsedPreferenceSections || []);
+  const next = normalizeCollapsedPreferenceSections(values, options.sections || []);
+  const nextIds = Array.from(next);
+  collapsedPreferenceSections = next;
+  if (options.persist === true && (previousIds.length !== nextIds.length || previousIds.some((id, index) => id !== nextIds[index]))) {
+    writeStoredCollapsedPreferenceSections();
+  }
+  return collapsedPreferenceSections;
 }
 
 function cleanDiffRef(value, fallback = '') {
@@ -1340,8 +1745,10 @@ function globalThemeIsDark(mode = globalThemeMode) {
 
 function globalThemeLabel(mode = globalThemeMode) {
   const normalized = normalizeGlobalThemeMode(mode);
-  if (normalized === 'system') return `System (${resolvedGlobalThemeMode(mode)})`;
-  return normalized === 'dark' ? 'Dark' : 'Light';
+  if (normalized === 'system') return t('pref.appearance.theme.systemResolved', {
+    resolved: t(`pref.appearance.theme.${resolvedGlobalThemeMode(mode)}`),
+  });
+  return t(`pref.appearance.theme.${normalized}`);
 }
 
 function nextGlobalThemeMode(mode = globalThemeMode) {
@@ -1443,8 +1850,8 @@ function syncPressedButton(button, active, options = {}) {
 
 function syncFileExplorerHiddenButton(button) {
   syncPressedButton(button, fileExplorerShowHidden, {
-    labelOn: 'Hide dotfiles (.*)',
-    labelOff: 'Show hidden files (dotfiles)',
+    labelOn: t('finder.toolbar.hideHidden'),
+    labelOff: t('finder.toolbar.hidden'),
   });
 }
 
@@ -1517,8 +1924,8 @@ function renderTabMetaToggle() {
   document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
   if (!tabMetaToggle) return;
   syncPressedButton(tabMetaToggle, tabMetaVisible, {
-    labelOn: 'Hide tab metadata',
-    labelOff: 'Show tab metadata',
+    labelOn: t('menu.view.tabMeta.hide'),
+    labelOff: t('menu.view.tabMeta.show'),
   });
 }
 
@@ -1541,6 +1948,28 @@ function rememberActivePaneItem(item) {
   if (!item || !itemIsActivePaneTab(item)) return;
   lastActivePaneItem = item;
   if (!isFileExplorerItem(item)) lastActiveNonFileExplorerPaneItem = item;
+}
+
+function explicitPaneFocusItem() {
+  return explicitPaneFocusState.item && itemIsActivePaneTab(explicitPaneFocusState.item) ? explicitPaneFocusState.item : null;
+}
+
+function explicitTmuxPaneFocusSession() {
+  const session = explicitPaneFocusState.tmuxSession;
+  return isTmuxSession(session) && activeSessions.includes(session) ? session : '';
+}
+
+function setExplicitPaneFocusItem(item, options = {}) {
+  const next = String(item || '').trim();
+  if (next && options.allowInactive !== true && !itemIsActivePaneTab(next)) return false;
+  const nextTmuxSession = isTmuxSession(next)
+    ? next
+    : (options.clearTmux === true ? null : explicitPaneFocusState.tmuxSession);
+  if (explicitPaneFocusState.item === (next || null) && explicitPaneFocusState.tmuxSession === nextTmuxSession) return false;
+  explicitPaneFocusState.item = next || null;
+  explicitPaneFocusState.tmuxSession = nextTmuxSession;
+  if (options.renderMenu !== false && typeof renderSessionButtons === 'function') renderSessionButtons();
+  return true;
 }
 
 function visualActivePaneItem() {
@@ -1571,15 +2000,33 @@ function attentionAcknowledgeDelayMsFromOptions(options = {}) {
 function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null, options = {}) {
   const sessionKey = String(session || '').trim();
   if (!sessionKey || !isTmuxSession(sessionKey)) return false;
+  const explicitWindowIndex = windowIndex !== null && windowIndex !== undefined;
   const acknowledgeDelayMs = attentionAcknowledgeDelayMsFromOptions(options);
   let acknowledged = false;
+  // A parent session tab acknowledges the highest-priority stopped/attention child, not whichever
+  // tmux window happens to be active. Direct sub-window actions remain tied to their exact target.
+  if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
+    acknowledged = acknowledgeAgentWindowActivity(sessionKey, explicitWindowIndex ? windowIndex : null, {
+      ...options,
+      preferSummary: options.preferSummary === true || !explicitWindowIndex,
+      delayMs: acknowledgeDelayMs,
+    }) || acknowledged;
+  }
   if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
     acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
   }
-  if (options.acknowledgeAgentWindow !== false && typeof acknowledgeAgentWindowActivity === 'function') {
-    acknowledged = acknowledgeAgentWindowActivity(sessionKey, windowIndex, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
-  }
   return acknowledged;
+}
+
+function activateTmuxWindowFromUserAction(session, windowIndex, label, options = {}) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || !isTmuxSession(sessionKey) || windowIndex === null || windowIndex === undefined || String(windowIndex).trim() === '') return false;
+  // Every visible direct-window surface must acknowledge the exact target before switching. The
+  // acknowledgement captures the red/yellow generation while the old window model is still live.
+  acknowledgeTerminalAttentionFromUserAction(sessionKey, windowIndex, options);
+  if (typeof tmuxWindow !== 'function') return false;
+  tmuxWindow(sessionKey, {windowIndex}, label);
+  return true;
 }
 
 function setFocusedTerminal(session, options = {}) {
@@ -1589,6 +2036,14 @@ function setFocusedTerminal(session, options = {}) {
   } finally {
     clientPerfEnd(perf, {sessions: activeSessions.length, user: options.userInitiated === true ? 1 : 0});
   }
+}
+
+function updateFocusOnlyChrome() {
+  // Focus does not change pane-tab content. Dockview/classic layout activation owns active-tab
+  // chrome, while acknowledgement updates arrive through their existing status-render path.
+  updateTopbarActivityStatus();
+  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
+  updatePanelInactiveOverlays();
 }
 
 function setFocusedTerminalMeasured(session, options = {}) {
@@ -1614,9 +2069,7 @@ function setFocusedTerminalMeasured(session, options = {}) {
   clearPendingFileEditorFocusExcept(session);
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
   sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
     acknowledgeTerminalAttentionFromUserAction(session, null, options);
@@ -1631,36 +2084,50 @@ function clearFocusedTerminal(session) {
   if (focusedTerminal !== session) return;
   focusedTerminal = null;
   focusedPanelItem = null;
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
+}
+
+function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
+  if (isTmuxSession(item)) {
+    acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
+    rememberFileExplorerExplicitSyncSession(item);
+  } else {
+    setExplicitPaneFocusItem(item);
+  }
+  if (isFileEditorItem(item)) {
+    activeFile = fileItemPath(item);
+    scheduleFileExplorerActiveFileReveal(activeFile);
+  }
+  const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
+  if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
+  if (previousItem !== item) recordFocusNavTransition(previousItem, item);
 }
 
 function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
+  const alreadyFocused = focusedPanelItem === item;
+  if (alreadyFocused) {
+    rememberActivePaneItem(item);
+    if (isTmuxSession(item)) lastFocusedTmuxSession = item;
+    dismissNotificationsForTarget(item);
+    if (options.userInitiated === true) {
+      applyUserInitiatedPanelFocus(item, previousItem, options);
+    }
+    return;
+  }
   if (previousItem !== item) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
+  dismissNotificationsForTarget(item);
   clearPendingFileEditorFocusExcept(item);
   if (isTmuxSession(item)) {
     lastFocusedTmuxSession = item;
-    dismissAttentionAlertsForSession(item);
   }
-  updateSessionButtonStates();
-  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
-  updatePanelInactiveOverlays();
+  updateFocusOnlyChrome();
   sharePublish('focus', {item});
   if (options.userInitiated === true) {
-    if (isTmuxSession(item)) acknowledgeTerminalAttentionFromUserAction(item, null, {...options, preferSummary: true});
-    if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
-    if (isFileEditorItem(item)) {
-      activeFile = fileItemPath(item);
-      scheduleFileExplorerActiveFileReveal(activeFile);
-    }
-    const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
-    if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
-    recordFocusNavTransition(previousItem, item);
+    applyUserInitiatedPanelFocus(item, previousItem, options);
   }
   else recordAutoFocusNav(item, previousItem);
 }
@@ -1672,7 +2139,7 @@ let autoFocusNavTimer = null;
 // record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
 // already at the stack head, so recordEditorNav's consecutive-dedupe makes this a no-op there.
 function recordAutoFocusNav(item, previousItem = null) {
-  if (!autoFocusEnabled || !item) return;
+  if (!autoFocusCanFollowCursor() || !item) return;
   if (autoFocusNavTimer) clearTimeout(autoFocusNavTimer);
   autoFocusNavTimer = setTimeout(() => {
     autoFocusNavTimer = null;
@@ -1687,18 +2154,29 @@ function clearPendingFileEditorFocusExcept(item) {
 }
 
 function focusTerminalWhenAutoFocus(session, delay = 0) {
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor()) return;
   focusTerminalDom(session, delay);
 }
 
-function focusTerminalFromUserAction(session, delay = 0) {
+function focusTerminalFromUserAction(session, delay = 0, options = {}) {
+  // A tab detail opened from a touch action has no hover-leave event. Terminal engagement is an
+  // explicit change of context, so it must dismiss that detail before focusing the xterm surface.
+  if (typeof closeOtherSessionPopovers === 'function') closeOtherSessionPopovers(null, {force: true});
   noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
+  setFocusedTerminal(session, {...options, userInitiated: true});
   focusTerminalDom(session, delay);
 }
 
 function focusTerminalDom(session, delay = 0) {
-  const run = () => terminals.get(session)?.term?.focus?.();
+  const run = () => {
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    terminals.get(session)?.term?.focus?.();
+    // xterm focuses its hidden textarea without a preventScroll option. In a full-height app with
+    // a tall sibling pane, Chrome can scroll the otherwise overflow-hidden document and move the
+    // entire top bar above the viewport when switching terminal tabs.
+    if (window.scrollX !== scrollX || window.scrollY !== scrollY) window.scrollTo(scrollX, scrollY);
+  };
   if (delay > 0) setTimeout(run, delay);
   else run();
 }
@@ -1709,15 +2187,17 @@ function clearFocusForInactiveLayout() {
   if (lastActivePaneItem && !itemIsActivePaneTab(lastActivePaneItem)) lastActivePaneItem = null;
   if (lastActiveNonFileExplorerPaneItem && !itemIsActivePaneTab(lastActiveNonFileExplorerPaneItem)) lastActiveNonFileExplorerPaneItem = null;
   if (lastFocusedTmuxSession && !activeSessions.includes(lastFocusedTmuxSession)) lastFocusedTmuxSession = null;
+  if (explicitPaneFocusState.item && !itemIsActivePaneTab(explicitPaneFocusState.item)) explicitPaneFocusState.item = null;
+  if (explicitPaneFocusState.tmuxSession && !activeSessions.includes(explicitPaneFocusState.tmuxSession)) explicitPaneFocusState.tmuxSession = null;
 }
 
 function terminalPaneIsActive(session) {
   return document.getElementById(`terminal-pane-${session}`)?.classList.contains(CLS.active) === true;
 }
 
-function selectPanelOnHover(item) {
+function selectPanelOnHover(item, event = null) {
   if (!item) return;
-  if (!autoFocusEnabled) return;
+  if (!autoFocusCanFollowCursor(event)) return;
   if (isTmuxSession(item) && terminalPaneIsActive(item)) {
     setFocusedTerminal(item);
     scheduleFit(item);
@@ -1736,6 +2216,11 @@ function updatePanelInactiveOverlays() {
   }
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
+  const focusedSlot = focusedPanelItem ? slotForItem(focusedPanelItem) : '';
+  const focusMatchesActiveLayout = !focusedSlot || activeItemForSide(focusedSlot) === focusedPanelItem;
+  if (focusMatchesActiveLayout && typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
+  else if (focusMatchesActiveLayout && typeof syncTabberTreeLayoutState === 'function') syncTabberTreeLayoutState();
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
 }
 
 function esc(value) {
@@ -1794,6 +2279,7 @@ const searchRankWeights = Object.freeze({
   fileNamePrefix: 3500,
   fileNameContains: 1800,
   fileNameSubsequence: 600,
+  paneNameContiguous: {files: 50000, command: 100000},
   finderAlias: 25000,
   finderAliasFilesMode: 2500,
   paneExactIdentifier: 30000,
@@ -1847,6 +2333,24 @@ function fuzzyFieldStartsWithQuery(query, text) {
   return Boolean(needle) && fuzzyCanonicalPrefixText(text).startsWith(needle);
 }
 
+function focusPanelSearchInput(panel, inputSelector, options = {}) {
+  const panelSelector = String(options.panelSelector || '');
+  const root = panel && panel.isConnected !== false
+    ? panel
+    : (panelSelector
+      ? (Array.from(document.querySelectorAll(panelSelector)).find(candidate => candidate.offsetParent !== null) || document.querySelector(panelSelector))
+      : null);
+  const search = root?.querySelector?.(inputSelector);
+  if (!search) return false;
+  search.focus?.({preventScroll: true});
+  if (options.select === true) search.select?.();
+  else {
+    const position = String(search.value || '').length;
+    search.setSelectionRange?.(position, position);
+  }
+  return true;
+}
+
 function fuzzySearchScore(query, fields) {
   const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return 0;
@@ -1868,7 +2372,19 @@ function fuzzySearchScore(query, fields) {
   return total;
 }
 
-function fuzzyHighlightHtml(query, text) {
+function sessionScopedId(key, create = randomShareViewerId) {
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = create();
+    sessionStorage.setItem(key, created);
+    return created;
+  } catch (_) {
+    return create();
+  }
+}
+
+function fuzzyHighlightHtml(query, text, {markClass = 'fuzzy-match'} = {}) {
   const value = String(text ?? '');
   // Highlight EVERY query token's subsequence match, not just the first — mirrors fuzzySearchScore, which
   // scores all tokens. So "pa exploration" highlights both "PA" and "exploration", not only "pa".
@@ -1890,7 +2406,7 @@ function fuzzyHighlightHtml(query, text) {
     }
     const start = index;
     while (index < chars.length && indexes.has(index)) index += 1;
-    parts.push(`<mark class="fuzzy-match">${esc(chars.slice(start, index).join(''))}</mark>`);
+    parts.push(`<mark class="${esc(markClass)}">${esc(chars.slice(start, index).join(''))}</mark>`);
   }
   return parts.join('');
 }
@@ -1931,7 +2447,7 @@ function renderTransportWarning() {
   const port = location.port || '9998';
   const selfSigned = `python3 yolomux.py --port ${port} --self-signed`;
   const cert = `python3 yolomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;
-  httpsWarning.dataset.tip = `No HTTPS. Highly recommend that you restart with ${selfSigned}. Or use ${cert}.`;
+  httpsWarning.dataset.tip = t('app.noHttpsDetail', {selfSigned, cert});
   httpsWarning.setAttribute('aria-label', httpsWarning.dataset.tip);
   httpsWarning.tabIndex = 0;
 }
@@ -1944,6 +2460,9 @@ function stripTerminalQueryResponses(data) {
 
 const terminalLinkPattern = /(?:https?:\/\/|file:\/\/|www\.)[^\s<>"'`]+/gi;
 const terminalFileReferencePattern = /(^|[\s([{<"'`])((?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+(?:\/[A-Za-z0-9._@%+=-]+)+)|(?:(?:~\/|\.{1,2}\/|\/)?[A-Za-z0-9._@%+=-]+\.[A-Za-z0-9][A-Za-z0-9+_-]{0,31}))(?::([1-9]\d{0,6}))?/g;
+const terminalFileReferenceExtensions = new Set(['c', 'cc', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'html', 'ini', 'java', 'js', 'json', 'jsx', 'lock', 'lua', 'md', 'mjs', 'php', 'py', 'rb', 'rs', 'scss', 'sh', 'sql', 'toml', 'ts', 'tsx', 'txt', 'xml', 'yaml', 'yml']);
+const terminalFileReferenceNegativeCacheMs = 5_000;
+const terminalFileReferencePositiveCacheMs = 30_000;
 const terminalWrappedUrlMaxRows = 8;
 const terminalLinkClosePairs = [
   [')', '('],
@@ -2021,6 +2540,7 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     const prefix = match[1] || '';
     const path = match[2] || '';
     if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path)) continue;
+    if (!terminalTextLooksLikeFileReference(path)) continue;
     const line = Number(match[3] || 0);
     const startIndex = (match.index || 0) + prefix.length;
     const endIndex = startIndex + path.length + (match[3] ? match[3].length + 1 : 0);
@@ -2039,6 +2559,17 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     });
   }
   return refs;
+}
+
+// Terminal output frequently contains dotted JavaScript symbols and slash-separated status
+// labels. Only probe paths that carry an explicit path prefix or a conventional file suffix.
+function terminalTextLooksLikeFileReference(path) {
+  const value = String(path || '');
+  if (/^(?:~\/|\.{1,2}\/|\/)/.test(value)) return true;
+  const basename = value.split('/').pop() || '';
+  const extension = basename.includes('.') ? basename.split('.').pop().toLowerCase() : '';
+  if (!terminalFileReferenceExtensions.has(extension)) return false;
+  return value.includes('/') || basename.includes('.');
 }
 
 function terminalTextReferences(lineText, rangeForOffsets, y = null) {
@@ -2224,13 +2755,18 @@ async function terminalReferenceProviderLinks(session, term, y) {
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
-const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 90;
+const TERMINAL_FILE_UNDERLINE_REFRESH_MS = 1700;
 
 function terminalFileReferenceViewportSignature(term) {
+  const references = terminalVisibleFileReferences(term)
+    .map(terminalFileReferenceKey)
+    .sort()
+    .join('\x1e');
   return [
     Math.max(0, Math.floor(Number(term?.cols || 0))),
     Math.max(0, Math.floor(Number(term?.rows || 0))),
     Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0))),
+    references,
   ].join(':');
 }
 
@@ -2371,9 +2907,16 @@ function renderTerminalFileReferenceUnderlinesMeasured(term, container, referenc
   return nodes.length;
 }
 
+function terminalFileReferenceUnderlineIsActive(session, container) {
+  return document.visibilityState !== 'hidden'
+    && itemIsActivePaneTab(session)
+    && terminalIsVisible(session, container);
+}
+
 function installTerminalFileReferenceUnderlines(session, term, container, options = {}) {
   if (!session || !term || !container) return null;
   const targetResolver = options.targetResolver || terminalFileReferenceTarget;
+  const isActive = typeof options.isActive === 'function' ? options.isActive : terminalFileReferenceUnderlineIsActive;
   const disposables = [];
   let disposed = false;
   let timer = 0;
@@ -2383,6 +2926,21 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   let existingReferenceKeys = new Set();
   const existingReferenceTargets = new Map();
   let hoverKey = '';
+  let refreshRequest = null;
+
+  const active = () => !disposed && Boolean(isActive(session, container));
+
+  const clearInactive = () => {
+    sequence += 1;
+    if (timer) clearTimeout(timer);
+    if (renderFrame) cancelAnimationFrame(renderFrame);
+    timer = 0;
+    renderFrame = 0;
+    existingReferenceKeys = new Set();
+    hoverKey = '';
+    lastRenderedViewportSignature = '';
+    return clearTerminalFileReferenceUnderlines(container);
+  };
 
   const setHoverKey = nextKey => {
     const normalizedKey = nextKey && existingReferenceKeys.has(nextKey) ? nextKey : '';
@@ -2392,7 +2950,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 
   const updateHover = event => {
-    if (disposed) return;
+    if (!active()) return;
     const reference = terminalReferenceAtClientPoint(term, container, event?.clientX, event?.clientY);
     setHoverKey(reference?.type === 'file' ? terminalFileReferenceKey(reference) : '');
   };
@@ -2400,6 +2958,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   const clearHover = () => setHoverKey('');
 
   const renderCached = () => {
+    if (!active()) return clearInactive();
     const existingRefs = [];
     for (const ref of terminalVisibleFileReferences(term)) {
       const key = terminalFileReferenceCacheKey(session, ref);
@@ -2413,8 +2972,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
-  const refresh = async () => {
+  const refreshNow = async () => {
     if (disposed) return 0;
+    if (!active()) return clearInactive();
     if (timer) {
       clearTimeout(timer);
       timer = 0;
@@ -2432,6 +2992,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
       Promise.resolve(targetResolver(session, ref, {fresh: false, user: true})).catch(() => null)
     )));
     if (disposed || currentSequence !== sequence) return 0;
+    if (!active()) return clearInactive();
     const existingRefs = refs
       .map((ref, index) => {
         const cacheKey = terminalFileReferenceCacheKey(session, ref);
@@ -2451,25 +3012,45 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     return count;
   };
 
+  const refresh = () => {
+    if (refreshRequest) return refreshRequest;
+    const request = refreshNow();
+    refreshRequest = request;
+    request.finally(() => {
+      if (refreshRequest === request) refreshRequest = null;
+    });
+    return request;
+  };
+
   const scheduleCachedRender = () => {
-    if (disposed) return;
+    if (!active()) {
+      clearInactive();
+      return;
+    }
     if (renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
       renderFrame = 0;
-      if (!disposed) renderCached();
+      if (active()) renderCached();
+      else clearInactive();
     });
   };
 
   const schedule = (scheduleOptions = {}) => {
-    if (disposed) return;
+    if (!active()) {
+      clearInactive();
+      return;
+    }
     const viewportSignature = terminalFileReferenceViewportSignature(term);
     const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
-    if (viewportChanged) scheduleCachedRender();
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = 0;
-      refresh();
-    }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+    const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
+    if (viewportChanged || contentChanged) scheduleCachedRender();
+    if ((viewportChanged || contentChanged) && !timer) {
+      timer = setTimeout(() => {
+        timer = 0;
+        if (active()) refresh();
+        else clearInactive();
+      }, TERMINAL_FILE_UNDERLINE_REFRESH_MS);
+    }
   };
 
   const bindTerminalEvent = (name, callback) => {
@@ -2478,7 +3059,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
   bindTerminalEvent('onScroll', () => schedule({reason: 'scroll', viewportChanged: true}));
   bindTerminalEvent('onResize', () => schedule({reason: 'resize', viewportChanged: true}));
-  bindTerminalEvent('onRender', () => schedule({reason: 'render'}));
+  bindTerminalEvent('onRender', () => schedule({reason: 'render', contentChanged: true}));
   container.addEventListener?.('mousemove', updateHover);
   container.addEventListener?.('mouseleave', clearHover);
   disposables.push({
@@ -2616,7 +3197,7 @@ async function copyTextToClipboard(text) {
   textarea.select();
   const copied = document.execCommand?.('copy') === true;
   textarea.remove();
-  if (!copied) throw new Error('clipboard copy is unavailable');
+  if (!copied) throw new Error(t('common.clipboardUnavailable'));
 }
 
 function copyTextToClipboardViaCopyEvent(text) {
@@ -2665,7 +3246,7 @@ function writeTerminalTextToClipboard(text, options = {}) {
     })
     .catch(error => {
       copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
-      statusErr(localizedHtml('status.copyFailed', {error}));
+      statusErr(localizedHtml('common.copyFailed', {error}));
     });
   cleanup();
 }
@@ -2683,37 +3264,79 @@ function copyDebug(stage, fields = {}) {
   console.log(`[copy-debug] ${stage} ${parts}`);
 }
 
-function createContextMenuController() {
-  let menu = null;
-  const close = () => {
-    if (!menu) return;
-    menu.remove();
-    menu = null;
+function overlayFocusableElements(overlay) {
+  return Array.from(overlay?.querySelectorAll?.('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || []);
+}
+
+function createDismissableOverlayController(options = {}) {
+  let overlay = null;
+  let trigger = null;
+  let removeOnClose = false;
+  const close = (closeOptions = {}) => {
+    if (!overlay) return false;
+    const closed = overlay;
+    const returnTarget = trigger;
+    if (removeOnClose) closed.remove();
+    else closed.hidden = true;
+    overlay = null;
+    trigger = null;
+    removeOnClose = false;
     document.removeEventListener('pointerdown', pointerdown, true);
     document.removeEventListener('keydown', keydown, true);
-    window.removeEventListener('blur', close);
-    scheduleSharePopupLayerPublish({immediate: true});
+    window.removeEventListener('blur', blur);
+    options.onClose?.(closed);
+    if (closeOptions.returnFocus !== false && returnTarget?.isConnected !== false) returnTarget?.focus?.();
+    return true;
   };
   const pointerdown = event => {
-    if (menu?.contains(event.target)) return;
-    close();
+    if (overlay?.contains(event.target) || trigger?.contains?.(event.target)) return;
+    close({returnFocus: false});
   };
   const keydown = event => {
-    if (event.key === 'Escape') close();
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== 'Tab' || options.trapFocus !== true) return;
+    const focusable = overlayFocusableElements(overlay);
+    const index = focusable.indexOf(document.activeElement);
+    if (!focusable.length || (!event.shiftKey && index < focusable.length - 1) || (event.shiftKey && index > 0)) return;
+    event.preventDefault();
+    focusable[event.shiftKey ? focusable.length - 1 : 0].focus();
   };
+  const blur = () => close({returnFocus: false});
   return {
     close,
-    isOpen: () => Boolean(menu),
-    open(nextMenu, x, y) {
-      close();
-      menu = nextMenu;
-      menu.addEventListener('pointerdown', event => event.stopPropagation());
-      appOverlayRootElement().appendChild(menu);
-      positionContextMenu(menu, x, y);
+    isOpen: () => Boolean(overlay),
+    open(nextOverlay, openOptions = {}) {
+      close({returnFocus: false});
+      overlay = nextOverlay;
+      trigger = openOptions.trigger || null;
+      removeOnClose = openOptions.removeOnClose === true;
+      overlay.hidden = false;
+      overlay.addEventListener('pointerdown', event => event.stopPropagation());
       document.addEventListener('pointerdown', pointerdown, true);
       document.addEventListener('keydown', keydown, true);
-      window.addEventListener('blur', close);
-      scheduleSharePopupLayerPublish();
+      if (openOptions.closeOnBlur !== false) window.addEventListener('blur', blur);
+      options.onOpen?.(overlay);
+      return overlay;
+    },
+  };
+}
+
+function createContextMenuController() {
+  const overlay = createDismissableOverlayController({
+    onOpen: () => scheduleSharePopupLayerPublish(),
+    onClose: () => scheduleSharePopupLayerPublish({immediate: true}),
+  });
+  return {
+    close: overlay.close,
+    isOpen: overlay.isOpen,
+    open(menu, x, y) {
+      appOverlayRootElement().appendChild(menu);
+      positionContextMenu(menu, x, y);
+      overlay.open(menu, {removeOnClose: true});
     },
   };
 }
@@ -2721,25 +3344,17 @@ function createContextMenuController() {
 function makeButton(options = {}) {
   const button = document.createElement('button');
   button.type = options.type || 'button';
-  if (options.id) button.id = options.id;
-  if (options.className) button.className = options.className;
-  if (options.role) button.setAttribute('role', options.role);
-  if (options.html !== undefined) button.innerHTML = options.html;
-  else if (options.label !== undefined) button.textContent = options.label;
+  setDomBuilderOptions(button, options);
   button.disabled = options.disabled === true;
-  if (options.title) button.title = options.title;
-  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
   if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
     button.setAttribute('aria-checked', options.checked ? 'true' : 'false');
     if (options.checked === true) button.dataset.checked = 'true';
   }
-  if (options.dataset) {
-    for (const [key, value] of Object.entries(options.dataset)) {
-      if (value !== undefined && value !== null) button.dataset[key] = String(value);
-    }
-  }
   if (typeof options.onClick === 'function') button.addEventListener('click', options.onClick);
+  for (const [type, listener] of Object.entries(options.events || {})) {
+    if (typeof listener === 'function') button.addEventListener(type, listener);
+  }
   return button;
 }
 
@@ -2770,7 +3385,7 @@ function activateCopyPathButton(event, button) {
   if (!path) return;
   copyTextToClipboard(path)
     .then(() => { statusOk(localizedHtml('status.copied')); })
-    .catch(error => { statusErr(localizedHtml('status.copyFailed', {error})); });
+    .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
 }
 
 function handleCopyPathPointerUp(event, button) {
@@ -2841,7 +3456,7 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
     event.preventDefault();
     event.stopPropagation();
     if (!button.disabled) handler();
-    closeMenu();
+    if (options.keepOpen !== true) closeMenu();
   });
   menu.appendChild(button);
   return button;
@@ -2875,9 +3490,6 @@ function rootCssLengthPx(name) {
   return Math.max(0, width);
 }
 
-const MIN_SPLIT_PANE_WIDTH_FALLBACK_PX = 320;
-const MIN_SPLIT_PANE_HEIGHT_FALLBACK_PX = 220;
-
 function minSplitPaneWidthPx() {
   return rootCssLengthPx('--min-split-pane-width') || MIN_SPLIT_PANE_WIDTH_FALLBACK_PX;
 }
@@ -2894,10 +3506,16 @@ function positionContextMenu(menu, x, y) {
   const rect = menu.getBoundingClientRect();
   const edgeGap = popoverEdgeGapPx();
   const viewport = appViewport();
-  const left = Math.min(Math.max(edgeGap, x), Math.max(edgeGap, viewport.width - rect.width - edgeGap));
-  const top = Math.min(Math.max(edgeGap, y), Math.max(edgeGap, viewport.height - rect.height - edgeGap));
+  const sheet = menu.classList?.contains('tab-action-sheet');
+  const desiredLeft = sheet ? x - rect.width / 2 : x;
+  const left = Math.min(Math.max(edgeGap, desiredLeft), Math.max(edgeGap, viewport.width - rect.width - edgeGap));
+  const maxTop = Math.max(edgeGap, viewport.height - rect.height - edgeGap);
+  const shouldOpenAbove = sheet && y + rect.height > viewport.height - edgeGap && y - rect.height - edgeGap >= edgeGap;
+  const desiredTop = shouldOpenAbove ? y - rect.height - edgeGap : y;
+  const top = Math.min(Math.max(edgeGap, desiredTop), maxTop);
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
+  menu.style.bottom = 'auto';
 }
 
 function closeTerminalContextMenu() {
@@ -2921,6 +3539,33 @@ function closeContextMenus() {
   closeFileContextMenu();
   closeSessionContextMenu();
   closeLinkContextMenu();
+}
+
+function normalizedExternalHttpUrl(value, options = {}) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > Math.max(1, Number(options.maxLength) || 8192)) return '';
+  try {
+    const url = new URL(options.decodeHtmlAmpersands === true ? raw.replace(/&amp;/gi, '&') : raw);
+    if (!['http:', 'https:'].includes(url.protocol.toLowerCase()) || url.username || url.password) return '';
+    return url.href;
+  } catch (_) {
+    return '';
+  }
+}
+
+function triggerExternalUrlDownload(value) {
+  const url = normalizedExternalHttpUrl(value);
+  if (!url || !document.body) return false;
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = basenameOf(new URL(url).pathname) || 'download';
+  anchor.target = '_blank';
+  anchor.rel = 'noopener noreferrer';
+  anchor.hidden = true;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  return true;
 }
 
 function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
@@ -3058,7 +3703,7 @@ function withTerminalVisibleSelectionCleanup(session, term, container, reason, h
 
 const TERMINAL_COPY_ACTIONS = Object.freeze({
   selected: Object.freeze({
-    labelKey: 'terminal.copySelected',
+    labelKey: 'common.copy',
     statusKey: 'status.copied',
     reason: 'copy-selection',
     dedent: false,
@@ -3070,7 +3715,7 @@ const TERMINAL_COPY_ACTIONS = Object.freeze({
     dedent: true,
   }),
   tmux: Object.freeze({
-    labelKey: 'terminal.copyTmuxSelection',
+    labelKey: 'common.copyTmuxSelection',
     statusPluralKey: 'status.copiedTmuxSelection',
     reason: 'copy-tmux-selection',
   }),
@@ -3160,19 +3805,63 @@ function terminalFileReferenceAbsolutePath(session, reference) {
 
 async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
+  const canReuse = options.fresh === false;
+  const now = typeof options.now === 'function' ? options.now : Date.now;
+  const cacheKey = terminalFileReferenceCacheKey(session, reference);
+  if (canReuse && terminalFileReferenceTargetCache.has(cacheKey)) {
+    const cached = terminalFileReferenceTargetCache.get(cacheKey);
+    if (cached.expiresAt > now()) {
+      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cached, fileExplorerMemoryCacheLimit);
+      return cached.promise || cached.value;
+    }
+    terminalFileReferenceTargetCache.delete(cacheKey);
+  }
   const fetchOptions = {
     user: options.user !== false,
-    fresh: options.fresh !== false,
+    fresh: !canReuse,
   };
-  for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
-    try {
-      const info = await fetchFilePathInfo(path, fetchOptions);
-      if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
-    } catch (_error) {
-      // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+  const targetPromise = (async () => {
+    for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
+      try {
+        const info = await fetchFilePathInfo(path, fetchOptions);
+        if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
+      } catch (_error) {
+        // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+      }
     }
+    return null;
+  })();
+  if (!canReuse) return targetPromise;
+  const cacheEntry = {promise: targetPromise, value: null, expiresAt: Number.POSITIVE_INFINITY, paths: terminalFileReferenceCandidatePaths(session, reference)};
+  setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cacheEntry, fileExplorerMemoryCacheLimit);
+  try {
+    const target = await targetPromise;
+    if (terminalFileReferenceTargetCache.get(cacheKey) === cacheEntry) {
+      cacheEntry.promise = null;
+      cacheEntry.value = target;
+      cacheEntry.expiresAt = now() + (target ? terminalFileReferencePositiveCacheMs : terminalFileReferenceNegativeCacheMs);
+      setLimitedMapEntry(terminalFileReferenceTargetCache, cacheKey, cacheEntry, fileExplorerMemoryCacheLimit);
+    }
+    return target;
+  } catch (error) {
+    if (terminalFileReferenceTargetCache.get(cacheKey) === cacheEntry) terminalFileReferenceTargetCache.delete(cacheKey);
+    throw error;
   }
-  return null;
+}
+
+function invalidateTerminalFileReferenceTargets(roots = []) {
+  const normalizedRoots = (Array.isArray(roots) ? roots : [roots])
+    .map(path => normalizeDirectoryPath(String(path || '')))
+    .filter(Boolean);
+  if (!normalizedRoots.length) return 0;
+  let invalidated = 0;
+  for (const [key, entry] of terminalFileReferenceTargetCache) {
+    const paths = Array.isArray(entry?.paths) ? entry.paths : [key.split('\x1f')[0]];
+    if (!paths.some(path => normalizedRoots.some(root => pathIsInsideDirectory(path, root)))) continue;
+    terminalFileReferenceTargetCache.delete(key);
+    invalidated += 1;
+  }
+  return invalidated;
 }
 
 function requestFileEditorLineTarget(item, line) {
@@ -3206,7 +3895,7 @@ function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = n
     });
   }
   if (reference.type === 'file' && fileTarget) {
-    appendContextMenuButton(menu, t('contextmenu.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
+    appendContextMenuButton(menu, t('common.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
     appendContextMenuButton(menu, t('contextmenu.copyPath'), () => copyTextToClipboard(fileTarget.path), closeTerminalContextMenu);
     return true;
   }
@@ -3227,7 +3916,7 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
     await copyTextToClipboard(text);
     statusEl.textContent = terminalCopyStatusText(action);
   } catch (error) {
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    statusErr(localizedHtml('common.copyFailed', {error}));
   } finally {
     clearTerminalVisibleSelection(session, term, container, action.reason);
   }
@@ -3271,7 +3960,7 @@ async function copyTmuxSelectionToClipboard(session, term = null, container = nu
       statusEl.textContent = error.message || t('status.nothingSelected');
       return false;
     }
-    statusErr(localizedHtml('status.copyFailed', {error}));
+    statusErr(esc(userMessageText(error, t('common.copyFailed', {error}))));
     return false;
   } finally {
     clearTerminalVisibleSelection(session, term, container, 'copy-tmux-selection');
@@ -3282,7 +3971,7 @@ async function fetchTmuxSelectionText(session) {
   const payload = await apiFetchJson(`/api/tmux-copy-selection?session=${encodeURIComponent(session)}`, {method: 'POST'});
   const text = payload?.copied ? String(payload.text || '') : '';
   if (!text) {
-    const error = new Error(payload?.error === 'tmux copy mode is not active' ? t('status.nothingSelected') : (payload?.error || t('status.nothingSelected')));
+    const error = new Error(userMessageText(payload, t('status.nothingSelected')));
     error.noClipboardText = true;
     throw error;
   }
@@ -3410,17 +4099,45 @@ function handleTerminalTmuxWindowShortcutKeydown(session, event) {
   return true;
 }
 
+function terminalTmuxHistoryNavigationDirection(event) {
+  if (event?.type !== 'keydown' || !appModifier(event) || event.shiftKey) return 0;
+  if (event.key === 'ArrowUp' || event.code === 'ArrowUp') return -1;
+  if (event.key === 'ArrowDown' || event.code === 'ArrowDown') return 1;
+  return 0;
+}
+
+function handleTerminalTmuxHistoryNavigationKeydown(session, term, event) {
+  const direction = terminalTmuxHistoryNavigationDirection(event);
+  if (!direction) return false;
+  // PageUp/PageDown belong to foreground TUIs such as vim and Emacs. The app modifier has no
+  // terminal escape-sequence meaning, so reserve it for explicit tmux scrollback paging.
+  event.preventDefault?.();
+  const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
+  const signedLines = direction * pageLines;
+  const item = terminals.get(session);
+  if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
+    queueTmuxScroll(item, signedLines);
+    return true;
+  }
+  if (term) queueLocalTerminalScroll(term, signedLines);
+  return true;
+}
+
 function installTerminalCopyShortcut(session, term, container = null) {
   // Ctrl-C / Cmd-C copy the xterm selection. Plain Ctrl-C with NO selection
   // must still send SIGINT to the PTY, and Cmd-C must stay browser/xterm copy
   // only. Tmux copy-mode text has a separate explicit shortcut/menu action.
   container?.addEventListener?.('keydown', event => {
-    if (!handleTerminalTmuxWindowShortcutKeydown(session, event) && !handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
+    if (!handleTerminalTmuxHistoryNavigationKeydown(session, term, event)
+      && !handleTerminalTmuxWindowShortcutKeydown(session, event)
+      && !handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
     event.stopImmediatePropagation?.();
     event.stopPropagation?.();
   }, {capture: true});
   term.attachCustomKeyEventHandler?.(event => {
-    return (handleTerminalTmuxWindowShortcutKeydown(session, event) || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
+    return (handleTerminalTmuxHistoryNavigationKeydown(session, term, event)
+      || handleTerminalTmuxWindowShortcutKeydown(session, event)
+      || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
   });
 }
 
@@ -3460,6 +4177,11 @@ async function showTerminalContextMenu(session, term, x, y, container = null, pr
   if (hasUrlReference) {
     appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.selectedDedent), () => copyTerminalSelection(session, term, {action: TERMINAL_COPY_ACTIONS.selectedDedent, dedent: true, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
   }
+  // Long-press starts this probe while Safari still grants user activation.  Do not offer a
+  // dead Paste action when that probe found no text/image, and reuse the one paste transport.
+  if ((!readOnlyMode || shareWriteMode) && typeof terminalClipboardPasteAvailable === 'function' && terminalClipboardPasteAvailable()) {
+    appendContextMenuButton(menu, t('common.paste'), () => pasteTerminalMobileAccessoryClipboard(session), closeTerminalContextMenu);
+  }
   terminalContextMenu.open(menu, x, y);
 }
 
@@ -3469,6 +4191,9 @@ function installTerminalContextMenu(session, term, container) {
   // xterm never processes that mousedown — the highlight stays visible AND the menu has the text even if
   // focus moves to the menu. No preventDefault, so the contextmenu event still fires normally.
   let rightClickSelection = null;
+  container.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'touch') void primeTerminalClipboardAvailability();
+  }, {capture: true, passive: true});
   container.addEventListener('mousedown', event => {
     if (event.button !== 2) return;
     rightClickSelection = terminalSelectedText(term, container);
@@ -3482,15 +4207,123 @@ function installTerminalContextMenu(session, term, container) {
   });
 }
 
+function openTabDescriptionPopover(item, anchor) {
+  if (!anchor?.isConnected) return false;
+  const popover = typeof paneTabPopoverForAnchor === 'function' ? paneTabPopoverForAnchor(anchor) : null;
+  if (!popover) return false;
+  closeSessionContextMenu();
+  closeOtherSessionPopovers(anchor, {force: true});
+  if (typeof positionPaneTabPopover === 'function') positionPaneTabPopover(anchor, popover);
+  anchor.classList.add('popover-open');
+  popover.classList.add('popover-open');
+  if (typeof maybeLoadFileTabForPopover === 'function') maybeLoadFileTabForPopover(anchor, item);
+  if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
+  return true;
+}
+
 function showTabContextMenu(item, x, y, options = {}) {
-  if (!isPinnableTab(item) && !isTmuxSession(item)) return;
+  if (!isLayoutItem(item)) return;
   closeAppMenus();
   closeTerminalContextMenu();
   closeFileContextMenu();
   closeOtherSessionPopovers(null);
   const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu session-context-menu';
+  menu.className = `terminal-context-menu session-context-menu${options.presentation === 'sheet' ? ' tab-action-sheet' : ''}`;
   menu.setAttribute('role', 'menu');
+  const refreshPosition = () => positionContextMenu(menu, x, y);
+  const appendDescription = () => {
+    const info = transcriptMetadataState.payload.sessions?.[item];
+    const tab = itemLabel(item);
+    const rawDescription = isTmuxSession(item)
+      ? sessionWorkDescription(item, info, 0)
+      : tabMenuDetailText(item, info);
+    const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
+    const text = t('tab.actions.moreDescription', {tab, description});
+    const line = makeButton({
+      className: 'tab-action-description',
+      label: text,
+      ariaLabel: text,
+      title: t('common.details'),
+      onClick: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openTabDescriptionPopover(item, options.tab);
+      },
+    });
+    menu.appendChild(line);
+  };
+  const renderActions = () => {
+    menu.replaceChildren();
+    const sourceSlot = options.sourceSlot || slotForItem(item);
+    if (!slotIsSidePane(sourceSlot)) appendDescription();
+    appendTabSplitCommands(menu, item, options);
+    if (tabWorkspaceIsFilled(item) || tabCanFillWorkspace(item)) {
+      appendContextMenuButton(
+        menu,
+        tabWorkspaceIsFilled(item) ? t('layout.status.restored', {item: itemLabel(item)}) : t('pane.expand'),
+        () => { toggleTabWorkspaceFill(item); },
+        closeSessionContextMenu,
+      );
+    }
+    appendContextMenuSeparator(menu);
+    appendTabActionCommands(menu, item, options);
+    refreshPosition();
+  };
+  renderActions();
+  sessionContextMenu.open(menu, x, y);
+}
+
+function tabDirectionalActionIconHtml(zone) {
+  return `<span class="tab-directional-action-icon tab-directional-action-icon--${zone}" aria-hidden="true"></span>`;
+}
+
+function appendTabSplitCommands(menu, item, options = {}) {
+  const sourceSlot = options.sourceSlot || slotForItem(item);
+  const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
+  const zones = ['left', 'right', 'top', 'bottom'];
+  const sourceRect = sourceSlot ? layoutSlotScreenRect(sourceSlot) : null;
+  const canPresent = Boolean(
+    sourceSlot
+      && sourceRect
+      && !narrowSingleColumnMode()
+      && (!isFileExplorerItem(activeItemForSide(sourceSlot)) || slotIsSidePane(sourceSlot)),
+  );
+  if (!canPresent) return;
+  const actionGroups = document.createElement('div');
+  actionGroups.className = 'tab-directional-action-groups';
+  const appendDirectionalActions = (kind, label, action) => {
+    const group = document.createElement('section');
+    group.className = `tab-split-actions tab-${kind}-actions`;
+    group.dataset.tabActionKind = kind;
+    const title = document.createElement('div');
+    title.className = 'tab-directional-actions-title';
+    title.textContent = label;
+    group.appendChild(title);
+    for (const zone of zones) {
+      const directionLabel = `${label} ${t(`layout.zone.${zone}`)}`;
+      const button = appendContextMenuButton(
+        group,
+        directionLabel,
+        () => { void action(zone); },
+        closeSessionContextMenu,
+        {
+          disabled: capabilities[kind][zone] !== true,
+          className: `tab-split-action tab-${kind}-action`,
+          iconHtml: tabDirectionalActionIconHtml(zone),
+          ariaLabel: directionLabel,
+          title: directionLabel,
+        },
+      );
+      button.dataset.direction = zone;
+    }
+    actionGroups.appendChild(group);
+  };
+  appendDirectionalActions('move', t('tab.actions.move'), zone => moveLayoutItemDirectional(item, sourceSlot, zone));
+  appendDirectionalActions('swap', t('layout.drop.swap'), zone => swapLayoutItemDirectional(item, sourceSlot, zone));
+  menu.appendChild(actionGroups);
+}
+
+function appendTabActionCommands(menu, item, options = {}) {
   if (isPinnableTab(item)) {
     const pinned = tabIsPinned(item);
     appendContextMenuButton(
@@ -3515,7 +4348,7 @@ function showTabContextMenu(item, x, y, options = {}) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {disabled: command.disabled, checked: command.checked});
     }
     const paneInfoBarLabel = t('menu.tmux.paneDetails');
-    const viewItems = tmuxSessionViewCommands(item).filter(command => command.label !== paneInfoBarLabel);
+    const viewItems = tmuxSessionViewCommands(item, {includeStatus: false}).filter(command => command.label !== paneInfoBarLabel);
     for (const command of viewItems) {
       appendContextMenuButton(menu, command.label, command.action, closeSessionContextMenu, {
         disabled: command.disabled,
@@ -3527,7 +4360,6 @@ function showTabContextMenu(item, x, y, options = {}) {
     const killItem = tmuxSessionKillCommand(item);
     appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
   }
-  sessionContextMenu.open(menu, x, y);
 }
 
 function showSessionContextMenu(session, x, y, options = {}) {

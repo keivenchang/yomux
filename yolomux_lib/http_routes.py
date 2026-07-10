@@ -22,13 +22,41 @@ from .common import SUMMARY_LOOKBACK_SECONDS
 from .common import auth_setup_required
 from .common import error_payload
 from .common import parse_bool
+from .chat_service import ChatServiceError
+from .chat_store import ChatStoreValidationError
+from .locales import resolve_locale_preference
 from .web import html_page
+from .web import server_string
 from .web import static_content_type
 
 
 RouteRole = str | Callable[[Any, Any], str]
 RouteHandler = Callable[[Any, Any, "Route"], bool | None]
 PUBLIC = "public"
+SHARE_ACCESS_NONE = "none"
+SHARE_ACCESS_READONLY = "readonly"
+SHARE_ACCESS_SCOPED_FILE = "scoped-file"
+SHARE_ACCESS_VALUES = frozenset({SHARE_ACCESS_NONE, SHARE_ACCESS_READONLY, SHARE_ACCESS_SCOPED_FILE})
+
+
+class RequestValidationError(str):
+    """String-compatible validation detail carrying the shared message descriptor fields."""
+
+    def __new__(cls, fallback: str, message_key: str, **message_params: Any):
+        value = super().__new__(cls, fallback)
+        value.message_key = message_key
+        value.message_params = message_params
+        value.diagnostic = ""
+        return value
+
+    def payload(self, *, status: int = HTTPStatus.BAD_REQUEST) -> dict[str, Any]:
+        return error_payload(
+            self,
+            message_key=self.message_key,
+            message_params=self.message_params,
+            diagnostic=self.diagnostic,
+            status=status,
+        )
 
 
 @dataclass(frozen=True)
@@ -39,11 +67,26 @@ class Route:
     handler: RouteHandler
     body_limit: int | None = None
     group: str = "core"
+    share_access: str = SHARE_ACCESS_NONE
+
+    def __post_init__(self) -> None:
+        if self.share_access not in SHARE_ACCESS_VALUES:
+            raise ValueError(f"invalid share access policy: {self.share_access}")
 
 
 def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> str | None:
     values = qs.get(name)
     return values[0] if values else default
+
+
+def request_query(request: Any, parsed: Any) -> dict[str, list[str]]:
+    """Return the request's parsed query once, for every route helper that needs it."""
+    cached = getattr(request, "_route_query_cache", None)
+    if cached is not None and cached[0] is parsed:
+        return cached[1]
+    qs = parse_qs(parsed.query)
+    setattr(request, "_route_query_cache", (parsed, qs))
+    return qs
 
 
 def query_list(qs: dict[str, list[str]], name: str) -> list[str]:
@@ -73,9 +116,18 @@ def parse_query_int(
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        return None, f"{name} must be an integer"
+        return None, RequestValidationError(
+            f"{name} must be an integer",
+            "request.error.integer",
+            field=name,
+        )
     if value < min_value:
-        return None, f"{name} must be at least {min_value}"
+        return None, RequestValidationError(
+            f"{name} must be at least {min_value}",
+            "request.error.minimum",
+            field=name,
+            min=min_value,
+        )
     if max_value is not None:
         value = min(value, max_value)
     return value, ""
@@ -93,11 +145,24 @@ def parse_query_float(
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return None, f"{name} must be a number"
+        return None, RequestValidationError(
+            f"{name} must be a number",
+            "request.error.number",
+            field=name,
+        )
     if not math.isfinite(value):
-        return None, f"{name} must be finite"
+        return None, RequestValidationError(
+            f"{name} must be finite",
+            "request.error.finite",
+            field=name,
+        )
     if value < min_value:
-        return None, f"{name} must be at least {min_value:g}"
+        return None, RequestValidationError(
+            f"{name} must be at least {min_value:g}",
+            "request.error.minimum",
+            field=name,
+            min=f"{min_value:g}",
+        )
     if max_value is not None:
         value = min(value, max_value)
     return value, ""
@@ -129,12 +194,7 @@ def parse_repo_refs_param(raw: str | None) -> dict[str, dict[str, str]] | None:
     return result or None
 
 
-def get_share_status_role(request: Any, parsed: Any) -> str:
-    del parsed
-    return "readonly" if request.share_token_text() else "admin"
-
-
-def share_readonly_post_role(request: Any, parsed: Any) -> str:
+def share_token_readonly_role(request: Any, parsed: Any) -> str:
     del parsed
     return "readonly" if request.share_token_text() else "admin"
 
@@ -160,12 +220,23 @@ def routes_for_method(method: str) -> tuple[Route, ...]:
     return ROUTES_BY_METHOD.get(method.upper(), ())
 
 
+def route_for_request(method: str, path: str) -> Route | None:
+    for route in routes_for_method(method):
+        if route_matches(route, path):
+            return route
+    return None
+
+
 def dispatch_http_route(request: Any, method: str) -> None:
+    # A Handler instance can serve many HTTP/1.1 requests.  The server resets its request
+    # record before parsing each request; route dispatch supplies the per-request start used
+    # for ordinary endpoints which do not have a more specific build timer.
+    setattr(request, "_http_request_dispatch_started_at", time.perf_counter())
     parsed = urlparse(request.path)
     if request.redirect_plaintext_to_https_if_needed(parsed):
         return
 
-    route = _find_route(method, parsed.path)
+    route = route_for_request(method, parsed.path)
     if route is None:
         _write_not_found_after_default_auth(request, method)
         return
@@ -185,22 +256,19 @@ def dispatch_http_route(request: Any, method: str) -> None:
     route.handler(request, parsed, route)
 
 
-def _find_route(method: str, path: str) -> Route | None:
-    for route in routes_for_method(method):
-        if route_matches(route, path):
-            return route
-    return None
-
-
 def _write_not_found_after_default_auth(request: Any, method: str) -> None:
     if method.upper() == "GET":
         if not request.require_auth("readonly"):
             return
-        request.write_text("not found\n", status=HTTPStatus.NOT_FOUND)
+        locale = resolve_locale_preference(request.request_locale_pref(), request.headers.get("Accept-Language", ""))
+        request.write_text(server_string(locale, "common.notFound") + "\n", status=HTTPStatus.NOT_FOUND)
         return
     if not request.require_auth("admin"):
         return
-    request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+    request.write_json(
+        error_payload("not found", message_key="common.notFound", status=HTTPStatus.NOT_FOUND),
+        status=HTTPStatus.NOT_FOUND,
+    )
 
 
 def _json_body(request: Any, route: Route, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
@@ -248,25 +316,49 @@ def get_ping(request: Any, parsed: Any, route: Route) -> None:
 
 def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    started = time.perf_counter()
+    qs = request_query(request, parsed)
     since, error = parse_query_int(qs, "since", 0, min_value=0)
     if error:
-        request.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        request.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
     client_id = (qs.get("client_id") or qs.get("client") or [""])[0]
     token_consumer = query_bool(qs, "token_consumer") or query_bool(qs, "tokens")
     token_since, token_since_error = parse_query_int(qs, "token_since", 0, min_value=0)
     token_resolution, token_resolution_error = parse_query_int(qs, "token_resolution", 0, min_value=0)
-    if token_since_error or token_resolution_error:
-        request.write_json(error_payload(token_since_error or token_resolution_error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+    token_history_start, token_history_start_error = parse_query_int(qs, "token_history_start", 0, min_value=0)
+    token_history_end, token_history_end_error = parse_query_int(qs, "token_history_end", 0, min_value=0)
+    token_history_start_supplied = "token_history_start" in qs
+    token_history_end_supplied = "token_history_end" in qs
+    history_start, history_start_error = parse_query_int(qs, "history_start", 0, min_value=0)
+    history_end, history_end_error = parse_query_int(qs, "history_end", 0, min_value=0)
+    history_resolution, history_resolution_error = parse_query_int(qs, "history_resolution", 0, min_value=0, max_value=24 * 60 * 60)
+    history_max_points, history_max_points_error = parse_query_int(qs, "history_max_points", 0, min_value=0, max_value=100_000)
+    if token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error:
+        request_error = token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
+        request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
-    request.write_json(request.server.app.stats_sample_payload(
+    payload = request.server.app.stats_sample_payload(
         since=since or 0,
         client_id=client_id,
         token_consumer=token_consumer,
         token_since=token_since or 0,
         token_resolution_seconds=token_resolution or 0,
-    ))
+        token_history_start=token_history_start if token_history_start_supplied else None,
+        token_history_end=token_history_end if token_history_end_supplied else None,
+        history_start=history_start or 0,
+        history_end=history_end or 0,
+        history_resolution_seconds=history_resolution or 0,
+        history_max_points=history_max_points or 0,
+    )
+    app_profile = payload.pop("_endpoint_profile", None)
+    build_ms = (time.perf_counter() - started) * 1000
+    setattr(request, "_http_response_compute_ms", build_ms)
+    details = {"stats_build_ms": round(build_ms, 3)}
+    if isinstance(app_profile, dict):
+        details.update(app_profile)
+    setattr(request, "_http_response_performance_details", details)
+    request.write_json(payload)
 
 
 def post_stats_history(request: Any, parsed: Any, route: Route) -> None:
@@ -283,26 +375,34 @@ def get_update_status(request: Any, parsed: Any, route: Route) -> None:
     if request.auth_readonly():
         request.reject_forbidden(request.auth_identity(), "admin")
         return
-    request.write_json(request.server.app.update_status_payload(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
+    request.write_json(request.server.app.update_status_payload(dryrun=query_bool(request_query(request, parsed), "dryrun")))
 
 
 def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
+    del route
     if not getattr(request.server, "dev", False):
-        request.write_json(error_payload("not found", status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+        request.write_json(
+            error_payload("not found", message_key="common.notFound", status=HTTPStatus.NOT_FOUND),
+            status=HTTPStatus.NOT_FOUND,
+        )
         return
-    request.stream_dev_reload()
+    request.stream_dev_reload(str(query_one(request_query(request, parsed), "bundle_revision", "") or ""))
 
 
 def get_client_events(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
-    request.stream_client_events()
+    del route
+    qs = request_query(request, parsed)
+    request.stream_client_events(
+        channels=str(query_one(qs, "channels", "") or ""),
+        client_id=str(query_one(qs, "client_id", "") or ""),
+    )
 
 
 def get_home(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     sessions = request.share_sessions() if request.share_sessions() else request.server.app.sessions
     share_record = request.share_record()
+    recent_sessions = request.server.app.tmux_recency_ordered_sessions(sessions)
     started = time.perf_counter()
     body = html_page(
         sessions,
@@ -310,6 +410,9 @@ def get_home(request: Any, parsed: Any, route: Route) -> None:
         dev=getattr(request.server, "dev", False),
         dangerously_yolo=request.server.app.dangerously_yolo,
         share=request.share_bootstrap_payload(share_record) if share_record else None,
+        accept_language=getattr(request, "headers", {}).get("Accept-Language", ""),
+        auth_username=request.auth_identity().username,
+        recent_sessions=recent_sessions,
     )
     compute_ms = (time.perf_counter() - started) * 1000
     setattr(request, "_http_response_compute_ms", compute_ms)
@@ -334,7 +437,7 @@ def get_pane_popout(request: Any, parsed: Any, route: Route) -> None:
 
 def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     payload_fn = getattr(request.server.app, "session_metadata_payload", None) or request.server.app.transcripts_payload
     scoped_fn = getattr(request, "share_scoped_session_metadata_payload", None) or request.share_scoped_transcripts_payload
     request.write_json(scoped_fn(payload_fn(force=query_bool(qs, "force"))))
@@ -346,20 +449,20 @@ def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
 
 def get_tmux_session_exists(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.tmux_session_exists_payload(session))
 
 
 def get_agent_auth(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_json(request.server.app.agent_auth_payload(force=query_bool(qs, "force")))
 
 
 def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_json(request.server.app.activity_summary_payload(
         force=query_bool(qs, "force"),
         locale=str(query_one(qs, "locale", "en") or "en"),
@@ -371,6 +474,11 @@ def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
 def get_background_status(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_app_result(request.server.app.background_owner_status_payload())
+
+
+def get_performance_diagnostics(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.performance_diagnostics_payload())
 
 
 def post_background_claim(request: Any, parsed: Any, route: Route) -> None:
@@ -385,7 +493,7 @@ def get_yoagent_skills(request: Any, parsed: Any, route: Route) -> None:
 
 def get_yoagent_skill_files(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     payload, status = request.server.app.yoagent_skill_files_payload(
         str(query_one(qs, "kind", "") or ""),
         str(query_one(qs, "name", "") or ""),
@@ -400,7 +508,7 @@ def get_yoagent_conversation(request: Any, parsed: Any, route: Route) -> None:
 
 def get_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
-    response, status = request.server.app.yoagent_jobs_payload()
+    response, status = request.server.app.yoagent_controller.yoagent_jobs_payload()
     request.write_json(response, status=status)
 
 
@@ -417,8 +525,13 @@ def get_tmux(request: Any, parsed: Any, route: Route) -> None:
 
 def get_tmux_signals(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(qs, "force"), session=str(query_one(qs, "session", "") or "")))
+
+def get_tmux_status(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    request.write_app_result(request.server.app.tmux_status_mode(str(query_one(qs, "session", "") or "")))
 
 
 def get_transcript(request: Any, parsed: Any, route: Route) -> None:
@@ -466,7 +579,7 @@ def get_summary_stream(request: Any, parsed: Any, route: Route) -> None:
 
 def get_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = query_one(qs, "session", None)
     request.write_app_result(request.server.app.auto_approve_status(session))
 
@@ -523,14 +636,14 @@ def get_search(request: Any, parsed: Any, route: Route) -> None:
 
 def get_run_history(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = query_one(qs, "session", None)
     request.write_app_result(request.server.app.run_history_payload(session))
 
 
 def get_activity(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     visible = query_bool(qs, "visible", True)
     request.write_validated_float_result(
         qs,
@@ -543,7 +656,7 @@ def get_activity(request: Any, parsed: Any, route: Route) -> None:
 
 def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     requested_sessions = query_list(qs, "session") or query_list(qs, "sessions")
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
@@ -558,7 +671,11 @@ def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
                 scoped_sessions = share_sessions
             blocked = [session for session in scoped_sessions if session not in share_sessions]
             if blocked:
-                return error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), HTTPStatus.FORBIDDEN
+                return error_payload(
+                    "share token is scoped to a different session",
+                    message_key="share.error.sessionScope",
+                    status=HTTPStatus.FORBIDDEN,
+                ), HTTPStatus.FORBIDDEN
         return request.server.app.session_files_batch_payload(scoped_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
 
     request.write_validated_float_result(qs, "hours", 24.0, ACTIVITY_MAX_HOURS, make_result)
@@ -566,7 +683,7 @@ def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
 
 def get_session_files(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = query_one(qs, "session", None)
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
@@ -576,7 +693,11 @@ def get_session_files(request: Any, parsed: Any, route: Route) -> None:
 
     def make_result(hours: float) -> tuple[Any, HTTPStatus]:
         if share_sessions and session not in share_sessions:
-            return error_payload("share token is scoped to a different session", status=HTTPStatus.FORBIDDEN), HTTPStatus.FORBIDDEN
+            return error_payload(
+                "share token is scoped to a different session",
+                message_key="share.error.sessionScope",
+                status=HTTPStatus.FORBIDDEN,
+            ), HTTPStatus.FORBIDDEN
         return request.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
 
     request.write_validated_float_result(
@@ -590,9 +711,171 @@ def get_session_files(request: Any, parsed: Any, route: Route) -> None:
 
 def get_summary(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.summary(session))
+
+
+def _chat_write_result(request: Any, operation: Callable[[], dict[str, Any]], *, created: bool = False) -> None:
+    if request.share_token_text():
+        request.reject_forbidden(request.auth_identity(), "authenticated user")
+        return
+    try:
+        payload = operation()
+    except ChatServiceError as error:
+        request.write_json(
+            error_payload(str(error), message_key="common.requestFailed", status=error.status, code=error.code),
+            status=error.status,
+        )
+        return
+    except (ChatStoreValidationError, TypeError, ValueError) as error:
+        request.write_json(
+            error_payload(str(error), message_key="common.requestFailed", status=HTTPStatus.BAD_REQUEST, code="invalid"),
+            status=HTTPStatus.BAD_REQUEST,
+        )
+        return
+    request.write_json(payload, status=HTTPStatus.CREATED if created and payload.get("created") else HTTPStatus.OK)
+
+
+def get_chat_bootstrap(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    identity = request.auth_identity()
+    client_ip = str(request.client_address[0]) if isinstance(request.client_address, tuple) and request.client_address else ""
+
+    def bootstrap_payload() -> dict[str, Any]:
+        payload = request.server.app.chat_bootstrap(
+            identity.username,
+            str(query_one(qs, "reader_id", "") or ""),
+            str(query_one(qs, "browser_instance_id", "") or ""),
+        )
+        payload["client_ip"] = client_ip
+        return payload
+
+    _chat_write_result(
+        request,
+        bootstrap_payload,
+    )
+
+
+def get_chat_page(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_page(
+            request.auth_identity().username,
+            before=str(query_one(qs, "before", "") or ""),
+            limit=str(query_one(qs, "limit", "50") or "50"),
+        ),
+    )
+
+
+def get_chat_delta(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_delta(
+            request.auth_identity().username,
+            after=str(query_one(qs, "after", "") or ""),
+            limit=str(query_one(qs, "limit", "200") or "200"),
+        ),
+    )
+
+
+def get_chat_context(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_context(
+            request.auth_identity().username,
+            message_id=str(query_one(qs, "message_id", "") or ""),
+            before=str(query_one(qs, "before", "3") or "3"),
+            after=str(query_one(qs, "after", "3") or "3"),
+        ),
+    )
+
+
+def get_chat_search(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_search(
+            request.auth_identity().username,
+            query=str(query_one(qs, "query", "") or ""),
+            cursor=str(query_one(qs, "cursor", "") or ""),
+            limit=str(query_one(qs, "limit", "20") or "20"),
+        ),
+    )
+
+
+def post_chat_send(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    identity = request.auth_identity()
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_send(
+            identity.username,
+            payload,
+            request.request_locale_pref(),
+            sender_ip=str(request.client_address[0]),
+        ),
+        created=True,
+    )
+
+
+def post_chat_yoagent(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    identity = request.auth_identity()
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_yoagent(
+            identity.username,
+            identity.role,
+            payload,
+            request.request_locale_pref(),
+        ),
+        created=True,
+    )
+
+
+def post_chat_typing(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_typing(
+            request.auth_identity().username,
+            payload.get("browser_instance_id"),
+            payload.get("typing") is True,
+        ),
+    )
+
+
+def post_chat_read(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = _json_body(request, route)
+    if payload is None:
+        return
+    _chat_write_result(
+        request,
+        lambda: request.server.app.chat_read(
+            request.auth_identity().username,
+            payload.get("reader_id"),
+            payload.get("message_id"),
+        ),
+    )
 
 
 def get_fs_list(request: Any, parsed: Any, route: Route) -> None:
@@ -627,7 +910,7 @@ def get_fs_diff(request: Any, parsed: Any, route: Route) -> None:
 
 def get_fs_watch_diff(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     request.write_json(request.server.app.filesystem_watch_diff_payload(
         since_token=str(query_one(qs, "since", "") or ""),
         force_full=query_bool(qs, "full"),
@@ -689,26 +972,28 @@ def post_self_update(request: Any, parsed: Any, route: Route) -> None:
     if request.auth_readonly():
         request.reject_forbidden(request.auth_identity(), "admin")
         return
-    request.write_json(request.server.app.perform_self_update(dryrun=query_bool(parse_qs(parsed.query), "dryrun")))
+    request.write_json(request.server.app.perform_self_update(dryrun=query_bool(request_query(request, parsed), "dryrun")))
 
 
 def post_ensure_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.ensure_session(session))
 
 
 def post_create_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     agent = str(query_one(qs, "agent", "claude") or "claude")
-    request.write_app_result(request.server.app.create_next_session(agent))
+    dangerously_yolo = query_bool(qs, "dangerously_yolo", request.server.app.dangerously_yolo)
+    terminal = str(query_one(qs, "terminal", "") or "")
+    request.write_app_result(request.server.app.create_next_session(agent, dangerously_yolo, terminal))
 
 
 def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     new_name = str(query_one(qs, "new_name", "") or "")
     request.write_app_result(request.server.app.rename_session(session, new_name))
@@ -716,14 +1001,14 @@ def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
 
 def post_kill_session(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.kill_session(session))
 
 
 def post_upload(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     editor_path = str(query_one(qs, "editor_path", "") or "")
     base_dir = str(query_one(qs, "base_dir", "") or "")
@@ -732,7 +1017,7 @@ def post_upload(request: Any, parsed: Any, route: Route) -> None:
 
 def post_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     enabled = query_bool(qs, "enabled")
     request.write_app_result(request.server.app.set_auto_approve(session, enabled))
@@ -748,7 +1033,7 @@ def post_attention_ack(request: Any, parsed: Any, route: Route) -> None:
 
 def post_notify(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     enabled = query_bool(qs, "enabled")
     request.write_json(request.server.app.set_notify(enabled))
 
@@ -770,7 +1055,7 @@ def post_share_create(request: Any, parsed: Any, route: Route) -> None:
 
 
 def post_share_stop(request: Any, parsed: Any, route: Route) -> None:
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     token_or_short_id = str(query_one(qs, "token", "") or query_one(qs, "id", "") or "")
     if not token_or_short_id:
         payload = _json_body(request, route, allow_empty=True, allow_missing=True)
@@ -803,7 +1088,14 @@ def post_share_debug_profile(request: Any, parsed: Any, route: Route) -> None:
         return
     token = request.share_token()
     if not token:
-        request.write_json(error_payload("share token required", status=HTTPStatus.UNAUTHORIZED), status=HTTPStatus.UNAUTHORIZED)
+        request.write_json(
+            error_payload(
+                "share token required",
+                message_key="share.error.tokenRequired",
+                status=HTTPStatus.UNAUTHORIZED,
+            ),
+            status=HTTPStatus.UNAUTHORIZED,
+        )
         return
     client_ip = request.client_address[0] if isinstance(request.client_address, tuple) and request.client_address else ""
     request.write_app_result(request.server.app.record_share_debug_profile(
@@ -835,7 +1127,7 @@ def post_yoagent_chat(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.yoagent_chat(payload, access_role=request.auth_identity().role)
+    response, status = request.server.app.yoagent_controller.yoagent_chat(payload, access_role=request.auth_identity().role)
     request.write_json(response, status=status)
 
 
@@ -844,7 +1136,7 @@ def post_yoagent_chat_cancel(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     request_id = unquote(parsed.path[len("/api/yoagent/chat/"):-len("/cancel")]).strip("/")
-    response, status = request.server.app.cancel_yoagent_chat(str(payload.get("request_id") or request_id))
+    response, status = request.server.app.yoagent_controller.cancel_yoagent_chat(str(payload.get("request_id") or request_id))
     request.write_json(response, status=status)
 
 
@@ -853,7 +1145,7 @@ def post_yoagent_preview_send(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.preview_yoagent_send_action(payload)
+    response, status = request.server.app.yoagent_controller.preview_yoagent_send_action(payload)
     request.write_json(response, status=status)
 
 
@@ -862,7 +1154,7 @@ def post_yoagent_execute_send(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.execute_yoagent_send_action(payload)
+    response, status = request.server.app.yoagent_controller.execute_yoagent_send_action(payload)
     request.write_json(response, status=status)
 
 
@@ -871,7 +1163,7 @@ def post_yoagent_intent(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.yoagent_intent(payload)
+    response, status = request.server.app.yoagent_controller.yoagent_intent(payload)
     request.write_json(response, status=status)
 
 
@@ -880,7 +1172,7 @@ def post_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.create_yoagent_job(payload)
+    response, status = request.server.app.yoagent_controller.create_yoagent_job(payload)
     request.write_json(response, status=status)
 
 
@@ -889,7 +1181,7 @@ def post_yoagent_job_confirm(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/confirm")]).strip("/")
-    response, status = request.server.app.confirm_yoagent_job(str(payload.get("id") or job_id))
+    response, status = request.server.app.yoagent_controller.confirm_yoagent_job(str(payload.get("id") or job_id))
     request.write_json(response, status=status)
 
 
@@ -898,7 +1190,7 @@ def post_yoagent_job_cancel(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/cancel")]).strip("/")
-    response, status = request.server.app.cancel_yoagent_job(str(payload.get("id") or job_id))
+    response, status = request.server.app.yoagent_controller.cancel_yoagent_job(str(payload.get("id") or job_id))
     request.write_json(response, status=status)
 
 
@@ -907,7 +1199,7 @@ def post_yoagent_jobs_cancel_session(request: Any, parsed: Any, route: Route) ->
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.cancel_yoagent_jobs_for_session(str(payload.get("session") or ""))
+    response, status = request.server.app.yoagent_controller.cancel_yoagent_jobs_for_session(str(payload.get("session") or ""))
     request.write_json(response, status=status)
 
 
@@ -916,7 +1208,7 @@ def post_yoagent_wait_clear(request: Any, parsed: Any, route: Route) -> None:
     if payload is None:
         return
     wait_id = unquote(parsed.path[len("/api/yoagent/waits/"):-len("/clear")]).strip("/")
-    response, status = request.server.app.clear_yoagent_action_wait(str(payload.get("id") or wait_id))
+    response, status = request.server.app.yoagent_controller.clear_yoagent_action_wait(str(payload.get("id") or wait_id))
     request.write_json(response, status=status)
 
 
@@ -943,13 +1235,13 @@ def post_yoagent_prewarm(request: Any, parsed: Any, route: Route) -> None:
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.yoagent_prewarm(payload)
+    response, status = request.server.app.yoagent_controller.yoagent_prewarm(payload)
     request.write_json(response, status=status)
 
 
 def post_yoagent_reset(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
-    request.write_json(request.server.app.reset_yoagent_chat())
+    request.write_json(request.server.app.yoagent_controller.reset_yoagent_chat())
 
 
 def post_yolo_rules_reload(request: Any, parsed: Any, route: Route) -> None:
@@ -964,14 +1256,19 @@ def post_yolo_rules_open(request: Any, parsed: Any, route: Route) -> None:
 
 def post_tmux_next(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = qs.get("session", [""])[0]
     request.write_app_result(request.server.app.tmux_next_window(session))
+
+def post_tmux_status(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    qs = request_query(request, parsed)
+    request.write_app_result(request.server.app.cycle_tmux_status_mode(str(query_one(qs, "session", "") or "")))
 
 
 def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = qs.get("session", [""])[0]
     window = qs.get("window", [""])[0]
     payload, status = request.server.app.tmux_select_window(session, window)
@@ -980,7 +1277,7 @@ def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
 
 def post_tmux_copy_selection(request: Any, parsed: Any, route: Route) -> None:
     del route
-    qs = parse_qs(parsed.query)
+    qs = request_query(request, parsed)
     session = str(query_one(qs, "session", "") or "")
     request.write_app_result(request.server.app.tmux_copy_selection(session))
 
@@ -1021,23 +1318,24 @@ def post_fs_mkdir(request: Any, parsed: Any, route: Route) -> None:
 
 
 CORE_ROUTES = (
-    Route("GET", "/static/*", PUBLIC, get_static_asset, group="core"),
+    Route("GET", "/static/*", PUBLIC, get_static_asset, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/auth-setup", PUBLIC, get_auth_setup, group="core"),
     Route("GET", "/login", PUBLIC, get_login, group="core"),
     Route("GET", "/logout", PUBLIC, get_logout, group="core"),
-    Route("GET", "/api/ping", "readonly", get_ping, group="core"),
+    Route("GET", "/api/ping", "readonly", get_ping, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/stats-sample", "readonly", get_stats_sample, group="core"),
     Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
     Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),
     Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
-    Route("GET", "/", "readonly", get_home, group="core"),
+    Route("GET", "/", "readonly", get_home, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/preview-popout", "readonly", get_preview_popout, group="core"),
     Route("GET", "/pane-popout", "readonly", get_pane_popout, group="core"),
-    Route("GET", "/api/session-metadata", "readonly", get_session_metadata, group="core"),
-    Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core"),
+    Route("GET", "/api/session-metadata", "readonly", get_session_metadata, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
     Route("GET", "/api/background/status", "readonly", get_background_status, group="core"),
+    Route("GET", "/api/diagnostics/performance", "admin", get_performance_diagnostics, group="core"),
     Route("GET", "/api/auto-approve", "readonly", get_auto_approve, group="core"),
     Route("GET", "/api/notify", "readonly", get_notify, group="core"),
     Route("GET", "/api/settings", "readonly", get_settings, group="core"),
@@ -1046,9 +1344,9 @@ CORE_ROUTES = (
     Route("GET", "/api/events", "readonly", get_events, group="core"),
     Route("GET", "/api/search", "readonly", get_search, group="core"),
     Route("GET", "/api/run-history", "readonly", get_run_history, group="core"),
-    Route("GET", "/api/activity", "readonly", get_activity, group="core"),
-    Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, group="core"),
-    Route("GET", "/api/session-files", "readonly", get_session_files, group="core"),
+    Route("GET", "/api/activity", "readonly", get_activity, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/session-files", "readonly", get_session_files, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/summary", "readonly", get_summary, group="core"),
     Route("GET", "/api/tmux-session-exists", "readonly", get_tmux_session_exists, group="core"),
     Route("POST", "/login", PUBLIC, post_login, group="core"),
@@ -1072,15 +1370,15 @@ CORE_ROUTES = (
 )
 
 SHARE_ROUTES = (
-    Route("GET", "/share/*", PUBLIC, get_share_shell, group="share"),
-    Route("GET", "/api/share", get_share_status_role, get_share_status, group="share"),
+    Route("GET", "/share/*", PUBLIC, get_share_shell, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/share", share_token_readonly_role, get_share_status, group="share", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/ws/share-host", "admin", get_share_host_websocket, group="share"),
-    Route("GET", "/ws/share-ui", "readonly", get_share_ui_websocket, group="share"),
-    Route("GET", "/ws/share-view", "readonly", get_share_view_websocket, group="share"),
+    Route("GET", "/ws/share-ui", "readonly", get_share_ui_websocket, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/ws/share-view", "readonly", get_share_view_websocket, group="share", share_access=SHARE_ACCESS_READONLY),
     Route("POST", "/api/share", "admin", post_share_create, body_limit=16 * 1024, group="share"),
     Route("POST", "/api/share/stop", "admin", post_share_stop, body_limit=4096, group="share"),
     Route("POST", "/api/share/extend", "admin", post_share_extend, body_limit=4096, group="share"),
-    Route("POST", "/api/share/debug-profile", share_readonly_post_role, post_share_debug_profile, body_limit=64 * 1024, group="share"),
+    Route("POST", "/api/share/debug-profile", share_token_readonly_role, post_share_debug_profile, body_limit=64 * 1024, group="share", share_access=SHARE_ACCESS_READONLY),
 )
 
 YOAGENT_ROUTES = (
@@ -1104,20 +1402,32 @@ YOAGENT_ROUTES = (
     Route("POST", "/api/yoagent/reset", "admin", post_yoagent_reset, group="yoagent"),
 )
 
+CHAT_ROUTES = (
+    Route("GET", "/api/chat/bootstrap", "readonly", get_chat_bootstrap, group="chat"),
+    Route("GET", "/api/chat/page", "readonly", get_chat_page, group="chat"),
+    Route("GET", "/api/chat/delta", "readonly", get_chat_delta, group="chat"),
+    Route("GET", "/api/chat/context", "readonly", get_chat_context, group="chat"),
+    Route("GET", "/api/chat/search", "readonly", get_chat_search, group="chat"),
+    Route("POST", "/api/chat/send", "readonly", post_chat_send, body_limit=12 * 1024, group="chat"),
+    Route("POST", "/api/chat/yoagent", "readonly", post_chat_yoagent, body_limit=4096, group="chat"),
+    Route("POST", "/api/chat/typing", "readonly", post_chat_typing, body_limit=4096, group="chat"),
+    Route("POST", "/api/chat/read", "readonly", post_chat_read, body_limit=4096, group="chat"),
+)
+
 FILESYSTEM_ROUTES = (
-    Route("GET", "/api/fs/list", "readonly", get_fs_list, group="filesystem"),
+    Route("GET", "/api/fs/list", "readonly", get_fs_list, group="filesystem", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/fs/search", "readonly", get_fs_search, group="filesystem"),
-    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, group="filesystem"),
-    Route("GET", "/api/fs/read", "readonly", get_fs_read, group="filesystem"),
-    Route("GET", "/api/fs/info", "readonly", get_fs_info, group="filesystem"),
-    Route("GET", "/api/fs/diff", "readonly", get_fs_diff, group="filesystem"),
-    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, group="filesystem"),
+    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/fs/read", "readonly", get_fs_read, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
+    Route("GET", "/api/fs/info", "readonly", get_fs_info, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/fs/diff", "readonly", get_fs_diff, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
+    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, group="filesystem", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/blame", "readonly", get_blame, group="filesystem"),
-    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem"),
+    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
     Route("GET", "/api/fs/zip", "readonly", get_fs_zip, group="filesystem"),
     Route("GET", "/api/fs/count", "readonly", get_fs_count, group="filesystem"),
     Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, group="filesystem"),
-    Route("POST", "/api/fs/batch", share_readonly_post_role, post_fs_batch, body_limit=64 * 1024, group="filesystem"),
+    Route("POST", "/api/fs/batch", share_token_readonly_role, post_fs_batch, body_limit=64 * 1024, group="filesystem", share_access=SHARE_ACCESS_READONLY),
     Route("POST", "/api/fs/write", "admin", post_fs_write, group="filesystem"),
     Route("POST", "/api/fs/delete", "admin", post_fs_delete, body_limit=4096, group="filesystem"),
     Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, body_limit=4096, group="filesystem"),
@@ -1128,13 +1438,15 @@ FILESYSTEM_ROUTES = (
 TMUX_ROUTES = (
     Route("GET", "/api/tmux", "readonly", get_tmux, group="tmux"),
     Route("GET", "/api/tmux-signals", "readonly", get_tmux_signals, group="tmux"),
+    Route("GET", "/api/tmux-status", "readonly", get_tmux_status, group="tmux"),
     Route("GET", "/api/transcript", "readonly", get_transcript, group="tmux"),
     Route("GET", "/api/context", "readonly", get_context, group="tmux"),
     Route("GET", "/api/context-items", "readonly", get_context_items, group="tmux"),
     Route("GET", "/api/context-stream", "readonly", get_context_stream, group="tmux"),
     Route("GET", "/api/summary-stream", "admin", get_summary_stream, group="tmux"),
-    Route("GET", "/ws", "readonly", get_websocket, group="tmux"),
+    Route("GET", "/ws", "readonly", get_websocket, group="tmux", share_access=SHARE_ACCESS_READONLY),
     Route("POST", "/api/tmux-next", "admin", post_tmux_next, group="tmux"),
+    Route("POST", "/api/tmux-status", "admin", post_tmux_status, group="tmux"),
     Route("POST", "/api/tmux-window", "admin", post_tmux_window, group="tmux"),
     Route("POST", "/api/tmux-copy-selection", "admin", post_tmux_copy_selection, group="tmux"),
 )
@@ -1143,6 +1455,7 @@ ROUTE_GROUPS = {
     "core": CORE_ROUTES,
     "share": SHARE_ROUTES,
     "yoagent": YOAGENT_ROUTES,
+    "chat": CHAT_ROUTES,
     "filesystem": FILESYSTEM_ROUTES,
     "tmux": TMUX_ROUTES,
 }

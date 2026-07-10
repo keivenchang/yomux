@@ -7,10 +7,10 @@ command list. These bridge that gap.
 
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+from tools import static_build
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,8 +29,5 @@ def test_node_layout_suite_passes():
 
 
 def test_generated_locale_outputs_are_current():
-    sys.path.insert(0, str(REPO_ROOT / "tools"))
-    import static_build
-
     stale = static_build.check_locales()
     assert stale == [], f"stale generated locale outputs (run tools/static_build.py): {stale}"

@@ -2,44 +2,42 @@
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  /* Keep the branch and description column stable as the numeric session changes on reload. */
   justify-content: flex-start;
-  min-width: 4ch;
   color: inherit;
   background: transparent;
   border: 0;
   font-weight: 500;
+}
+.session-button-identifier {
+  font-weight: 700;
 }
 .session-button-prefix {
   flex: 0 0 auto;
   min-width: max-content;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
   overflow: visible;
   white-space: nowrap;
 }
 .session-label-agent {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-3);
 }
 .session-button-text {
   flex: 1 1 auto;
   min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
   overflow: hidden;
   white-space: nowrap;
 }
 .session-button-name {
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 72px;
+  max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #f2f5f8;
+  color: var(--session-label-fg);
   font-size: var(--tab-label-size);
   font-weight: 500;
 }
@@ -85,29 +83,25 @@
 }
 .status-indicator--inline {
   min-width: 0;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   border: 1px solid transparent;
   border-radius: 5px;
   line-height: 1.15;
 }
 .status-indicator--text {
   min-width: 26px;
-  padding: 1px 3px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--divider);
   border-radius: 5px;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
   text-transform: uppercase;
 }
 .status-indicator--label {
-  min-width: 0;
   max-width: 100%;
-  padding: 0 3px;
+  padding: 0 var(--space-3);
   border: 1px solid transparent;
   border-radius: 5px;
   line-height: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .status-indicator--dot {
   width: 1em;
@@ -116,13 +110,15 @@
   font-size: 0.9em;
   line-height: 1;
   text-align: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   opacity: 1;
 }
 .status-indicator--dot.heartbeat-pulse {
   --attention-pulse-saturate-rest: 1.04;
   --attention-pulse-saturate-peak: 1.42;
-  --attention-pulse-brightness-rest: 0.82;
+  /* Keep the status fill at its canonical color between glow peaks. A dim resting frame made
+     pane-tab balls look washed out beside the same static balls in the activity summary. */
+  --attention-pulse-brightness-rest: 1;
   --attention-pulse-brightness-peak: 1.34;
   --attention-ring-border-rest-alpha: 0.56;
   --attention-ring-border-peak-alpha: 1;
@@ -135,11 +131,13 @@
 .status-indicator--positive,
 .status-indicator--working {
   color: var(--pr-status-passing);
-  --attention-ring-rgb: 82 210 115;
+  --agent-status-ball-fill: var(--pr-status-passing);
+  --attention-ring-rgb: var(--agent-status-working-rgb);
 }
 .status-indicator--cooldown {
-  color: var(--accent-gold);
-  --attention-ring-rgb: 245 197 66;
+  color: var(--agent-status-cooldown);
+  --agent-status-ball-fill: var(--agent-status-cooldown);
+  --attention-ring-rgb: var(--agent-status-cooldown-rgb);
 }
 .status-indicator--active {
   color: var(--file-tree-recency-max-contrast, var(--text));
@@ -165,34 +163,24 @@
   animation-direction: normal;
 }
 .status-indicator--dot.status-indicator--working.heartbeat-pulse {
-  --attention-pulse-saturate-rest: 1;
-  --attention-pulse-saturate-peak: 1.08;
-  --attention-pulse-brightness-rest: 0.96;
-  --attention-pulse-brightness-peak: 1.06;
-  --attention-ring-border-rest-alpha: 0.18;
-  --attention-ring-border-peak-alpha: 0.42;
-  --attention-ring-rest-glow-alpha: 0.06;
-  --attention-ring-peak-outline-alpha: 0.14;
-  --attention-ring-peak-glow-alpha: 0.18;
-  --attention-ring-rest-glow-size: 2px;
-  --attention-ring-peak-glow-size: 8px;
-  border: 1px solid transparent;
-  animation-name: attention-ring-fade, working-ball-hard-flash;
+  animation-name: agent-status-opacity-pulse;
 }
-.status-indicator--dot.status-indicator--attention.heartbeat-pulse,
 .status-indicator--dot.status-indicator--cooldown.heartbeat-pulse {
-  border: 1px solid transparent;
-  animation-name: attention-ring-fade;
+  animation-name: agent-status-opacity-pulse;
 }
 .agent-window-status-dot--transition-glow.status-indicator--working,
 .agent-window-status-dot--transition-glow.status-indicator--attention,
 .agent-window-status-dot--transition-glow.status-indicator--cooldown {
-  border: 1px solid rgb(var(--attention-ring-rgb, 255 51 71) / 0.42);
-  box-shadow: 0 0 0 1px rgb(var(--attention-ring-rgb, 255 51 71) / 0.18), 0 0 5px rgb(var(--attention-ring-rgb, 255 51 71) / 0.18);
+  box-shadow: none;
+  filter: none;
+  animation-name: agent-status-opacity-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
 }
 .agent-window-status-dot--transition-pulse:not(.heartbeat-pulse) {
-  border: 1px solid transparent;
-  animation-name: agent-status-transition-pulse;
+  animation-name: agent-status-opacity-pulse;
   animation-duration: var(--agent-status-transition-pulse-duration, var(--pulse-duration, 1.55s));
   animation-delay: var(--attention-animation-delay, 0s);
   animation-timing-function: var(--status-pulse-timing);
@@ -203,14 +191,41 @@
 }
 .status-indicator--attention {
   color: var(--danger-text);
-  --attention-ring-rgb: 255 51 71;
+  --agent-status-ball-fill: var(--bad);
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
 .status-indicator--dot.status-indicator--attention {
   color: var(--bad);
 }
 .status-indicator--dot.status-indicator--cooldown {
-  color: var(--accent-gold);
+  color: var(--agent-status-cooldown);
   border: 1px solid transparent;
+}
+.status-indicator--dot.status-indicator--acknowledged,
+.agent-window-status-dot--acknowledging {
+  color: var(--muted);
+  --agent-status-ball-fill: var(--muted);
+  animation-name: agent-status-acknowledgement-fade;
+  animation-duration: var(--agent-status-acknowledgement-duration, var(--pulse-duration));
+  animation-delay: var(--agent-status-acknowledgement-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: var(--agent-status-acknowledgement-iteration-count, 1);
+  animation-direction: normal;
+  animation-fill-mode: both;
+  will-change: opacity;
+}
+.agent-window-status-dot--acknowledgement-preview {
+  --agent-status-acknowledgement-delay: var(--attention-animation-delay, 0s);
+  --agent-status-acknowledgement-iteration-count: infinite;
+}
+.agent-window-activity,
+.changes-file-agent,
+.file-tree-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  vertical-align: middle;
 }
 .agent-window-activity {
   --agent-window-icon-size: 18px;
@@ -218,14 +233,10 @@
      two sizes stay in a single source — see .tmux-window-button .agent-window-activity. */
   --agent-status-ball-size-base: 14px;
   --agent-status-ball-size: var(--agent-status-ball-size-base);
+  --agent-status-ball-border: var(--paint-black);
   --agent-window-activity-inline-size: 24px;
   --agent-window-activity-block-size: var(--agent-window-icon-size);
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-  margin-inline-start: 2px;
-  vertical-align: middle;
+  margin-inline-start: var(--space-2);
 }
 .agent-window-activity .agent-icon {
   width: var(--agent-window-icon-size);
@@ -237,54 +248,58 @@
   width: var(--agent-window-icon-size);
   height: var(--agent-window-icon-size);
 }
+.changes-file-agent .agent-icon svg,
+.agent-window-activity--subwindow .agent-icon svg {
+  flex-basis: 14px;
+  width: 14px;
+  height: 14px;
+}
 .agent-window-status-dot {
   margin-inline-start: 0;
   font-family: var(--ui-font);
   font-stretch: normal;
 }
-.status-indicator--dot.agent-window-status-dot--segmented {
-  --agent-status-segment-attention: var(--bad);
-  --agent-status-segment-cooldown: var(--accent-gold);
-  --agent-status-segment-working: var(--pr-status-passing);
-  display: inline-block;
-  height: 1em;
+.session-agent-activity-marker .agent-window-status-dot {
+  box-sizing: border-box;
+  inline-size: var(--agent-status-ball-size);
+  min-inline-size: var(--agent-status-ball-size);
+  block-size: var(--agent-status-ball-size);
+  flex: 0 0 var(--agent-status-ball-size);
+  line-height: var(--agent-status-ball-size);
+  background: var(--agent-status-ball-fill, currentColor);
+  border: 1px solid var(--agent-status-ball-border);
+  border-radius: 50%;
   color: transparent;
-  background: var(--agent-status-segment-bg, currentColor);
-  overflow: hidden;
+  filter: none;
+  box-shadow: none;
 }
-.agent-window-status-dot--attention-cooldown {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-attention) 0 50%,
-    var(--agent-status-segment-cooldown) 0 100%
-  );
+/* Parent Tabs summarize every visible child state with equal, crisp colors instead of averaging them
+   into an unreadable brown. The child glyphs remain single-state symbols. */
+.session-agent-activity-marker .agent-window-status-dot--attention-cooldown {
+  --agent-status-ball-fill: conic-gradient(var(--bad) 0 50%, var(--agent-status-cooldown) 50% 100%);
 }
-.agent-window-status-dot--attention-working {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-attention) 0 50%,
-    var(--agent-status-segment-working) 0 100%
-  );
+.session-agent-activity-marker .agent-window-status-dot--attention-working {
+  --agent-status-ball-fill: conic-gradient(var(--bad) 0 50%, var(--pr-status-passing) 50% 100%);
 }
-.agent-window-status-dot--cooldown-working {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-cooldown) 0 50%,
-    var(--agent-status-segment-working) 0 100%
-  );
+.session-agent-activity-marker .agent-window-status-dot--cooldown-working {
+  --agent-status-ball-fill: conic-gradient(var(--agent-status-cooldown) 0 50%, var(--pr-status-passing) 50% 100%);
 }
-.agent-window-status-dot--attention-cooldown-working {
-  --agent-status-segment-bg: conic-gradient(
-    var(--agent-status-segment-attention) 0 33.333%,
-    var(--agent-status-segment-cooldown) 0 66.666%,
-    var(--agent-status-segment-working) 0 100%
-  );
+.session-agent-activity-marker .agent-window-status-dot--attention-cooldown-working {
+  --agent-status-ball-fill: conic-gradient(var(--bad) 0 33.333%, var(--agent-status-cooldown) 33.333% 66.666%, var(--pr-status-passing) 66.666% 100%);
 }
-/* Agent status = a static AI symbol followed by a separate glowing status ball:
-   [symbol][ball]. Working uses a quieter green glow; attention and cooldown keep stronger red/yellow
-   glows. The active/current state is the only status that animates the symbol itself. */
+.session-agent-activity-marker .agent-window-status-dot.status-indicator--working.heartbeat-pulse,
+.session-agent-activity-marker .agent-window-status-dot.status-indicator--cooldown.heartbeat-pulse,
+.session-agent-activity-marker .agent-window-status-dot.status-indicator--attention.heartbeat-pulse {
+  animation-name: agent-status-opacity-pulse;
+}
+/* Agent status = a static AI symbol followed by a separate filled status ball:
+   [symbol][ball]. Activity is communicated by opacity, never glow. The active/current state is the
+   only status that animates the symbol itself. */
 .agent-window-activity--attention {
-  --attention-ring-rgb: 255 51 71;
+  --attention-ring-rgb: var(--agent-status-attention-ring-rgb);
 }
 .agent-window-activity--cooldown {
-  --attention-ring-rgb: 245 197 66;
+  --attention-ring-rgb: var(--agent-status-cooldown-rgb);
 }
 /* Status balls own their size through --agent-status-ball-size instead of inheriting the surrounding
    surface's icon/font size. The symbol can be compact in a window button while the ball stays identical
@@ -294,13 +309,6 @@
 .agent-window-activity--cooldown .agent-window-status-dot {
   font-size: var(--agent-status-ball-size);
   line-height: 1;
-}
-.agent-window-activity .agent-window-status-dot--acknowledged {
-  font-size: var(--agent-status-ball-size-base);
-  border-color: transparent;
-  box-shadow: none;
-  filter: saturate(0.9) brightness(0.95);
-  opacity: 0.82;
 }
 .agent-window-agent-icon--active {
   --agent-working-glow-rgb: 226 238 248;
@@ -329,24 +337,13 @@
   55%, 85% {
     opacity: 0.15;
     transform: scale(0.9);
-    filter: saturate(var(--attention-pulse-saturate-rest, 0.86)) brightness(var(--attention-pulse-brightness-rest, 0.7)) drop-shadow(0 0 0 rgb(var(--agent-working-glow-rgb) / 0));
-    box-shadow: 0 0 0 0 rgb(var(--agent-working-glow-rgb) / 0);
+    filter: saturate(var(--attention-pulse-saturate-rest, 0.86)) brightness(var(--attention-pulse-brightness-rest, 0.7)) drop-shadow(0 0 0 var(--paint-agent-working-glow-transparent));
+    box-shadow: 0 0 0 0 var(--paint-agent-working-glow-transparent);
   }
 }
 .session-state-badge {
   color: var(--pr-status-closed);
-  background: #161d29;
-}
-.session-state-needs-approval,
-.session-state-needs-input {
-  color: var(--danger-text);
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-}
-.session-state-yolo-approval {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
+  background: var(--neutral-status-bg);
 }
 .session-state-blocked,
 .session-state-disconnected {
@@ -366,32 +363,30 @@
 }
 @keyframes attention-ring-fade {
   0%, 100% {
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-border-rest-alpha, 0.56));
-    box-shadow: 0 0 0 0 rgb(var(--attention-ring-rgb, 255 51 71) / 0), 0 0 var(--attention-ring-rest-glow-size, 5px) rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-rest-glow-alpha, 0.24));
+    border-color: rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-border-rest-alpha, 0.56));
+    box-shadow: 0 0 0 0 rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0), 0 0 var(--attention-ring-rest-glow-size, 5px) rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-rest-glow-alpha, 0.24));
     filter: saturate(var(--attention-pulse-saturate-rest, 1)) brightness(var(--attention-pulse-brightness-rest, 1));
   }
   45%, 55% {
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-border-peak-alpha, 1));
-    box-shadow: 0 0 0 2px rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-outline-alpha, 0.72)), 0 0 var(--attention-ring-peak-glow-size, 26px) rgb(var(--attention-ring-rgb, 255 51 71) / var(--attention-ring-peak-glow-alpha, 0.68));
+    border-color: rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-border-peak-alpha, 1));
+    box-shadow: 0 0 0 2px rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-peak-outline-alpha, 0.72)), 0 0 var(--attention-ring-peak-glow-size, 26px) rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / var(--attention-ring-peak-glow-alpha, 0.68));
     filter: saturate(var(--attention-pulse-saturate-peak, 1)) brightness(var(--attention-pulse-brightness-peak, 1));
   }
 }
-@keyframes working-ball-hard-flash {
+@keyframes agent-status-opacity-pulse {
   0%, 100% {
-    color: var(--pr-status-passing);
+    opacity: var(--agent-status-pulse-min-opacity);
   }
-  45%, 55% {
-    color: #4be878;
+  50% {
+    opacity: 1;
   }
 }
-@keyframes agent-status-transition-pulse {
-  0%, 100% {
-    opacity: 0.52;
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.18);
-  }
-  45%, 55% {
+@keyframes agent-status-acknowledgement-fade {
+  0% {
     opacity: 1;
-    border-color: rgb(var(--attention-ring-rgb, 255 51 71) / 0.72);
+  }
+  100% {
+    opacity: 0;
   }
 }
 .attention-pulse {
@@ -419,7 +414,7 @@
     transform: scale(0.97);
   }
   45%, 55% {
-    color: #ffffff;
+    color: var(--paint-white);
     background-color: #ff304a;
     filter: saturate(1.45) brightness(1.12);
     transform: scale(1.08);
@@ -459,6 +454,15 @@ html.status-pulse-disabled .ci-indicator.pr-status-failing {
   transform: none !important;
   transition: none !important;
 }
+/* Green play is continuous work, not the optional broad status animation. It must keep its shared
+   opacity pulse even when attention/cooldown animation is disabled in Preferences. */
+html.status-pulse-disabled .status-indicator--dot.status-indicator--working.heartbeat-pulse {
+  animation-name: agent-status-opacity-pulse !important;
+  animation-duration: var(--pulse-duration) !important;
+  animation-delay: var(--attention-animation-delay, 0s) !important;
+  animation-timing-function: var(--status-pulse-timing) !important;
+  animation-iteration-count: infinite !important;
+}
 html.status-pulse-disabled .status-indicator--dot,
 html.status-pulse-disabled .agent-window-status-dot,
 html.status-pulse-disabled .agent-window-agent-icon--active {
@@ -473,12 +477,12 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 1px 0;
+  padding: var(--space-1) 0;
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
   border: 2px solid var(--pane-tab-yolo-border);
   border-radius: var(--radius-control);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.42), 0 0 0 2px rgb(255 255 255 / 0.24);
+  box-shadow: 0 0 0 1px var(--paint-black-42), 0 0 0 2px rgb(255 255 255 / 0.24);
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
   overflow: visible;
 }
@@ -490,6 +494,10 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+.session-agent-activity-marker--placeholder {
+  visibility: hidden;
+  pointer-events: none;
 }
 .session-agent-activity-marker[data-auto-session] {
   cursor: pointer;
@@ -504,47 +512,15 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   border-radius: var(--radius-control);
   font-size: max(10px, var(--ui-font-size));
 }
-.session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
-}
 .session-yolo-marker.locked {
   color: #ffd75d;
   background: #3a3524;
-  border-color: #f0b85d;
+  border-color: var(--accent-gold);
 }
-/* Light mode: the NEUTRAL badges/markers hardcode dark slate boxes (the saturated
-   status colors — red/blue/green — already read on white and are left alone).
-   Repaint the neutral chips as light gray with dark text. */
-body.theme-light .session-state-badge {
-  color: var(--neutral-text-strong);
-  background: #eef1f5;
-  border-color: #cdd5e0;
-}
-body.theme-light .session-yolo-marker.inactive {
-  color: var(--agent-inactive-marker-text);
-  background: var(--agent-inactive-marker-bg);
-  border-color: var(--agent-inactive-marker-border);
-}
-/* The session YO marker no longer rotates to signal "working" — the glowing green ball beside the
-   agent symbol does that now. YO!agent thinking spinners still spin below; they indicate transient
-   model work, not session-working. */
+/* The session YO marker is always static; the pulsing green ball beside the agent symbol signals
+   session work, while transient model work uses the shared moving ellipsis. */
 .session-yolo-marker.working {
   transform-origin: center;
-}
-.session-yolo-marker.yoagent-waiting-spinner,
-.session-yolo-marker.yoagent-chat-spinner {
-  transform-origin: center;
-  animation-name: yolo-marker-rotate;
-  animation-duration: var(--pulse-duration, 1.55s);
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-}
-@keyframes yolo-marker-rotate {
-  to {
-    transform: rotate(360deg);
-  }
 }
 .ci-indicator {
   flex: 0 0 auto;
@@ -554,21 +530,22 @@ body.theme-light .session-yolo-marker.inactive {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   border-radius: 0;
   border: 1px solid var(--divider);
   color: var(--pr-status-closed);
-  background: #161d29;
+  background: var(--neutral-status-bg);
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
 }
-body.tab-meta-hidden .pane-tab .tab-symbol {
+body.tab-meta-hidden .pane-tab .tab-symbol,
+body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   display: none;
 }
 .ci-indicator.pr-number-chip {
-  color: #e9edf3;
-  background: #000;
-  border-color: #000;
-  padding: 0 4px;
+  color: var(--20-sessions-popovers-ci-indicator-fg-7);
+  background: var(--pr-number-chip-bg);
+  border-color: var(--pr-number-chip-bg);
+  padding: 0 var(--space-4);
 }
 .popover-chip-link {
   display: inline-flex;
@@ -580,100 +557,57 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 .popover-chip-link:hover {
   text-decoration: none;
 }
-.ci-indicator.pr-status-failing {
+.session-state-needs-approval,
+.session-state-needs-input {
   color: var(--danger-text);
   background: var(--danger-bg);
   border-color: var(--danger-border);
+}
+.ci-indicator.pr-status-failing,
+.ci-indicator.pr-review-changes {
+  color: var(--20-sessions-popovers-ci-indicator-fg-11);
+  background: var(--20-sessions-popovers-ci-indicator-bg-12);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-13);
+}
+.ci-indicator.pr-status-failing {
   box-shadow: none;
 }
 .ci-indicator.pr-status-pending,
 .ci-indicator.pr-status-draft {
-  color: #161000;
-  background: var(--pane-tab-badge-gold);
-  border-color: #ffe27a;
+  color: var(--20-sessions-popovers-ci-indicator-fg-14);
+  background: var(--20-sessions-popovers-ci-indicator-bg-15);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-16);
 }
-.ci-indicator.pr-status-passing {
-  color: #051408;
-  background: var(--pr-status-passing);
-  border-color: #8ff2a7;
+.ci-indicator.pr-status-passing,
+.ci-indicator.pr-review-approved {
+  color: var(--20-sessions-popovers-ci-indicator-fg-8);
+  background: var(--20-sessions-popovers-ci-indicator-bg-9);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-10);
 }
 .ci-indicator.pr-status-merged {
-  color: #170326;
-  background: var(--pr-status-merged);
-  border-color: #e9d5ff;
+  color: var(--20-sessions-popovers-ci-indicator-fg-17);
+  background: var(--20-sessions-popovers-ci-indicator-bg-18);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-19);
 }
 /* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
 .ci-indicator.pr-review-chip {
-  padding: 0 5px;
+  padding: 0 var(--space-5);
   font-weight: 700;
 }
-.ci-indicator.pr-review-approved {
-  color: #051408;
-  background: var(--pr-status-passing);
-  border-color: #8ff2a7;
-}
-.ci-indicator.pr-review-changes {
-  color: var(--danger-text);
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-}
 .ci-indicator.pr-review-required {
-  color: #172033;
+  color: var(--20-sessions-popovers-ci-indicator-fg-20);
   background: #e7ebf1;
   border-color: #aab4c4;
   text-decoration: line-through;
   opacity: 1;
 }
 .ci-indicator.branch-indicator {
-  color: #071321;
-  background: var(--accent-sky-strong);
-  border-color: #c9ebff;
-}
-/* the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
-   are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
-   theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
-body.theme-light .ci-indicator {
-  color: #1c2430;
-  background: #ffffff;
-  border-color: #b9c2d0;
-}
-body.theme-light .ci-indicator.pr-number-chip {
-  color: #ffffff;
-  background: #2b3242;
-  border-color: #2b3242;
-}
-body.theme-light .ci-indicator.pr-status-passing,
-body.theme-light .ci-indicator.pr-review-approved {
-  color: #06340f;
-  background: #6fe08a;
-  border-color: #3fae5e;
-}
-body.theme-light .ci-indicator.pr-status-failing,
-body.theme-light .ci-indicator.pr-review-changes {
-  color: #ffffff;
-  background: #d83048;
-  border-color: #b21f34;
-}
-body.theme-light .ci-indicator.pr-status-pending,
-body.theme-light .ci-indicator.pr-status-draft {
-  color: #3a2c00;
-  background: #ffcf4d;
-  border-color: #d9a400;
-}
-body.theme-light .ci-indicator.pr-status-merged {
-  color: #2b0a45;
-  background: #c79bf5;
-  border-color: #9a5fd0;
-}
-body.theme-light .ci-indicator.pr-review-required {
-  color: #41506a;
-  background: #e7ebf1;
-  border-color: #aab4c4;
-}
-body.theme-light .ci-indicator.branch-indicator {
-  color: #07314f;
-  background: #bfe3ff;
-  border-color: #7fb8e0;
+  --branch-indicator-text: var(--20-sessions-popovers-ci-indicator-branch-indicator-text-21);
+  --branch-indicator-bg: var(--20-sessions-popovers-ci-indicator-branch-indicator-bg-22);
+  --branch-indicator-border: var(--20-sessions-popovers-ci-indicator-branch-indicator-border-23);
+  color: var(--branch-indicator-text);
+  background: var(--branch-indicator-bg);
+  border-color: var(--branch-indicator-border);
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
@@ -684,8 +618,8 @@ body.theme-light .ci-indicator.branch-indicator {
 }
 @keyframes metadata-badge-pulse {
   0%, 100% {
-    outline: 0 solid rgba(255, 226, 122, 0);
-    box-shadow: 0 0 0 0 rgba(255, 226, 122, 0);
+    outline: 0 solid var(--paint-warning-transparent);
+    box-shadow: 0 0 0 0 var(--paint-warning-transparent);
     filter: saturate(1) brightness(1);
     transform: scale(1);
   }
@@ -709,22 +643,25 @@ body.theme-light .ci-indicator.branch-indicator {
   max-width: var(--popover-max-inline-size);
   max-height: calc(100vh - var(--topbar-height) - var(--popover-edge-gap));
   overflow: auto;
-  padding: 8px 10px;
-  color: var(--text);
+  padding: var(--space-8) var(--space-10);
+  color: var(--20-sessions-popovers-session-popover-fg-24);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size);
   font-stretch: normal;
   line-height: 1.25;
   font-weight: 400;
-  background: var(--panel2);
+  background: var(--20-sessions-popovers-session-popover-bg-25);
   border: 1px solid var(--active-control-soft-border);
-  border-radius: 8px;
-  box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.42);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--20-sessions-popovers-session-popover-shadow-27);
   transform: translateY(-2px);
   transition:
-    opacity 90ms ease var(--popover-hide-delay),
-    transform 90ms ease var(--popover-hide-delay),
-    visibility 0s linear calc(var(--popover-hide-delay) + 90ms);
+    opacity var(--motion-interaction-fast) ease var(--popover-hide-delay),
+    transform var(--motion-interaction-fast) ease var(--popover-hide-delay),
+    visibility 0s linear calc(var(--popover-hide-delay) + var(--motion-interaction-fast));
+
+
+  border-color: var(--20-sessions-popovers-session-popover-border-26);
 }
 .session-popover::before {
   content: "";
@@ -734,106 +671,81 @@ body.theme-light .ci-indicator.branch-indicator {
   width: 10px;
   height: 10px;
   transform: rotate(45deg);
-  background: var(--panel2);
+  background: var(--20-sessions-popovers-session-popover-bg-28);
   border-inline-start: 1px solid var(--active-control-soft-border);
   border-top: 1px solid var(--active-control-soft-border);
+
+
+  border-inline-start-color: var(--20-sessions-popovers-session-popover-border-inline-start-29);
+  border-top-color: var(--20-sessions-popovers-session-popover-border-top-30);
 }
 /* S14: opt-in drag-timing readout — a copyable on-page box so the timing can be captured
    without DevTools. Only shown after a tab drag while the yolomux.debugDragTiming flag is set; click
    it to select-all, then copy. Theme-aware (no hardcoded colors). */
 .drag-timing-overlay {
   position: fixed;
-  top: 8px;
-  right: 8px;
+  inset-block-start: var(--popover-edge-gap);
+  inset-inline-end: var(--popover-edge-gap);
   z-index: var(--z-terminal-popover);
-  max-width: 460px;
+  inline-size: max-content;
+  max-inline-size: min(88ch, var(--popover-max-inline-size));
   margin: 0;
-  padding: 8px 10px;
+  padding: var(--space-8) var(--space-10);
   color: var(--text);
   background: var(--panel2);
   border: 1px solid var(--active-control-soft-border);
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / 0.5);
-  font: 11px/1.4 var(--mono-font);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px var(--paint-shadow-50);
+  font: var(--ui-font-size-xs)/1.4 var(--mono-font);
   white-space: pre;
   user-select: text;
   cursor: text;
-}
-/* Light mode: use a neutral card with the active accent only as border/labels. */
-body.theme-light .session-popover {
-  color: var(--pc-control-fg);
-  background: #ffffff;
-  border-color: var(--active-control-soft-border);
-  box-shadow: 0 18px 50px rgb(var(--overlay-slate-rgb) / 0.16);
-}
-body.theme-light .session-popover::before {
-  background: #ffffff;
-  border-inline-start-color: var(--active-control-soft-border);
-  border-top-color: var(--active-control-soft-border);
-}
-body.theme-light .popover-row {
-  border-top-color: rgb(var(--overlay-slate-rgb) / 0.10);
-}
-body.theme-light .popover-subtitle,
-body.theme-light .popover-label,
-body.theme-light .popover-desc-body,
-body.theme-light .state-legend-item,
-body.theme-light .session-popover .meta-muted {
-  color: #586072;
-}
-body.theme-light .session-popover .meta-sep {
-  color: #9aa3b2;
-}
-body.theme-light .popover-desc {
-  color: var(--pc-control-fg);
-}
-body.theme-light .session-popover a,
-body.theme-light .branch-link {
-  color: var(--accent);
 }
 .popover-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 5px;
+  gap: var(--space-8);
+  margin-bottom: var(--space-5);
 }
 .popover-title {
   font-weight: 600;
   font-size: var(--ui-font-size);
 }
 .popover-subtitle {
-  margin-top: 1px;
-  color: var(--muted);
+  margin-top: var(--space-1);
+
   font: inherit;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-4);
   overflow-wrap: anywhere;
+
+
+  color: var(--20-sessions-popovers-popover-subtitle-fg-32);
 }
 .popover-subtitle-text {
   min-width: 0;
 }
 .session-agent-list {
   display: grid;
-  gap: 2px;
-  margin: 1px 0 6px;
-  padding: 4px 0 5px;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 var(--space-6);
+  padding: var(--space-4) 0 var(--space-5);
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
 .session-agent-row {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 5px;
+  display: block;
   color: var(--text);
   font: var(--ui-font-size-xs)/1.25 var(--ui-font);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .session-agent-window-block > .session-agent-row {
-  padding: 3px 5px;
+  padding: var(--space-3) var(--space-5);
   border-radius: 5px;
   background: var(--pane-inactive-tab-bg);
 }
@@ -844,10 +756,11 @@ body.theme-light .branch-link {
   color: var(--danger-text);
 }
 .session-agent-kind {
-  min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-3);
+  margin-inline-end: var(--space-3);
+  vertical-align: text-bottom;
   font-weight: 600;
 }
 .session-agent-kind .agent-window-activity {
@@ -857,6 +770,9 @@ body.theme-light .branch-link {
 .session-agent-status,
 .session-agent-empty {
   color: var(--muted);
+}
+.session-agent-sep {
+  margin-inline: var(--space-3);
 }
 .session-agent-row.attention .session-agent-status {
   color: var(--danger-text);
@@ -870,56 +786,54 @@ body.theme-light .branch-link {
 }
 .session-window-metadata-list {
   display: grid;
-  gap: 4px;
-  margin: 0 0 6px;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-6);
 }
 .session-window-metadata,
 .session-window-metadata-list.shared {
-  padding: 4px 0 2px;
+  padding: var(--space-4) 0 var(--space-2);
   border-top: 1px solid var(--line);
 }
 .session-window-metadata-title {
   color: var(--text);
   font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
-  padding: 2px 0;
+  padding: var(--space-2) 0;
 }
 .popover-row {
   display: grid;
   grid-template-columns: 62px minmax(0, 1fr);
-  gap: 6px;
-  padding: 2px 0;
+  gap: var(--space-6);
+  padding: var(--space-2) 0;
   border-top: 1px solid var(--line);
+
+
+  border-top-color: var(--20-sessions-popovers-popover-row-border-top-31);
 }
 .popover-row.compact {
   grid-template-columns: 44px minmax(0, 0.8fr) 44px minmax(0, 1fr);
-  gap: 6px 8px;
+  gap: var(--space-6) var(--space-8);
 }
 .popover-label {
-  color: var(--active-accent-bright);
   font-weight: 500;
+
+
+  color: var(--20-sessions-popovers-popover-label-fg-33);
 }
 .popover-value {
   min-width: 0;
   overflow-wrap: anywhere;
   font-weight: 400;
 }
-.popover-value:has(.popover-copy-value) {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .popover-copy-value {
   min-width: 0;
   flex: 1;
   overflow-wrap: anywhere;
 }
-.popover-row.compact .popover-value {
-}
 .session-popover .meta-muted {
-  color: var(--muted);
+  color: var(--20-sessions-popovers-session-popover-fg-36);
 }
 .session-popover .meta-sep {
-  color: var(--muted);
+  color: var(--20-sessions-popovers-session-popover-fg-37);
 }
 .drag-image {
   opacity: 0.50 !important;
@@ -928,7 +842,7 @@ body.theme-light .branch-link {
 .file-drag-image.drag-image {
   width: min(36ch, 42vw, var(--popover-max-inline-size));
   max-width: min(36ch, 42vw, var(--popover-max-inline-size));
-  padding: 4px 6px;
+  padding: var(--space-4) var(--space-6);
   color: var(--text);
   background: color-mix(in srgb, var(--panel2) 96%, black 4%);
   border: 1px solid var(--active-control-soft-border);
@@ -941,18 +855,18 @@ body.theme-light .branch-link {
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   border: 2px dotted var(--pane-resizer-hover-bg);
   border-radius: var(--radius-lg);
-  box-shadow: 0 14px 34px rgb(var(--shadow-rgb) / 0.42);
+  box-shadow: 0 14px 34px var(--paint-shadow-42);
   overflow: hidden;
   opacity: 0.86 !important;
 }
 .tabber-drag-image.drag-image {
   max-height: min(56vh, 520px);
-  padding: 4px;
+  padding: var(--space-4);
   color: var(--text);
   background: color-mix(in srgb, var(--panel) 94%, black 6%);
   border: 1px solid var(--pane-inactive-tab-border);
   border-radius: var(--radius-control);
-  box-shadow: 0 12px 30px rgb(var(--shadow-rgb) / 0.42);
+  box-shadow: 0 12px 30px var(--paint-shadow-42);
   overflow: hidden;
   opacity: 0.88 !important;
 }
@@ -963,12 +877,10 @@ body.theme-light .branch-link {
   display: none !important;
 }
 .pane-drag-image-frame {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 4px;
+  gap: var(--space-4);
   width: 100%;
   height: 100%;
-  padding: 9px 10px;
+  padding: var(--space-9) var(--space-10);
   background:
     linear-gradient(to bottom, var(--pane-bar-bg, var(--panel2)) 0 30px, transparent 30px),
     color-mix(in srgb, var(--panel) 94%, black 6%);
@@ -976,37 +888,34 @@ body.theme-light .branch-link {
 .pane-drag-image-title {
   min-width: 0;
   font-weight: 700;
-  font-size: 12px;
+  font-size: var(--ui-font-size-sm);
   line-height: 1.2;
 }
 .pane-drag-image-meta {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--ui-font-size-xs);
   line-height: 1.2;
 }
 .pane-drag-image-tabs {
   display: flex;
   flex-wrap: wrap;
   align-content: flex-start;
-  gap: 4px;
+  gap: var(--space-4);
   min-height: 0;
   overflow: hidden;
-  padding-top: 4px;
+  padding-top: var(--space-4);
 }
 .pane-drag-image-tabs span {
   max-width: min(18ch, 42%);
-  padding: 2px 5px;
-  color: var(--text);
+  padding: var(--space-2) var(--space-5);
   background: var(--pane-bar-bg, var(--panel2));
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  font-size: 11px;
+  font-size: var(--ui-font-size-xs);
   line-height: 1.15;
 }
 .file-drag-main {
   display: flex;
   align-items: flex-start;
-  gap: 5px;
+  gap: var(--space-5);
   min-width: 0;
 }
 .file-drag-thumb {
@@ -1014,7 +923,7 @@ body.theme-light .branch-link {
   width: 24px;
   height: 24px;
   object-fit: contain;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid var(--active-control-soft-border);
 }
@@ -1032,7 +941,7 @@ body.theme-light .branch-link {
   flex: 1;
 }
 .file-drag-title {
-  margin-bottom: 1px;
+  margin-bottom: var(--space-1);
   color: var(--text);
   font: 600 var(--ui-font-size-2xs)/1.15 var(--ui-font);
 }
@@ -1047,34 +956,52 @@ body.theme-light .branch-link {
 .state-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 9px;
+  gap: var(--space-6) var(--space-9);
 }
 .state-legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  color: var(--muted);
+  gap: var(--space-4);
+
   font-size: var(--ui-font-size-xs);
   white-space: nowrap;
+
+
+  color: var(--20-sessions-popovers-state-legend-item-fg-35);
 }
 .popover-desc {
-  color: var(--text);
   line-height: 1.35;
+
+
+  color: var(--20-sessions-popovers-popover-desc-fg-38);
 }
 .popover-desc-title {
   font-weight: 700;
 }
 .popover-desc-body {
-  margin-top: 4px;
-  color: var(--muted);
+  margin-top: var(--space-4);
+
+  color: var(--20-sessions-popovers-popover-desc-body-fg-34);
 }
 .popover-desc-line + .popover-desc-line {
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 .popover-value a,
-.branch-link {
+.branch-link,
+.meta a,
+.summary-context a {
   color: var(--link-soft);
   text-decoration: none;
+}
+body :is(
+  .popover-value a,
+  .branch-link,
+  .meta a,
+  .summary-context a,
+  .info-tree-group-label-action
+):is(:hover, :focus-visible) {
+  color: var(--link-soft-hover);
+  text-decoration: underline;
 }
 .popover-value a.pr-status-failing,
 .meta a.pr-status-failing,
@@ -1098,10 +1025,40 @@ body.theme-light .branch-link {
 .meta a.pr-status-merged,
 .summary-context a.pr-status-merged,
 .branch-meta a.pr-status-merged {
-  color: var(--pr-status-merged);
+  color: var(--pr-link-merged);
+}
+body :is(
+  .popover-value a.pr-status-merged,
+  .meta a.pr-status-merged,
+  .summary-context a.pr-status-merged,
+  .branch-meta a.pr-status-merged
+):is(:hover, :focus-visible) {
+  color: var(--pr-link-merged-hover);
 }
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,
 .summary-context a.pr-status-closed {
   color: var(--pr-status-closed);
+}
+
+/* Theme-token consumers without a pre-existing local owner. */
+.session-state-badge:not(:is(.session-state-needs-approval, .session-state-needs-input, .session-state-blocked, .session-state-disconnected, .session-state-tests-running, .session-state-ready-review, .session-state-yolo-approval)) {
+
+  color: var(--20-sessions-popovers-session-state-badge-fg-1);
+  background: var(--20-sessions-popovers-session-state-badge-bg-2);
+  border-color: var(--20-sessions-popovers-session-state-badge-border-3);
+}
+.ci-indicator:not(.branch-indicator):not(.pr-number-chip):not(:is(.pr-status-failing, .pr-review-changes, .pr-status-pending, .pr-status-draft, .pr-status-passing, .pr-review-approved, .pr-status-merged, .pr-review-required)) {
+
+  color: var(--20-sessions-popovers-ci-indicator-fg-4);
+  background: var(--20-sessions-popovers-ci-indicator-bg-5);
+  border-color: var(--20-sessions-popovers-ci-indicator-border-6);
+}
+.session-popover a {
+
+  color: var(--20-sessions-popovers-session-popover-fg-39);
+}
+.branch-link {
+
+  color: var(--20-sessions-popovers-branch-link-fg-40);
 }

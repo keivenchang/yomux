@@ -10,6 +10,8 @@ from datetime import datetime
 from datetime import timezone
 from typing import Any
 
+from ..locales import message_descriptor
+
 ASSISTANT_DELTA = "assistant_delta"
 HIDDEN_WORK_DELTA = "hidden_work_delta"
 HIDDEN_WORK_DONE = "hidden_work_done"
@@ -54,6 +56,7 @@ class YoagentStreamEvent:
     raw_thinking: bool = False
     redacted: bool = False
     snapshot: bool = False
+    heartbeat: bool = False
     metadata: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -84,6 +87,8 @@ class YoagentStreamEvent:
             payload["redacted"] = True
         if self.snapshot:
             payload["snapshot"] = True
+        if self.heartbeat:
+            payload["heartbeat"] = True
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return payload
@@ -151,7 +156,33 @@ def _stream_auxiliary_multiline_text(value: Any) -> str:
     return str(value or "").replace("\\n", "\n").strip()
 
 
-def yoagent_stream_event_auxiliary_line(event: dict[str, Any]) -> str:
+def _stream_auxiliary_item(
+    kind: str,
+    event_kind: str,
+    label_key: str,
+    fallback: str,
+    *,
+    label_params: dict[str, Any] | None = None,
+    text: str = "",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build one canonical stream label and derive compatibility fields from it."""
+    label = message_descriptor(label_key, fallback, label_params)
+    return {
+        "kind": kind,
+        "eventKind": event_kind,
+        "label": label,
+        # Existing persisted conversations and older browser bundles still read these flattened fields.
+        "labelKey": label["key"],
+        "labelParams": label["params"],
+        "fallback": label["fallback"],
+        "text": text,
+        **extra,
+    }
+
+
+def yoagent_stream_event_auxiliary_item(event: dict[str, Any]) -> dict[str, Any]:
+    """Keep normalized auxiliary facts structured for persistence and client localization."""
     kind = str(event.get("kind") or event.get("event") or "")
     text = _stream_auxiliary_compact_text(event.get("text"))
     multiline_text = _stream_auxiliary_multiline_text(event.get("text"))
@@ -159,36 +190,55 @@ def yoagent_stream_event_auxiliary_line(event: dict[str, Any]) -> str:
     native_type = str(event.get("native_type") or "").strip()
     command = str(event.get("command") or "").strip()
     path = str(event.get("path") or "").strip()
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    token_count = metadata.get("estimated_tokens")
+    if not isinstance(token_count, (int, float)):
+        token_count = 0
     if kind == HIDDEN_WORK_DELTA:
-        prefix = "thinking"
+        label_key = "yoagent.stream.thinking"
+        fallback = "thinking"
         if event.get("summary"):
-            prefix = "thinking summary"
+            label_key = "yoagent.stream.thinkingSummary"
+            fallback = "thinking summary"
         if event.get("redacted"):
-            prefix = "redacted thinking"
-        if text.lower() == prefix or text.lower().startswith(f"{prefix}..."):
-            return text
-        return f"{prefix}: {text}" if text else prefix
+            label_key = "yoagent.stream.redactedThinking"
+            fallback = "redacted thinking"
+        return _stream_auxiliary_item(
+            "thinking",
+            kind,
+            label_key,
+            fallback,
+            text="" if event.get("heartbeat") else multiline_text,
+            tokenCount=int(token_count),
+        )
     if kind == HIDDEN_WORK_DONE:
-        return "thinking done"
+        return _stream_auxiliary_item("diagnostic", kind, "yoagent.stream.thinkingDone", "thinking done")
     if kind == TOOL_CALL_STARTED:
         detail = command or path or multiline_text
-        label = f"tool start: {tool_name or native_type or 'tool'}"
-        return f"{label}: {detail}" if detail else label
+        tool = tool_name or native_type or "tool"
+        return _stream_auxiliary_item("tool", kind, "yoagent.stream.toolStart", f"tool start: {tool}", label_params={"tool": tool}, text=detail, toolName=tool, command=command, path=path)
     if kind == TOOL_CALL_DELTA:
-        label = f"tool output: {tool_name or native_type or 'tool'}"
-        return f"{label}: {multiline_text}" if multiline_text else label
+        tool = tool_name or native_type or "tool"
+        return _stream_auxiliary_item("tool", kind, "yoagent.stream.toolOutput", f"tool output: {tool}", label_params={"tool": tool}, text=multiline_text, toolName=tool)
     if kind == TOOL_CALL_FINISHED:
         detail = command or path or multiline_text
-        label = f"tool done: {tool_name or native_type or 'tool'}"
-        return f"{label}: {detail}" if detail else label
+        tool = tool_name or native_type or "tool"
+        return _stream_auxiliary_item("tool", kind, "yoagent.stream.toolDone", f"tool done: {tool}", label_params={"tool": tool}, text=detail, toolName=tool, command=command, path=path)
     if kind == APPROVAL_REQUESTED:
         detail = command or path or text
-        return f"approval requested: {detail}" if detail else "approval requested"
+        return _stream_auxiliary_item("tool", kind, "yoagent.stream.approvalRequested", "approval requested", text=detail, command=command, path=path)
     if kind == USAGE:
-        return f"usage: {text}" if text else "usage"
+        return _stream_auxiliary_item("diagnostic", kind, "yoagent.stream.usage", "usage", text=multiline_text)
     if kind == ERROR:
-        return f"error: {text}" if text else "error"
-    return ""
+        return _stream_auxiliary_item("diagnostic", kind, "yoagent.stream.error", "error", text=multiline_text)
+    return {}
+
+
+def yoagent_stream_event_auxiliary_line(event: dict[str, Any]) -> str:
+    item = yoagent_stream_event_auxiliary_item(event)
+    fallback = str(item.get("fallback") or "")
+    detail = str(item.get("text") or "")
+    return f"{fallback}: {detail}" if fallback and detail else fallback or detail
 
 
 def _json_compact(value: Any) -> str:
@@ -260,13 +310,13 @@ def normalize_codex_app_server_message(message: dict[str, Any], *, backend: str 
         return []
     if method == "item/reasoning/summaryTextDelta":
         delta = str(params.get("delta") or "")
-        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning summary...", summary=True, **common)]
+        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning summary...", summary=True, heartbeat=not bool(delta), **common)]
     if method == "item/reasoning/textDelta":
         delta = str(params.get("delta") or "")
-        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning...", raw_thinking=True, **common)]
+        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning...", raw_thinking=True, heartbeat=not bool(delta), **common)]
     if method in {"item/reasoning/delta", "item/thinking/delta", "item/thought/delta"}:
         delta = str(params.get("delta") or params.get("text") or "")
-        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning...", **common)]
+        return [stream_event(HIDDEN_WORK_DELTA, text=delta or "reasoning...", heartbeat=not bool(delta), **common)]
     if method in {"item/commandExecution/outputDelta", "item/fileChange/outputDelta"}:
         delta = str(params.get("delta") or "")
         tool_name = "command" if "commandExecution" in method else "file change"
@@ -391,7 +441,7 @@ class ClaudeStreamJsonNormalizer:
             self.thinking_token_estimate = int(token_count)
             heartbeat = f"thinking... (~{int(token_count)} tokens)" if token_count is not None else "thinking..."
             metadata = {"estimated_tokens": token_count} if token_count is not None else None
-            return [stream_event(HIDDEN_WORK_DELTA, text=heartbeat, raw_thinking=True, redacted=delta_type == "redacted_thinking_delta", metadata=metadata, **self._common(item))]
+            return [stream_event(HIDDEN_WORK_DELTA, text=heartbeat, raw_thinking=True, redacted=delta_type == "redacted_thinking_delta", heartbeat=True, metadata=metadata, **self._common(item))]
         return []
 
     def _content_block_stop(self, item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -464,6 +514,7 @@ class ClaudeStreamJsonNormalizer:
                 HIDDEN_WORK_DELTA,
                 text=f"thinking... (~{token_count} tokens)",
                 raw_thinking=True,
+                heartbeat=True,
                 metadata=metadata,
                 **self._common(item),
             )

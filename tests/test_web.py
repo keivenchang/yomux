@@ -52,16 +52,45 @@ def test_html_lang_dir_attrs_escapes_and_sets_direction():
     assert '"><' not in attrs
 
 
+def test_server_string_normalizes_locale_before_cached_catalog_lookup(monkeypatch, tmp_path):
+    locale_dir = tmp_path / "locales"
+    locale_dir.mkdir()
+    (locale_dir / "en.json").write_text('{"label": "English"}', encoding="utf-8")
+    (locale_dir / "zh-Hant.json").write_text('{"label": "繁體中文"}', encoding="utf-8")
+    monkeypatch.setattr(web, "STATIC_DIR", tmp_path)
+    web.bootstrap_locale_catalogs.cache_clear()
+    try:
+        assert web.server_string("ZH-hant", "label") == "繁體中文"
+        assert web.server_string("zh-Hant", "label") == "繁體中文"
+        assert web.bootstrap_locale_catalogs.cache_info().hits >= 1
+    finally:
+        web.bootstrap_locale_catalogs.cache_clear()
+
+
 def test_html_page_marks_readonly_role_without_breaking_out():
     # The access role is reflected into the bootstrap payload; a readonly guest renders a valid page.
     bootstrap = _bootstrap_json(web.html_page([], access_role="readonly"))
     assert json.loads(bootstrap)["accessRole"] == "readonly"
 
 
+def test_html_page_bootstraps_authoritative_username_but_never_for_share():
+    bootstrap = json.loads(_bootstrap_json(web.html_page([], auth_username="alice")))
+    shared = json.loads(_bootstrap_json(web.html_page([], access_role="readonly", auth_username="alice", share={"id": "share"})))
+
+    assert bootstrap["authUsername"] == "alice"
+    assert shared["authUsername"] == ""
+
+
 def test_html_page_bootstrap_includes_linear_issue_base_url():
     bootstrap = json.loads(_bootstrap_json(web.html_page([])))
 
     assert bootstrap["linearIssueBaseUrl"] == "https://linear.app/issue"
+
+
+def test_html_page_bootstrap_preserves_server_ranked_recent_sessions():
+    bootstrap = json.loads(_bootstrap_json(web.html_page(["old", "new"], recent_sessions=["new", "old"])))
+
+    assert bootstrap["recentSessions"] == ["new", "old"]
 
 
 def test_xterm_unicode11_addon_asset_resolves_from_sibling_package(monkeypatch, tmp_path):
@@ -75,6 +104,21 @@ def test_xterm_unicode11_addon_asset_resolves_from_sibling_package(monkeypatch, 
 
     assert common.xterm_asset_path("xterm-addon-unicode11.js") == addon_path
     assert web.static_content_type("xterm-addon-unicode11.js") == "application/javascript; charset=utf-8"
+
+
+def test_emoji_catalog_is_a_served_lazy_javascript_asset():
+    assert web.static_content_type("emoji-data.js") == "application/javascript; charset=utf-8"
+    assert web.static_asset_path("emoji-data.js") == common.STATIC_DIR / "emoji-data.js"
+
+
+def test_xterm_asset_path_prefers_packaged_static_asset(monkeypatch, tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    packaged_asset = static_dir / "xterm.js"
+    packaged_asset.write_text("window.Terminal = {};", encoding="utf-8")
+    monkeypatch.setattr(common, "STATIC_DIR", static_dir)
+
+    assert common.xterm_asset_path("xterm.js") == packaged_asset
 
 
 def test_html_page_loads_xterm_unicode11_addon_after_xterm():

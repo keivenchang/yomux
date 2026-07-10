@@ -31,6 +31,7 @@ from .github_client import github_pull_request_url
 from .github_client import pull_request_status_label  # noqa: F401 - re-exported for existing metadata callers
 from .github_client import summarize_github_checks  # noqa: F401 - re-exported for existing metadata callers
 from .linear_client import linear_issue_metadata
+from .locales import message_fields
 from .session_files import session_touched_dirs
 from .settings import settings_payload
 from .workdir import numbered_session_workdir
@@ -38,6 +39,13 @@ from .workdir import session_workdir
 
 
 _METADATA_BUILD_LOCAL = threading.local()
+# Indexed directories can be very large. Discovery is intentionally slower
+# than per-repository Git metadata, so share one bounded scan across every
+# request/thread rather than letting concurrent metadata readers each os.walk
+# the same tree. Changing the configured directory list changes the cache key.
+INDEXED_REPO_ROOTS_CACHE_SECONDS = 30.0
+_INDEXED_REPO_ROOTS_CACHE_LOCK = threading.Lock()
+_INDEXED_REPO_ROOTS_CACHE: dict[tuple[str, ...], tuple[float, list[str]]] = {}
 
 
 @contextmanager
@@ -299,6 +307,7 @@ def local_branch_inventory(
                 "source": source,
                 "name": name,
                 "sha": sha,
+                # This is the branch HEAD commit's committer date, never a working-tree file mtime.
                 "updated_ts_text": updated_ts_text,
                 "updated": updated,
                 "subject": subject,
@@ -698,6 +707,26 @@ def indexed_repo_roots(indexed_dirs: list[str] | None = None) -> list[str]:
         raw_dirs = settings_payload().get("settings", {}).get("file_explorer", {}).get("indexed_dirs", [])
     if not isinstance(raw_dirs, list):
         return []
+    cache_key = tuple(str(item).strip() for item in raw_dirs if isinstance(item, str) and str(item).strip())
+    now = time.monotonic()
+    with _INDEXED_REPO_ROOTS_CACHE_LOCK:
+        cached = _INDEXED_REPO_ROOTS_CACHE.get(cache_key)
+        if cached is not None and now - cached[0] < INDEXED_REPO_ROOTS_CACHE_SECONDS:
+            return list(cached[1])
+
+        # Keep the lock through the walk: one slow first reader is acceptable;
+        # N simultaneous readers recursively walking the same configured root is
+        # not.  The result is small (repository paths only), and callers receive
+        # their own list copy below.
+        roots = _discover_indexed_repo_roots(raw_dirs)
+        _INDEXED_REPO_ROOTS_CACHE[cache_key] = (time.monotonic(), roots)
+        if len(_INDEXED_REPO_ROOTS_CACHE) > 64:
+            oldest_key = min(_INDEXED_REPO_ROOTS_CACHE, key=lambda key: _INDEXED_REPO_ROOTS_CACHE[key][0])
+            _INDEXED_REPO_ROOTS_CACHE.pop(oldest_key, None)
+        return list(roots)
+
+
+def _discover_indexed_repo_roots(raw_dirs: list[str]) -> list[str]:
     roots: list[str] = []
     seen: set[str] = set()
 
@@ -1007,7 +1036,22 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_netw
         "session": info.session,
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
-        "agents": [asdict(agent) for agent in info.agents],
+        "agents": [
+            {
+                **asdict(agent),
+                **(
+                    message_fields(
+                        "error",
+                        "transcript.error.unavailable",
+                        agent.error,
+                        {"error": agent.error},
+                    )
+                    if agent.error
+                    else {}
+                ),
+            }
+            for agent in info.agents
+        ],
         "window_metadata": window_metadata(info, include_git=include_metadata),
         "transcript_mtime": transcript_mtime,
         "project": session_project_metadata(info, metadata_cache, allow_network=allow_network) if include_metadata else empty_project_metadata(loading=True),

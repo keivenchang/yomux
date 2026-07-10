@@ -6,7 +6,7 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
   const previous = infoSessionFileLookbackHours;
   infoSessionFileLookbackHours = writeStoredInfoLookbackHours(hours);
   if (infoSessionFileLookbackHours !== previous) {
-    activitySummaryPayload = {...activitySummaryPayload, session_file_hours: infoSessionFileLookbackHours};
+    activitySummaryState.payload = {...activitySummaryState.payload, session_file_hours: infoSessionFileLookbackHours};
     if (options.refresh !== false) refreshActivitySummary({force: true, silent: options.silent === true});
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   }
@@ -14,18 +14,18 @@ function setInfoSessionFileLookbackHours(hours, options = {}) {
 }
 
 function infoGroupingControlsHtml() {
-  const grouping = typeof currentInfoGrouping === 'function' ? currentInfoGrouping() : ['tab', 'path'];
+  const grouping = typeof currentInfoGrouping === 'function' ? currentInfoGrouping() : ['tab', 'path', 'tmux-window'];
   const sort = typeof currentInfoSort === 'function' ? currentInfoSort() : {key: 'date', dir: 'desc'};
   const search = typeof currentInfoSearch === 'function' ? currentInfoSearch() : '';
   const presets = typeof infoGroupingPresets === 'function' ? infoGroupingPresets() : [];
-  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: 'recent'}];
+  const sortFields = typeof infoSortFields === 'function' ? infoSortFields() : [{key: 'date', dir: 'desc', value: 'date:desc', label: t('common.sort.recent')}];
   const dimensionsForLevel = level => typeof infoGroupDimensionsForLevel === 'function'
     ? infoGroupDimensionsForLevel(level, grouping)
     : (typeof infoGroupDimensions === 'function' ? infoGroupDimensions() : []);
   const optionHtml = level => {
     const dimensions = dimensionsForLevel(level);
     return [
-      `<option value="">None</option>`,
+      `<option value="">${esc(t('info.group.none'))}</option>`,
       ...dimensions.map(dimension => `<option value="${esc(dimension.key)}"${grouping[level] === dimension.key ? ' selected' : ''}>${esc(dimension.label)}</option>`),
     ].join('');
   };
@@ -35,17 +35,17 @@ function infoGroupingControlsHtml() {
     const active = grouping.join('|') === preset.grouping.join('|');
     return `<button type="button" class="info-tree-preset${active ? ' active' : ''}" data-info-preset="${esc(preset.key)}" aria-pressed="${active ? 'true' : 'false'}" title="${esc(preset.title)}">${esc(preset.label)}</button>`;
   }).join('');
-  const searchHtml = `<label class="info-tree-search-control"><span>Search</span><input type="search" data-info-search value="${esc(search)}" placeholder="Search YO!info" aria-label="Search YO!info"></label>`;
-  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="Order by level ${index + 1}">${optionHtml(index)}</select></label>`).join('');
-  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="Sort order">
-          <label class="info-tree-group-select"><span>Sort</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
+  const searchHtml = `<label class="info-tree-search-control"><span>${esc(t('common.search'))}</span><input type="search" data-info-search value="${esc(search)}" placeholder="${esc(t('info.search.placeholder'))}" aria-label="${esc(t('info.search.placeholder'))}"></label>`;
+  const selects = [0, 1, 2, 3].map(index => `${index === 0 ? '' : '<span class="info-tree-order-separator" aria-hidden="true">&gt;</span>'}<label class="info-tree-group-select info-tree-order-select"><select data-info-group-level="${index}" aria-label="${esc(t('info.group.orderByLevel', {level: index + 1}))}">${optionHtml(index)}</select></label>`).join('');
+  const sortControls = `<div class="info-tree-sort-controls" role="group" aria-label="${esc(t('info.sort.order'))}">
+          <label class="info-tree-group-select"><span>${esc(t('changes.sort'))}</span><select data-info-sort-mode>${sortFieldHtml}</select></label>
         </div>`;
   return `
         <div class="info-tree-primary-controls">
-          <div class="info-tree-presets" role="group" aria-label="Grouping presets">${presetHtml}</div>
+          <div class="info-tree-presets" role="group" aria-label="${esc(t('info.group.presets'))}">${presetHtml}</div>
           ${searchHtml}
         </div>
-        <div class="info-tree-group-selects" role="group" aria-label="Grouping levels"><span class="info-tree-order-label">Order by:</span>${selects}</div>
+        <div class="info-tree-group-selects" role="group" aria-label="${esc(t('info.group.levels'))}"><span class="info-tree-order-label">${esc(t('info.group.orderBy'))}</span>${selects}</div>
         ${sortControls}`;
 }
 
@@ -94,8 +94,8 @@ function bindInfoPanel(panel) {
     const session = button.dataset.infoOpenAiTab || '';
     const windowIndex = button.dataset.infoOpenAiWindow || '';
     if (!session) return;
-    if (windowIndex !== '' && typeof tmuxWindow === 'function') {
-      tmuxWindow(session, {windowIndex}, button.textContent || `tmux sub-window ${windowIndex}`);
+    if (windowIndex !== '') {
+      activateTmuxWindowFromUserAction(session, windowIndex, button.textContent || t('terminal.window.title', {name: windowIndex}));
     }
     selectSession(session, {userInitiated: true});
   });
@@ -139,21 +139,18 @@ function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel info-tree-panel';
   panel.id = panelDomId(infoItemId);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="info-actions-bar info-tree-actions-bar">
+  panel.innerHTML = panelFrameHtml({
+    item: infoItemId,
+    controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
+    afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
-          <button type="button" class="info-refresh" data-info-refresh title="${esc(t('meta.refresh'))}" aria-label="${esc(t('meta.refresh'))}">${esc(t('meta.refresh'))}</button>
+          <button type="button" class="info-refresh" data-info-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.refresh'))}</button>
         </div>
-      </div>
-      <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
-        <div id="info-content" class="info-list info-tree-list"></div>
-      </div>`;
+      </div>`,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
+  });
   bindPanelShell(panel, infoItemId);
   bindInfoPanel(panel);
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
@@ -164,20 +161,17 @@ function createYoagentPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel yoagent-panel';
   panel.id = panelDomId(yoagentItemId);
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${virtualPanelControlsHtml(yoagentItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="info-actions-bar">
+  panel.innerHTML = panelFrameHtml({
+    item: yoagentItemId,
+    controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
+    afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
-          <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+          <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
         </div>
-      </div>
-      <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${yoagentItemId}" class="panel-toast-stack"></div>
-        <div id="yoagent-content" class="info-list yoagent-list"></div>
-      </div>`;
+      </div>`,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
+  });
   bindPanelShell(panel, yoagentItemId);
   bindYoagentPanel(panel);
   showYoagentStartupInfoOnce();
@@ -190,11 +184,24 @@ function createYoagentPanel() {
 }
 
 function bindYoagentPanel(panel) {
-  panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
-    event.preventDefault();
-    loadYoagentConversation({force: true, silent: true, scrollBottom: false});
-    loadYoagentJobs({silent: true, scrollBottom: false});
-    refreshActivitySummary({force: true});
+  bindActionDispatcher(panel, {
+    'yoagent-refresh': () => {
+      loadYoagentConversation({force: true, silent: true, scrollBottom: false});
+      loadYoagentJobs({silent: true, scrollBottom: false});
+      refreshActivitySummary({force: true});
+    },
+    'yoagent-clear': () => clearYoagentConversation(),
+    'yoagent-retry': () => {
+      const input = panel.querySelector('[data-yoagent-chat-input]');
+      sendYoagentChatMessage(input?.value || yoagentChatState.draft);
+    },
+    'yoagent-chat-cancel': () => cancelActiveYoagentChatRequest(),
+    'yoagent-queued-cancel': (_event, target) => cancelQueuedYoagentChatMessage(target.dataset.yoagentQueuedCancel || ''),
+    'yoagent-agent-restart': (_event, target) => createNextSession(target.dataset.yolomuxAgentRestart || 'claude'),
+    'yoagent-action-send': (_event, target) => executeYoagentActionSend(target.dataset.yoagentActionSend || ''),
+    'yoagent-job-confirm': (_event, target) => confirmYoagentJob(target.dataset.yoagentJobConfirm || ''),
+    'yoagent-job-cancel': (_event, target) => cancelYoagentJob(target.dataset.yoagentJobCancel || ''),
+    'yoagent-wait-clear': (_event, target) => clearYoagentPendingWait(target.dataset.yoagentWaitClear || ''),
   });
   panel.addEventListener('submit', event => {
     const form = event.target.closest('[data-yoagent-chat-form]');
@@ -203,71 +210,15 @@ function bindYoagentPanel(panel) {
     const input = form.querySelector('[data-yoagent-chat-input]');
     const value = input?.value || '';
     if (input) input.value = '';
-    yoagentDraft = '';
+    yoagentChatState.draft = '';
     resetYoagentComposerHistory();
     sendYoagentChatMessage(value);
-  });
-  panel.addEventListener('click', event => {
-    const clear = event.target.closest('[data-yoagent-clear]');
-    if (clear && panel.contains(clear)) {
-      event.preventDefault();
-      clearYoagentConversation();
-      return;
-    }
-    const retry = event.target.closest('[data-yoagent-retry]');
-    if (retry && panel.contains(retry)) {
-      event.preventDefault();
-      const input = panel.querySelector('[data-yoagent-chat-input]');
-      sendYoagentChatMessage(input?.value || yoagentDraft);
-      return;
-    }
-    const activeCancel = event.target.closest('[data-yoagent-chat-cancel]');
-    if (activeCancel && panel.contains(activeCancel)) {
-      event.preventDefault();
-      cancelActiveYoagentChatRequest();
-      return;
-    }
-    const queuedCancel = event.target.closest('[data-yoagent-queued-cancel]');
-    if (queuedCancel && panel.contains(queuedCancel)) {
-      event.preventDefault();
-      cancelQueuedYoagentChatMessage(queuedCancel.dataset.yoagentQueuedCancel || '');
-      return;
-    }
-    const agentRestart = event.target.closest('[data-yolomux-agent-restart]');
-    if (agentRestart && panel.contains(agentRestart)) {
-      event.preventDefault();
-      createNextSession(agentRestart.dataset.yolomuxAgentRestart || 'claude');
-      return;
-    }
-    const actionSend = event.target.closest('[data-yoagent-action-send]');
-    if (actionSend && panel.contains(actionSend)) {
-      event.preventDefault();
-      executeYoagentActionSend(actionSend.dataset.yoagentActionSend || '');
-      return;
-    }
-    const jobConfirm = event.target.closest('[data-yoagent-job-confirm]');
-    if (jobConfirm && panel.contains(jobConfirm)) {
-      event.preventDefault();
-      confirmYoagentJob(jobConfirm.dataset.yoagentJobConfirm || '');
-      return;
-    }
-    const jobCancel = event.target.closest('[data-yoagent-job-cancel]');
-    if (jobCancel && panel.contains(jobCancel)) {
-      event.preventDefault();
-      cancelYoagentJob(jobCancel.dataset.yoagentJobCancel || '');
-      return;
-    }
-    const waitClear = event.target.closest('[data-yoagent-wait-clear]');
-    if (waitClear && panel.contains(waitClear)) {
-      event.preventDefault();
-      clearYoagentPendingWait(waitClear.dataset.yoagentWaitClear || '');
-    }
   });
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
     if (input && panel.contains(input)) {
-      yoagentDraft = input.value || '';
-      if (yoagentHistoryCursor === null) yoagentHistoryDraft = '';
+      yoagentChatState.draft = input.value || '';
+      if (yoagentChatState.historyCursor === null) yoagentChatState.historyDraft = '';
     }
   });
   panel.addEventListener('keydown', event => {
@@ -280,29 +231,20 @@ function bindYoagentPanel(panel) {
     const path = yoagentSetting.dataset.yoagentSettingPath || '';
     saveSettingsPatch(settingPatchForPath(path, yoagentSetting.value))
       .then(() => { statusEl.textContent = t('yoagent.statusBackend', {backend: yoagentBackendLabel(yoagentComposerBackendKey())}); renderYoagentPanel(); })
-      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+      .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
   });
 }
 
 // Persistent virtual panels keep their chrome mounted between language changes. Re-label those controls in place.
 function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(infoItemId))) {
   if (!panel) return;
-  const minimizeLabel = t('pane.minimize');
-  const expandLabel = t('pane.expand');
-  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
-    button.title = minimizeLabel;
-    button.setAttribute('aria-label', minimizeLabel);
-  });
-  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
-    button.title = expandLabel;
-    button.setAttribute('aria-label', expandLabel);
-  });
+  relocalizeVirtualPanelChrome(panel, infoTabLabel());
   const refresh = panel.querySelector('[data-info-refresh]');
   if (refresh) {
     if (typeof setMetadataRefreshButtonLoading === 'function') {
-      setMetadataRefreshButtonLoading(refresh, transcriptMetaLoading, t('meta.refresh'), t('meta.refresh'));
+      setMetadataRefreshButtonLoading(refresh, transcriptMetadataState.loading, t('common.refresh'), t('common.refresh'));
     } else {
-      const label = t('meta.refresh');
+      const label = t('common.refresh');
       refresh.textContent = label;
       refresh.title = label;
       refresh.setAttribute('aria-label', label);
@@ -317,16 +259,7 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(panelDomId(in
 
 function relocalizeYoagentPanelChrome(panel = document.getElementById(panelDomId(yoagentItemId))) {
   if (!panel) return;
-  const minimizeLabel = t('pane.minimize');
-  const expandLabel = t('pane.expand');
-  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
-    button.title = minimizeLabel;
-    button.setAttribute('aria-label', minimizeLabel);
-  });
-  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
-    button.title = expandLabel;
-    button.setAttribute('aria-label', expandLabel);
-  });
+  relocalizeVirtualPanelChrome(panel, yoagentTabLabel());
   const agentRefresh = panel.querySelector('[data-yoagent-refresh]');
   if (agentRefresh) {
     agentRefresh.textContent = t('yoagent.refresh');
@@ -421,7 +354,7 @@ function splitVirtualItemToRightPane(item, sourceSlot = null) {
   if (!root) {
     const targetSlot = sourceSlot || slotForNewSession();
     next[layoutTreeKey] = leafNode(targetSlot);
-    next[targetSlot] = paneStateWithTabs([item], item);
+    next[targetSlot] = paneStateWithTabsForSlot(targetSlot, [item], item, next);
     applyLayoutSlots(next, {focusSession: item, prune: false});
     return;
   }

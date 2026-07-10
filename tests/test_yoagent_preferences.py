@@ -3,11 +3,13 @@ from http import HTTPStatus
 import pytest
 
 from yolomux_lib import app as app_module
+from yolomux_lib.yoagent import controller as yoagent_controller_module
 from yolomux_lib.settings import default_settings
 from yolomux_lib.settings import save_settings
 from yolomux_lib.settings import settings_payload
 from yolomux_lib.yoagent.preferences import catalog_from_payload
 from yolomux_lib.yoagent.preferences import product_capability_registry
+from yolomux_lib.yoagent.preferences import product_capability_locale_key
 from yolomux_lib.yoagent.preferences import yoagent_operator_response
 
 
@@ -41,7 +43,7 @@ def test_operator_answers_current_setting_without_model(tmp_path):
     assert response is not None
     assert response["backend_used"] == "yolomux"
     assert "`appearance.tab_width`" in response["answer"]
-    assert "current `180`" in response["answer"]
+    assert "current `172`" in response["answer"]
     assert calls == []
 
 
@@ -142,6 +144,51 @@ def test_operator_catalog_hides_reserved_and_legacy_settings(tmp_path):
     assert "general.default_sessions" not in catalog
     assert "appearance.editor_color_scheme" not in catalog
     assert catalog["yoagent.invocation"]["choices"] == ["cli"]
+
+
+def test_operator_catalog_exposes_shared_locale_keys(tmp_path):
+    payload = settings_payload_for_path(tmp_path / "settings.yaml")
+    catalog = catalog_from_payload(payload)
+    theme = catalog["appearance.theme"]
+
+    assert theme["locale_keys"] == {
+        "description": "pref.appearance.theme.help",
+        "label": "pref.appearance.theme.label",
+    }
+    assert theme["gui"]["section_locale_key"] == "pref.section.appearance"
+    assert catalog["file_explorer.root_mode"]["gui"]["section_locale_key"] == "finder.label.finder"
+    for path in [
+        "general.default_sessions",
+        "appearance.editor_color_scheme",
+        "updates.check_interval_minutes",
+        "share.view_fit",
+        "summary.backend",
+        "summary.codex_model",
+        "summary.codex_effort",
+        "summary.codex_service_tier",
+        "summary.lookback_seconds",
+        "summary.timeout_seconds",
+    ]:
+        assert payload["catalog"][path]["gui"]["visible"] is False
+
+
+def test_operator_localizes_setting_section_and_help(tmp_path):
+    payload = settings_payload_for_path(tmp_path / "settings.yaml")
+
+    response = yoagent_operator_response(
+        "what is my theme?",
+        payload,
+        {},
+        "readonly",
+        lambda patch: payload,
+        "zh-Hans",
+    )
+
+    assert response is not None
+    assert "偏好设置 -> 外观" in response["answer"]
+    assert "菜单、窗格、文件浏览器" in response["answer"]
+    assert "Preferences -> Appearance" not in response["answer"]
+    assert "Theme for menus" not in response["answer"]
 
 
 def test_operator_does_not_write_legacy_editor_scheme(tmp_path):
@@ -461,6 +508,14 @@ def test_product_capability_registry_mentions_preferences_and_orchestration():
     assert preferences["backing"] == "settings_catalog + TmuxWebtermApp.save_settings"
     assert "appearance.tab_width" in preferences["setting_keys"]
 
+    by_key = {item["key"]: item for item in registry}
+    for key in ["panesTabs", "finderDifferTabber", "uploads"]:
+        assert product_capability_locale_key(by_key[key], "auth") == "yoagent.capability.auth.adminForWrites"
+    assert product_capability_locale_key(preferences, "name") == "common.preferences"
+    assert product_capability_locale_key(by_key["share"], "name") == "brand.share"
+    assert product_capability_locale_key(by_key["recentWork"], "write") == "common.readOnly"
+    assert product_capability_locale_key(by_key["orchestration"], "name") == "yoagent.capability.orchestration.name"
+
 
 def test_app_yoagent_settings_question_skips_cli_backend(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
@@ -468,9 +523,9 @@ def test_app_yoagent_settings_question_skips_cli_backend(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("settings questions must not build the activity summary")))
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
     try:
-        response, status = webapp.yoagent_chat({"message": "what is my theme?"}, access_role="readonly")
+        response, status = webapp.yoagent_controller.yoagent_chat({"message": "what is my theme?"}, access_role="readonly")
     finally:
         webapp.control_server.stop()
 
@@ -480,15 +535,59 @@ def test_app_yoagent_settings_question_skips_cli_backend(monkeypatch, tmp_path):
     assert "ttfr_ms" in response["timing"]
 
 
+def test_app_yoagent_missing_message_keeps_diagnostic_descriptor():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        response, status = webapp.yoagent_controller.yoagent_chat({"locale": "zh-Hans"}, access_role="readonly")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert response["error"] == "missing YO!agent message"
+    assert response["user_message"] == {
+        "key": "yoagent.error.chatMessageRequired",
+        "params": {},
+        "fallback": "missing YO!agent message",
+    }
+
+
+def test_app_yoagent_action_details_use_locale_catalog(monkeypatch):
+    calls = []
+
+    def localized(locale, key, **_params):
+        calls.append((locale, key))
+        return f"{locale}:{key}"
+
+    monkeypatch.setattr(yoagent_controller_module, "yoagent_text", localized)
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        details = webapp.yoagent_controller.yoagent_action_preview_details(
+            {
+                "session": "1",
+                "screen": {"key": "input-draft", "detected_text": "old command"},
+                "acceptance_text": "target is busy",
+            },
+            "zh-Hans",
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert "zh-Hans:common.sessionLabel" in details
+    assert "zh-Hans:yoagent.action.detail.screenState" in details
+    assert "zh-Hans:yoagent.action.detail.composerText" in details
+    assert "zh-Hans:yoagent.action.detail.sendBlocker" in details
+    assert all(locale == "zh-Hans" for locale, _key in calls)
+
+
 def test_app_yoagent_static_capability_question_skips_activity_summary(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
     payload = settings_payload_for_path(path)
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("static capability questions must not build the activity summary")))
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
     try:
-        response, status = webapp.yoagent_chat({"message": "what can I do from here?"}, access_role="readonly")
+        response, status = webapp.yoagent_controller.yoagent_chat({"message": "what can I do from here?"}, access_role="readonly")
     finally:
         webapp.control_server.stop()
 
@@ -508,9 +607,9 @@ def test_app_yoagent_product_state_question_skips_cli_backend(monkeypatch, tmp_p
         "sessions": {"6": {"session": "6", "last_activity_ts": 1, "repos": ["/repo"], "work": "tests", "file_lines": ["M app.py"]}},
         "global": {"headline": "No work."},
     })
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
     try:
-        response, status = webapp.yoagent_chat({"message": "what changed?"}, access_role="readonly")
+        response, status = webapp.yoagent_controller.yoagent_chat({"message": "what changed?"}, access_role="readonly")
     finally:
         webapp.control_server.stop()
 
@@ -538,9 +637,9 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
     monkeypatch.setattr(webapp.yoagent_controller, "activity_summary_payload", fake_activity_payload)
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", fake_cli_backend)
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", fake_cli_backend)
     try:
-        response, status = webapp.yoagent_chat({"message": "summarize this project"}, access_role="admin")
+        response, status = webapp.yoagent_controller.yoagent_chat({"message": "summarize this project"}, access_role="admin")
     finally:
         webapp.control_server.stop()
 
@@ -548,8 +647,19 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
     assert response["backend_used"] == "claude"
     assert response["answer"] == "model answer"
     assert "ttfr_ms" in response["timing"]
-    assert "response time:" in response["details"]
-    assert "backend: `claude`" in response["details"]
+    detail_rows = {row["key"]: row for row in response["detail_rows"]}
+    assert detail_rows["yoagent.details.backend"]["params"] == {"backend": "claude"}
+    assert detail_rows["yoagent.details.responseTime"]["params"] == {
+        "seconds": f'{response["timing"]["ttfr_ms"] / 1000:.3f}',
+        "milliseconds": f'{response["timing"]["ttfr_ms"]:.1f}',
+    }
+    assert response["conversation"]["messages"][-1]["detailRows"] == response["detail_rows"]
+    assert app_module.server_string(
+        "zh-Hans",
+        detail_rows["yoagent.details.responseTime"]["key"],
+        **detail_rows["yoagent.details.responseTime"]["params"],
+    ).startswith("响应时间")
+    assert response["details"] == ""
     assert activity_force_calls == [True]
     assert backend_calls[0]["kwargs"]["include_activity_context"] is True
 
@@ -562,9 +672,9 @@ def test_app_yoagent_hides_raw_think_blocks_and_exposes_safe_details(monkeypatch
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
-    monkeypatch.setattr(webapp, "run_yoagent_cli_backend", lambda *_args, **_kwargs: ("<think>hidden chain</think>\nfinal answer", "", {"elapsed_ms": 1234}))
+    monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", lambda *_args, **_kwargs: ("<think>hidden chain</think>\nfinal answer", "", {"elapsed_ms": 1234}))
     try:
-        response, status = webapp.yoagent_chat({"message": "use the model"}, access_role="admin")
+        response, status = webapp.yoagent_controller.yoagent_chat({"message": "use the model"}, access_role="admin")
         conversation = webapp.yoagent_conversation_payload()
     finally:
         webapp.control_server.stop()
@@ -572,16 +682,25 @@ def test_app_yoagent_hides_raw_think_blocks_and_exposes_safe_details(monkeypatch
     assert status == HTTPStatus.OK
     assert response["answer"] == "final answer"
     assert "hidden chain" not in response["answer"]
-    assert "raw model thinking was hidden" in response["details"]
-    assert "model CLI time: `1.234s`" in response["details"]
-    assert conversation["messages"][-1]["details"] == response["details"]
+    detail_rows = {row["key"]: row for row in response["detail_rows"]}
+    assert detail_rows["yoagent.details.hiddenThinking"]["fallback"].startswith("raw model thinking was hidden")
+    assert detail_rows["yoagent.details.modelCliTime"]["params"] == {"seconds": "1.234"}
+    assert conversation["messages"][-1]["detailRows"] == response["detail_rows"]
+    localized_hidden_thinking = app_module.server_string(
+        "zh-Hans",
+        detail_rows["yoagent.details.hiddenThinking"]["key"],
+        **detail_rows["yoagent.details.hiddenThinking"]["params"],
+    )
+    assert "原始模型思考已隐藏" in localized_hidden_thinking
+    assert "raw model thinking was hidden" not in localized_hidden_thinking
+    assert conversation["messages"][-1].get("details", "") == response["details"] == ""
 
 
 def test_app_yoagent_readonly_cannot_send_to_session(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}})
     try:
-        response, status = webapp.yoagent_chat({"message": "tell session 6 to run date"}, access_role="readonly")
+        response, status = webapp.yoagent_controller.yoagent_chat({"message": "tell session 6 to run date"}, access_role="readonly")
     finally:
         webapp.control_server.stop()
 

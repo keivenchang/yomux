@@ -2,7 +2,13 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-default_port="${YOLOMUX_PORT:-7777}"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  platform_default_port=8880
+else
+  platform_default_port=7770
+fi
+primary_port="${YOLOMUX_PORT:-$platform_default_port}"
+default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
 dev_mode="auto"
@@ -14,7 +20,7 @@ usage() {
   cat <<'EOF'
 Usage: boot.sh [--print-command] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's YOLOmux server. Defaults to port 7777. Non-7777 ports use --dev by default.
+Restart this checkout's YOLOmux server. YOLOMUX_PORT selects the primary port; otherwise it defaults to 8880 on macOS and 7770 on Linux. Non-primary ports use --dev by default.
 
 Examples:
   ./boot.sh
@@ -90,17 +96,30 @@ if [[ "${#ports[@]}" -eq 0 ]]; then
   add_port "$default_port"
 fi
 
-export PATH="${HOME}/.local/bin:${HOME}/.local/node-v22.11.0-linux-x64/bin:${PATH:-}"
+path_entries=()
+for path_entry in "${HOME}/.local/bin" "${HOME}/.local/node-v22.11.0-linux-x64/bin"; do
+  [[ -d "$path_entry" ]] && path_entries+=("$path_entry")
+done
+IFS=: read -r -a inherited_path_entries <<< "${PATH:-}"
+for path_entry in "${inherited_path_entries[@]}"; do
+  [[ -d "$path_entry" ]] && path_entries+=("$path_entry")
+done
+PATH="$(IFS=:; printf '%s' "${path_entries[*]}")"
+unset path_entries inherited_path_entries path_entry
+export PATH
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
-# YO!agent's Claude backend runs `claude` non-interactively. On macOS that binary
-# authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT read
-# primaryApiKey from ~/.claude.json the way the Linux build does. The detached server
-# bypasses the ~/bin/claude wrapper (PATH resolves ~/.local/bin/claude first), so mirror
-# that wrapper here: export the stored primaryApiKey as ANTHROPIC_API_KEY when it is not
-# already set. Exported (not passed on argv) so the key never appears in `ps`.
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -r "${HOME}/.claude.json" ]]; then
+# YO!agent's Claude backend runs `claude` non-interactively. On macOS, the `claude`
+# binary authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT
+# read primaryApiKey from ~/.claude.json the way the Linux build does, so export the
+# stored primaryApiKey as ANTHROPIC_API_KEY when it is not already set. Exported (not
+# passed on argv) so the key never appears in `ps`. Linux is excluded: its `claude`
+# build already reads primaryApiKey from ~/.claude.json directly, and forcing the env
+# var here collides with a claude.ai (OAuth) login stored in the same file.
+# TODO: verify this is still accurate on the current macOS `claude` release.
+if [[ "$(uname -s)" == "Darwin" && -z "${ANTHROPIC_API_KEY:-}" && -r "${HOME}/.claude.json" ]]; then
   ANTHROPIC_API_KEY="$("$python_bin" -c 'import json, os
 try:
     print(json.load(open(os.path.expanduser("~/.claude.json"))).get("primaryApiKey") or "")
@@ -119,7 +138,7 @@ use_dev_mode() {
   case "$dev_mode" in
     always) return 0 ;;
     never) return 1 ;;
-    auto) [[ "$port" != "7777" ]] ;;
+    auto) [[ "$port" != "$primary_port" ]] ;;
     *) die "invalid dev mode: $dev_mode" ;;
   esac
 }
@@ -159,7 +178,10 @@ supports_setsid_f() {
 
 shell_command_for() {
   local log_path="$1"
-  printf 'cd %q && exec env TERM=%q PYTHONUNBUFFERED=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$PATH"
+  # A server started from inside a tmux client inherits TMUX and would then operate on
+  # that client socket instead of the user's shared default server. A deliberate custom
+  # socket still travels through YOLOMUX_TMUX_SOCKET below.
+  printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
     printf ' %q' "$item"
   done
@@ -179,6 +201,8 @@ repo_root = sys.argv[1]
 log_path = sys.argv[2]
 separator = sys.argv.index("--")
 env = os.environ.copy()
+env.pop("TMUX", None)
+env.pop("TMUX_PANE", None)
 for item in sys.argv[3:separator]:
     key, _, value = item.partition("=")
     if key:
@@ -206,6 +230,7 @@ build_python_detach_args() {
     "$log_path"
     "TERM=$TERM"
     "PYTHONUNBUFFERED=$PYTHONUNBUFFERED"
+    "MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX"
     "PATH=$PATH"
   )
   for item in "${extra_env[@]}"; do
@@ -376,18 +401,41 @@ restart_port() {
 }
 
 ensure_xterm_assets() {
+  local xterm_js="$repo_root/node_modules/@xterm/xterm/lib/xterm.js"
+  local xterm_css="$repo_root/node_modules/@xterm/xterm/css/xterm.css"
+  local unicode_addon="$repo_root/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"
+  local packaged_js="$repo_root/static/xterm.js"
+  local packaged_css="$repo_root/static/xterm.css"
+  local packaged_addon="$repo_root/static/xterm-addon-unicode11.js"
   # yolomux serves /static/{xterm.js,xterm.css,xterm-addon-unicode11.js} by resolving @xterm/*
-  # from node_modules (see yolomux_lib/common.py XTERM_ASSET_ROOTS). On a dev machine it can
-  # borrow them from an installed IDE bundle, but a headless host has none — so install the
-  # declared deps (package.json) once. Skipped when already present; warns (never fails) on miss.
-  [[ -f "$repo_root/node_modules/@xterm/xterm/lib/xterm.js" ]] && return 0
-  if ! command -v npm >/dev/null 2>&1; then
-    printf 'warn: npm not found; web terminal xterm.js will 404 (install Node.js, then run `npm install` in %s)\n' "$repo_root" >&2
+  # from node_modules (see yolomux_lib/common.py XTERM_ASSET_ROOTS). Require the complete runtime
+  # set. VDI boxes have no compatible npm, so they use the pinned UMD files in static/ instead.
+  [[ ( -f "$xterm_js" && -f "$xterm_css" && -f "$unicode_addon" ) \
+    || ( -f "$packaged_js" && -f "$packaged_css" && -f "$packaged_addon" ) ]] && return 0
+  if command -v npm >/dev/null 2>&1; then
+    printf 'boot.sh: installing web-terminal assets (npm install) in %s ...\n' "$repo_root" >&2
+    ( cd "$repo_root" && npm install --no-audit --no-fund --silent ) || true
+    [[ -f "$xterm_js" && -f "$xterm_css" && -f "$unicode_addon" ]] && return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    printf 'warn: curl unavailable and xterm runtime assets are missing; terminals cannot attach\n' >&2
     return 0
   fi
-  printf 'boot.sh: installing web-terminal assets (npm install) in %s ...\n' "$repo_root" >&2
-  ( cd "$repo_root" && npm install --no-audit --no-fund --silent ) \
-    || printf 'warn: npm install failed; web terminal xterm.js may 404 (see npm output above)\n' >&2
+  printf 'boot.sh: downloading static xterm assets for this host ...\n' >&2
+  mkdir -p "$repo_root/static"
+  fetch_xterm_asset() {
+    local url="$1"
+    local destination="$2"
+    local temporary="${destination}.$$"
+    rm -f "$temporary"
+    curl -fsSL --connect-timeout 10 --retry 2 "$url" -o "$temporary" \
+      && [[ -s "$temporary" ]] \
+      && mv -f "$temporary" "$destination"
+  }
+  fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js "$packaged_js" \
+    && fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css "$packaged_css" \
+    && fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.9.0/lib/addon-unicode11.js "$packaged_addon" \
+    || printf 'warn: static xterm asset download failed; terminals cannot attach\n' >&2
 }
 
 if [[ "$print_command" -eq 1 ]]; then

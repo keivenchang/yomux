@@ -43,7 +43,7 @@ import codex  # noqa: E402
 from yolomux_lib.agent_comms.json_rpc import json_rpc_request  # noqa: E402
 from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer  # noqa: E402
 from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message  # noqa: E402
-from yolomux_lib.yoagent.backends import yoagent_response_details  # noqa: E402
+from yolomux_lib.yoagent.backends import yoagent_response_detail_rows  # noqa: E402
 from claude import ClaudeTextClient  # noqa: E402
 from codex import APP_SERVER_TIMEOUT_SECONDS, CodexTextClient  # noqa: E402
 
@@ -509,8 +509,8 @@ def test_text_client_normalized_events_match_shared_agent_comms(capsys):
     capsys.readouterr()
 
 
-def test_yoagent_response_details_reports_codex_transport_timing():
-    details = yoagent_response_details({
+def test_yoagent_response_detail_rows_report_codex_transport_timing():
+    details = yoagent_response_detail_rows({
         "backend_used": "codex",
         "timing": {"ttfr_ms": 1500},
         "cli": {
@@ -527,9 +527,11 @@ def test_yoagent_response_details_reports_codex_transport_timing():
         },
     })
 
-    assert "- Codex transport: `warm reuse`, `thread reused`" in details
-    assert "first answer delta 7.8ms" in details
-    assert "- model CLI time: `0.010s`" in details
+    by_key = {row["key"]: row for row in details}
+    assert by_key["yoagent.details.codexProcess.warmReuse"]["fallback"] == "Codex process: `warm reuse`"
+    assert by_key["yoagent.details.codexThread.reused"]["fallback"] == "Codex thread: `reused`"
+    assert by_key["yoagent.details.codexTiming.first_assistant_delta_ms"]["params"] == {"milliseconds": "7.8"}
+    assert by_key["yoagent.details.modelCliTime"]["params"] == {"seconds": "0.010"}
 
 
 def test_terminology_markdown_rows_are_valid_table_rows():

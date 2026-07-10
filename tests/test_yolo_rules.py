@@ -59,13 +59,22 @@ def test_match_types_and_first_match_precedence():
     first = yolo_rules.evaluate_ruleset("rm file.txt", rules)
     assert first["action"] == "approve"
     assert first["rule_name"] == "first wins"
+    assert first["rule_name_key"] == ""
+    assert yolo_rules.decision_rule_name_descriptor(first) == "first wins"
     assert action_for("make test", rules) == "approve"
     assert action_for("git status --short", rules) == "approve"
     assert action_for("python3 script.py", rules) == "ask"
 
 
 def test_hard_floor_blocks_unrelaxable_cases():
-    assert yolo_rules.hard_floor_decision("rm -rf /")["action"] == "block"
+    rm_root = yolo_rules.hard_floor_decision("rm -rf /")
+    assert rm_root["action"] == "block"
+    assert rm_root["rule_name_key"] == "yolo.rule.hardFloor.rmRoot"
+    assert yolo_rules.decision_rule_name_descriptor(rm_root) == {
+        "key": "yolo.rule.hardFloor.rmRoot",
+        "params": {},
+        "fallback": "built-in hard floor: rm root",
+    }
     assert yolo_rules.hard_floor_decision("rm -rf /*")["action"] == "block"
     assert yolo_rules.hard_floor_decision("rm -rf //")["action"] == "block"
     assert yolo_rules.hard_floor_decision("rm -rf ~/")["action"] == "block"

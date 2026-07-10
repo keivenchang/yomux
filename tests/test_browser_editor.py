@@ -1,10 +1,34 @@
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
+
+def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser, tmp_path):
+    css = app_css()
+    page = tmp_path / "preview-frame-sizing.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><style>
+        #host {{ display:flex; width:900px; height:600px; }}
+        </style></head><body class="theme-dark editor-theme-dark"><div id="host"><iframe id="html" class="file-editor-html-preview"></iframe><iframe id="pdf" class="file-editor-pdf-preview"></iframe></div></body></html>""",
+    )
+    metrics = browser.execute_script(
+        """const get = id => { const node = document.getElementById(id); const style = getComputedStyle(node); return {display: style.display, flex: style.flex, width: style.width, border: style.borderTopWidth, background: style.backgroundColor, colorScheme: style.colorScheme, minHeight: style.minHeight, height: style.height}; }; return {html: get('html'), pdf: get('pdf')};"""
+    )
+    for key in ("display", "flex", "width", "border", "background", "colorScheme"):
+        assert metrics["html"][key] == metrics["pdf"][key], metrics
+    assert metrics["html"]["minHeight"] == "0px", metrics
+    assert metrics["pdf"]["minHeight"] == "420px", metrics
+    assert metrics["html"]["height"] != metrics["pdf"]["height"], metrics
+
 def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     css = app_css()
     page = tmp_path / "diff-active-line-fill.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
         <style>
         body {{ margin: 0; padding: 20px; background: #0f1115; color: #dfe6ef; }}
@@ -24,11 +48,10 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
             </div></div>
           </div>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
+        const {probePaint} = window.__yolomuxTestHelpers;
         function bg(selector) {
           return getComputedStyle(document.querySelector(selector)).backgroundColor;
         }
@@ -43,6 +66,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
           selectedShadow: getComputedStyle(document.querySelector('#selected-match')).boxShadow,
           addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
           removeToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-remove-line-bg').trim(),
+          expectedMatchColor: probePaint('color:var(--diff-search-match-fg)', document.querySelector('#host')).color,
         };
         document.body.classList.remove('editor-theme-dark');
         document.body.classList.add('editor-theme-light');
@@ -54,6 +78,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
           matchShadow: getComputedStyle(document.querySelector('#added-match')).boxShadow,
           selectedBg: bg('#selected-match'),
           addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
+          expectedMatchColor: probePaint('color:var(--diff-search-match-fg)', document.querySelector('#host')).color,
         };
         return {dark, light};
         """
@@ -61,7 +86,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     assert metrics["dark"]["added"] == metrics["dark"]["activeAdded"], metrics
     assert metrics["dark"]["plainActive"] in ("rgba(0, 0, 0, 0)", "transparent"), metrics
     assert metrics["dark"]["matchBg"] != metrics["dark"]["added"], metrics
-    assert metrics["dark"]["matchColor"] == "rgb(11, 16, 32)", metrics
+    assert metrics["dark"]["matchColor"] == metrics["dark"]["expectedMatchColor"], metrics
     assert metrics["dark"]["matchShadow"] != "none", metrics
     assert metrics["dark"]["selectedBg"] != metrics["dark"]["added"], metrics
     assert metrics["dark"]["selectedShadow"] != "none", metrics
@@ -69,7 +94,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     assert "transparent" not in metrics["dark"]["removeToken"], metrics
     assert metrics["light"]["added"] == metrics["light"]["activeAdded"], metrics
     assert metrics["light"]["matchBg"] != metrics["light"]["added"], metrics
-    assert metrics["light"]["matchColor"] == "rgb(17, 24, 39)", metrics
+    assert metrics["light"]["matchColor"] == metrics["light"]["expectedMatchColor"], metrics
     assert metrics["light"]["matchShadow"] != "none", metrics
     assert metrics["light"]["selectedBg"] != metrics["light"]["added"], metrics
     assert metrics["light"]["addToken"] == "#bfeac8", metrics
@@ -78,7 +103,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
 def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -121,7 +146,10 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
         separators=(",", ":"),
     )
     page = tmp_path / "readme-diff-race.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -194,14 +222,8 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 }}
                 return originalLoadCodeMirrorApi.apply(this, args);
               }};
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 120; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               renderFileEditorPanel(panel, item);
               await waitFor(() => window.__resolveReadmeDiffFetch);
               await frame();
@@ -252,9 +274,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -274,7 +294,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
 def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -306,7 +326,10 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
         separators=(",", ":"),
     )
     page = tmp_path / "clean-diff-button-race.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -368,14 +391,8 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
               panel.classList.add('active-pane');
               panelNodes.set(item, panel);
               document.getElementById('mount').append(panel);
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 120; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               const snapshot = () => {{
                 const button = panel.querySelector('.file-editor-diff-panel');
                 const refs = panel.querySelector('.file-editor-diff-ref-panel');
@@ -420,9 +437,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -455,7 +470,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
 
 def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_path):
     css = app_css()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -470,7 +485,10 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
         separators=(",", ":"),
     )
     page = tmp_path / "preview-toolbar.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
@@ -536,9 +554,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return window.__previewToolbarReady != null")
     )
@@ -546,7 +562,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["preview"]["previewHidden"] is False, metrics
     assert metrics["preview"]["gutterHidden"] is True, metrics
     assert metrics["preview"]["wrapHidden"] is True, metrics
-    assert metrics["preview"]["findHidden"] is True, metrics
+    assert metrics["preview"]["findHidden"] is False, metrics
     assert metrics["preview"]["modeHidden"] is False, metrics
     assert metrics["preview"]["diffExpandHidden"] is True, metrics
     assert metrics["preview"]["diffRefsHidden"] is True, metrics
@@ -570,12 +586,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
 
 
 def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_path):
-    page = tmp_path / "preview-direct-media.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_script(
         """
         const mount = document.getElementById('grid');
@@ -758,18 +769,13 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
 
 
 def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
-    page = tmp_path / "preview-direct-mermaid-source.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof openFileInEditor === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const originalFetch = window.fetch.bind(window);
             const path = '/home/test/repo/chart.mmd';
             window.fetch = async (input, options = {}) => {
@@ -833,40 +839,9 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
-def _wcag_contrast(c1, c2):
-    """WCAG contrast ratio between two CSS colors (#hex or rgb()/rgba()). None if unparseable."""
-    def rel_lum(color):
-        text = str(color or "").strip()
-        if text.startswith("#"):
-            h = text[1:]
-            if len(h) == 3:
-                h = "".join(ch * 2 for ch in h)
-            if len(h) < 6:
-                return None
-            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        else:
-            m = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", text)
-            if not m:
-                return None
-            r, g, b = float(m.group(1)), float(m.group(2)), float(m.group(3))
-        def lin(v):
-            v /= 255.0
-            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
-        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-    a, b = rel_lum(c1), rel_lum(c2)
-    if a is None or b is None:
-        return None
-    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
-
-
 def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_path):
     browser.set_window_size(1200, 900)
-    page = tmp_path / "preview-direct-mermaid-real-bundle.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     mermaid_uri = (REPO_ROOT / "static" / "vendor" / "mermaid.min.js").as_uri()
     mermaid_source = (REPO_ROOT / "docs" / "preview-samples" / "14-mermaid.mmd").read_text(encoding="utf-8")
     assert "flowchart TD" in mermaid_source
@@ -881,7 +856,8 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
         const done = arguments[arguments.length - 1];
             (async () => {
               try {
-                const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+                const {frame} = window.__yolomuxTestHelpers;
+                const waitFor = window.__yolomuxTestWaitFor;
                 const waitImage = image => new Promise(resolve => {
                   if (!image) {
                     resolve(false);
@@ -895,11 +871,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
                   image.addEventListener('load', finish, {once: true});
                   image.addEventListener('error', finish, {once: true});
                 });
-                const rect = node => {
-                  if (!node) return null;
-                  const box = node.getBoundingClientRect();
-                  return {left: box.left, top: box.top, width: box.width, height: box.height, right: box.right, bottom: box.bottom};
-                };
+                const {rect} = window.__yolomuxTestHelpers;
                 const readBlobText = url => new Promise((resolve, reject) => {
                   const request = new XMLHttpRequest();
                   request.open('GET', url);
@@ -1001,9 +973,10 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             await frame();
             // Wait for the zoom surface to reveal (measuring class cleared) so geometry/pixels are
             // sampled at the settled size, not a transient pre-settle size that is hidden anyway.
-            for (let i = 0; i < 50 && splitPreview.classList.contains('file-editor-preview-zoom-measuring'); i += 1) {
-              await new Promise(resolve => setTimeout(resolve, 16));
-            }
+            await waitFor(
+              () => !splitPreview.classList.contains('file-editor-preview-zoom-measuring'),
+              {description: 'split Mermaid zoom measurement'}
+            );
             await frame();
             const splitMeasuring = splitPreview.classList.contains('file-editor-preview-zoom-measuring');
             const splitViewport = splitPreview.querySelector('.file-editor-preview-zoom-viewport');
@@ -1160,9 +1133,10 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
                 const bp = panel.querySelector('.file-editor-preview-pane-panel');
                 renderEditorPreviewPane(bp, path, mermaidSource, {context: 'split'});
                 if (bp._previewAsync) await bp._previewAsync;
-                for (let i = 0; i < 60 && bp.querySelector('.file-editor-preview-zoom-shell') && bp.querySelector('.file-editor-preview-zoom-shell').classList.contains('file-editor-preview-zoom-measuring'); i += 1) {
-                  await new Promise(resolve => setTimeout(resolve, 16));
-                }
+                await waitFor(() => {
+                  const shell = bp.querySelector('.file-editor-preview-zoom-shell');
+                  return !shell || !shell.classList.contains('file-editor-preview-zoom-measuring');
+                }, {description: 'bright Mermaid zoom measurement'});
                 const bImg = bp.querySelector('img.mermaid-preview-image');
                 await waitImage(bImg);
                 const bTxt = bImg && bImg.src ? await readBlobText(bImg.src) : '';
@@ -1261,13 +1235,13 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     bright = metrics.get("brightContrast")
     assert bright and "error" not in bright, bright
     assert bright["mode"] in ("vanilla", "light"), bright
-    edge_contrast = _wcag_contrast(bright["edgeStroke"], bright["paneBg"])
-    assert edge_contrast is not None and edge_contrast >= 3.0, {"edgeStroke": bright["edgeStroke"], "paneBg": bright["paneBg"], "contrast": edge_contrast}
+    edge_contrast = wcag_contrast_ratio(bright["edgeStroke"], bright["paneBg"])
+    assert edge_contrast >= 3.0, {"edgeStroke": bright["edgeStroke"], "paneBg": bright["paneBg"], "contrast": edge_contrast}
     for fill in bright["labelFills"]:
         if not fill:
             continue
-        label_contrast = _wcag_contrast(fill, bright["paneBg"])
-        assert label_contrast is not None and label_contrast >= 3.0, {"labelFill": fill, "paneBg": bright["paneBg"], "contrast": label_contrast}
+        label_contrast = wcag_contrast_ratio(fill, bright["paneBg"])
+        assert label_contrast >= 3.0, {"labelFill": fill, "paneBg": bright["paneBg"], "contrast": label_contrast}
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -1296,12 +1270,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
 
 
 def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_path):
-    page = tmp_path / "preview-sniffed-binary.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof openFileInEditor === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1364,12 +1333,7 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
 
 
 def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_path):
-    page = tmp_path / "preview-registry-structured-table.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderEditorPreviewPane === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_script(
         """
         const mount = document.getElementById('grid');
@@ -1520,18 +1484,13 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
 
 
 def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
-    page = tmp_path / "preview-markdown-media-mermaid.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -1747,18 +1706,14 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
 
 
 def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
-    page = tmp_path / "preview-markdown-split-scroll-media.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"], grid_width=920, grid_height=620), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=920, grid_height=620)
     metrics = browser.execute_async_script(
         """
+        const neutralDark = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
@@ -1791,7 +1746,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
             const ctx = canvas.getContext('2d');
             ctx.fillStyle = '#14b8a6';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.fillStyle = '#111827';
+            ctx.fillStyle = neutralDark;
             ctx.font = '700 20px Arial';
             ctx.fillText('TALL', 30, 360);
             const tallImage = canvas.toDataURL('image/png');
@@ -1907,7 +1862,8 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
             done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
           }
         })();
-        """
+        """,
+        ui_pin("paneMetaPathLight"),
     )
     assert "error" not in metrics, metrics
     assert metrics["errors"] == [], metrics
@@ -1926,18 +1882,14 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
 
 def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser, tmp_path):
     browser.set_window_size(1200, 1200)
-    page = tmp_path / "preview-markdown-visual-mermaid-media.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"], grid_width=1000, grid_height=980), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=1000, grid_height=980)
     metrics = browser.execute_async_script(
         """
+        const neutralDark = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const waitImage = image => new Promise(resolve => {
               if (!image) {
                 resolve(false);
@@ -1951,11 +1903,7 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
               image.addEventListener('load', finish, {once: true});
               image.addEventListener('error', finish, {once: true});
             });
-            const rect = node => {
-              if (!node) return null;
-              const box = node.getBoundingClientRect();
-              return {left: box.left, top: box.top, width: box.width, height: box.height, right: box.right, bottom: box.bottom};
-            };
+            const {rect} = window.__yolomuxTestHelpers;
             const readBlobText = url => new Promise((resolve, reject) => {
               const request = new XMLHttpRequest();
               request.open('GET', url);
@@ -1971,7 +1919,7 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
             ctx.fillRect(0, 0, 60, 64);
             ctx.fillStyle = '#14b8a6';
             ctx.fillRect(60, 0, 60, 64);
-            ctx.fillStyle = '#111827';
+            ctx.fillStyle = neutralDark;
             ctx.font = '700 18px Arial';
             ctx.fillText('PNG', 36, 38);
             const mediaDataUrl = canvas.toDataURL('image/png');
@@ -2074,7 +2022,8 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
             done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
           }
         })();
-        """
+        """,
+        ui_pin("paneMetaPathLight"),
     )
     assert "error" not in metrics, metrics
     assert metrics["tableCells"] == ["Format", "Status", "PNG", "rendered", "Mermaid", "labels visible"], metrics
@@ -2119,18 +2068,13 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
 
 
 def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
-    page = tmp_path / "preview-popout-media-mermaid.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderedPreviewSnapshotAsync === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -2223,18 +2167,14 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
 
 
 def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
-    page = tmp_path / "preview-popout-zoom-controls.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderedPreviewSnapshotAsync === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
+        const neutralDark = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = win => new Promise(resolve => (win || window).requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const waitImage = image => new Promise(resolve => {
               if (!image) {
                 resolve(false);
@@ -2248,11 +2188,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
               image.addEventListener('load', finish, {once: true});
               image.addEventListener('error', finish, {once: true});
             });
-            const rect = node => {
-              if (!node) return null;
-              const box = node.getBoundingClientRect();
-              return {left: box.left, top: box.top, width: box.width, height: box.height, right: box.right, bottom: box.bottom};
-            };
+            const {rect} = window.__yolomuxTestHelpers;
             window.mermaid = {
               initialize(config) {
                 window.__popoutZoomMermaidConfig = config;
@@ -2266,7 +2202,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
                       <text x="240" y="172" text-anchor="middle" font-family="Arial" font-size="34" font-weight="700">Popout</text>
                       <rect x="540" y="310" width="240" height="90" fill="#dcfce7" stroke="#166534" stroke-width="4"/>
                       <text x="660" y="362" text-anchor="middle" font-family="Arial" font-size="34" font-weight="700">Zoom</text>
-                      <line x1="360" y1="165" x2="540" y2="355" stroke="#111827" stroke-width="6"/>
+                      <line x1="360" y1="165" x2="540" y2="355" stroke="${neutralDark}" stroke-width="6"/>
                     </svg>
                   `,
                 };
@@ -2395,7 +2331,8 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
             done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
           }
         })();
-        """
+        """,
+        ui_pin("paneMetaPathLight"),
     )
     assert "error" not in metrics, metrics
     assert "file-editor-preview-zoom-shell" in metrics["rootClass"], metrics
@@ -2425,18 +2362,13 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
 
 
 def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser, tmp_path):
-    page = tmp_path / "markdown-task-checkbox-split.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -2472,13 +2404,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = async predicate => {
-              for (let attempt = 0; attempt < 160; attempt += 1) {
-                if (predicate()) return true;
-                await frame();
-              }
-              return false;
-            };
+            const waitFor = window.__yolomuxTestWaitFor;
             const ready = await waitFor(() => panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length === 2 && panel._cmView?.state?.doc?.toString?.().includes('first task'));
             const before = {
               ready,
@@ -2528,12 +2454,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
 
 
 def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser, tmp_path):
-    page = tmp_path / "preview-yellow-callout.html"
-    page.write_text(live_runtime_boot_fixture_html(sessions=["1"]), encoding="utf-8")
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof renderEditorPreviewPane === 'function' && document.querySelector('#grid');")
-    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_script(
         """
         document.body.classList.remove('theme-light', 'editor-theme-light');
@@ -2626,7 +2547,16 @@ python -V
         const mdCautionCodeStyle = style('#md-caution-code');
         const mdCautionBreakStyle = style('#md-caution-break');
         const mdCautionDirectStyle = style('#md-caution-direct');
+        const {probePaint} = window.__yolomuxTestHelpers;
+            const expectedPreview = probePaint('color:var(--text);background:var(--markdown-preview-bg);border:1px solid var(--line)', preview);
+        const expectedWarning = probePaint('color:var(--markdown-html-dark-text);background:var(--markdown-html-dark-bg);border:1px solid var(--markdown-html-dark-border)');
+        const expectedCaution = probePaint('color:var(--markdown-html-dark-text);background:var(--markdown-alert-caution-dark-bg)');
+        const expectedCode = probePaint('color:var(--markdown-html-dark-code);background:var(--markdown-html-dark-code-bg);border:1px solid var(--markdown-html-dark-code-border)');
         return {
+          expectedPreview,
+          expectedWarning,
+          expectedCaution,
+          expectedCode,
           lightClass: document.querySelector('#callout').classList.contains('markdown-html-light-bg'),
           mdWarningClass: document.querySelector('#md-warning').classList.contains('markdown-alert-warning'),
           mdWarningText: document.querySelector('#md-warning').textContent,
@@ -2680,30 +2610,30 @@ python -V
         """
     )
     assert metrics["lightClass"] is False, metrics
-    assert metrics["previewBg"] == "rgb(0, 0, 0)", metrics
-    assert metrics["previewColor"] == "rgb(207, 211, 220)", metrics
-    assert metrics["normalColor"] == "rgb(207, 211, 220)", metrics
-    assert metrics["normalBorderColor"] == "rgb(48, 57, 72)", metrics
+    assert metrics["previewBg"] == metrics["expectedPreview"]["background"], metrics
+    assert metrics["previewColor"] == metrics["expectedPreview"]["color"], metrics
+    assert metrics["normalColor"] == metrics["expectedPreview"]["color"], metrics
+    assert metrics["normalBorderColor"] == metrics["expectedPreview"]["border"], metrics
     assert metrics["mdWarningClass"] is True, metrics
     assert "[!WARNING]" not in metrics["mdWarningText"], metrics
-    assert metrics["mdWarningBg"] == "rgb(111, 90, 12)", metrics
+    assert metrics["mdWarningBg"] == metrics["expectedWarning"]["background"], metrics
     assert metrics["mdWarningBorderLeftWidth"] == "0px", metrics
-    assert metrics["mdWarningColor"] == "rgb(228, 232, 238)", metrics
-    assert metrics["mdWarningStrongColor"] == "rgb(228, 232, 238)", metrics
-    assert metrics["mdWarningCodeColor"] == "rgb(255, 224, 138)", metrics
-    assert metrics["mdWarningCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
+    assert metrics["mdWarningColor"] == metrics["expectedWarning"]["color"], metrics
+    assert metrics["mdWarningStrongColor"] == metrics["expectedWarning"]["color"], metrics
+    assert metrics["mdWarningCodeColor"] == metrics["expectedCode"]["color"], metrics
+    assert metrics["mdWarningCodeBg"] == metrics["expectedCode"]["background"], metrics
     assert metrics["mdCautionClass"] is True, metrics
     assert "[!CAUTION]" not in metrics["mdCautionText"], metrics
-    assert metrics["mdCautionBg"] == "rgb(111, 38, 50)", metrics
+    assert metrics["mdCautionBg"] == metrics["expectedCaution"]["background"], metrics
     assert metrics["mdCautionBorderLeftWidth"] == "0px", metrics
-    assert metrics["mdCautionColor"] == "rgb(228, 232, 238)", metrics
-    assert metrics["mdCautionStrongColor"] == "rgb(228, 232, 238)", metrics
-    assert metrics["mdCautionCodeColor"] == "rgb(255, 224, 138)", metrics
-    assert metrics["mdCautionCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
+    assert metrics["mdCautionColor"] == metrics["expectedCaution"]["color"], metrics
+    assert metrics["mdCautionStrongColor"] == metrics["expectedCaution"]["color"], metrics
+    assert metrics["mdCautionCodeColor"] == metrics["expectedCode"]["color"], metrics
+    assert metrics["mdCautionCodeBg"] == metrics["expectedCode"]["background"], metrics
     assert metrics["mdCautionBlockCodeText"] == "oss scan", metrics
     assert metrics["mdCautionBreakClass"] is True, metrics
     assert "[!CAUTION]" not in metrics["mdCautionBreakText"], metrics
-    assert metrics["mdCautionBreakBg"] == "rgb(111, 38, 50)", metrics
+    assert metrics["mdCautionBreakBg"] == metrics["expectedCaution"]["background"], metrics
     assert metrics["mdCautionBreakFirstVisibleNode"] == "STRONG", metrics
     assert metrics["mdCautionListClass"] is True, metrics
     assert "[!CAUTION]" not in metrics["mdCautionListText"], metrics
@@ -2716,23 +2646,26 @@ python -V
     assert metrics["edgePreTailGap"] <= 8, metrics
     assert metrics["mdCautionDirectClass"] is True, metrics
     assert "[!CAUTION]" not in metrics["mdCautionDirectText"], metrics
-    assert metrics["mdCautionDirectBg"] == "rgb(111, 38, 50)", metrics
-    assert metrics["mdCautionDirectStrongColor"] == "rgb(228, 232, 238)", metrics
+    assert metrics["mdCautionDirectBg"] == metrics["expectedCaution"]["background"], metrics
+    assert metrics["mdCautionDirectStrongColor"] == metrics["expectedCaution"]["color"], metrics
     assert metrics["mdCautionDirectFirstVisibleNode"] == "STRONG", metrics
-    assert metrics["calloutBg"] == "rgb(111, 90, 12)", metrics
-    assert metrics["calloutCellBg"] == "rgb(111, 90, 12)", metrics
-    assert metrics["calloutColor"] == "rgb(228, 232, 238)", metrics
-    assert metrics["calloutStrongColor"] == "rgb(228, 232, 238)", metrics
-    assert metrics["calloutCodeColor"] == "rgb(255, 224, 138)", metrics
-    assert metrics["calloutCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
-    assert metrics["calloutCodeBorderColor"] == "rgba(245, 197, 66, 0.24)", metrics
-    assert metrics["calloutBorderColor"] == "rgb(111, 90, 12)", metrics
+    assert metrics["calloutBg"] == metrics["expectedWarning"]["background"], metrics
+    assert metrics["calloutCellBg"] == metrics["expectedWarning"]["background"], metrics
+    assert metrics["calloutColor"] == metrics["expectedWarning"]["color"], metrics
+    assert metrics["calloutStrongColor"] == metrics["expectedWarning"]["color"], metrics
+    assert metrics["calloutCodeColor"] == metrics["expectedCode"]["color"], metrics
+    assert metrics["calloutCodeBg"] == metrics["expectedCode"]["background"], metrics
+    assert metrics["calloutCodeBorderColor"] == metrics["expectedCode"]["border"], metrics
+    assert metrics["calloutBorderColor"] == metrics["expectedWarning"]["border"], metrics
     assert metrics["calloutPaddingTop"] == "10px", metrics
 
 
 def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(browser, tmp_path):
     page = tmp_path / "preview-code-block-bg.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{app_css()}</style></head>
         <body class="theme-dark editor-theme-dark">
           <div class="file-editor-content">
@@ -2744,13 +2677,12 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
             </article>
           </div>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const preview = document.querySelector('#preview');
         const pre = document.querySelector('#code-block');
+        const {probePaint} = window.__yolomuxTestHelpers;
         const read = () => ({
           preview: getComputedStyle(preview).backgroundColor,
           code: getComputedStyle(pre).backgroundColor,
@@ -2760,6 +2692,17 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
           calloutStrong: getComputedStyle(document.querySelector('#callout-strong')).color,
           calloutCode: getComputedStyle(document.querySelector('#callout-code')).color,
           calloutCodeBg: getComputedStyle(document.querySelector('#callout-code')).backgroundColor,
+          expectedPreview: probePaint(
+            `background:var(${document.body.classList.contains('editor-theme-light') ? '--editor-preview-bg' : '--markdown-preview-bg'})`,
+            preview,
+          ).background,
+          expectedCode: probePaint(
+            `background:var(${document.body.classList.contains('editor-theme-light') ? '--lt-panel' : '--markdown-code-block-bg'})`,
+            preview,
+          ).background,
+          expectedDarkCallout: probePaint('color:var(--markdown-html-dark-text);background:var(--markdown-html-dark-bg)', preview),
+          expectedLightCallout: probePaint('color:var(--markdown-html-light-text)', preview),
+          expectedInlineCode: probePaint('color:var(--code-inline);background:var(--code-inline-bg)', document.querySelector('#callout-cell')),
         });
         const dark = read();
         document.body.classList.remove('theme-dark', 'editor-theme-dark');
@@ -2768,52 +2711,45 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
         return {dark, light};
         """
     )
-    assert metrics["dark"]["preview"] == "rgb(0, 0, 0)", metrics
-    assert metrics["dark"]["code"] == "rgb(42, 48, 59)", metrics
+    assert metrics["dark"]["preview"] == metrics["dark"]["expectedPreview"], metrics
+    assert metrics["dark"]["code"] == metrics["dark"]["expectedCode"], metrics
     assert metrics["dark"]["code"] != metrics["dark"]["preview"], metrics
-    assert metrics["dark"]["callout"] == "rgb(111, 90, 12)", metrics
-    assert metrics["dark"]["calloutCell"] == "rgb(111, 90, 12)", metrics
-    assert metrics["dark"]["calloutText"] == "rgb(228, 232, 238)", metrics
-    assert metrics["dark"]["calloutStrong"] == "rgb(228, 232, 238)", metrics
-    assert metrics["dark"]["calloutCode"] == "rgb(255, 224, 138)", metrics
-    assert metrics["dark"]["calloutCodeBg"] == "rgba(245, 197, 66, 0.14)", metrics
-    assert metrics["light"]["preview"] == "rgb(255, 246, 223)", metrics
-    assert metrics["light"]["code"] == "rgb(246, 248, 250)", metrics
+    assert metrics["dark"]["callout"] == metrics["dark"]["expectedDarkCallout"]["background"], metrics
+    assert metrics["dark"]["calloutCell"] == metrics["dark"]["expectedDarkCallout"]["background"], metrics
+    assert metrics["dark"]["calloutText"] == metrics["dark"]["expectedDarkCallout"]["color"], metrics
+    assert metrics["dark"]["calloutStrong"] == metrics["dark"]["expectedDarkCallout"]["color"], metrics
+    assert metrics["dark"]["calloutCode"] == metrics["dark"]["expectedInlineCode"]["color"], metrics
+    assert metrics["dark"]["calloutCodeBg"] == metrics["dark"]["expectedInlineCode"]["background"], metrics
+    assert metrics["light"]["preview"] == metrics["light"]["expectedPreview"], metrics
+    assert metrics["light"]["code"] == metrics["light"]["expectedCode"], metrics
+    # This native bgcolor comes from the HTML fixture. It deliberately proves that a vanilla
+    # HTML table retains its authored paint in light mode; it is not a product design token.
     assert metrics["light"]["callout"] == "rgb(255, 248, 204)", metrics
-    assert metrics["light"]["calloutText"] == "rgb(17, 24, 39)", metrics
-    assert metrics["light"]["calloutStrong"] == "rgb(17, 24, 39)", metrics
-    assert metrics["light"]["calloutCode"] == "rgb(164, 14, 38)", metrics
-    assert metrics["light"]["calloutCodeBg"] == "rgb(255, 241, 214)", metrics
+    assert metrics["light"]["calloutText"] == metrics["light"]["expectedLightCallout"]["color"], metrics
+    assert metrics["light"]["calloutStrong"] == metrics["light"]["expectedLightCallout"]["color"], metrics
+    assert metrics["light"]["calloutCode"] == metrics["light"]["expectedInlineCode"]["color"], metrics
+    assert metrics["light"]["calloutCodeBg"] == metrics["light"]["expectedInlineCode"]["background"], metrics
 
 
 def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
-    page = tmp_path / "preview-popout-sync.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"appearance": {"preview_font_size": 16}},
-            sessions=["1"],
-        ),
-        encoding="utf-8",
-    )
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1",
+        settings={"appearance": {"preview_font_size": 16}},
+        sessions=["1"],
     )
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
             (async () => {
               try {
-                const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-                const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-                const waitFor = async (predicate, timeoutMs = 1500) => {
-                  const deadline = performance.now() + timeoutMs;
-                  while (performance.now() < deadline) {
-                    if (predicate()) return true;
-                    await frame();
-                  }
-                  return predicate();
-                };
+                const {frame} = window.__yolomuxTestHelpers;
+                const waitFor = window.__yolomuxTestWaitFor;
+                const waitForScrollSyncReady = (...records) => waitFor(
+                  () => records.every(record => !fileEditorScrollSyncBlocked(record)),
+                  {timeoutMs: 500, description: 'editor scroll-sync readiness'}
+                );
                 const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -2996,14 +2932,15 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupValue: popupValue(),
               editorValue: editorValue(),
             };
-            popupThemeButton().click();
-            await frame();
-            await frame();
-            const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
-            previewPane.scrollTop = Math.round(maxScrollTop(previewPane) * 0.38);
-            previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
-            await frame();
-            await frame();
+                popupThemeButton().click();
+                await frame();
+                await frame();
+                const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+                panel._previewLayoutScrollUntil = performance.now() + fileEditorPreviewLayoutScrollSyncMs;
+                previewPane.scrollTop = Math.round(maxScrollTop(previewPane) * 0.38);
+                previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+                await frame();
+                await frame();
             const afterEditorScroll = {
               previewTop: previewPane.scrollTop,
               popupTop: popupScroller().scrollTop,
@@ -3012,7 +2949,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewCenterRatio: visibleCenterRatio(previewPane),
               popupCenterRatio: visibleCenterRatio(popupScroller()),
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             previewPane.scrollTop = 0;
             previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3021,7 +2958,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewTop: previewPane.scrollTop,
               popupTop: popupScroller().scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             previewPane.scrollTop = maxScrollTop(previewPane);
             previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3032,7 +2969,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupTop: popupScroller().scrollTop,
               popupMax: maxScrollTop(popupScroller()),
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const popupBefore = popupScroller().scrollTop;
             popupScroller().scrollTop = Math.round(maxScrollTop(popupScroller()) * 0.61);
             popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
@@ -3049,7 +2986,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewCenterRatio: visibleCenterRatio(previewPane),
               headerTop: snapshotGeometry().headerTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             popupScroller().scrollTop = 0;
             popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
             popupDoc.defaultView.dispatchEvent(new Event('scroll'));
@@ -3059,7 +2996,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupTop: popupScroller().scrollTop,
               previewTop: previewPane.scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             popupScroller().scrollTop = maxScrollTop(popupScroller());
             popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
             popupDoc.defaultView.dispatchEvent(new Event('scroll'));
@@ -3110,7 +3047,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorTop: editorScroller?.scrollTop || 0,
               editorMax: maxScrollTop(editorScroller),
             };
-            await delay(220);
+                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const splitPath = '/home/test/repo/SPLIT_SCROLL.md';
             const splitTail = Array.from({length: 120}, (_, index) => `Split paragraph ${index + 1} smooth scroll text`).join('\\n\\n');
             const splitOriginal = `# Split Scroll\n\n${splitTail}\n`;
@@ -3155,7 +3092,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorCenterRatio: visibleCenterRatio(splitEditorScroller),
               previewCenterRatio: visibleCenterRatio(splitPreviewPane),
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitEditorScroller.scrollTop = 0;
             splitEditorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3164,7 +3101,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorTop: splitEditorScroller.scrollTop,
               previewTop: splitPreviewPane.scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitEditorScroller.scrollTop = maxScrollTop(splitEditorScroller);
             splitEditorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3175,7 +3112,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewTop: splitPreviewPane.scrollTop,
               previewMax: maxScrollTop(splitPreviewPane),
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitPreviewPane.scrollTop = Math.round(maxScrollTop(splitPreviewPane) * 0.63);
             splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3186,7 +3123,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewCenterRatio: visibleCenterRatio(splitPreviewPane),
               editorCenterRatio: visibleCenterRatio(splitEditorScroller),
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitPreviewPane.scrollTop = 0;
             splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3195,7 +3132,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewTop: splitPreviewPane.scrollTop,
               editorTop: splitEditorScroller.scrollTop,
             };
-            await delay(220);
+                await waitForScrollSyncReady(splitPanel);
             splitPreviewPane.scrollTop = maxScrollTop(splitPreviewPane);
             splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
@@ -3282,6 +3219,8 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert metrics["initial"]["popupThemeText"] == "Bright", metrics
     assert "hljs" in metrics["initial"]["popupCodeClass"], metrics
     assert metrics["initial"]["editorKeywordColor"] == metrics["initial"]["popupKeywordColor"], metrics
+    # These are the fixed colors emitted by the bundled syntax highlighter, not CSS tokens.
+    # Pin them because this test is specifically the editor/popout syntax-renderer parity check.
     assert metrics["initial"]["editorKeywordColor"] == "rgb(0, 0, 255)", metrics
     assert metrics["initial"]["editorRustControl"] == "pub", metrics
     assert metrics["initial"]["popupRustControl"] == "pub", metrics
@@ -3346,24 +3285,19 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
 
 
 def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_path):
-    page = tmp_path / "editor-preview-shared-light-syntax.html"
-    page.write_text(
-        live_runtime_boot_fixture_html(
-            settings={"appearance": {"preview_font_size": 16}},
-            sessions=["1"],
-        ),
-        encoding="utf-8",
-    )
-    browser.get(page.as_uri() + "?sessions=1")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1",
+        settings={"appearance": {"preview_font_size": 16}},
+        sessions=["1"],
     )
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const {frame} = window.__yolomuxTestHelpers;
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -3587,7 +3521,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
 
 def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser, tmp_path):
     css = app_css()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3602,7 +3536,10 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
         separators=(",", ":"),
     )
     page = tmp_path / "preview-vanilla.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -3642,6 +3579,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
+              const {{probePaint}} = window.__yolomuxTestHelpers;
               const read = () => {{
                 const preview = panel.querySelector('.file-editor-preview-pane-panel');
                 const heading = getComputedStyle(preview.querySelector('h1'));
@@ -3654,6 +3592,10 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                   headingBg: heading.backgroundColor,
                   linkColor: link.color,
                   codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
+                  expectedVanilla: {{
+                    preview: probePaint('color:var(--markdown-html-light-text);background:var(--paint-white)', preview),
+                    link: probePaint('color:var(--vanilla-preview-link)', preview).color,
+                  }},
                   vanillaClass: preview.classList.contains('vanilla-preview-body'),
                   buttonTheme: panel.querySelector('.file-editor-theme-panel')?.dataset.editorTheme || '',
                   buttonTitle: panel.querySelector('.file-editor-theme-panel')?.title || '',
@@ -3666,23 +3608,22 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return window.__previewVanillaReady != null")
     )
     metrics = browser.execute_script("return window.__previewVanillaReady")
     assert metrics["normal"]["vanillaClass"] is False, metrics
-    assert metrics["normal"]["headingColor"] != "rgb(17, 24, 39)", metrics
+    assert metrics["normal"]["headingColor"] != metrics["normal"]["expectedVanilla"]["preview"]["color"], metrics
+    # The highlighter's blue keyword is an external syntax semantic, not a YOLOmux token.
     assert metrics["normal"]["codeSpanColor"] == "rgb(0, 0, 255)", metrics
     assert metrics["vanilla"]["vanillaClass"] is True, metrics
-    assert metrics["vanilla"]["previewBg"] == "rgb(255, 255, 255)", metrics
-    assert metrics["vanilla"]["previewColor"] == "rgb(17, 24, 39)", metrics
-    assert metrics["vanilla"]["headingColor"] == "rgb(17, 24, 39)", metrics
+    assert metrics["vanilla"]["previewBg"] == metrics["vanilla"]["expectedVanilla"]["preview"]["background"], metrics
+    assert metrics["vanilla"]["previewColor"] == metrics["vanilla"]["expectedVanilla"]["preview"]["color"], metrics
+    assert metrics["vanilla"]["headingColor"] == metrics["vanilla"]["expectedVanilla"]["preview"]["color"], metrics
     assert metrics["vanilla"]["headingBg"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["vanilla"]["linkColor"] == "rgb(6, 69, 173)", metrics
-    assert metrics["vanilla"]["codeSpanColor"] in ("rgb(17, 24, 39)", ""), metrics
+    assert metrics["vanilla"]["linkColor"] == metrics["vanilla"]["expectedVanilla"]["link"], metrics
+    assert metrics["vanilla"]["codeSpanColor"] in (metrics["vanilla"]["expectedVanilla"]["preview"]["color"], ""), metrics
     assert metrics["vanilla"]["buttonTheme"] == "vanilla", metrics
     assert "Vanilla preview" in metrics["vanilla"]["buttonTitle"], metrics
 
@@ -3690,7 +3631,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
 def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3706,7 +3647,10 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
         separators=(",", ":"),
     )
     page = tmp_path / "markdown-edit-color.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
@@ -3745,7 +3689,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const {{frame, probePaint}} = window.__yolomuxTestHelpers;
               for (let attempt = 0; attempt < 120; attempt += 1) {{
                 if (panel.querySelector('.cm-content .md-heading')) break;
                 await frame();
@@ -3759,7 +3703,6 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
               const headingAfterTheme = panel.querySelector('.cm-content .md-heading');
               const boldAfterTheme = panel.querySelector('.cm-content .md-bold');
               const linkAfterTheme = panel.querySelector('.cm-content .md-link');
-              const root = getComputedStyle(document.documentElement);
               return {{
                 cmMode: panel._cmMode || '',
                 plainFallback: panel._cmPlainFallback === true,
@@ -3771,7 +3714,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
                 afterHeadingText: headingAfterTheme?.textContent || '',
                 afterHeadingColor: headingAfterTheme ? getComputedStyle(headingAfterTheme).color : '',
                 afterHeadingBg: headingAfterTheme ? getComputedStyle(headingAfterTheme).backgroundColor : '',
-                expectedHeading: root.getPropertyValue('--markdown-heading').trim(),
+                expectedHeading: probePaint('color:var(--markdown-heading)', panel).color,
                 hasBold: Boolean(bold),
                 hasLink: Boolean(link),
                 hasBoldAfterTheme: Boolean(boldAfterTheme),
@@ -3780,9 +3723,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -3793,14 +3734,14 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     assert metrics["cmMode"] == "edit", metrics
     assert metrics["plainFallback"] is True, metrics
     assert metrics["headingText"].startswith("# YOLOmux"), metrics
-    assert metrics["headingColor"] == "rgb(37, 99, 235)", metrics
+    assert metrics["headingColor"] == metrics["expectedHeading"], metrics
     assert metrics["headingBg"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["visibleHeadingColor"] == "rgb(37, 99, 235)", metrics
+    assert metrics["visibleHeadingColor"] == metrics["expectedHeading"], metrics
     assert metrics["visibleHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBold"] is True, metrics
     assert metrics["hasLink"] is True, metrics
     assert metrics["afterHeadingText"].startswith("# YOLOmux"), metrics
-    assert metrics["afterHeadingColor"] == "rgb(37, 99, 235)", metrics
+    assert metrics["afterHeadingColor"] == metrics["expectedHeading"], metrics
     assert metrics["afterHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBoldAfterTheme"] is True, metrics
     assert metrics["hasLinkAfterTheme"] is True, metrics
@@ -3809,7 +3750,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
 def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3825,7 +3766,10 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
         separators=(",", ":"),
     )
     page = tmp_path / "editor-search-toggle.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
@@ -3859,14 +3803,8 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 160; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               await waitFor(() => panel._cmView && panel.querySelector('.file-editor-find-panel')?.hidden === false);
               const button = panel.querySelector('.file-editor-find-panel');
               const before = {{
@@ -3892,9 +3830,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -3915,7 +3851,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
 def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
             "sessions": [],
@@ -3931,7 +3867,10 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
         separators=(",", ":"),
     )
     page = tmp_path / "long-markdown-editor-scroll.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
@@ -3965,14 +3904,8 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-              const waitFor = async predicate => {{
-                for (let attempt = 0; attempt < 180; attempt += 1) {{
-                  if (predicate()) return true;
-                  await frame();
-                }}
-                return false;
-              }};
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
               const ready = await waitFor(() => {{
                 const scroller = panel._cmView?.scrollDOM;
                 return scroller && scroller.scrollHeight > scroller.clientHeight * 3;
@@ -4003,9 +3936,7 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -4017,3 +3948,97 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
     assert metrics["savedTop"] > metrics["clientHeight"], metrics
     assert metrics["restored"] is True, metrics
     assert abs(metrics["restoredTop"] - metrics["savedTop"]) < 32, metrics
+
+
+def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(browser, tmp_path):
+    css = app_css()
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": dict(app_english_strings())},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "focused-editor-background-rerender.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 520px; }}
+        .file-editor-panel {{ width: 920px; height: 520px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__focusedRerenderReady = (async () => {{
+              const path = '/home/test/repo/interview.md';
+              const content = Array.from({{length: 500}}, (_value, index) => `line ${{index + 1}} with enough text to keep CodeMirror scrolling normally`).join('\\n');
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{kind: 'text', content, original: content, dirty: false, language: 'markdown'}});
+              setFileEditorViewMode(path, 'edit', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              renderFileEditorPanel(panel, item);
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
+              const ready = await waitFor(() => panel._cmView?.scrollDOM?.scrollHeight > panel._cmView?.scrollDOM?.clientHeight * 3);
+              if (!ready) return {{error: 'CodeMirror editor did not become scrollable'}};
+              const view = panel._cmView;
+              const scroller = view.scrollDOM;
+              view.focus();
+              view.dispatch({{selection: {{anchor: 12, head: 48}}}});
+              scroller.scrollTop = Math.min(1600, scroller.scrollHeight - scroller.clientHeight - 10);
+              await frame();
+              captureFileEditorPanelViewState(item, panel);
+              const stale = fileEditorViewState.get(item);
+              view.dispatch({{selection: {{anchor: 180, head: 420}}}});
+              scroller.scrollTop = Math.min(5200, scroller.scrollHeight - scroller.clientHeight - 10);
+              await frame();
+              const before = {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}};
+              fileEditorViewState.set(item, stale);
+              renderFileEditorPanel(panel, item, {{updateActiveFile: false, captureViewState: false}});
+              await frame();
+              await frame();
+              await frame();
+              return {{
+                focused: panel._cmView.hasFocus,
+                sameView: panel._cmView === view,
+                before,
+                after: {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}},
+                stale: {{anchor: stale.anchor, head: stale.head, top: stale.scrollTop}},
+              }};
+            }})();
+          </script>
+        </body></html>""",
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__focusedRerenderReady.then(done, error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["focused"] is True, metrics
+    assert metrics["sameView"] is True, metrics
+    assert metrics["before"]["anchor"] != metrics["stale"]["anchor"], metrics
+    assert metrics["before"]["head"] != metrics["stale"]["head"], metrics
+    assert metrics["before"]["top"] > metrics["stale"]["top"], metrics
+    assert metrics["after"]["anchor"] == metrics["before"]["anchor"], metrics
+    assert metrics["after"]["head"] == metrics["before"]["head"], metrics
+    assert abs(metrics["after"]["top"] - metrics["before"]["top"]) < 32, metrics

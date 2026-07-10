@@ -42,8 +42,8 @@ When one tmux session contains multiple detected Claude/Codex panes, each tmux s
 - For YO!agent send-result watchers, transcript result text wins first, transcript-derived edited-file deltas win next, and visible pane scraping is only a final fallback when those stronger signals are missing or stale.
 - Use the newest bounded visible block. Do not scan the whole scrollback and treat an old prompt as current.
 - A live working line wins over older questions above it. A current approval prompt wins over an older working header above it.
-- Visible status counters are screen-local activity evidence. A shape match such as a spinner/status marker plus elapsed time, token count, effort/progress text, or interrupt hint can mark the pane `working`; advancement of elapsed time, tokens, or tool-use counts across captures is stronger evidence than one copied row, and repeated unchanged counters may become stale when no transcript/file/tool activity still proves work is active.
-- Footer/chrome/task rows are not later activity or user questions by themselves. Examples include `esc to interrupt`, `bypass permissions`, `⏸ plan mode`, context usage, model/effort labels, Ctrl-T task rows, Claude `Tip:` rows, and composer boxes.
+- Visible status counters are screen-local activity evidence. A shape match such as a spinner/status marker plus elapsed time, token count, effort/progress text, or interrupt hint can mark the pane `working`; successive pane polls also compare status glyphs at the same screen row and column over time. Any change between known spinner glyphs at that position is activity regardless of glyph order or randomized status text. The animated leading marker is not part of counter identity, so transitions such as `◦ Waiting for background terminal (...)` to `• Waiting for background terminal (...)` remain one advancing counter. Advancement of the spinner, elapsed time, tokens, or tool-use counts across captures is stronger evidence than one copied row, and repeated unchanged counters may become stale when no transcript/file/tool activity still proves work is active. Temporal history belongs to the current pane lifetime: a capture without a visible counter clears that pane's record, records unseen for 30 seconds are pruned, and the process keeps at most 512 records. Regularly observed unchanged counters retain their history and become stale after 75 seconds; a disappeared or reused tmux pane target starts fresh instead of inheriting the previous pane's liveness.
+- Footer/chrome/task rows are not later activity or user questions by themselves. Examples include `esc to interrupt`, `bypass permissions`, `⏸ plan mode`, context usage, model/effort labels, Ctrl-T task rows, wrapped Claude `Tip:` rows, composer boxes, and composer borders whose box-drawing line contains a draft or suggestion label.
 - Composer ghost detection must use cursor facts when available. Claude can leave NBSP/suggestion-looking spacing after the user types into the composer; if the cursor has advanced past the candidate text, treat it as a real draft that can be cleared, not a ghost suggestion.
 - A real shell prompt below a working row means the working row is stale.
 - A bare user prompt at the bottom must stop stale-question scanning. Example: an old `❯ Where are the DOIT files?` above a current `❯ ` prompt is not `needs-input`.
@@ -66,6 +66,30 @@ Claude working rows often use a leading glyph, a randomized verb, elapsed time, 
 · Tomfoolering… (12m 49s · ↑ 64.3k tokens)
 ```
 
+The spinner glyph is animated state, not a fixed semantic symbol. These observed sequences both prove continued work because the glyph changes at the same screen position; glyph order and status wording are irrelevant.
+
+```text
+✢ Bloviating… (10s · ↓ 558 tokens)
+* Bloviating… (13s · ↓ 658 tokens)
+
+✻ Bloviating… (57s · ↓ 3.7k tokens · thinking with high effort)
+✢ Bloviating… (62s · ↓ 4.7k tokens · thinking with high effort)
+```
+
+Codex uses the same temporal rule; `• Working (…)` changing to `◦ Working (…)` at the same position proves RUN. Bold-style changes may accompany the glyph change, but are not required evidence.
+
+Claude compaction uses the same working-row contract. A decorated composer title below it is chrome, not later output that cancels the RUN state.
+
+```text
+✶ Compacting conversation… (11m 14s · ↑ 28.6k tokens)
+  ⎿ Tip: /loop runs any prompt on a recurring schedule.
+                                      100% context used
+──────────────────────── Check ABC-2310 status ──
+❯
+────────────────────────────────────────────────
+⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · PR #93 · esc to interrupt
+```
+
 Claude may also show multi-agent progress instead of a single "Thinking" row.
 
 ```text
@@ -85,6 +109,8 @@ Claude chrome below a live working row should not make the detector think the tu
 100% context used
 ▶▶ bypass permissions on · 1 shell · esc to interrupt
 ```
+
+Persistent `/goal active (<duration>)` composer chrome is display metadata, not standalone proof of RUN. It supplies the cumulative goal duration only when a real live working counter is present; a completed `Worked for …` row plus an available composer remains idle/DONE.
 
 ```text
 ● Lollygagging… (2m 1s · ↓ 8.0k tokens · thinking with xhigh effort)
@@ -155,7 +181,7 @@ This stale example is idle, not `needs-input`, because the current bottom prompt
 ```text
 ❯ Where are the DOIT files?
 
-● They're gone from ~/yolomux.dev8002 — and that's by the project's design, not a loss.
+● They're gone from <dev-worktree> — and that's by the project's design, not a loss.
 
 ✻ Baked for 1m 33s · 1 shell still running
 
@@ -211,7 +237,7 @@ Codex can show a working row above an input-looking composer and model line. The
 │ Use /skills to list available skills       │
 │ >                                          │
 ╰────────────────────────────────────────────╯
-gpt-5.5 xhigh   ~/yolomux.dev8002
+gpt-5.5 xhigh   <dev-worktree>
 ```
 
 The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
@@ -270,7 +296,7 @@ Codex may select option 2 by default for remembered prefixes. The detector must 
 ```text
   Would you like to run the following command?
 
-  $ curl -sk -u yolomux:yolomux https://localhost:7777/
+  $ curl -sk -u yolomux:yolomux https://localhost:<port>/
 
   1. Yes, proceed (y)
 › 2. Yes, and don't ask again for commands that start with `curl -sk -u` (p)

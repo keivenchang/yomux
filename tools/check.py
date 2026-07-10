@@ -12,7 +12,7 @@ load makes a failure hard to read. Focused pytest lanes are available with
 Usage:
   python3 tools/check.py
   python3 tools/check.py --serial
-  python3 tools/check.py --lane pytest-browser
+  python3 tools/check.py --lane pytest-boot
   python3 tools/check.py --no-tool-guard
 """
 
@@ -33,10 +33,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.background_owner import pid_is_alive
+
 DEFAULT_TOOL_LOCK_PATH = Path(tempfile.gettempdir()) / "yolomux-expensive-tools.lock"
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
-EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-browser", "pytest-e2e"})
+EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e"})
 
 
 @dataclass(frozen=True)
@@ -118,9 +123,20 @@ def lanes() -> list[Lane]:
             True,
         ),
         Lane(
+            "pytest-boot",
+            "pytest boot smoke",
+            (Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),),
+        ),
+        Lane(
             "pytest-browser",
             "pytest browser",
-            (Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "browser and not e2e", "-q"]),),
+            (
+                Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),
+                # Browser durations vary enough that xdist's initial load assignment leaves a long
+                # tail even with valid slow-first hints. Two same-code A/B pairs made work stealing
+                # repeatably faster, while boot smoke stays serial and separate above.
+                Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot", "-q"]),
+            ),
             True,
         ),
         Lane(
@@ -186,18 +202,6 @@ def command_text(args: list[str]) -> str:
 
 def state_dir_from_env() -> Path:
     return Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
-
-
-def pid_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def active_yolomux_server_records(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import re
 import shlex
 import threading
 import time
@@ -19,6 +18,7 @@ from .common import SessionInfo
 from .cache import TtlCache
 from .common import _CACHE_MISS
 from .common import tail_file_lines
+from .common import path_mtime_or_zero
 from .tmux_utils import cmd_error
 from .tmux_utils import run_cmd
 from .tmux_utils import tmux
@@ -29,6 +29,7 @@ TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
 CODEX_LSOF_TIMEOUT_SECONDS = 1.0
 CODEX_LSOF_CACHE_SECONDS = 15.0
+CLAUDE_SUBAGENTS_DIRNAME = "subagents"
 # the shared TtlCache instead of a hand-rolled dict+lock+TTL. get_or_miss() preserves the
 # _CACHE_MISS-vs-cached-None distinction the callers rely on.
 _TRANSCRIPT_LOOKUP_CACHE = TtlCache(ttl_seconds=TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS)
@@ -209,18 +210,16 @@ def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> tuple[s
 
 
 def classify_agent(command: str) -> str | None:
-    base = command_basename(command)
-    if base in AGENT_COMMANDS:
-        return base
-    lowered = command.lower()
-    if re.search(r"(^|[/\s])claude\.py\s+--mock(\s|$)", lowered):
-        return "claude"
-    if re.search(r"(^|[/\s])codex\.py\s+--mock(\s|$)", lowered):
-        return "codex"
-    if re.search(r"(^|\s)(claude|codex)(\s|$)", lowered):
-        match = re.search(r"(^|\s)(claude|codex)(\s|$)", lowered)
-        if match:
-            return match.group(2)
+    label = process_display_label(command).lower()
+    if label in AGENT_COMMANDS:
+        return label
+    # Pane descendants include every search, test, and shell command launched by the agent. Only
+    # classify an actual mock entry point here; an argument or commit message that merely mentions
+    # "claude" or "codex" must not become a second agent for the same pane.
+    if "--mock" in command_tokens(command):
+        for kind in ("claude", "codex"):
+            if label == f"{kind}.py":
+                return kind
     return None
 
 
@@ -235,8 +234,25 @@ def find_transcript_by_session_id(base_dir: Path, session_id: str) -> Path | Non
     return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, None)
 
 
-def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
-    meta_path = Path.home() / ".claude" / "sessions" / f"{process.pid}.json"
+def claude_transcript_family_paths(path: Path) -> list[Path]:
+    paths = [path]
+    subagents_root = path.with_suffix("") / CLAUDE_SUBAGENTS_DIRNAME
+    if subagents_root.is_dir():
+        paths.extend(sorted(subagents_root.rglob("*.jsonl")))
+    return paths
+
+
+def read_claude_agent(
+    session: str,
+    pane: PaneInfo,
+    process: ProcessInfo,
+    *,
+    sessions_root: Path | None = None,
+    projects_root: Path | None = None,
+) -> AgentInfo:
+    sessions_root = sessions_root or Path.home() / ".claude" / "sessions"
+    projects_root = projects_root or Path.home() / ".claude" / "projects"
+    meta_path = sessions_root / f"{process.pid}.json"
     if not meta_path.exists():
         return AgentInfo(
             session=session,
@@ -262,7 +278,7 @@ def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Age
     session_id = metadata.get("sessionId")
     transcript_path = None
     if isinstance(session_id, str) and session_id:
-        transcript_path = find_transcript_by_session_id(Path.home() / ".claude" / "projects", session_id)
+        transcript_path = find_transcript_by_session_id(projects_root, session_id)
 
     return AgentInfo(
         session=session,
@@ -277,6 +293,48 @@ def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Age
         error=None if transcript_path else "claude transcript not found",
         model=agent_model_from_metadata(metadata) or agent_model_from_command(process.command),
     )
+
+
+def select_claude_agent(
+    session: str,
+    pane: PaneInfo,
+    processes: list[ProcessInfo],
+    *,
+    sessions_root: Path | None = None,
+    projects_root: Path | None = None,
+) -> AgentInfo | None:
+    sessions_root = sessions_root or Path.home() / ".claude" / "sessions"
+    candidates: list[AgentInfo] = []
+    for process in processes:
+        if classify_agent(process.command) != "claude" and not (sessions_root / f"{process.pid}.json").is_file():
+            continue
+        candidates.append(
+            read_claude_agent(
+                session,
+                pane,
+                process,
+                sessions_root=sessions_root,
+                projects_root=projects_root,
+            )
+        )
+    if not candidates:
+        return None
+    with_transcript = [agent for agent in candidates if agent.transcript]
+    if not with_transcript:
+        return candidates[0]
+
+    def active_session_rank(agent: AgentInfo) -> tuple[float, bool, int]:
+        explicit_session_id = command_option_value(agent.command, "--session-id")
+        explicit_session_match = bool(explicit_session_id and explicit_session_id == agent.session_id)
+        transcript_activity = max(
+            (path_mtime(path) for path in claude_transcript_family_paths(Path(str(agent.transcript)))),
+            default=0.0,
+        )
+        # Claude's daemon-backed UI keeps the original launcher alive while a descendant owns the
+        # active --session-id. Transcript-family activity owns selection; the explicit owner breaks ties.
+        return transcript_activity, explicit_session_match, int(agent.pid or 0)
+
+    return max(with_transcript, key=active_session_rank)
 
 
 def agent_error(session: str, kind: str, pane: PaneInfo, process: ProcessInfo, error: str) -> AgentInfo:
@@ -362,11 +420,7 @@ def recent_codex_transcript_candidates(root: Path | None = None, limit: int = CO
     return unique
 
 
-def path_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+path_mtime = path_mtime_or_zero
 
 
 def newest_codex_transcript(paths: list[Path]) -> Path | None:
@@ -542,6 +596,30 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
     )
 
 
+def select_codex_agent(session: str, pane: PaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+    candidates = [process for process in processes if classify_agent(process.command) == "codex"]
+    if not candidates:
+        return None
+    # The Node launcher and native Codex binary are one interactive client. Prefer the native
+    # process because it owns the rollout file; fall back to the wrapper for mocks/other clients.
+    process = next(
+        (candidate for candidate in candidates if command_basename(candidate.command) == "codex"),
+        candidates[0],
+    )
+    return read_codex_agent(session, pane, process)
+
+
+def select_pane_agent(session: str, pane: PaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+    kinds = [kind for process in processes if (kind := classify_agent(process.command)) in {"claude", "codex"}]
+    if not kinds:
+        return None
+    # `processes` is breadth-first from the tmux pane PID. The first real agent is the interactive
+    # owner; a nested agent command launched as a tool must not replace its parent pane identity.
+    if kinds[0] == "claude":
+        return select_claude_agent(session, pane, processes)
+    return select_codex_agent(session, pane, processes)
+
+
 def process_cwd(pid: int, lsof_runner: Any = None) -> str | None:
     if platform.system() == "Darwin":
         paths = lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
@@ -622,15 +700,10 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
             process_label, process_label_pid = pane_process_label(raw_pane, candidates)
             pane = replace(raw_pane, process_label=process_label, process_label_pid=process_label_pid)
             session_panes.append(pane)
-            for process in candidates:
-                kind = classify_agent(process.command)
-                if not kind or process.pid in seen_pids:
-                    continue
-                seen_pids.add(process.pid)
-                if kind == "claude":
-                    agents.append(read_claude_agent(session, pane, process))
-                elif kind == "codex":
-                    agents.append(read_codex_agent(session, pane, process))
+            agent = select_pane_agent(session, pane, candidates)
+            if agent is not None and agent.pid not in seen_pids:
+                seen_pids.add(agent.pid)
+                agents.append(agent)
         result[session] = SessionInfo(
             session=session,
             panes=session_panes,

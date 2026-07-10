@@ -17,7 +17,7 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
   // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
   // not get mistaken for a cheap same-shape layout update on drop.
-  if (dragSession != null) {
+  if (dragState.item != null) {
     requestLayoutRender({
       previousActive,
       options,
@@ -34,6 +34,10 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
   if (tree) grid.appendChild(renderLayoutRoot(tree));
 
   bindDropTargets();
+  finishPanelLayoutRender(previousActive, options, {updateInactiveOverlays: true});
+}
+
+function finishPanelLayoutRender(previousActive = [], options = {}, {updateInactiveOverlays = false} = {}) {
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
   scheduleAgentWindowActivityAnimationSync();
@@ -42,9 +46,8 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
       clearTimeout(responsiveLayoutPruneTimer);
       responsiveLayoutPruneTimer = null;
     }
-  } else {
-    scheduleResponsiveLayoutPrune();
-  }
+  } else scheduleResponsiveLayoutPrune();
+  if (updateInactiveOverlays) updatePanelInactiveOverlays();
 }
 
 function movePanelsToPool() {
@@ -79,9 +82,9 @@ function poolDisplacedPanel(node) {
 // for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
 // grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
 // zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
-function syncActivePanelsInPlace() {
+function syncActivePanelsInPlace(previousActive = []) {
   if (dockviewLayoutActive()) {
-    syncActivePanelsDockview();
+    syncActivePanelsDockview(previousActive);
     return;
   }
   for (const dropSlot of grid.querySelectorAll('.drop-slot[data-slot]')) {
@@ -106,6 +109,7 @@ function syncActivePanelsInPlace() {
     renderAttachedPanelContent(item);
     restorePaneViewState(item, desired);
   }
+  updatePanelInactiveOverlays();
 }
 
 function renderAttachedPanelContent(item) {
@@ -250,12 +254,18 @@ function scheduleResponsiveLayoutPrune() {
 }
 
 function pruneSmallLayoutSlots() {
-  if (layoutResizeState || layoutVisiblePaneCount() <= 1) return;
+  if (layoutResizeState) return;
+  // Viewport policy owns the hard one-column/mobile invariant for both renderers. Dockview has no
+  // legacy .layout-column nodes for the DOM-size candidate loop below, so relying on that loop
+  // left a stale second pane visibly clipped after Safari resized or rotated. Reuse the shared
+  // layout normalizer before the renderer-specific minimum-size cleanup.
+  if (compactCurrentLayoutSlots({focusSession: visualActivePaneItem()})) return;
+  if (layoutVisiblePaneCount() <= 1) return;
   const candidate = smallLayoutSlotCandidate();
   if (!candidate) return;
   const moved = paneTabs(candidate.slot);
   applyLayoutSlots(layoutWithoutSlot(candidate.slot), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout: not enough room` : '',
+    message: moved.length ? t('layout.status.hiddenNoRoom', {items: moved.map(itemLabel).join(', ')}) : '',
   });
 }
 
@@ -265,7 +275,15 @@ function minWidthForLayoutItem(item) {
   return minSplitPaneWidthPx();
 }
 
+function minWidthForSidePaneItem(item) {
+  return Math.min(
+    minWidthForLayoutItem(item),
+    rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx(),
+  );
+}
+
 function minWidthForLayoutSlot(slot, slots = layoutSlots) {
+  if (slotIsSidePane(slot, slots)) return minWidthForSidePaneItem(activeItemForSide(slot, slots));
   return minWidthForLayoutItem(activeItemForSide(slot, slots));
 }
 
@@ -325,11 +343,27 @@ function smallLayoutSlotCandidate() {
   return candidate;
 }
 
+function syncPaneRoleDom(node, slot, slots = layoutSlots) {
+  if (!node) return null;
+  const role = paneRoleForSlot(slot, slots);
+  node.dataset.paneRole = role.kind;
+  if (role.kind === paneRoleSide) {
+    node.dataset.paneSide = role.side;
+    node.style?.setProperty('--side-pane-max-viewport-fraction', String(role.maxViewportFraction));
+  } else {
+    delete node.dataset.paneSide;
+    node.style?.removeProperty('--side-pane-max-viewport-fraction');
+  }
+  node.classList.toggle('side-pane-role', role.kind === paneRoleSide);
+  return role;
+}
+
 function renderLayoutColumn(side) {
   const column = document.createElement('section');
   const session = activeItemForSide(side);
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
+  syncPaneRoleDom(column, side);
   if (isPreferencesItem(session)) column.classList.add('preferences-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
   if (!session) column.classList.add('empty-pane-column');
@@ -344,6 +378,7 @@ function renderDropSlot(slot, session) {
   node.className = 'drop-slot';
   node.dataset.slot = slot;
   node.dataset.side = slotSide(slot);
+  syncPaneRoleDom(node, slot);
   if (!session) {
     node.appendChild(renderEmptyPane(slot));
     return node;
@@ -361,8 +396,40 @@ function renderEmptyPane(slot) {
   panel.className = 'panel empty-pane-panel';
   panel.dataset.slot = slot;
   panel.setAttribute('aria-label', t('pane.empty'));
-  panel.appendChild(document.createElement('div'));
-  panel.children[0].className = 'empty-pane-fill';
+  const emptyItem = dockviewEmptyPaneItem(slot);
+  if (canCloseEmptyPane(slot)) {
+    const controls = document.createElement('div');
+    controls.className = 'empty-pane-controls';
+    controls.innerHTML = paneFrameControlsGroupHtml(emptyItem, {
+      slot,
+      actions: false,
+      details: false,
+      popout: false,
+      expand: false,
+      minimize: false,
+      close: true,
+      closeTitle: t('editor.closePane'),
+      closeLabel: t('editor.closePane'),
+    });
+    panel.appendChild(controls);
+    bindPaneFrameControls(panel, emptyItem);
+  }
+  const fill = document.createElement('div');
+  fill.className = 'empty-pane-fill';
+  const title = document.createElement('strong');
+  title.textContent = t('pane.dropTab');
+  const hint = document.createElement('span');
+  hint.className = 'empty-pane-hint';
+  hint.textContent = t('pane.empty');
+  const add = makeButton({
+    className: 'empty-pane-add control-active-hover',
+    label: t('pane.addTab'),
+    title: `${t('common.commandPalette')} (${appShortcutText('P', {shift: true})})`,
+    ariaLabel: t('common.commandPalette'),
+    onClick: () => openCommandPalette({mode: 'command', targetSlot: slot}),
+  });
+  fill.append(title, hint, add);
+  panel.appendChild(fill);
   return panel;
 }
 
@@ -383,7 +450,7 @@ function renderPaneTabStripsMeasured() {
   }
   // do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
   // aborts the native drag. Defer to the endSessionDrag flush.
-  if (dragSession != null) { pendingTabStripRender = true; return; }
+  if (dragState.item != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
     const session = activeItemForSide(side);
     if (!session) continue;
@@ -400,11 +467,6 @@ function updatePaneTabStrip(panel, side) {
   if (!strip) return;
   const stack = paneTabs(side);
   strip.dataset.side = side;
-  if (isFileExplorerItem(activeItemForSide(side))) {
-    strip.hidden = true;
-    strip.replaceChildren();
-    return;
-  }
   strip.hidden = false;
   const restorePopoverItem = paneTabPopoverItemToRestore(strip);
   const activeItem = activeItemForSide(side);
@@ -541,30 +603,49 @@ function restorePaneTabPopover(strip, item) {
 // enforced in one place instead of by hand across two renderers.
 function paneTabInnerHtml(item, rowOptions = {}) {
   const type = tabTypeForItem(item);
-  const isFiles = type?.key === 'files';
+  const isLegacyFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
   let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
   html = `${pinnedTabIconHtml(item)}${html}`;
-  if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
+  if (!isLegacyFiles) {
+    const closeLabel = isEditor
+      ? t('finder.close', {name: itemLabel(item)})
+      : t('finder.hideFromLayout', {name: itemLabel(item)});
     const controlKind = isEditor ? 'close' : 'minimize';
     html += toolbarButtonHtml({
       className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
       action: 'pane-tab-close',
       dataset: {paneTabClose: ''},
-      title: closeTitle,
+      title: closeLabel,
       ariaLabel: closeLabel,
     });
   }
   if (isEditor) html += filePopoverHtml(item);
   else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
   return html;
+}
+
+// Virtual panels differ in their toolbars and bodies, but their frame is one contract. Keep the
+// head/tablist, overlay root, and toast identity here so a new panel cannot quietly omit one.
+function panelToastStackHtml(item, contentHtml = '') {
+  return `<div id="panel-toasts-${esc(item)}" class="panel-toast-stack">${contentHtml}</div>`;
+}
+
+function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsHtml = '', afterHeadHtml = '', bodyClass = '', bodyHtml = '', toastStack = true, toastContentHtml = '', bodyAttributes = '', afterBodyHtml = ''} = {}) {
+  const classes = ['panel-overlay-root', bodyClass].filter(Boolean).join(' ');
+  return `<div class="panel-head ${esc(headClass)}">
+    ${controlsHtml}
+    <div class="pane-tabs" role="tablist" aria-label="${esc(t('common.tabsLabel'))}"></div>
+    ${headAfterTabsHtml}
+  </div>
+  ${afterHeadHtml}
+  <div class="${classes}"${bodyAttributes ? ` ${bodyAttributes}` : ''}>${toastStack ? panelToastStackHtml(item, toastContentHtml) : ''}${bodyHtml}</div>
+  ${afterBodyHtml}`;
 }
 
 function paneTabDragSourceItem(itemOrGetter, event) {
@@ -602,7 +683,7 @@ function createPaneTab(side, item, displayContext = {}) {
   const type = tabTypeForItem(item);
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const state = isVirtual ? null : sessionState(item, info);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
@@ -622,10 +703,8 @@ function createPaneTab(side, item, displayContext = {}) {
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
-  }
-  tab.setAttribute('aria-label', isEditor
-    ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
-    : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  } else bindTabInteraction({anchor: tab, item, sourceSlot: () => side});
+  tab.setAttribute('aria-label', paneTabAriaLabel(item));
   tab.addEventListener('pointerdown', event => {
     dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
     dragTimingMark('pointerdown');
@@ -637,7 +716,7 @@ function createPaneTab(side, item, displayContext = {}) {
     if (!autoTarget) return;
     event.preventDefault();
     event.stopPropagation();
-    if (item === activeItemForSide(side)) setFocusedPanelItem(item);
+    if (item === activeItemForSide(side)) setFocusedPanelItem(item, {userInitiated: true});
   });
   bindActionDispatcher(tab, {
     'pane-tab-close': () => {
@@ -647,7 +726,7 @@ function createPaneTab(side, item, displayContext = {}) {
     'pane-tab-auto-approve': async (_event, autoTarget) => {
       const shouldRefocus = item === activeItemForSide(side);
       await toggleAutoApprove(autoTarget.dataset.autoSession);
-      if (shouldRefocus) focusPanel(item);
+      if (shouldRefocus) focusPanel(item, {userInitiated: true});
     },
   });
   tab.addEventListener('keydown', event => {
@@ -674,15 +753,18 @@ function createPaneTab(side, item, displayContext = {}) {
       beginPaneTabRename(tab, item);
     });
   }
-  if (isPinnableTab(item)) {
-    tab.addEventListener('contextmenu', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      showTabContextMenu(item, event.clientX, event.clientY, {tab});
-    });
-  }
   bindPaneTabNativeDragSource(tab, item, () => side);
   return tab;
+}
+
+function paneTabAriaLabel(item) {
+  if (isFileEditorItem(item)) {
+    const missing = openFileIsMissing(fileItemPath(item)) ? ` ${t('filetab.missingTitle')}` : '';
+    return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
+  }
+  const type = tabTypeForItem(item);
+  if (type) return itemLabel(item);
+  return `${sessionLabel(item)} ${sessionWorkDescription(item, transcriptMetadataState.payload.sessions?.[item], 140)}`.trim();
 }
 
 function beginPaneTabRename(tab, session) {
@@ -707,38 +789,31 @@ function beginFileTabRename(tab, item) {
     return;
   }
   const currentName = basenameOf(path);
-  const nextName = window.prompt(`Rename ${currentName}`, currentName);
+  const nextName = window.prompt(t('common.renameNamed', {name: currentName}), currentName);
   if (nextName === null) return;
   renameFileTreePath(path, entry, nextName);
 }
 
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
-  if (!popover) return;
-  const detached = tab.classList?.contains('dockview-pane-tab') === true;
+  if (!popover) return bindTabInteraction({anchor: tab, item: session});
+  const detached = tab.classList?.contains('dockview-pane-tab') === true
+    || tab.classList?.contains('tabber-session-tab') === true;
   if (detached) detachPaneTabPopover(tab, popover);
-  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab, popover), {
-    onOpen: () => maybeLoadFileTabForPopover(tab, session),
-    onStateOpen: () => popover.classList.add('popover-open'),
-    onClose: () => popover.classList.remove('popover-open'),
-  });
-}
-
-function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
-  createHoverPopover({
-    anchor,
-    popover,
-    showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
-    hideDelay: () => popoverHideDelayMs,
-    canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
-    onQueue: position,
-    onOpen: event => {
-      options.onStateOpen?.(event);
-      options.onOpen?.(event);
+  return bindTabInteraction({
+    anchor: tab,
+    item: session,
+    sourceSlot: () => slotForItem(session),
+    popover: () => paneTabPopoverForAnchor(tab),
+    positionDetail: () => {
+      const currentPopover = paneTabPopoverForAnchor(tab);
+      if (currentPopover) positionPaneTabPopover(tab, currentPopover);
     },
-    onClose: options.onClose,
-    position,
-    closeOthers: () => closeOtherSessionPopovers(anchor),
+    onDetailOpen: () => {
+      paneTabPopoverForAnchor(tab)?.classList.add('popover-open');
+      maybeLoadFileTabForPopover(tab, session);
+    },
+    onDetailClose: () => paneTabPopoverForAnchor(tab)?.classList.remove('popover-open'),
   });
 }
 
@@ -751,9 +826,7 @@ function detachPaneTabPopover(tab, popover) {
 }
 
 function cleanupDetachedPaneTabPopover(tab, keep = null) {
-  const previous = tab?.__yolomuxDetachedPopover;
-  if (previous && previous !== keep) previous.remove();
-  if (previous && previous !== keep) tab.__yolomuxDetachedPopover = null;
+  cleanupDetachedPopoverAnchor(tab, keep);
 }
 
 function maybeLoadFileTabForPopover(tab, item) {
@@ -807,25 +880,47 @@ function refreshFileTabPopover(tab, item) {
   bindFilePopoverActions(popover);
 }
 
+function paneTabPopoverOwningPane(tab) {
+  const directPane = tab?.closest?.('.panel');
+  if (directPane) return directPane;
+  // Dockview renders its tab strip beside its active panel rather than inside it.
+  return tab?.closest?.('.dv-groupview')?.querySelector?.('.dockview-panel-content > .panel') || null;
+}
+
 function positionPaneTabPopover(tab, popover = null) {
   const rect = tab.getBoundingClientRect();
   popover = popover || paneTabPopoverForAnchor(tab);
+  const tabberPane = tab?.classList?.contains?.('tabber-session-tab')
+    ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
+    : null;
+  const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
+  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep file
+  // previews content-sized, but let every session surface share the full owning-pane geometry.
+  const sessionPane = !tabberPane && !popover?.classList?.contains?.('file-popover')
+    ? paneTabPopoverOwningPane(tab)
+    : null;
+  const sessionPaneRect = sessionPane ? appSpaceRect(sessionPane) : null;
+  const paneRect = tabberPaneRect || sessionPaneRect;
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
   const bounds = viewportBounds(edgeGap);
   const maxInline = Math.max(0, bounds.right - bounds.left);
+  const useAvailableInlineWidth = narrowSingleColumnMode();
   // #45: when the live popover width measures 0 (e.g. before first paint), fall back to the popover's
   // CSS inline size (capped to the viewport) — NOT the tiny tab width. Over-estimating only pulls a
   // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
-  const width = Math.min(maxInline, measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+  const paneGutter = sessionPaneRect ? edgeGap : 0;
+  const width = useAvailableInlineWidth
+    ? maxInline
+    : Math.min(maxInline, Math.max(0, (paneRect?.width || 0) - (2 * paneGutter)) || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
-    Math.floor(rect.left),
+    Math.floor(paneRect ? paneRect.left + paneGutter : rect.left),
     Math.ceil(rect.bottom) + bridgeGap,
     width,
     height,
@@ -840,6 +935,7 @@ function positionPaneTabPopover(tab, popover = null) {
     popover.style.top = top;
     popover.style.left = left;
     popover.style.width = inlineSize;
+    popover.style.maxWidth = (paneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }
@@ -848,15 +944,16 @@ function positionPaneTabPopover(tab, popover = null) {
 function paneInfoTabHtml(item = infoItemId, options = {}) {
   // use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
   // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
+  const status = item === chatItemId && typeof chatStatusMarkerHtml === 'function' ? chatStatusMarkerHtml() : '';
+  return `<span class="pane-tab-core">${status}${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(fileExplorerLabel())}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(itemLabel(item))}</span></span>`;
 }
 
 function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.preferences'))}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('common.preferences'))}</span></span>`;
 }
 
 function debugPaneTabHtml(item = debugPaneItemId, options = {}) {
@@ -874,7 +971,7 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
   const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
-  const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
+  const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('state.modified'))}" aria-label="${esc(t('state.modified'))}"></span>` : '';
   const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
@@ -893,14 +990,14 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
   const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
-  return `<span class="pane-tab-core">${leadingHtml}<span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
+  return `<span class="pane-tab-core"><span class="session-tab-leading-activity">${leadingHtml}</span><span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
 
 function tmuxPaneTabTokenHtml(session, options = {}) {
   const item = String(options.item || session || '').trim();
   if (!item) return '';
-  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMeta.sessions?.[item];
+  const info = Object.prototype.hasOwnProperty.call(options, 'info') ? options.info : transcriptMetadataState.payload.sessions?.[item];
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(item, info);
   const auto = Object.prototype.hasOwnProperty.call(options, 'auto') ? options.auto : autoApproveStates.get(item)?.enabled === true;
   const active = Object.prototype.hasOwnProperty.call(options, 'active') ? options.active === true : itemIsActivePaneTab(item);
@@ -999,7 +1096,7 @@ function clearPaneTabDropPreview(strip) {
 
 // #47: reset the per-drag tab-rect cache (called at drag start/end). See dragMeasureStrip.
 function resetDragTabRectCache() {
-  dragTabRectCache = null;
+  dragState.tabRectCache = null;
 }
 
 // During a live drag the tabs do not move (renders are deferred, #30), so measure each strip's rect +
@@ -1007,11 +1104,11 @@ function resetDragTabRectCache() {
 // Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
 function dragMeasureStrip(strip) {
   dragTimingMarkOnce('dragMeasureStrip:first');   // S14: first strip getBoundingClientRect of the drag
-  if (dragSession != null) {
-    if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
-      dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
+  if (dragState.item != null) {
+    if (!dragState.tabRectCache || dragState.tabRectCache.strip !== strip) {
+      dragState.tabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
     }
-    return dragTabRectCache;
+    return dragState.tabRectCache;
   }
   return {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
 }
@@ -1127,12 +1224,27 @@ function bindPanelShell(panel, session) {
   // keyed off the uniformly-toggled .focused-pane class) — no per-pane overlay <div> to install.
   bindPanelPopover(panel);
   bindPaneFrameControls(panel, session);
-  panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
+  panel.addEventListener('pointerenter', event => selectPanelOnHover(session, event));
   panel.addEventListener('pointerdown', event => {
+    // Native range dragging must keep the same input node for the whole gesture;
+    // focusing YO!stats here would rerender the panel before the browser moves the thumb.
+    if (event.target?.closest?.('[data-js-debug-range-slider], .js-debug-line-chart, [data-js-debug-zoom-reset]')) return;
     if (isTmuxSession(session)) {
       const windowTarget = event.target?.closest?.('[data-window-index]');
-      const chromeTarget = event.target?.closest?.('[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], [data-auto-session]');
-      if (windowTarget) return;
+      const autoTarget = event.target?.closest?.('[data-auto-session]');
+      // Toggling YO changes the tab's state and can rebuild its chrome. Do not rebuild on pointerdown
+      // before its shared click dispatcher receives the same control.
+      if (autoTarget) return;
+      const chromeTarget = event.target?.closest?.(`[data-window-dir], [data-window-index], [data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-detail-toggle], ${repoSelectorControlSelector}`);
+      if (windowTarget) {
+        // Run the original target before polling or focus-side updates can replace it.
+        // The marker suppresses the later delegated click if the browser still emits one.
+        event.preventDefault();
+        event.stopPropagation();
+        windowTarget.dataset.pointerActionHandled = '1';
+        handleWindowStepButtonClick({target: windowTarget, currentTarget: windowTarget});
+        return;
+      }
       if (chromeTarget) {
         setFocusedTerminal(session, {userInitiated: true, acknowledgeAgentWindow: false});
         return;
@@ -1242,7 +1354,7 @@ function bindPanelShell(panel, session) {
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
       if (slotIsFileExplorerPane(targetSlot)) return;
-      if (isFileExplorerItem(payload.session)) {
+      if (isFileExplorerItem(payload.session) && !fileExplorerUsesNormalTabMovement()) {
         dockFileExplorerPane();
         return;
       }
@@ -1283,7 +1395,7 @@ function bindPaneFrameControls(panel, session) {
       return;
     }
     if (button.dataset.paneClose !== undefined) {
-      removePaneFromLayout(button.dataset.paneClose || session);
+      closePaneFrameItem(button.dataset.paneClose || session);
     }
   }, true);
 }
@@ -1352,12 +1464,12 @@ function schedulePanelDetailsFit(panel) {
 }
 
 function terminalTabDisplayLabel(session, info) {
-  return 'Term';
+  return t('tab.terminal.short');
 }
 
 function terminalTabDetailLabel(session, info) {
   const label = terminalProcessLabel(session, info);
-  return label || 'Term';
+  return label || t('tab.terminal.short');
 }
 
 function terminalTabLabel(session, info) {
@@ -1369,7 +1481,7 @@ function terminalTabLabel(session, info) {
 function terminalTabTitle(session, info) {
   const type = tabTypeForItem(session);
   if (type?.terminalTitle) return type.terminalTitle(session);
-  return `terminal: ${terminalTabDetailLabel(session, info)}`;
+  return t('terminal.tab.title', {name: terminalTabDetailLabel(session, info)});
 }
 
 function terminalProcessLabel(session, info) {
@@ -1379,7 +1491,7 @@ function terminalProcessLabel(session, info) {
   if (agent?.command) return processLabelFromCommand(agent.command);
   if (agent?.kind) return agent.kind;
   if (pane?.command) return pane.command;
-  return 'Term';
+  return t('tab.terminal.short');
 }
 
 function terminalDisplayPaneForWindowIndex(info, windowIndex) {
@@ -1410,9 +1522,7 @@ function tmuxWindowNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-const tmuxWindowActiveIndexOverrides = new Map();
-const tmuxWindowSwitchSequences = new Map();
-const tmuxWindowDirectTargetGuards = new Map();
+const tmuxWindowNavigationRecords = new Map();
 const tmuxWindowPendingActiveIndex = '__pending__';
 const tmuxWindowConfirmedOverrideHoldMs = 4000;
 const tmuxWindowDirectTargetGuardMs = 17000;
@@ -1422,8 +1532,33 @@ function tmuxWindowIndexKey(value) {
   return index === null ? null : String(index);
 }
 
+function tmuxWindowNavigationRecord(session, options = {}) {
+  const key = String(session || '');
+  if (!key) return null;
+  let record = tmuxWindowNavigationRecords.get(key) || null;
+  if (!record && options.create === true) {
+    record = {activeIndexOverride: undefined, sequence: 0, directTargetGuard: null};
+    tmuxWindowNavigationRecords.set(key, record);
+  }
+  return record;
+}
+
+function pruneTmuxWindowNavigationRecord(session, record = tmuxWindowNavigationRecord(session)) {
+  if (!record) return false;
+  if (record.activeIndexOverride !== undefined || Number(record.sequence || 0) > 0 || record.directTargetGuard) return false;
+  return tmuxWindowNavigationRecords.delete(String(session || ''));
+}
+
 function tmuxWindowActiveIndexOverride(session) {
-  return tmuxWindowActiveIndexOverrides.get(String(session || ''));
+  return tmuxWindowNavigationRecord(session)?.activeIndexOverride;
+}
+
+function tmuxWindowActiveIndexOverrideEntries() {
+  const entries = [];
+  for (const [session, record] of tmuxWindowNavigationRecords.entries()) {
+    if (record.activeIndexOverride !== undefined) entries.push([session, record.activeIndexOverride]);
+  }
+  return entries;
 }
 
 function tmuxWindowDisplayActiveIndex(session) {
@@ -1432,21 +1567,35 @@ function tmuxWindowDisplayActiveIndex(session) {
   return tmuxWindowDirectTargetGuard(session)?.index;
 }
 
+function tmuxWindowRecordIsActive(session, record) {
+  const override = tmuxWindowDisplayActiveIndex(session);
+  if (override !== undefined) return override !== tmuxWindowPendingActiveIndex && String(record?.index) === String(override);
+  // `window_active` comes from the tmux snapshot that also selects the visible terminal. Agent
+  // polling can lag it, so it must never independently choose a different highlighted window.
+  return record?.active === true;
+}
+
+function tmuxWindowActiveRecord(session, info) {
+  return tmuxWindowRecords(Array.isArray(info) ? info : info?.panes)
+    .find(record => tmuxWindowRecordIsActive(session, record)) || null;
+}
+
 function tmuxWindowDirectTargetGuard(session) {
   const key = String(session || '');
-  const guard = tmuxWindowDirectTargetGuards.get(key);
+  const record = tmuxWindowNavigationRecord(key);
+  const guard = record?.directTargetGuard || null;
   if (!guard) return null;
   if (Number(guard.guardUntilMs || 0) > Date.now()) return guard;
-  tmuxWindowDirectTargetGuards.delete(key);
+  record.directTargetGuard = null;
+  pruneTmuxWindowNavigationRecord(key, record);
   return null;
 }
 
 function tmuxWindowDirectTargetGuardEntries() {
   const entries = [];
-  for (const [session, guard] of tmuxWindowDirectTargetGuards.entries()) {
+  for (const [session] of tmuxWindowNavigationRecords.entries()) {
     const active = tmuxWindowDirectTargetGuard(session);
     if (active) entries.push([session, active]);
-    else if (guard) tmuxWindowDirectTargetGuards.delete(session);
   }
   return entries;
 }
@@ -1456,13 +1605,14 @@ function setTmuxWindowDirectTargetGuard(session, windowIndex, sequence) {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (!key || indexKey === null) return false;
   const now = Date.now();
-  tmuxWindowDirectTargetGuards.set(key, {
+  const record = tmuxWindowNavigationRecord(key, {create: true});
+  record.directTargetGuard = {
     index: indexKey,
     sequence: Number(sequence) || 0,
     startedAtMs: now,
     confirmedAtMs: 0,
     guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
-  });
+  };
   return true;
 }
 
@@ -1475,11 +1625,12 @@ function confirmTmuxWindowDirectTargetGuard(session, windowIndex, options = {}) 
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
   const now = Date.now();
-  tmuxWindowDirectTargetGuards.set(key, {
+  const record = tmuxWindowNavigationRecord(key, {create: true});
+  record.directTargetGuard = {
     ...guard,
     confirmedAtMs: now,
     guardUntilMs: now + tmuxWindowDirectTargetGuardMs,
-  });
+  };
   return true;
 }
 
@@ -1488,12 +1639,16 @@ function clearTmuxWindowDirectTargetGuard(session, options = {}) {
   if (!key) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   const guard = tmuxWindowDirectTargetGuard(key);
+  if (!guard) return false;
   if (sequence > 0 && guard && Number(guard.sequence || 0) > 0 && Number(guard.sequence) !== sequence) return false;
-  return tmuxWindowDirectTargetGuards.delete(key);
+  const record = tmuxWindowNavigationRecord(key);
+  record.directTargetGuard = null;
+  pruneTmuxWindowNavigationRecord(key, record);
+  return true;
 }
 
 function tmuxWindowSwitchSequence(session) {
-  return Number(tmuxWindowSwitchSequences.get(String(session || '')) || 0);
+  return Number(tmuxWindowNavigationRecord(session)?.sequence || 0);
 }
 
 function tmuxWindowSwitchOptionSequence(options = {}) {
@@ -1510,7 +1665,7 @@ function nextTmuxWindowSwitchSequence(session) {
   const key = String(session || '');
   if (!key) return 0;
   const next = tmuxWindowSwitchSequence(key) + 1;
-  tmuxWindowSwitchSequences.set(key, next);
+  tmuxWindowNavigationRecord(key, {create: true}).sequence = next;
   return next;
 }
 
@@ -1519,7 +1674,7 @@ function tmuxWindowOverrideSequence(session, options = {}) {
   if (!key) return 0;
   const explicit = tmuxWindowSwitchOptionSequence(options);
   if (explicit > 0) {
-    tmuxWindowSwitchSequences.set(key, explicit);
+    tmuxWindowNavigationRecord(key, {create: true}).sequence = explicit;
     return explicit;
   }
   if (options.bumpSequence === false) return tmuxWindowSwitchSequence(key);
@@ -1542,7 +1697,7 @@ function updateTmuxWindowBarActiveButtons(session, windowIndex) {
 }
 
 function refreshTabberPanelsForTmuxWindowChange() {
-  if (fileExplorerMode === 'tabber' && itemIsActivePaneTab(fileExplorerItemId) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
+  if (itemInLayout(tabberItemId) && typeof refreshTabberPanels === 'function') refreshTabberPanels();
 }
 
 function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
@@ -1564,13 +1719,13 @@ function tmuxWindowInfoWithActiveIndex(info, windowIndex) {
 }
 
 function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, options = {}) {
-  const info = transcriptMeta.sessions?.[session];
+  const info = transcriptMetadataState.payload.sessions?.[session];
   const nextInfo = tmuxWindowInfoWithActiveIndex(info, windowIndex);
   if (!nextInfo) return false;
-  transcriptMeta = {
-    ...transcriptMeta,
-    sessions: {...(transcriptMeta.sessions || {}), [session]: nextInfo},
-  };
+  setTranscriptMetadataPayload({
+    ...transcriptMetadataState.payload,
+    sessions: {...(transcriptMetadataState.payload.sessions || {}), [session]: nextInfo},
+  });
   if (options.render === true) {
     updatePanelHeader(session, nextInfo);
     renderInfoPanel();
@@ -1597,7 +1752,7 @@ function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
   };
 }
 
-function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMeta) {
+function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = transcriptMetadataState.payload) {
   if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
   const previousSessions = previousPayload?.sessions && typeof previousPayload.sessions === 'object' ? previousPayload.sessions : {};
   let nextSessions = null;
@@ -1647,7 +1802,7 @@ function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
   const indexKey = tmuxWindowIndexKey(windowIndex);
   if (!session || indexKey === null) return false;
   const sequence = tmuxWindowOverrideSequence(session, options);
-  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = indexKey;
   setTmuxWindowDirectTargetGuard(session, indexKey, sequence);
   applyTmuxWindowActiveIndexToTranscriptInfo(String(session), indexKey, {render: true});
   updateTmuxWindowBarActiveButtons(session, indexKey);
@@ -1658,7 +1813,7 @@ function setTmuxWindowActiveIndexOverride(session, windowIndex, options = {}) {
 function setTmuxWindowActiveIndexPending(session, options = {}) {
   if (!session) return false;
   const sequence = tmuxWindowOverrideSequence(session, options);
-  tmuxWindowActiveIndexOverrides.set(String(session), tmuxWindowPendingActiveIndex);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = tmuxWindowPendingActiveIndex;
   clearTmuxWindowDirectTargetGuard(session);
   updateTmuxWindowBarActiveButtons(session, null);
   refreshTabberPanelsForTmuxWindowChange();
@@ -1669,8 +1824,11 @@ function clearTmuxWindowActiveIndexOverride(session, options = {}) {
   if (!session) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
-  const deleted = tmuxWindowActiveIndexOverrides.delete(String(session));
+  const record = tmuxWindowNavigationRecord(session);
+  const deleted = record?.activeIndexOverride !== undefined;
+  if (record) record.activeIndexOverride = undefined;
   if (options.clearDirectTarget === true) clearTmuxWindowDirectTargetGuard(session, {sequence});
+  pruneTmuxWindowNavigationRecord(session, record);
   if (deleted) refreshTabberPanelsForTmuxWindowChange();
   return deleted;
 }
@@ -1680,14 +1838,14 @@ function confirmTmuxWindowActiveIndexOverride(session, windowIndex, options = {}
   if (!session || indexKey === null) return false;
   const sequence = tmuxWindowSwitchOptionSequence(options);
   if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
-  tmuxWindowActiveIndexOverrides.set(String(session), indexKey);
+  tmuxWindowNavigationRecord(session, {create: true}).activeIndexOverride = indexKey;
   confirmTmuxWindowDirectTargetGuard(session, indexKey, {sequence});
   updateTmuxWindowBarActiveButtons(session, indexKey);
   refreshTabberPanelsForTmuxWindowChange();
   setTimeout(() => {
     if (sequence > 0 && !tmuxWindowSwitchSequenceMatches(session, sequence)) return;
     if (tmuxWindowActiveIndexOverride(session) !== indexKey) return;
-    if (tmuxWindowInfoActiveIndex(transcriptMeta.sessions?.[session]) === indexKey) {
+    if (tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]) === indexKey) {
       clearTmuxWindowActiveIndexOverride(session, {sequence});
     }
   }, tmuxWindowConfirmedOverrideHoldMs);
@@ -1755,7 +1913,7 @@ function tmuxWindowDisplayName(pane) {
   const name = String(pane?.window_name || '').trim();
   if (name) return name;
   const inferred = processLabelFromCommand(pane?.command || '');
-  return String(inferred || '').trim() || `window ${pane?.window ?? ''}`.trim() || 'window';
+  return String(inferred || '').trim() || t('terminal.window.unnamed', {index: pane?.window ?? ''});
 }
 
 function tmuxWindowProcessPid(pane) {
@@ -1763,8 +1921,14 @@ function tmuxWindowProcessPid(pane) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
 }
 
+function tmuxWindowPidText(pid) {
+  const value = Number(pid);
+  return Number.isFinite(value) && value > 0 ? t('terminal.window.pid', {pid: Math.floor(value)}) : '';
+}
+
 function tmuxWindowDisplayLabel(name, pid) {
-  return pid ? `${name} (pid=${pid})` : name;
+  const pidText = tmuxWindowPidText(pid);
+  return pidText ? `${name} ${pidText}` : name;
 }
 
 function tmuxWindowRecords(panes) {
@@ -1836,7 +2000,7 @@ function tmuxWindowButtonHtml(options = {}) {
   const agentStatus = options.agentStatus || null;
   const activityIconHtml = options.activityIconHtml !== undefined
     ? String(options.activityIconHtml || '')
-    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false});
+    : agentWindowActivityIconHtmlForStatus(agentStatus, options.agentKey, options.session || '', {animate: options.activityAnimate !== false, reserveStatusSlot: true, statusBeforeAgent: true});
   const labelHtml = options.labelHtml !== undefined ? String(options.labelHtml || '') : esc(visibleName);
   const numberLabel = String(options.numberLabel || options.indexText || visibleName);
   const numberHtml = options.showNumberLabel === false ? '' : `<span class="tmux-window-number-label">${esc(numberLabel)}</span>`;
@@ -1853,12 +2017,45 @@ function tmuxWindowAgentKey(name) {
   return 'other';
 }
 
-function tmuxWindowBarHtml(session, info, options = {}) {
+function tmuxWindowBarPaneFromSignal(windowRecord) {
+  const windowIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+  if (windowIndex === null) return null;
+  const activePane = (windowRecord.panes || []).find(pane => pane?.active === true) || windowRecord.panes?.[0] || {};
+  return {
+    window: windowIndex,
+    window_name: windowRecord.window_name || activePane.current_command || `window ${windowIndex}`,
+    pane: activePane.pane_index ?? '',
+    pane_id: activePane.pane_id || activePane.target || '',
+    target: activePane.target || activePane.pane_id || '',
+    current_path: activePane.current_path || '',
+    command: activePane.current_command || '',
+    active: activePane.active === true,
+    window_active: windowRecord.active === true,
+  };
+}
+
+function tmuxWindowBarPanes(session, info) {
   const panes = Array.isArray(info) ? info : info?.panes;
+  const signalWindows = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : [];
+  if (typeof tmuxSignalSnapshotAuthoritativeForSession === 'function' && tmuxSignalSnapshotAuthoritativeForSession(session)) {
+    return signalWindows.map(tmuxWindowBarPaneFromSignal).filter(Boolean);
+  }
+  const result = Array.isArray(panes) ? [...panes] : [];
+  const knownWindows = new Set(result.map(pane => tmuxWindowIndexKey(pane?.window ?? pane?.window_index)).filter(index => index !== null));
+  for (const windowRecord of signalWindows) {
+    const windowIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+    if (windowIndex === null || knownWindows.has(windowIndex)) continue;
+    result.push(tmuxWindowBarPaneFromSignal(windowRecord));
+    knownWindows.add(windowIndex);
+  }
+  return result;
+}
+
+function tmuxWindowBarHtml(session, info, options = {}) {
+  const panes = tmuxWindowBarPanes(session, info);
   const records = tmuxWindowRecords(panes);
   if (!records.length) return '';
   const disabled = options.disabled === true || readOnlyMode;
-  const activeIndexOverride = tmuxWindowDisplayActiveIndex(session);
   const labelMode = tmuxWindowBarLabelMode(records, options.infoBar === true && !options.labelMode ? {...options, labelMode: 'names'} : options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
   const contextAttr = options.infoBar === true ? ' data-tmux-window-bar-context="info-bar"' : '';
@@ -1867,21 +2064,14 @@ function tmuxWindowBarHtml(session, info, options = {}) {
     const fallbackName = record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.nameLabel}`;
     const visibleName = tmuxWindowCanonicalLabel(session, record, fallbackName, infoPayload);
     const {status: agentStatus, agentKey} = tmuxWindowAgentStatus(session, record, infoPayload);
-    const agentCurrent = typeof agentWindowPayloadCurrent === 'function' ? agentWindowPayloadCurrent(agentStatus) : null;
-    const recordActive = agentCurrent === null ? record.active : agentCurrent === true;
-    const active = activeIndexOverride === undefined ? recordActive : String(record.index) === activeIndexOverride;
-    const agentStatusForIcon = agentStatus
-      ? {...agentStatus, current: active, window_active: active}
-      : (active && ['claude', 'codex'].includes(agentKey)
-        ? {kind: agentKey, state: 'idle', window: record.indexText, window_index: record.index, current: true, window_active: true}
-        : agentStatus);
+    const active = tmuxWindowRecordIsActive(session, record);
     const title = t('terminal.window.title', {name: visibleName});
     return tmuxWindowButtonHtml({
       session,
       visibleName,
       numberLabel: record.numberLabel,
       active,
-      agentStatus: agentStatusForIcon,
+      agentStatus,
       agentKey,
       title,
       disabled,
@@ -1901,17 +2091,45 @@ function handleWindowStepButtonClick(event) {
   if (!button) return;
   if (button.dataset.windowIndex !== undefined) {
     const label = button.dataset.windowLabel || button.dataset.windowIndex;
-    if (typeof acknowledgeTerminalAttentionFromUserAction === 'function') {
-      acknowledgeTerminalAttentionFromUserAction(button.dataset.windowSession, button.dataset.windowIndex);
-    } else if (typeof acknowledgeAgentWindowActivity === 'function') {
-      acknowledgeAgentWindowActivity(button.dataset.windowSession, button.dataset.windowIndex, {delayMs: agentWindowActivityAcknowledgeDelayMs});
-    }
-    tmuxWindow(button.dataset.windowSession, {windowIndex: button.dataset.windowIndex}, `tmux sub-window ${label}`);
+    activateTmuxWindowFromUserAction(
+      button.dataset.windowSession,
+      button.dataset.windowIndex,
+      t('terminal.window.title', {name: label}),
+    );
     return;
   }
   const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
-  const label = button.dataset.windowDir === 'prev' ? 'previous tmux sub-window' : 'next tmux sub-window';
-  tmuxWindow(button.dataset.windowSession, key, label);
+  const label = button.dataset.windowDir === 'prev' ? t('terminal.window.previous') : t('terminal.window.next');
+  const session = String(button.dataset.windowSession || '').trim();
+  const target = tmuxWindowStepTarget(session, key);
+  if (target) {
+    activateTmuxWindowFromUserAction(session, target.index, t('terminal.window.title', {name: target.label}));
+    return;
+  }
+  // A collapsed or not-yet-rendered window bar cannot name the next target. It must still use the
+  // user-action transaction so leaving the current attention window never bypasses acknowledgement.
+  acknowledgeTerminalAttentionFromUserAction(session, null);
+  tmuxWindow(session, key, label);
+}
+
+function tmuxWindowStepTarget(session, direction) {
+  const sessionKey = String(session || '').trim();
+  if (!sessionKey || typeof document === 'undefined') return null;
+  const records = [];
+  const seen = new Set();
+  for (const button of document.querySelectorAll('.tmux-window-bar [data-window-index][data-window-session]')) {
+    if (String(button.dataset.windowSession || '').trim() !== sessionKey) continue;
+    const index = tmuxWindowIndexKey(button.dataset.windowIndex);
+    if (index === null || seen.has(index)) continue;
+    seen.add(index);
+    records.push({index, label: button.dataset.windowLabel || button.dataset.windowIndex || index});
+  }
+  if (!records.length) return null;
+  const current = tmuxWindowUserInteractionIndex(sessionKey);
+  const currentPosition = records.findIndex(record => record.index === current);
+  if (currentPosition < 0) return null;
+  const delta = direction === 'p' ? -1 : 1;
+  return records[(currentPosition + delta + records.length) % records.length] || null;
 }
 
 function windowStepButtonFromEvent(event) {
@@ -1957,8 +2175,10 @@ function updatePanelWindowStepButtons(session, info) {
     if (!row) return false;
     const replacement = replacementFromHtml();
     if (!replacement) return false;
+    const controls = row.querySelector(':scope > .pane-info-bar-controls') || row.querySelector('.pane-info-bar-controls');
     const close = row.querySelector(':scope > .panel-detail-close') || row.querySelector('.panel-detail-close');
-    if (close?.parentElement === row) row.insertBefore(replacement, close);
+    if (controls?.parentElement === row) row.insertBefore(replacement, controls);
+    else if (close?.parentElement === row) row.insertBefore(replacement, close);
     else row.appendChild(replacement);
     changed = true;
     return true;
@@ -1971,7 +2191,9 @@ function updatePanelWindowStepButtons(session, info) {
     return;
   }
   bars.forEach(existing => {
-    if (existing.outerHTML === html) return;
+    const existingSignature = agentWindowActivityMarkupSignature(existing.outerHTML);
+    const nextSignature = agentWindowActivityMarkupSignature(html);
+    if (existingSignature === nextSignature) return;
     const replacement = replacementFromHtml();
     if (replacement) {
       existing.replaceWith(replacement);
@@ -2009,11 +2231,11 @@ function updatePanelControlLabels(session, info) {
 }
 
 function searchHistoryResults() {
-  return Array.isArray(searchHistoryPayload?.results) ? searchHistoryPayload.results : [];
+  return Array.isArray(searchHistoryState.payload?.results) ? searchHistoryState.payload.results : [];
 }
 
 function runHistoryRows() {
-  return Array.isArray(runHistoryPayload?.runs) ? runHistoryPayload.runs : [];
+  return Array.isArray(runHistoryState.payload?.runs) ? runHistoryState.payload.runs : [];
 }
 
 function searchHistoryTimestampSeconds(value) {
@@ -2035,7 +2257,49 @@ function runHistoryAgentLabel(row) {
 function runHistoryPrLabel(row) {
   const pr = row?.pr && typeof row.pr === 'object' ? row.pr : null;
   if (!pr?.number) return '';
-  return `${t('searchHistory.pr')} #${pr.number}${pr.state ? ` ${pr.state}` : ''}`;
+  const status = pullRequestStatusDisplay(pr);
+  return `${t('common.pullRequestShort')} #${pr.number}${status ? ` ${status}` : ''}`;
+}
+
+function runHistoryStateLabel(value) {
+  const state = String(value || '');
+  if (state && stateDefs[state]) return stateDef(state).label;
+  if (state === 'waiting') return t('searchHistory.runState.waiting');
+  return t('common.unknown');
+}
+
+const SEARCH_HISTORY_SOURCE_KEYS = Object.freeze({
+  event: 'searchHistory.source.event',
+  session_summary: 'searchHistory.source.sessionSummary',
+  rolling_summary: 'searchHistory.source.rollingSummary',
+  global_summary: 'searchHistory.source.globalSummary',
+});
+const SEARCH_HISTORY_SOURCE_BY_LEGACY_KIND = Object.freeze({
+  event: 'event',
+  summary: 'session_summary',
+  global_summary: 'global_summary',
+});
+
+function searchHistorySourceLabel(result) {
+  const kind = String(result?.kind || '');
+  const source = String(result?.source || SEARCH_HISTORY_SOURCE_BY_LEGACY_KIND[kind] || '');
+  const key = SEARCH_HISTORY_SOURCE_KEYS[source];
+  return key ? t(key) : t('common.result');
+}
+
+function searchHistoryErrorText(payload) {
+  if (!payload) return '';
+  const message = structuredMessageText(payload, 'message');
+  if (message) return message;
+  return userMessageText(payload, String(payload?.error || payload?.message || payload));
+}
+
+function searchHistoryPanelErrors() {
+  const payloadErrors = Array.isArray(runHistoryState.payload?.errors) ? runHistoryState.payload.errors : [];
+  return [searchHistoryState.error, runHistoryState.error, ...payloadErrors]
+    .filter(Boolean)
+    .map(searchHistoryErrorText)
+    .filter(Boolean);
 }
 
 function runHistoryMetaParts(row) {
@@ -2046,7 +2310,7 @@ function runHistoryMetaParts(row) {
     runHistoryAgentLabel(row),
     started ? `${t('searchHistory.started')}: ${started}` : '',
     ended ? `${t('searchHistory.ended')}: ${ended}` : '',
-    row?.final_state ? `${t('searchHistory.finalState')}: ${row.final_state}` : '',
+    row?.final_state ? `${t('common.stateLabel')}: ${runHistoryStateLabel(row.final_state)}` : '',
     runHistoryPrLabel(row),
   ].filter(Boolean);
 }
@@ -2055,18 +2319,20 @@ function searchHistoryResultHtml(result, index) {
   const target = result?.target && typeof result.target === 'object' ? result.target : {};
   const session = target.session || result?.session || '';
   const time = searchHistoryTimeLabel(result?.timestamp);
-  const meta = [session, result?.kind || result?.source || '', time].filter(Boolean).join(' · ');
+  const meta = [session, searchHistorySourceLabel(result), time].filter(Boolean).join(' · ');
+  const title = structuredMessageText(result, 'title') || t('common.result');
+  const snippet = structuredMessageText(result, 'snippet');
   return `<button type="button" class="search-history-result" data-search-result-index="${index}">
     <span class="search-history-row-meta">${esc(meta)}</span>
-    <span class="search-history-row-title">${esc(result?.title || result?.kind || t('searchHistory.result'))}</span>
-    <span class="search-history-row-snippet">${esc(result?.snippet || '')}</span>
+    <span class="search-history-row-title">${esc(title)}</span>
+    <span class="search-history-row-snippet">${esc(snippet)}</span>
   </button>`;
 }
 
 function searchHistoryResultsHtml() {
   const results = searchHistoryResults();
-  if (searchHistoryLoading) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
-  if (!searchHistoryQuery.trim()) return `<div class="search-history-empty">${esc(t('searchHistory.emptyQuery'))}</div>`;
+  if (searchHistoryState.loading) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (!searchHistoryState.query.trim()) return `<div class="search-history-empty">${esc(t('searchHistory.emptyQuery'))}</div>`;
   if (!results.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyResults'))}</div>`;
   return `<div class="search-history-list">${results.map(searchHistoryResultHtml).join('')}</div>`;
 }
@@ -2087,25 +2353,26 @@ function runHistoryRowHtml(row) {
 
 function runHistoryRowsHtml() {
   const rows = runHistoryRows();
-  if (runHistoryLoading && !rows.length) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
+  if (runHistoryState.loading && !rows.length) return `<div class="search-history-empty">${esc(t('common.loading'))}</div>`;
   if (!rows.length) return `<div class="search-history-empty">${esc(t('searchHistory.emptyRuns'))}</div>`;
   return `<div class="search-history-list">${rows.map(runHistoryRowHtml).join('')}</div>`;
 }
 
 function searchHistoryPanelStatusText() {
-  if (searchHistoryLoading || runHistoryLoading) return t('common.loading');
-  if (searchHistoryError || runHistoryError) return searchHistoryError || runHistoryError;
+  if (searchHistoryState.loading || runHistoryState.loading) return t('common.loading');
+  const [error] = searchHistoryPanelErrors();
+  if (error) return error;
   return t('searchHistory.detail');
 }
 
 function searchHistoryPanelHtml() {
-  const errors = [searchHistoryError, runHistoryError].filter(Boolean);
+  const errors = searchHistoryPanelErrors();
   const errorHtml = errors.length ? `<div class="search-history-error">${esc(errors.join(' · '))}</div>` : '';
   return `
     <form class="search-history-search" data-search-history-form>
-      <input class="search-history-input" data-search-history-query value="${esc(searchHistoryQuery)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
-      <button type="submit" class="preferences-search-button">${esc(t('searchHistory.search'))}</button>
-      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('searchHistory.refresh'))}</button>
+      <input class="search-history-input" data-search-history-query value="${esc(searchHistoryState.query)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
+      <button type="submit" class="preferences-search-button">${esc(t('common.search'))}</button>
+      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('common.refresh'))}</button>
     </form>
     ${errorHtml}
     <section class="search-history-section" aria-label="${esc(t('searchHistory.results'))}">
@@ -2131,45 +2398,74 @@ function renderSearchHistoryPanels() {
 }
 
 async function refreshRunHistoryData() {
-  runHistoryLoading = true;
-  runHistoryError = '';
+  const requestIsCurrent = runHistoryState.guard.begin();
+  runHistoryState.loading = true;
+  runHistoryState.error = null;
   renderSearchHistoryPanels();
-  try {
-    runHistoryPayload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
-  } catch (error) {
-    runHistoryError = String(error?.payload?.error || error?.message || error);
-  } finally {
-    runHistoryLoading = false;
-    renderSearchHistoryPanels();
-  }
-  return runHistoryPayload;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/run-history', {cache: 'no-store'});
+      if (requestIsCurrent()) runHistoryState.payload = payload;
+    } catch (error) {
+      if (requestIsCurrent()) {
+        runHistoryState.error = error?.payload && typeof error.payload === 'object'
+          ? error.payload
+          : {error: String(error?.message || error)};
+      }
+    } finally {
+      if (runHistoryState.request === request) {
+        runHistoryState.loading = false;
+        runHistoryState.request = null;
+        renderSearchHistoryPanels();
+      }
+    }
+    return runHistoryState.payload;
+  })();
+  runHistoryState.request = request;
+  return request;
 }
 
-async function runSearchHistoryQuery(query = searchHistoryQuery) {
-  searchHistoryQuery = String(query || '').trim();
-  searchHistoryError = '';
-  if (!searchHistoryQuery) {
-    searchHistoryPayload = {query: '', results: []};
+async function runSearchHistoryQuery(query = searchHistoryState.query) {
+  const normalizedQuery = String(query || '').trim();
+  searchHistoryState.query = normalizedQuery;
+  searchHistoryState.error = null;
+  const requestIsCurrent = searchHistoryState.guard.begin();
+  if (!normalizedQuery) {
+    searchHistoryState.payload = {query: '', results: []};
+    searchHistoryState.loading = false;
+    searchHistoryState.request = null;
     renderSearchHistoryPanels();
-    return searchHistoryPayload;
+    return searchHistoryState.payload;
   }
-  searchHistoryLoading = true;
+  searchHistoryState.loading = true;
   renderSearchHistoryPanels();
-  try {
-    searchHistoryPayload = await apiFetchJson(`/api/search?q=${encodeURIComponent(searchHistoryQuery)}`, {cache: 'no-store'});
-  } catch (error) {
-    searchHistoryError = String(error?.payload?.error || error?.message || error);
-  } finally {
-    searchHistoryLoading = false;
-    renderSearchHistoryPanels();
-  }
-  return searchHistoryPayload;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/search?q=${encodeURIComponent(normalizedQuery)}`, {cache: 'no-store'});
+      if (requestIsCurrent()) searchHistoryState.payload = payload;
+    } catch (error) {
+      if (requestIsCurrent()) {
+        searchHistoryState.error = error?.payload && typeof error.payload === 'object'
+          ? error.payload
+          : {error: String(error?.message || error)};
+      }
+    } finally {
+      if (searchHistoryState.request === request) {
+        searchHistoryState.loading = false;
+        searchHistoryState.request = null;
+        renderSearchHistoryPanels();
+      }
+    }
+    return searchHistoryState.payload;
+  })();
+  searchHistoryState.request = request;
+  return request;
 }
 
 async function loadSearchHistoryPanelData(options = {}) {
   renderSearchHistoryPanels();
   await refreshRunHistoryData();
-  const query = options.query == null ? searchHistoryQuery : String(options.query || '');
+  const query = options.query == null ? searchHistoryState.query : String(options.query || '');
   if (query.trim()) await runSearchHistoryQuery(query);
   else renderSearchHistoryPanels();
 }
@@ -2214,7 +2510,7 @@ function bindSearchHistoryPanel(panel) {
     const refresh = event.target.closest('[data-run-history-refresh]');
     if (refresh && panel.contains(refresh)) {
       event.preventDefault();
-      loadSearchHistoryPanelData({query: searchHistoryQuery});
+      loadSearchHistoryPanelData({query: searchHistoryState.query});
       return;
     }
     const result = event.target.closest('[data-search-result-index]');
@@ -2235,22 +2531,20 @@ function createSearchHistoryPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel search-history-panel';
   panel.id = panelDomId(searchHistoryItemId);
-  panel.innerHTML = `
-      <div class="panel-head search-history-panel-head">
-        ${virtualPanelControlsHtml(searchHistoryItemId)}
-        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="pane-info-bar panel-detail-row">
+  panel.innerHTML = panelFrameHtml({
+    item: searchHistoryItemId,
+    headClass: 'search-history-panel-head',
+    controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
           <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
-      </div>
-      <div class="search-history-body info-pane panel-overlay-root">
-        <div id="panel-toasts-${searchHistoryItemId}" class="panel-toast-stack"></div>
-        <div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>
-      </div>`;
+      </div>`,
+    bodyClass: 'search-history-body info-pane',
+    bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+  });
   bindPanelShell(panel, searchHistoryItemId);
   bindSearchHistoryPanel(panel);
   return panel;

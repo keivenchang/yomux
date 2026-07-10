@@ -1,0 +1,29 @@
+name: verify-to-session
+kind: workflow
+description: >-
+  Delegate testing or validation to one known Claude/Codex tmux session. The planner may select a known target and preserve the requested check as a clean prompt, but cannot invent a server-side shell command. The confirmed persisted job rechecks target readiness before sending and can return the target's result through the normal watcher.
+tools:
+  - read_activity
+  - preview_send_prompt
+  - execute_confirmed_send
+triggers:
+  - have session 1 run focused tests
+  - ask agent 2 to validate the fix
+confirmation: required
+default_timeout_minutes: 120
+model_intent:
+  handler: wait-then-send
+  confirmation: required
+  defaults:
+    quiet_seconds: 3
+  candidate:
+    any_of:
+      - test
+      - validate
+      - verify
+      - reproduce
+    min_known_sessions: 1
+    priority: 10
+  output:
+    tag: yoagent-delegated-prompt
+    schema: delegated-prompt

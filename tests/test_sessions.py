@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 from yolomux_lib import sessions
-from yolomux_lib.common import PaneInfo, ProcessInfo
+from yolomux_lib.common import AgentInfo, PaneInfo, ProcessInfo
 from yolomux_lib.sessions import list_processes
 from yolomux_lib.sessions import pane_process_label
 
@@ -28,6 +28,16 @@ def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
     assert error is None
     assert calls == [(["ps", "-eww", "-o", "pid=,ppid=,command="], 8.0)]
     assert processes[10] == ProcessInfo(pid=10, ppid=1, command="python3 yolomux.py")
+
+
+def test_classify_agent_requires_an_agent_entry_point():
+    assert sessions.classify_agent("/Users/me/.local/bin/claude --resume abc") == "claude"
+    assert sessions.classify_agent("node /home/me/.local/bin/codex resume abc") == "codex"
+    assert sessions.classify_agent("python3 tools/claude.py --mock") == "claude"
+    assert sessions.classify_agent("python3 tools/codex.py --mock") == "codex"
+    assert sessions.classify_agent("rg -n claude yolomux_lib tests") is None
+    assert sessions.classify_agent("python3 -m pytest -k codex") is None
+    assert sessions.classify_agent("git commit -m 'fix claude notifications'") is None
 
 
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
@@ -177,6 +187,142 @@ def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):
     assert sessions.find_transcript_by_session_id(root, "session-123") == transcript
 
     assert glob_calls == ["**/session-123.jsonl"]
+
+
+def test_select_claude_agent_follows_daemon_delegated_session(tmp_path):
+    clear_transcript_lookup_cache()
+    claude_root = tmp_path / ".claude"
+    sessions_root = claude_root / "sessions"
+    projects_root = claude_root / "projects"
+    project_root = projects_root / "-repo"
+    sessions_root.mkdir(parents=True)
+    project_root.mkdir(parents=True)
+    old_transcript = project_root / "old-session.jsonl"
+    current_transcript = project_root / "current-session.jsonl"
+    old_transcript.write_text("{}\n", encoding="utf-8")
+    current_transcript.write_text("{}\n", encoding="utf-8")
+    os.utime(old_transcript, (1000, 1000))
+    os.utime(current_transcript, (2000, 2000))
+    (sessions_root / "101.json").write_text(json.dumps({
+        "pid": 101,
+        "sessionId": "old-session",
+        "cwd": "/repo",
+        "kind": "interactive",
+        "status": "busy",
+        "startedAt": 900_000,
+        "updatedAt": 1000_000,
+    }), encoding="utf-8")
+    (sessions_root / "104.json").write_text(json.dumps({
+        "pid": 104,
+        "sessionId": "current-session",
+        "cwd": "/repo",
+        "kind": "bg",
+        "status": "busy",
+        "startedAt": 1900_000,
+        "updatedAt": 2000_000,
+    }), encoding="utf-8")
+    candidates = [
+        ProcessInfo(pid=101, ppid=100, command="claude --dangerously-skip-permissions"),
+        ProcessInfo(pid=102, ppid=101, command="claude daemon run"),
+        ProcessInfo(pid=103, ppid=102, command="2.1.198 --bg-pty-host current.sock"),
+        ProcessInfo(pid=104, ppid=103, command="2.1.198 --session-id current-session --resume old-session.jsonl"),
+    ]
+
+    agent = sessions.select_claude_agent(
+        "1",
+        _pane(100),
+        candidates,
+        sessions_root=sessions_root,
+        projects_root=projects_root,
+    )
+
+    assert agent is not None
+    assert agent.pid == 104
+    assert agent.session_id == "current-session"
+    assert agent.transcript == str(current_transcript)
+
+
+def test_discover_sessions_emits_one_claude_agent_for_launcher_and_daemon_descendant(monkeypatch):
+    pane = _pane(100)
+    processes = {
+        100: ProcessInfo(pid=100, ppid=1, command="bash"),
+        101: ProcessInfo(pid=101, ppid=100, command="claude --dangerously-skip-permissions"),
+        102: ProcessInfo(pid=102, ppid=101, command="claude daemon run"),
+        103: ProcessInfo(pid=103, ppid=102, command="2.1.198 --session-id current-session"),
+    }
+    selected = AgentInfo(
+        session="1",
+        kind="claude",
+        pid=103,
+        pane_target=pane.target,
+        command=processes[103].command,
+        cwd="/repo",
+        status="busy",
+        session_id="current-session",
+        transcript="/repo/current-session.jsonl",
+        error=None,
+    )
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: ([pane], None))
+    monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
+    monkeypatch.setattr(sessions, "select_claude_agent", lambda _session, _pane, _processes: selected)
+
+    discovered, errors = sessions.discover_sessions(["1"])
+
+    assert errors == []
+    assert discovered["1"].agents == [selected]
+
+
+def test_discover_sessions_uses_one_canonical_agent_for_pane(monkeypatch):
+    pane = _pane(100)
+    processes = {
+        100: ProcessInfo(pid=100, ppid=1, command="bash"),
+        101: ProcessInfo(pid=101, ppid=100, command="node /home/me/.local/bin/codex resume abc"),
+        102: ProcessInfo(pid=102, ppid=101, command="/opt/codex resume abc"),
+        103: ProcessInfo(pid=103, ppid=102, command="rg -n claude yolomux_lib tests"),
+        104: ProcessInfo(pid=104, ppid=102, command="python3 -m pytest -k codex"),
+        105: ProcessInfo(pid=105, ppid=102, command="git commit -m 'fix claude notifications'"),
+    }
+    selected = AgentInfo(
+        session="1",
+        kind="codex",
+        pid=102,
+        pane_target=pane.target,
+        command=processes[102].command,
+        cwd="/repo",
+        status=None,
+        session_id="codex-session",
+        transcript="/repo/rollout.jsonl",
+        error=None,
+    )
+    selected_pids = []
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: ([pane], None))
+    monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
+    monkeypatch.setattr(
+        sessions,
+        "read_codex_agent",
+        lambda _session, _pane, process: selected_pids.append(process.pid) or selected,
+    )
+
+    discovered, errors = sessions.discover_sessions(["1"])
+
+    assert errors == []
+    assert selected_pids == [102]
+    assert discovered["1"].agents == [selected]
+
+
+def test_claude_transcript_family_paths_include_nested_subagents(tmp_path):
+    transcript = tmp_path / "session-id.jsonl"
+    direct = tmp_path / "session-id" / "subagents" / "agent-direct.jsonl"
+    nested = tmp_path / "session-id" / "subagents" / "nested" / "agent-nested.jsonl"
+    unrelated = tmp_path / "other.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    direct.parent.mkdir(parents=True)
+    nested.parent.mkdir(parents=True)
+    direct.write_text("{}\n", encoding="utf-8")
+    nested.write_text("{}\n", encoding="utf-8")
+    unrelated.write_text("{}\n", encoding="utf-8")
+
+    assert sessions.claude_transcript_family_paths(transcript) == [transcript, direct, nested]
 
 
 def test_codex_transcript_from_process_fd_prefers_open_rollout(tmp_path):

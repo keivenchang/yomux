@@ -1,0 +1,28 @@
+name: review-to-session
+kind: workflow
+description: >-
+  Delegate a code, diff, branch, or change review to one known Claude/Codex tmux session. The planner produces only a typed recipient and clean review request. YO!agent does not inspect a repository, execute a command, or apply changes itself; it waits for a prompt-ready target and sends only after explicit confirmation.
+tools:
+  - read_activity
+  - preview_send_prompt
+  - execute_confirmed_send
+triggers:
+  - have session 1 review the current diff
+  - ask agent 2 to audit the branch for regressions
+confirmation: required
+default_timeout_minutes: 120
+model_intent:
+  handler: wait-then-send
+  confirmation: required
+  defaults:
+    quiet_seconds: 3
+  candidate:
+    any_of:
+      - review
+      - audit
+      - inspect
+    min_known_sessions: 1
+    priority: 20
+  output:
+    tag: yoagent-delegated-prompt
+    schema: delegated-prompt

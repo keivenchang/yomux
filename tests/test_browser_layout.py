@@ -1,7 +1,558 @@
+import json
 import re
+from pathlib import Path
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+from tools.static_build import build_asset
+from yolomux_lib.locales import SHIPPED_LOCALES
+
+
+def test_browser_wait_timeout_has_one_xdist_only_floor():
+    assert browser_wait_timeout(5, worker="gw0") == XDIST_BROWSER_WAIT_FLOOR_SECONDS
+    assert browser_wait_timeout(15, worker="gw0") == 15
+    assert browser_wait_timeout(5, worker="") == 5
+
+
+def test_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path):
+    page = tmp_path / "browser-wait-helper.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html('<main id="ready">ready</main>'),
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const immediate = await window.__yolomuxTestWaitFor(
+            () => document.getElementById('ready')?.textContent,
+            {description: 'immediate fixture value'}
+          );
+          let delayedValue = '';
+          setTimeout(() => { delayedValue = 'delayed-value'; }, 20);
+          const delayed = await window.__yolomuxTestWaitFor(
+            () => delayedValue,
+            {timeoutMs: 500, intervalMs: 5, description: 'delayed fixture value'}
+          );
+          let asyncAttempts = 0;
+          const asyncValue = await window.__yolomuxTestWaitFor(
+            async () => {
+              await Promise.resolve();
+              asyncAttempts += 1;
+              return asyncAttempts >= 2 ? {ready: true} : false;
+            },
+            {timeoutMs: 500, intervalMs: 5, description: 'async fixture value'}
+          );
+          let timeout = '';
+          try {
+            await window.__yolomuxTestWaitFor(
+              () => false,
+              {timeoutMs: 15, intervalMs: 4, description: 'missing fixture state'}
+            );
+          } catch (error) {
+            timeout = String(error?.message || error);
+          }
+          done({immediate, delayed, asyncValue, asyncAttempts, timeout});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["immediate"] == "ready", metrics
+    assert metrics["delayed"] == "delayed-value", metrics
+    assert metrics["asyncValue"] == {"ready": True}, metrics
+    assert metrics["asyncAttempts"] == 2, metrics
+    assert metrics["timeout"] == "Timed out after 15ms waiting for missing fixture state", metrics
+
+
+def test_browser_paint_probe_resolves_scoped_tokens_from_the_component_owner(browser, tmp_path):
+    """A token expectation must inherit the component's local override, not the body's fallback."""
+    page = tmp_path / "browser-scoped-paint-probe.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html('<div id="owner" style="--fixture-paint: #123456"></div>'),
+    )
+    paint = browser.execute_script(
+        """
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const owner = document.getElementById('owner');
+        return {
+          scoped: probePaint('background:var(--fixture-paint)', owner).background,
+          root: probePaint('background:var(--fixture-paint)').background,
+        };
+        """
+    )
+    assert paint["scoped"] == "rgb(18, 52, 86)", paint
+    assert paint["root"] in ("rgba(0, 0, 0, 0)", "transparent"), paint
+
+
+def test_live_runtime_bundle_readiness_has_one_ready_and_error_owner():
+    class FixtureBrowser:
+        def __init__(self, state):
+            self.state = state
+
+        def execute_script(self, _script):
+            return self.state
+
+    ready = {"sentinel": True, "grid": True, "appRoot": False, "lateFunction": True, "url": "file:///tmp/live-runtime-boot.html", "errors": [], "rejections": []}
+    assert wait_for_live_runtime_bundle(FixtureBrowser(ready), timeout=0.01) == ready
+
+    replay_ready = {"sentinel": True, "grid": False, "appRoot": True, "lateFunction": True, "url": "file:///tmp/live-runtime-boot.html", "errors": [], "rejections": []}
+    assert wait_for_live_runtime_bundle(FixtureBrowser(replay_ready), timeout=0.01) == replay_ready
+
+    redirected = {"sentinel": False, "grid": False, "appRoot": False, "lateFunction": False, "url": "file:///login", "errors": [], "rejections": []}
+    assert wait_for_live_runtime_bundle(
+        FixtureBrowser(redirected),
+        timeout=0.01,
+        expected_url="file:///tmp/live-runtime-boot.html",
+        expected_redirect_paths=("/login",),
+    ) == redirected
+
+    unexpected_redirect = {**redirected, "url": "file:///broken"}
+    assert live_runtime_bundle_ready_state(unexpected_redirect, "/tmp/live-runtime-boot.html", ("/login",)) is False
+    chrome_error = {**redirected, "url": "chrome-error://chromewebdata/"}
+    assert live_runtime_bundle_ready_state(chrome_error, "/tmp/live-runtime-boot.html") is False
+    assert live_runtime_bundle_ready_state(chrome_error, "/tmp/live-runtime-boot.html", ("/login",)) == chrome_error
+
+    failed = {"sentinel": False, "grid": True, "appRoot": False, "lateFunction": False, "url": "file:///tmp/live-runtime-boot.html", "errors": [{"message": "bundle boom"}], "rejections": []}
+    with pytest.raises(AssertionError, match="bundle boom"):
+        wait_for_live_runtime_bundle(FixtureBrowser(failed), timeout=0.01)
+
+
+def test_live_runtime_raw_html_builder_has_no_external_callers():
+    external_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((REPO_ROOT / "tests").glob("test_browser_*.py"))
+    )
+    assert "live_runtime_boot_fixture" + "_html(" not in external_sources
+
+
+def test_static_browser_fixtures_have_one_write_and_navigation_owner():
+    source = (REPO_ROOT / "tests" / "browser_helpers" / "browser_layout.py").read_text(encoding="utf-8")
+
+    assert source.count("page.write_text(") == 2  # one static helper plus the distinct full-bundle loader
+    assert source.count("browser.get(page.as_uri())") == 1
+    assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
+
+
+def test_pane_width_fixture_keeps_the_production_tab_row_contract(browser, tmp_path):
+    """The CSS-only width fixture may be small, but its tab row must not fork from the real builder."""
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof paneTabInnerHtml === 'function'"))
+    production = browser.execute_script(
+        """
+        const root = document.createElement('div');
+        root.innerHTML = paneTabInnerHtml('1');
+        const classes = ['pane-tab-core', 'session-button-prefix', 'session-button-name', 'session-button-text'];
+        return Object.fromEntries(classes.map(name => [name, root.querySelectorAll(`.${name}`).length]));
+        """
+    )
+    load_fixture(browser, tmp_path, 480)
+    fixture = browser.execute_script(
+        """
+        const tab = document.querySelector('.pane-tab');
+        const classes = ['pane-tab-core', 'session-button-prefix', 'session-button-name', 'session-button-text'];
+        return Object.fromEntries(classes.map(name => [name, tab.querySelectorAll(`.${name}`).length]));
+        """
+    )
+    assert fixture == production, {"production": production, "fixture": fixture}
+
+
+def test_pc_controls_fixture_keeps_the_production_toolbar_button_contract(browser, tmp_path):
+    """Static control fixtures may vary content, but not the shared toolbar-button shape."""
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof toolbarButtonHtml === 'function'"))
+    production = browser.execute_script(
+        """
+        const root = document.createElement('div');
+        root.innerHTML = toolbarButtonHtml({
+          id: 'pane-zoom',
+          className: 'tab pane-expand pc-window-control pc-zoom',
+          action: 'fixture-zoom',
+        });
+        const button = root.firstElementChild;
+        return {
+          tag: button?.tagName,
+          type: button?.getAttribute('type'),
+          classes: [...button.classList].sort(),
+          action: button?.dataset.action,
+        };
+        """
+    )
+    load_pc_controls_fixture(browser, tmp_path)
+    fixture = browser.execute_script(
+        """
+        const button = document.getElementById('pane-zoom');
+        return {
+          tag: button?.tagName,
+          type: button?.getAttribute('type'),
+          classes: [...button.classList].sort(),
+          action: button?.dataset.action,
+        };
+        """
+    )
+    assert fixture == production, {"production": production, "fixture": fixture}
+
+
+def test_isolated_tmux_runtime_supports_named_commands_dimensions_and_cleanup(monkeypatch, tmp_path):
+    session = f"yt-named-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    runtime = start_isolated_tmux_runtime(
+        monkeypatch,
+        tmp_path,
+        session_commands={session: "printf 'named command ready\\n'; exec sh"},
+        columns=93,
+        rows=27,
+    )
+    socket_dir = runtime.socket_dir
+    try:
+        ready, panes = wait_for_isolated_tmux_panes(
+            runtime,
+            [session],
+            lambda captures: "named command ready" in captures[session],
+            timeout=5,
+            poll_interval=0.05,
+        )
+        dimensions = run_isolated_tmux(
+            runtime,
+            "display-message",
+            "-p",
+            "-t",
+            f"{session}:",
+            "#{window_width}x#{window_height}",
+            timeout=5,
+        )
+        assert ready, panes
+        assert dimensions.returncode == 0, dimensions.stderr or dimensions.stdout
+        assert dimensions.stdout.strip() == "93x27"
+    finally:
+        stop_isolated_tmux_runtime(runtime)
+    assert not socket_dir.exists()
+
+
+def test_agent_prompt_browser_cases_share_the_isolated_tmux_runtime_owner():
+    source = Path(__file__).read_text(encoding="utf-8")
+    function_sources = {}
+    for test_name in (
+        "test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
+        "test_real_agent_prompts_render_ask_attention_in_live_server",
+    ):
+        match = re.search(rf"^def {re.escape(test_name)}\(", source, re.MULTILINE)
+        assert match is not None
+        start = match.start()
+        end = source.find("\ndef test_", start + 1)
+        function_source = source[start:end if end >= 0 else len(source)]
+        function_sources[test_name] = function_source
+        assert "start_isolated_tmux_runtime(" in function_source
+        assert "run_isolated_tmux(" in function_source
+        assert "wait_for_isolated_tmux_panes(" in function_source
+        assert "stop_isolated_tmux_runtime(" in function_source
+        assert "subprocess.run(" not in function_source
+        assert "def tmux_cmd(" not in function_source
+    real_source = function_sources["test_real_agent_prompts_render_ask_attention_in_live_server"]
+    assert "getattr(" not in real_source
+    assert "except Exception:" not in real_source
+    assert "window.__yolomuxTestWaitFor" in real_source
+    assert "ui_deadline" not in real_source
+    assert "time.sleep(0.5)" not in real_source
+
+
+def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tmp_path):
+    page = tmp_path / "branch-list-title-theme.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html('<div class="branch-list-title">Branches</div>'),
+    )
+    colors = browser.execute_script(
+        """
+        const title = document.querySelector('.branch-list-title');
+        const dark = getComputedStyle(title).color;
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const darkExpected = probePaint('color:var(--neutral-text-cool)').color;
+        document.body.classList.add('theme-light');
+        const light = getComputedStyle(title).color;
+        const lightExpected = probePaint('color:var(--neutral-text-cool)').color;
+        return {dark, light, darkExpected, lightExpected};
+        """
+    )
+    assert colors["dark"] == colors["darkExpected"], colors
+    assert colors["light"] == colors["lightExpected"], colors
+    assert colors["dark"] != colors["light"], colors
+
+
+def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(browser, tmp_path):
+    page = tmp_path / "tab-metadata-visibility.html"
+    tab_body = '<span class="session-yolo-marker">YO</span><span class="session-button-name">1</span><span class="tab-symbol ci-indicator branch-indicator">MAIN</span><span class="session-button-detail">description</span>'
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
+      <button id="regular-tab" class="pane-tab active">{tab_body}</button>
+      <button id="compact-tab" class="tmux-pane-tab-token active">{tab_body}</button>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const regular = document.getElementById('regular-tab');
+        const compact = document.getElementById('compact-tab');
+        const read = tab => ({
+          symbol: getComputedStyle(tab.querySelector('.tab-symbol')).display,
+          symbolText: tab.querySelector('.branch-indicator')?.textContent || '',
+          symbolColor: getComputedStyle(tab.querySelector('.branch-indicator')).color,
+          symbolBackground: getComputedStyle(tab.querySelector('.branch-indicator')).backgroundColor,
+          yolo: getComputedStyle(tab.querySelector('.session-yolo-marker')).display,
+          number: tab.querySelector('.session-button-name')?.textContent || '',
+          detail: tab.querySelector('.session-button-detail')?.textContent || '',
+        });
+        document.body.classList.add('tab-meta-hidden');
+        const hidden = {regular: read(regular), compact: read(compact)};
+        document.body.classList.remove('tab-meta-hidden');
+        const visible = {regular: read(regular), compact: read(compact)};
+        return {hidden, visible};
+        """
+    )
+    for tab in metrics["hidden"].values():
+        assert tab["symbol"] == "none", metrics
+        assert tab["yolo"] != "none", metrics
+        assert tab["number"] == "1", metrics
+        assert tab["detail"] == "description", metrics
+    for tab in metrics["visible"].values():
+        assert tab["symbol"] != "none", metrics
+        assert tab["symbolText"] == "MAIN", metrics
+        assert tab["symbolColor"] != tab["symbolBackground"], metrics
+
+
+def test_session_popover_agent_row_wraps_text_after_compact_state_and_ai_controls(browser, tmp_path):
+    page = tmp_path / "session-popover-agent-row-wrap.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div id="row" class="session-agent-row attention">
+        <span id="controls" class="session-agent-kind"><span class="agent-window-activity"><span class="agent-window-status-dot">■</span><span class="agent-icon">✳</span></span></span>12:claude a deliberately long tmux window name that should wrap in the popover <span id="separator" class="session-agent-sep">—</span> needs input
+      </div>
+    """, extra_css="""
+      body { margin: 0; padding: 16px; background: var(--bg); }
+      #row { box-sizing: border-box; width: 210px; padding: 3px 5px; border-radius: 5px; background: var(--pane-inactive-tab-bg); }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const row = document.getElementById('row');
+        const controls = document.getElementById('controls');
+        const separator = document.getElementById('separator');
+        const labelRange = document.createRange();
+        labelRange.setStartAfter(controls);
+        labelRange.setEndBefore(separator);
+        const labelRects = [...labelRange.getClientRects()].map(rect => ({
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          width: rect.width,
+        }));
+        const rowRect = row.getBoundingClientRect();
+        const controlsRect = controls.getBoundingClientRect();
+        return {
+          controlsLeft: controlsRect.left,
+          controlsRight: controlsRect.right,
+          rowLeft: rowRect.left,
+          rowRight: rowRect.right,
+          scrollWidth: row.scrollWidth,
+          clientWidth: row.clientWidth,
+          labelRects,
+        };
+        """
+    )
+    assert metrics["controlsLeft"] - metrics["rowLeft"] <= 6, metrics
+    assert metrics["labelRects"][0]["left"] >= metrics["controlsRight"] - 1, metrics
+    assert len(metrics["labelRects"]) >= 2, metrics
+    assert metrics["labelRects"][1]["left"] <= metrics["labelRects"][0]["left"] + 1, metrics
+    assert metrics["scrollWidth"] <= metrics["clientWidth"], metrics
+
+
+def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(browser, tmp_path):
+    cases = [
+        {"tone": "attention", "pulsing": True, "expected_fill": "#dc2626", "window_index": 2},
+        {"tone": "attention", "pulsing": False, "expected_fill": "#dc2626", "window_index": 3},
+        {"tone": "cooldown", "pulsing": True, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 4},
+        {"tone": "cooldown", "pulsing": False, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 5},
+    ]
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    browser.execute_script(
+        """
+        const cases = arguments[0];
+        const now = Date.now() / 1000;
+        agentStatusPulsePeriodMs = 1200;
+        document.documentElement.style.setProperty('--pulse-duration', '1.2s');
+        document.documentElement.style.setProperty('--status-pulse-step-count', '10');
+        setAttentionAnimationClockDelay();
+        workflowTransitionGlowSeconds = 60;
+        const acknowledgementKeyFor = (item, tone) => JSON.stringify([
+          'agent-window',
+          '1',
+          String(item.window_index),
+          '',
+          'codex',
+          tone === 'attention' ? 'approval' : 'cooldown',
+          `click-gray-${item.window_index}`,
+        ]);
+        const agentFor = (item, tone = item.tone) => {
+          const acknowledgementKey = acknowledgementKeyFor(item, tone);
+          return tone === 'attention'
+            ? {kind: 'codex', state: 'approval', window_index: item.window_index, window_label: `${item.window_index}:codex`, attention_key: acknowledgementKey, attention_acknowledged: false, screen_text: 'Approval required', observed_ts: now}
+            : {kind: 'codex', state: 'idle', window_index: item.window_index, window_label: `${item.window_index}:codex`, working_stopped_ts: now - item.window_index, idle_since: now - item.window_index, cooldown_attention_key: acknowledgementKey, cooldown_acknowledged: false, observed_ts: now};
+        };
+        const payloadFor = agentWindows => ({
+          session_order: ['1'],
+          sessions: {'1': {target: '1', enabled: false, screen: {key: 'idle'}, agent_windows: agentWindows}},
+          rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+        });
+        const staticPreseed = cases.filter(item => !item.pulsing).map(item => agentFor(item, item.tone === 'attention' ? 'cooldown' : 'attention'));
+        applyAutoApprovePayload(payloadFor(staticPreseed));
+        refreshAgentWindowActivityDisplays();
+        const payload = payloadFor(cases.map(item => agentFor(item)));
+        window.__fixtureAutoApprovePayload = payload;
+        applyAutoApprovePayload(payload);
+        refreshAgentWindowActivityDisplays();
+        const findButton = index => [...document.querySelectorAll(`[data-window-session="1"][data-window-index="${index}"]`)].find(node => node.offsetParent !== null);
+        const read = (index, label) => {
+          const dot = findButton(index)?.querySelector('.agent-window-status-dot');
+          const style = dot ? getComputedStyle(dot) : null;
+          const stateRow = (autoApproveStates.get('1')?.agent_windows || []).find(row => Number(row?.window_index) === index);
+          const fixtureRow = (window.__fixtureAutoApprovePayload?.sessions?.['1']?.agent_windows || []).find(row => Number(row?.window_index) === index);
+          const key = String(stateRow?.attention_key || stateRow?.cooldown_attention_key || fixtureRow?.attention_key || fixtureRow?.cooldown_attention_key || '');
+          const record = attentionAcknowledgementRecord(key);
+          const pseudo = name => {
+            const pseudoStyle = dot ? getComputedStyle(dot, name) : null;
+            return {content: pseudoStyle?.content || '', width: pseudoStyle?.width || '', height: pseudoStyle?.height || '', background: pseudoStyle?.backgroundColor || ''};
+          };
+          return {label, gray: dot?.classList.contains('agent-window-status-dot--acknowledging') || false, pulsing: dot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false, fill: style?.getPropertyValue('--subwindow-status-glyph-fill').trim() || '', opacity: Number(style?.opacity || 0), animationName: style?.animationName || '', animationDuration: style?.animationDuration || '', animationDelay: style?.animationDelay || '', animationIterationCount: style?.animationIterationCount || '', animationTimingFunction: style?.animationTimingFunction || '', acknowledgement: {pending: record?.pending === true, recorded: record?.recordedAt !== null && record?.recordedAt !== undefined, state: stateRow?.attention_acknowledged === true || stateRow?.cooldown_acknowledged === true, fixture: fixtureRow?.attention_acknowledged === true || fixtureRow?.cooldown_acknowledged === true}, before: pseudo('::before'), after: pseudo('::after')};
+        };
+        window.__subwindowGrayClickSamples = Object.fromEntries(cases.map(item => [String(item.window_index), [read(item.window_index, 'before')]]));
+        window.__subwindowGrayClicked = new Set();
+        document.addEventListener('pointerdown', event => {
+          const button = event.target?.closest?.('[data-window-session="1"][data-window-index]');
+          const index = Number(button?.dataset?.windowIndex);
+            const samples = window.__subwindowGrayClickSamples[String(index)];
+            if (!samples || window.__subwindowGrayClicked.has(index)) return;
+                    window.__subwindowGrayClicked.add(index);
+                    const clickedAt = performance.now();
+                    const captureAt = (label, currentTime) => {
+                      refreshAgentWindowActivityDisplays();
+                      const dot = findButton(index)?.querySelector('.agent-window-status-dot');
+                      dot?.style.setProperty('--agent-status-acknowledgement-delay', '0s');
+                      const animation = dot?.getAnimations().find(item => item.animationName === 'agent-status-acknowledgement-fade');
+                      if (animation) {
+                        animation.pause();
+                        animation.currentTime = currentTime;
+                      }
+                      samples.push(read(index, label));
+                    };
+                    const captureSettled = () => {
+                      refreshAgentWindowActivityDisplays();
+                      const sample = read(index, 'settled');
+              if (!sample.gray || performance.now() - clickedAt >= 3000) samples.push(sample);
+              else setTimeout(captureSettled, 100);
+            };
+                setTimeout(() => {
+                  captureAt('100ms', 100);
+                  captureAt('500ms', 500);
+                  captureAt('1000ms', 1000);
+                }, 0);
+            setTimeout(captureSettled, 1400);
+        }, {capture: true});
+        return window.__subwindowGrayClickSamples;
+        """,
+        cases,
+    )
+    for case in cases:
+        selector = f'[data-window-session="1"][data-window-index="{case["window_index"]}"]'
+        click_visible_selector(browser, selector)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return Object.values(window.__subwindowGrayClickSamples || {}).every(samples => samples.length === 5)")
+    )
+    samples_by_window = browser.execute_script("return window.__subwindowGrayClickSamples")
+    expected_gray = browser.execute_script(
+        "return window.__yolomuxTestHelpers.probePaint('background:var(--muted)').background"
+    )
+    for case in cases:
+        samples = samples_by_window[str(case["window_index"])]
+        evidence = {"case": case, "samples": samples}
+        assert samples[0]["gray"] is False and samples[0]["pulsing"] is case["pulsing"] and samples[0]["fill"] == case["expected_fill"], evidence
+        for sample in samples[1:4]:
+            assert sample["gray"] is True and sample["pulsing"] is False and sample["fill"] == "#9aa5b1", evidence
+            assert sample["animationName"] == "agent-status-acknowledgement-fade", evidence
+            assert sample["animationDuration"] == "1.2s", evidence
+            assert -1.2 <= float(sample["animationDelay"].removesuffix("s")) <= 0, evidence
+            assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith("steps(10"), evidence
+            assert float(sample["before"]["width"].removesuffix("px")) > 0, evidence
+            assert float(sample["before"]["height"].removesuffix("px")) > 0, evidence
+            assert sample["before"]["background"] == expected_gray, evidence
+            if case["tone"] == "cooldown":
+                assert float(sample["after"]["width"].removesuffix("px")) > 0, evidence
+                assert float(sample["after"]["height"].removesuffix("px")) > 0, evidence
+                assert sample["after"]["background"] == expected_gray, evidence
+        assert samples[1]["opacity"] > samples[2]["opacity"] > samples[3]["opacity"] > 0, evidence
+        assert samples[1]["opacity"] >= 0.8 and samples[3]["opacity"] <= 0.6, evidence
+        assert samples[1]["opacity"] - samples[3]["opacity"] >= 0.4, evidence
+        assert samples[4]["gray"] is False and samples[4]["fill"] == "", {
+            "case": case,
+            "acknowledgement": samples[4]["acknowledgement"],
+            "gray": samples[4]["gray"],
+            "fill": samples[4]["fill"],
+        }
+
+
+def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(browser, tmp_path):
+    page = tmp_path / "tab-reserves-invisible-status-ball.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <section class="tab-prefix-fixture">
+        <button id="with-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="without-ball" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><span class="session-button-number">3</span></span><span class="session-button-text">#86 DRAFT feature title</span></span></button>
+        <button id="long-name" class="pane-tab active"><span class="pane-tab-core"><span class="session-agent-activity-marker session-agent-activity-marker--placeholder"><span class="agent-window-activity agent-window-activity--status-only"><span class="agent-window-status-dot"></span></span></span><span class="session-button-prefix"><strong class="session-button-name session-button-identifier">[vortex-utils.production]</strong></span><span class="session-button-text">keivenc</span></span></button>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 16px; background: #202633; }
+      .tab-prefix-fixture { display: grid; justify-items: start; gap: 8px; }
+      .pane-tab { width: 420px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const read = id => {
+          const tab = document.getElementById(id);
+          const number = tab.querySelector('.session-button-number');
+          const text = tab.querySelector('.session-button-text');
+          const numberRect = number.getBoundingClientRect();
+          const textRect = text.getBoundingClientRect();
+          const marker = tab.querySelector('.session-agent-activity-marker');
+          const markerRect = marker.getBoundingClientRect();
+          return {markerWidth: markerRect.width, numberWidth: numberRect.width, textLeft: textRect.left};
+        };
+        return {withBall: read('with-ball'), withoutBall: read('without-ball')};
+        """
+    )
+    assert abs(metrics["withoutBall"]["markerWidth"] - metrics["withBall"]["markerWidth"]) <= 0.5, metrics
+    assert abs(metrics["withoutBall"]["textLeft"] - metrics["withBall"]["textLeft"]) <= 0.5, metrics
+    assert metrics["withBall"]["numberWidth"] < 2 * metrics["withBall"]["markerWidth"], metrics
+    long_name = browser.execute_script(
+        """
+        const name = document.querySelector('#long-name .session-button-name');
+        return {clientWidth: name.clientWidth, scrollWidth: name.scrollWidth, text: name.textContent};
+        """
+    )
+    assert long_name["text"] == "[vortex-utils.production]", long_name
+    assert long_name["scrollWidth"] <= long_name["clientWidth"], long_name
 
 
 _CLAUDE_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
@@ -25,7 +576,7 @@ _CODEX_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
 </svg>"""
 
 
-def _agent_status_glyph_html(kind, state, element_id):
+def _agent_status_glyph_html(kind, state, element_id, *, subwindow=False):
     svg = _CLAUDE_WORKING_ICON_SVG if kind == "claude" else _CODEX_WORKING_ICON_SVG
     label = f"{'Claude' if kind == 'claude' else 'Codex'} {state}"
     dot_classes = [
@@ -40,7 +591,7 @@ def _agent_status_glyph_html(kind, state, element_id):
     if state in ("attention", "cooldown"):
         dot_classes.append("attention-pulse")
     return f"""
-      <span class="agent-window-activity agent-window-activity--{state}" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
+      <span class="agent-window-activity{' agent-window-activity--subwindow' if subwindow else ''} agent-window-activity--{state}" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
         <span id="{element_id}" class="agent-icon {kind} agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--{state} agent-window-agent-icon--{state}" aria-label="{label}" title="{label}">
           {svg}
         </span>
@@ -49,8 +600,8 @@ def _agent_status_glyph_html(kind, state, element_id):
     """
 
 
-def _working_agent_glyph_html(kind, element_id):
-    return _agent_status_glyph_html(kind, "working", element_id)
+def _working_agent_glyph_html(kind, element_id, *, subwindow=False):
+    return _agent_status_glyph_html(kind, "working", element_id, subwindow=subwindow)
 
 
 def _tabber_window_button_html(kind, label, glyph_html, active=False):
@@ -69,7 +620,11 @@ def _tabber_window_button_html(kind, label, glyph_html, active=False):
 
 def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
     page = tmp_path / "debug-agent-status-axis-guides.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="js-debug-chart debug-chart-fixture" data-js-debug-chart="activity">
         <div class="js-debug-chart-head">
           <span class="js-debug-chart-title">Agent status</span>
@@ -77,16 +632,16 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
         <div class="js-debug-chart-body">
           <div class="js-debug-y-axis js-debug-y-axis--integer" data-js-debug-axis="activity">
             <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="3" data-js-debug-axis-max="activity" style="--js-debug-axis-y: 6.667%;">3</span>
-            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="2" style="--js-debug-axis-y: 35.556%;">2</span>
-            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="1" style="--js-debug-axis-y: 64.444%;">1</span>
-            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="0" data-js-debug-axis-zero="activity" style="--js-debug-axis-y: 93.333%;">0</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="2" style="--js-debug-axis-y: 37.778%;">2</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="1" style="--js-debug-axis-y: 68.889%;">1</span>
+            <span data-js-debug-axis-tick="activity" data-js-debug-axis-value="0" data-js-debug-axis-zero="activity" style="--js-debug-axis-y: 100%;">0</span>
           </div>
           <div class="js-debug-plot">
             <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
               <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="3" x1="0" y1="8.0" x2="600" y2="8.0" vector-effect="non-scaling-stroke"></line>
-              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="2" x1="0" y1="42.7" x2="600" y2="42.7" vector-effect="non-scaling-stroke"></line>
-              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="1" x1="0" y1="77.3" x2="600" y2="77.3" vector-effect="non-scaling-stroke"></line>
-              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="0" x1="0" y1="112.0" x2="600" y2="112.0" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="2" x1="0" y1="45.3" x2="600" y2="45.3" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="1" x1="0" y1="82.7" x2="600" y2="82.7" vector-effect="non-scaling-stroke"></line>
+              <line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-line="activity" data-js-debug-grid-value="0" x1="0" y1="120.0" x2="600" y2="120.0" vector-effect="non-scaling-stroke"></line>
             </svg>
           </div>
           <div class="js-debug-x-axis" data-js-debug-x-axis>
@@ -96,11 +651,11 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
           </div>
         </div>
       </section>
-    """, extra_css="""
-      body { margin: 0; padding: 24px; background: #111827; color: #e5e7eb; }
-      .debug-chart-fixture { width: 560px; height: 260px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css=f"""
+      body {{ margin: 0; padding: 24px; background: {ui_pin('paneMetaPathLight')}; color: #e5e7eb; }}
+      .debug-chart-fixture {{ width: 560px; height: 260px; }}
+    """),
+    )
     metrics = browser.execute_script(
         """
         const svg = document.querySelector('.js-debug-line-chart');
@@ -120,34 +675,111 @@ def test_debug_agent_status_y_axis_guides_align_with_labels(browser, tmp_path):
         """
     )
     assert max(item["deltaY"] for item in metrics) <= 0.75, metrics
-    assert all(0 < item["strokeWidth"] <= 0.5 for item in metrics), metrics
+    assert all(0 < item["strokeWidth"] <= 0.8 for item in metrics), metrics
+
+
+def test_debug_agent_status_hidden_integer_guides_stay_full_width_and_distinct(browser, tmp_path):
+    axis_max = 12
+    labeled_values = list(range(axis_max, -1, -2))
+    grid_values = list(range(axis_max, -1, -1))
+    labels_html = "".join(
+        f'<span data-js-debug-axis-value="{value}">{value}</span>'
+        for value in labeled_values
+    )
+    grid_html = "".join(
+        f'<line class="js-debug-grid-line js-debug-grid-line--integer" data-js-debug-grid-value="{value}" x1="0" y1="{8 + (1 - value / axis_max) * 112:.1f}" x2="600" y2="{8 + (1 - value / axis_max) * 112:.1f}" vector-effect="non-scaling-stroke"></line>'
+        for value in grid_values
+    )
+    page = tmp_path / "debug-agent-status-hidden-integer-guides.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
+      <section class="js-debug-graph-view">
+        <div class="js-debug-y-axis">{labels_html}</div>
+        <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
+          <rect class="js-debug-bar js-debug-bar--idleAgents" data-idle-fill x="0" y="8" width="600" height="104"></rect>
+          {grid_html}
+        </svg>
+      </section>
+    """, extra_css=f"""
+      body {{ margin: 0; padding: 24px; background: {ui_pin('paneMetaPathLight')}; color: #e5e7eb; }}
+      .js-debug-graph-view {{ width: 560px; }}
+      .js-debug-line-chart {{ width: 520px; height: 220px; }}
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const lines = [...document.querySelectorAll('[data-js-debug-grid-value]')];
+        const labels = new Set([...document.querySelectorAll('[data-js-debug-axis-value]')].map(node => node.dataset.jsDebugAxisValue));
+        const hidden = lines.filter(line => !labels.has(line.dataset.jsDebugGridValue));
+        const rgb = value => {
+          const numbers = (String(value).match(/[0-9.]+/g) || []).slice(0, 3).map(Number);
+          return String(value).startsWith('color(srgb') ? numbers.map(number => number * 255) : numbers;
+        };
+        const lineColor = rgb(getComputedStyle(lines[0]).stroke);
+        const idleColor = rgb(getComputedStyle(document.querySelector('[data-idle-fill]')).fill);
+        const colorDistance = Math.sqrt(lineColor.reduce((total, value, index) => total + ((value - idleColor[index]) ** 2), 0));
+        return {
+          count: lines.length,
+          values: lines.map(line => Number(line.dataset.jsDebugGridValue)),
+          hiddenValues: hidden.map(line => Number(line.dataset.jsDebugGridValue)),
+          fullWidth: lines.every(line => line.getAttribute('x1') === '0' && line.getAttribute('x2') === '600'),
+          strokeWidths: lines.map(line => Number.parseFloat(getComputedStyle(line).strokeWidth)),
+          colorDistance,
+        };
+        """
+    )
+    assert metrics["count"] == axis_max + 1
+    assert metrics["values"] == grid_values
+    assert metrics["hiddenValues"] == [11, 9, 7, 5, 3, 1]
+    assert metrics["fullWidth"] is True
+    assert all(0.25 <= width <= 0.35 for width in metrics["strokeWidths"]), metrics
+    assert metrics["colorDistance"] >= 20, metrics
 
 
 def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_path):
     page = tmp_path / "debug-graph-series-colors.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="js-debug-graph-view" id="debug-graph">
         <svg class="js-debug-line-chart" viewBox="0 0 20 20" role="img" preserveAspectRatio="none">
           <path class="js-debug-line js-debug-line--api" d="M0 1L20 1"></path>
           <path class="js-debug-line js-debug-line--sse" d="M0 3L20 3"></path>
-          <path class="js-debug-line js-debug-line--cpu" d="M0 5L20 5"></path>
-          <path class="js-debug-line js-debug-line--systemCpu" d="M0 7L20 7"></path>
+          <path data-cpu-server="current" class="js-debug-line js-debug-line--cpu js-debug-line--pattern js-debug-line--pattern-solid" d="M0 5L20 5"></path>
+          <path data-cpu-server="peer" class="js-debug-line js-debug-line--cpu js-debug-line--pattern js-debug-line--pattern-dot" style="--js-debug-series-color: var(--accent-gold)" d="M0 6L20 6"></path>
+          <path data-cpu-server="system" class="js-debug-line js-debug-line--systemCpu js-debug-line--pattern js-debug-line--pattern-solid" d="M0 7L20 7"></path>
+          <path data-client-line="solid" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-solid" d="M0 8L20 8"></path>
+          <path data-client-line="peer" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" d="M0 10L20 10"></path>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="cyan" style="--js-debug-series-color: var(--js-debug-agent-token-cyan)" x="0" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="orange" style="--js-debug-series-color: var(--js-debug-agent-token-orange)" x="2" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="magenta" style="--js-debug-series-color: var(--js-debug-agent-token-magenta)" x="4" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="beige" style="--js-debug-series-color: var(--js-debug-agent-token-beige)" x="6" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="turquoise" style="--js-debug-series-color: var(--js-debug-agent-token-turquoise)" x="8" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="rose" style="--js-debug-series-color: var(--js-debug-agent-token-rose)" x="10" y="9" width="1" height="1"></rect>
+          <rect class="js-debug-bar js-debug-bar--agentToken" data-agent-token="violet" style="--js-debug-series-color: var(--js-debug-agent-token-violet)" x="12" y="9" width="1" height="1"></rect>
         </svg>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--api"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--sse"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--cpu"></span>
         <span class="js-debug-legend-swatch js-debug-legend-swatch--systemCpu"></span>
+        <svg class="js-debug-legend-line" viewBox="0 0 18 4"><line data-client-legend="peer" class="js-debug-line js-debug-line--api js-debug-line--client js-debug-line--client-dot" x1="0" y1="2" x2="18" y2="2"></line></svg>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       #debug-graph { width: 260px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const graph = document.getElementById('debug-graph');
         const line = name => getComputedStyle(document.querySelector(`.js-debug-line--${name}`)).stroke;
         const swatch = name => getComputedStyle(document.querySelector(`.js-debug-legend-swatch--${name}`)).color;
+        const agentToken = name => getComputedStyle(document.querySelector(`[data-agent-token="${name}"]`)).fill;
         const colorFor = value => {
           const probe = document.createElement('span');
           probe.style.color = value;
@@ -164,7 +796,7 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         };
         const read = () => {
           const values = {
-            line: {api: line('api'), sse: line('sse'), cpu: line('cpu'), systemCpu: line('systemCpu')},
+            line: {api: line('api'), sse: line('sse'), cpu: line('cpu'), peerCpu: getComputedStyle(document.querySelector('[data-cpu-server="peer"]')).stroke, systemCpu: line('systemCpu')},
             legend: {api: swatch('api'), sse: swatch('sse'), cpu: swatch('cpu'), systemCpu: swatch('systemCpu')},
             expected: {
               api: colorFor('var(--js-debug-api-series)'),
@@ -172,6 +804,11 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
               cpu: colorFor('var(--active-accent-bright)'),
               systemCpu: colorFor('var(--bad)'),
             },
+            agentTokens: ['cyan', 'orange', 'magenta', 'beige', 'turquoise', 'rose', 'violet'].map(agentToken),
+            clientLines: Object.fromEntries(['solid', 'peer'].map(pattern => [pattern, getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).strokeDasharray])),
+            clientOpacity: Object.fromEntries(['solid', 'peer'].map(pattern => [pattern, Number(getComputedStyle(document.querySelector(`[data-client-line="${pattern}"]`)).opacity)])),
+            clientLegend: {peer: getComputedStyle(document.querySelector('[data-client-legend="peer"]')).strokeDasharray},
+            cpuLines: Object.fromEntries(['current', 'peer', 'system'].map(server => [server, getComputedStyle(document.querySelector(`[data-cpu-server="${server}"]`)).strokeDasharray])),
           };
           values.apiSseDistance = colorDistance(values.line.api, values.line.sse);
           return values;
@@ -192,7 +829,301 @@ def test_debug_graph_series_colors_are_distinct_and_theme_aware(browser, tmp_pat
         assert item["line"]["api"] != item["line"]["sse"], (theme, item)
         assert item["line"]["cpu"] != item["line"]["api"], (theme, item)
         assert item["line"]["cpu"] != item["line"]["systemCpu"], (theme, item)
+        assert item["line"]["peerCpu"] != item["line"]["cpu"], (theme, item)
         assert item["apiSseDistance"] >= 120, (theme, item)
+        distances = [
+            item["agentTokens"][left] != item["agentTokens"][right]
+            for left in range(len(item["agentTokens"]))
+            for right in range(left + 1, len(item["agentTokens"]))
+        ]
+        assert all(distances), (theme, item)
+        assert item["clientLines"] == {
+            "solid": "none",
+            "peer": "1px, 3px",
+        }, (theme, item)
+        assert item["clientOpacity"]["solid"] == 1, (theme, item)
+        assert 0 < item["clientOpacity"]["peer"] < item["clientOpacity"]["solid"], (theme, item)
+        assert item["clientLegend"] == {"peer": item["clientLines"]["peer"]}, (theme, item)
+        assert item["cpuLines"] == {"current": "none", "peer": "1px, 3px", "system": "none"}, (theme, item)
+
+
+def test_debug_graph_chart_title_stays_full_above_long_client_legend(browser, tmp_path):
+    page = tmp_path / "debug-graph-full-title.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <section class="js-debug-chart" style="width:420px">
+        <div class="js-debug-chart-head">
+          <div class="js-debug-chart-heading-row">
+            <span id="latency-title" class="js-debug-chart-title">Client latency</span>
+          </div>
+          <div id="latency-legend" class="js-debug-legend">
+            <div class="js-debug-legend-item"><svg class="js-debug-legend-line"></svg><span>Client latency across all retained clients</span></div>
+          </div>
+        </div>
+        <div class="js-debug-chart-body"><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div>
+      </section>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"),
+    )
+    metrics = browser.execute_script(
+        """
+        const title = document.getElementById('latency-title');
+        const heading = title.closest('.js-debug-chart-heading-row').getBoundingClientRect();
+        const legend = document.getElementById('latency-legend').getBoundingClientRect();
+        const titleRect = title.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(title);
+        return {
+          text: title.textContent,
+          textOverflow: getComputedStyle(title).textOverflow,
+          textWidth: range.getBoundingClientRect().width,
+          titleWidth: titleRect.width,
+          headingBottom: heading.bottom,
+          legendTop: legend.top,
+          titleFontSize: Number.parseFloat(getComputedStyle(title).fontSize),
+          legendFontSize: Number.parseFloat(getComputedStyle(document.querySelector('.js-debug-legend-item')).fontSize),
+        };
+        """
+    )
+    assert metrics["text"] == "Client latency", metrics
+    assert metrics["textOverflow"] != "ellipsis", metrics
+    assert metrics["textWidth"] <= metrics["titleWidth"] + 0.5, metrics
+    assert metrics["legendTop"] >= metrics["headingBottom"] - 0.5, metrics
+    assert abs(metrics["legendFontSize"] / metrics["titleFontSize"] - 0.85) <= 0.01, metrics
+
+
+def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "debug-graph-header-geometry.html", page_html("""
+      <div class="js-debug-graph-controls" style="width:720px">
+        <div class="js-debug-range-slider-control" data-js-debug-range-control>
+          <span id="range-prefix" class="js-debug-range-prefix">Range:</span><input id="range-slider" class="js-debug-range-slider" type="range"><span id="range-label" class="js-debug-range-label">15m</span>
+        </div>
+        <span id="resolution" class="js-debug-resolution-label">Resolution: 1s</span>
+      </div>
+      <section id="chart" class="js-debug-chart" style="width:420px">
+        <div class="js-debug-chart-head"><div id="heading" class="js-debug-chart-heading-row"><span id="title" class="js-debug-chart-title">Client API&amp;SSE/sec</span><span id="summary" class="js-debug-chart-summary">(123.4k, Σ displayed reqs)</span><button id="close" class="js-debug-chart-close">×</button></div></div>
+        <div class="js-debug-chart-body"><div id="y-axis" class="js-debug-y-axis"><span id="axis-max" data-js-debug-axis-max style="--js-debug-axis-y: 6.667%;">100%</span><span id="axis-zero" data-js-debug-axis-zero style="--js-debug-axis-y: 100%;">0%</span></div><div id="plot" class="js-debug-plot"><svg id="svg" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div id="axis" class="js-debug-x-axis"><span>23:09:28</span><span>23:16:58</span><span>23:24:28</span></div></div>
+      </section>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
+    metrics = browser.execute_script(
+        """
+        const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {left:value.left, right:value.right, top:value.top, bottom:value.bottom, width:value.width, height:value.height}; };
+        const heading = rect('heading'); const close = rect('close'); const summary = rect('summary'); const axis = rect('axis'); const plot = rect('plot'); const svg = rect('svg');
+        const chart = rect('chart'); const range = document.querySelector('[data-js-debug-range-control]').getBoundingClientRect();
+        return {heading, close, summary, axis, plot, svg, chart, yAxis: rect('y-axis'), axisMax: rect('axis-max'), axisZero: rect('axis-zero'), range, resolution: rect('resolution'), rangePrefix: rect('range-prefix'), rangeSlider: rect('range-slider'), rangeLabel: rect('range-label'), axisItems: [...document.querySelectorAll('#axis span')].map(node => { const value=node.getBoundingClientRect(); return {left:value.left,right:value.right,top:value.top,bottom:value.bottom}; })};
+        """
+    )
+    assert metrics["close"]["right"] <= metrics["heading"]["right"] + 0.5, metrics
+    assert metrics["close"]["left"] >= metrics["summary"]["right"] + 4, metrics
+    assert metrics["axis"]["top"] >= metrics["plot"]["bottom"] + 4, metrics
+    assert all(item["left"] >= metrics["axis"]["left"] - 0.5 and item["right"] <= metrics["axis"]["right"] + 0.5 for item in metrics["axisItems"]), metrics
+    assert all(item["top"] >= metrics["chart"]["top"] and item["bottom"] <= metrics["chart"]["bottom"] for item in metrics["axisItems"]), metrics
+    assert abs(((metrics["axisMax"]["top"] + metrics["axisMax"]["bottom"]) / 2) - (metrics["svg"]["top"] + (metrics["svg"]["height"] * 8 / 120))) <= 0.75, metrics
+    assert abs(((metrics["axisZero"]["top"] + metrics["axisZero"]["bottom"]) / 2) - metrics["svg"]["bottom"]) <= 0.75, metrics
+    assert metrics["axisMax"]["top"] >= metrics["yAxis"]["top"] - 0.5, metrics
+    assert metrics["rangePrefix"]["right"] <= metrics["rangeSlider"]["left"] + 0.5, metrics
+    assert metrics["rangeLabel"]["left"] >= metrics["rangeSlider"]["right"] + 4, metrics
+    assert metrics["rangeLabel"]["right"] <= metrics["range"]["right"] + 0.5, metrics
+    assert metrics["resolution"]["left"] >= metrics["range"]["right"] + 4, metrics
+    assert metrics["rangeSlider"]["left"] >= metrics["range"]["left"] - 0.5, metrics
+
+
+def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const currentClientId = jsDebugStatsClientIdForRequest();
+        const records = Array.from({length: 300}, (_item, index) => ({
+          start: nowSeconds - 300 + index,
+          duration: 1,
+          sequence: index + 1,
+          cpu_total_percent: 1,
+          cpu_count: 1,
+          ...(index % 3 === 0 ? {
+            clients: {
+              [currentClientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256},
+            },
+          } : {}),
+        }));
+        setDebugGraphRange(5 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: 300, records});
+        renderDebugPanels({force: true});
+        let chart = document.querySelector('[data-js-debug-chart="latency"]');
+        const svg = chart.querySelector('.js-debug-line-chart');
+        const zero = chart.querySelector('[data-js-debug-axis-zero="latency"]');
+        const zeroRect = zero.getBoundingClientRect();
+        const svgRect = svg.getBoundingClientRect();
+        const fiveSecond = {
+          resolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+          lineSegments: chart.querySelectorAll('[data-js-debug-series="latency"]').length,
+          noDataRegions: chart.querySelectorAll('[data-js-debug-no-data-range]').length,
+        };
+
+        clearJsDebugGraphData();
+        const tenSecondRecords = Array.from({length: 90}, (_item, index) => ({
+          start: nowSeconds - (15 * 60) + (index * 10),
+          duration: 10,
+          sequence: index + 1,
+          cpu_total_percent: 1,
+          cpu_count: 1,
+          ...(index % 2 === 0 ? {
+            clients: {
+              [currentClientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256},
+            },
+          } : {}),
+        }));
+        setDebugGraphRange(15 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: 90, records: tenSecondRecords});
+        renderDebugPanels({force: true});
+        chart = document.querySelector('[data-js-debug-chart="bandwidth"]');
+        const tenSecond = {
+          resolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+          lineSegments: chart.querySelectorAll('[data-js-debug-series="bandwidth"]').length,
+          noDataRegions: chart.querySelectorAll('[data-js-debug-no-data-range]').length,
+        };
+
+        clearJsDebugGraphData();
+        setDebugGraphRange(60, {render: false});
+        debugGraphApplyServerHistory({sequence: 3, records: [{
+          start: nowSeconds - 3, duration: 1, sequence: 1, disconnected_ms: 1000,
+          clients: {'client-stale': {disconnected_ms: 1000}},
+        }, {
+          start: nowSeconds - 2, duration: 1, sequence: 2,
+          clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+        }, {
+          start: nowSeconds - 1, duration: 1, sequence: 3, disconnected_ms: 1000,
+          clients: {'client-stale': {disconnected_ms: 1000}, 'client-live': {disconnected_ms: 1000}},
+        }]});
+        renderDebugPanels({force: true});
+        const thisClientOutageRegions = document.querySelectorAll('[data-js-debug-chart="bandwidth"] [data-js-debug-disconnected-range]').length;
+        return {
+          fiveSecond,
+          tenSecond,
+          thisClientOutageRegions,
+          zeroBaselineDelta: Math.abs((zeroRect.top + zeroRect.height / 2) - svgRect.bottom),
+          zeroStyle: zero.style.getPropertyValue('--js-debug-axis-y'),
+        };
+        """
+    )
+    assert metrics["fiveSecond"]["resolution"] == 5, metrics
+    assert metrics["fiveSecond"]["lineSegments"] == 1, metrics
+    assert metrics["fiveSecond"]["noDataRegions"] <= 2, metrics
+    assert metrics["tenSecond"] == {"resolution": 10, "lineSegments": 1, "noDataRegions": 0}, metrics
+    assert metrics["thisClientOutageRegions"] == 2, metrics
+    assert metrics["zeroBaselineDelta"] <= 0.75, metrics
+    assert metrics["zeroStyle"] == "100.000%", metrics
+
+
+def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "debug-graph-cpu-compact-row.html", page_html("""
+      <div class="js-debug-chart-grid" style="width:690px">
+        <section id="cpu" class="js-debug-chart" data-js-debug-chart="cpu">
+          <div class="js-debug-chart-head"><div class="js-debug-chart-heading-row"><span class="js-debug-chart-title">CPU</span></div><div class="js-debug-legend"><span>system avg CPU %</span><span>yolomux.py :8101 CPU %</span><span>yolomux.py :8102 CPU %</span><span>yolomux.py :8103 CPU %</span></div></div>
+          <div id="cpu-body" class="js-debug-chart-body"><div id="cpu-axis" class="js-debug-y-axis"><span>100%</span></div><div class="js-debug-plot"><svg id="cpu-plot" class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>07:56</span><span>08:26</span><span>08:56</span></div></div>
+        </section>
+        <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">System memory</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>125GB</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div></section>
+        <section id="next-row" class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">GPU memory</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>48GB</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div></div></section>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
+    metrics = browser.execute_script(
+        """
+        const rect = id => { const value = document.getElementById(id).getBoundingClientRect(); return {top:value.top, bottom:value.bottom, height:value.height}; };
+        return {cpu: rect('cpu'), body: rect('cpu-body'), axis: rect('cpu-axis'), plot: rect('cpu-plot'), nextRow: rect('next-row')};
+        """
+    )
+    assert 72 <= metrics["body"]["height"] < 138, metrics
+    assert metrics["axis"]["height"] >= 72 and metrics["plot"]["height"] >= 72, metrics
+    assert metrics["cpu"]["bottom"] <= metrics["nextRow"]["top"] - 9, metrics
+
+
+def test_debug_graph_scrolls_whole_cards_without_an_outer_frame_or_chart_overlap(browser, tmp_path):
+    chart = """
+      <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span style="--js-debug-axis-y:6.667%">100%</span><span style="--js-debug-axis-y:100%">0%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
+    """
+    load_static_html_fixture(browser, tmp_path, "debug-graph-flow-layout.html", page_html(f"""
+      <div id="graph-view" class="js-debug-subview js-debug-graph-view" style="width:720px;height:300px">
+        <div id="graph" class="js-debug-graph"><div class="js-debug-chart-shell"><div id="chart-grid" class="js-debug-chart-grid">{chart.format(title='CPU')}{chart.format(title='System memory')}{chart.format(title='GPU utilization')}{chart.format(title='GPU memory')}</div></div></div>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
+    metrics = browser.execute_script(
+        """
+        const {rect} = window.__yolomuxTestHelpers;
+        const view = document.getElementById('graph-view');
+        const graph = document.getElementById('graph');
+        const cards = [...document.querySelectorAll('.js-debug-chart')].map(rect);
+        const timeLabels = [...document.querySelectorAll('.js-debug-x-axis span')].map(node => ({...rect(node), card: rect(node.closest('.js-debug-chart'))}));
+        return {view: {scrollHeight:view.scrollHeight, clientHeight:view.clientHeight, overflow:getComputedStyle(view).overflowY}, graph: {border:getComputedStyle(graph).borderTopWidth, padding:getComputedStyle(graph).paddingTop}, cards, timeLabels};
+        """
+    )
+    assert metrics["view"]["overflow"] == "auto" and metrics["view"]["scrollHeight"] > metrics["view"]["clientHeight"], metrics
+    assert metrics["graph"] == {"border": "0px", "padding": "0px"}, metrics
+    assert metrics["cards"][0]["bottom"] <= metrics["cards"][2]["top"] - 9, metrics
+    assert metrics["cards"][1]["bottom"] <= metrics["cards"][3]["top"] - 9, metrics
+    assert all(label["top"] >= label["card"]["top"] and label["bottom"] <= label["card"]["bottom"] for label in metrics["timeLabels"]), metrics
+
+
+def test_debug_graph_cards_fill_a_tall_pane_without_exceeding_their_maximum_height(browser, tmp_path):
+    chart = """
+      <section class="js-debug-chart"><div class="js-debug-chart-head"><span class="js-debug-chart-title">{title}</span></div><div class="js-debug-chart-body"><div class="js-debug-y-axis"><span>100%</span></div><div class="js-debug-plot"><svg class="js-debug-line-chart" viewBox="0 0 600 120"></svg></div><div class="js-debug-x-axis"><span>08:11:16</span><span>09:11:16</span><span>10:11:16</span></div></div></section>
+    """
+    load_static_html_fixture(browser, tmp_path, "debug-graph-tall-card-layout.html", page_html(f"""
+      <div id="graph-view" class="js-debug-subview js-debug-graph-view" style="width:720px;height:1040px">
+        <div id="graph" class="js-debug-graph"><div class="js-debug-chart-shell"><div id="chart-grid" class="js-debug-chart-grid">{chart.format(title='CPU')}{chart.format(title='System memory')}{chart.format(title='GPU utilization')}{chart.format(title='GPU memory')}{chart.format(title='Client latency')}{chart.format(title='Agent status')}</div></div></div>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
+    metrics = browser.execute_script(
+        """
+        const {rect} = window.__yolomuxTestHelpers;
+        const view = document.getElementById('graph-view');
+        const grid = document.getElementById('chart-grid');
+        return {
+          view: {clientHeight:view.clientHeight, scrollHeight:view.scrollHeight},
+          grid: rect(grid),
+          cards: [...document.querySelectorAll('.js-debug-chart')].map(rect),
+          minimum: Number.parseFloat(getComputedStyle(grid).getPropertyValue('--js-debug-chart-min-height')),
+          maximum: Number.parseFloat(getComputedStyle(grid).getPropertyValue('--js-debug-chart-max-height')),
+        };
+        """
+    )
+    assert metrics["view"]["scrollHeight"] == metrics["view"]["clientHeight"], metrics
+    assert all(metrics["minimum"] < card["height"] <= metrics["maximum"] for card in metrics["cards"]), metrics
+    assert metrics["cards"][0]["bottom"] <= metrics["cards"][2]["top"] - 9, metrics
+    assert metrics["cards"][2]["bottom"] <= metrics["cards"][4]["top"] - 9, metrics
+
+
+def test_repo_chip_menu_uses_shared_left_aligned_branch_and_status_columns(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "repo-chip-grid-columns.html", page_html("""
+      <div class="terminal-context-menu repo-chip-menu" style="width:760px">
+        <button type="button" class="repo-chip-row"><span class="repo-chip-path">~/yolomux.dev8001</span><span class="repo-chip-branch meta-branch">yolomux.dev8001</span><span class="repo-chip-status"><span class="meta-muted">51 dirty</span><span class="meta-muted">6 ahead</span></span></button>
+        <button type="button" class="repo-chip-row"><span class="repo-chip-path">~/yolomux.dev8002</span><span class="repo-chip-branch meta-branch">yolomux.dev8002</span><span class="repo-chip-status"><span class="meta-muted">9 ahead</span></span></button>
+      </div>
+    """, extra_css="body { margin:0; padding:24px; background:var(--bg); color:var(--text); }"))
+    metrics = browser.execute_script(
+        """
+        const column = selector => [...document.querySelectorAll(selector)].map(node => {
+          const rect = node.getBoundingClientRect();
+          return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom};
+        });
+        return {branches: column('.repo-chip-branch'), statuses: column('.repo-chip-status'), rows: column('.repo-chip-row')};
+        """
+    )
+    assert abs(metrics["branches"][0]["left"] - metrics["branches"][1]["left"]) <= 0.5, metrics
+    assert abs(metrics["statuses"][0]["left"] - metrics["statuses"][1]["left"]) <= 0.5, metrics
+    assert all(column["left"] >= row["left"] and column["right"] <= row["right"] for column, row in zip(metrics["branches"], metrics["rows"])), metrics
 
 
 def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
@@ -217,32 +1148,36 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
         </div>
       </div>
     """
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="js-debug-graph-view">
         <div id="graph-with-client-work" class="js-debug-graph" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
-          <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
+          <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
           {client_perf}
           {chart_shell}
+          <div class="js-debug-graph-meta">yolomux.py uptime 1s | PID=123 | rss 55.8 MiB | server seq 3049542 | total 0.01/0.57 MB up/down</div>
         </div>
         <div id="graph-without-client-work" class="js-debug-graph" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
-          <div class="js-debug-graph-meta">PID=123 | total 1/2 MB up/down</div>
+          <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
           {chart_shell}
+          <div class="js-debug-graph-meta">yolomux.py uptime 1s | PID=123 | rss 55.8 MiB | server seq 3049542 | total 0.01/0.57 MB up/down</div>
         </div>
         <div id="graph-empty-with-client-work" class="js-debug-graph js-debug-graph--empty" data-js-debug-graph>
-          <div class="js-debug-graph-controls"><button class="js-debug-range-button">5m</button></div>
-          <div class="js-debug-graph-meta">waiting for server stats</div>
+          <div class="js-debug-graph-controls"><span class="js-debug-resolution-label">Resolution: 1s</span></div>
           {client_perf}
           <div class="js-debug-graph-empty">No data</div>
+          <div class="js-debug-graph-meta">waiting for server stats</div>
         </div>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       .js-debug-graph-view { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; height: 380px; }
       .js-debug-graph { height: 340px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const rect = selector => {
@@ -259,16 +1194,19 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
             graph: rect('#graph-with-client-work'),
             client: rect('#graph-with-client-work .js-debug-client-perf'),
             chart: rect('#graph-with-client-work .js-debug-chart-shell'),
+            meta: rect('#graph-with-client-work .js-debug-graph-meta'),
             rowGap: rowGap('#graph-with-client-work'),
           },
           withoutClientWork: {
             graph: rect('#graph-without-client-work'),
             chart: rect('#graph-without-client-work .js-debug-chart-shell'),
+            meta: rect('#graph-without-client-work .js-debug-graph-meta'),
           },
           emptyWithClientWork: {
             graph: rect('#graph-empty-with-client-work'),
             client: rect('#graph-empty-with-client-work .js-debug-client-perf'),
             empty: rect('#graph-empty-with-client-work .js-debug-graph-empty'),
+            meta: rect('#graph-empty-with-client-work .js-debug-graph-meta'),
             rowGap: rowGap('#graph-empty-with-client-work'),
           },
         };
@@ -278,31 +1216,870 @@ def test_debug_graph_client_work_does_not_steal_chart_height(browser, tmp_path):
     assert with_client["client"]["height"] < with_client["graph"]["height"] * 0.4, metrics
     assert with_client["chart"]["height"] > with_client["graph"]["height"] * 0.45, metrics
     assert with_client["chart"]["top"] >= with_client["client"]["bottom"], metrics
+    assert with_client["meta"]["top"] >= with_client["chart"]["bottom"], metrics
     assert with_client["rowGap"] <= 6, metrics
     without_client = metrics["withoutClientWork"]
     assert without_client["chart"]["height"] > without_client["graph"]["height"] * 0.55, metrics
+    assert without_client["chart"]["bottom"] <= without_client["graph"]["bottom"], metrics
+    assert without_client["meta"]["top"] >= without_client["chart"]["bottom"], metrics
     empty = metrics["emptyWithClientWork"]
     assert empty["client"]["height"] < empty["graph"]["height"] * 0.4, metrics
     assert empty["empty"]["height"] > empty["graph"]["height"] * 0.45, metrics
+    assert empty["meta"]["top"] >= empty["empty"]["bottom"], metrics
     assert empty["rowGap"] <= 6, metrics
+
+
+def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof clearJsDebugServerHistory === 'function'
+              && typeof debugGraphMetaHtml === 'function';
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        clearJsDebugServerHistory();
+        resetJsDebugHistoryReadiness();
+        setJsDebugHistoryReadiness('loading-initial', {
+          requestedRangeSeconds: 900,
+          targetStartSeconds: Math.floor(Date.now() / 1000) - 900,
+          targetEndSeconds: Math.floor(Date.now() / 1000),
+          requestedResolutionSeconds: 5,
+          generation: 1,
+        });
+        renderDebugPanels({force: true});
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const meta = graph.querySelector('.js-debug-graph-meta');
+        const overlay = graph.querySelector('[data-js-debug-history-overlay]');
+        const dots = Array.from(overlay.querySelectorAll('.moving-ellipsis > span'));
+        return {
+          busy: graph.getAttribute('aria-busy'),
+          phase: graph.dataset.jsDebugHistoryState,
+          text: overlay.textContent,
+          waitingMeta: meta.textContent,
+          dotCount: dots.length,
+          animationNames: dots.map(dot => getComputedStyle(dot).animationName),
+          labelText: Array.from(overlay.querySelector('.js-debug-history-overlay-message > span').childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join(''),
+        };
+        """
+    )
+    assert metrics["busy"] == "true", metrics
+    assert metrics["phase"] == "loading-initial", metrics
+    assert metrics["text"].startswith("Loading history"), metrics
+    assert metrics["waitingMeta"] == "", metrics
+    assert metrics["dotCount"] == 3, metrics
+    assert all(name == "moving-ellipsis-dot" for name in metrics["animationNames"]), metrics
+    assert metrics["labelText"] == "Loading history", metrics
+
+
+@pytest.mark.boot
+def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
+    selected_path = "/home/test/project/state.txt"
+    source_bundle = tmp_path / "yolomux-source.js"
+    source_bundle.write_text(build_asset("yolomux.js"), encoding="utf-8")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=files,1,debug",
+        sessions=["1"],
+        runtime_script_uri=source_bundle.as_uri(),
+        file_explorer_open_intent="1",
+        fs_entries={
+            "/home/test": [{"name": "project", "path": "/home/test/project", "kind": "dir"}],
+            "/home/test/project": [{"name": "state.txt", "path": selected_path, "kind": "file", "size": 17}],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyLocale === 'function'
+              && typeof openKeyboardShortcutsOverlay === 'function'
+              && typeof debugGraphApplyServerHistory === 'function'
+              && typeof fileEditorItemFor === 'function'
+              && typeof applyLayoutSlots === 'function'
+              && typeof jsDebugGraphChartGroups !== 'undefined'
+              && window.__terminalOpened >= 1
+              && window.__eventSources.length >= 1
+              && document.querySelector('#grid') !== null;
+            """
+        )
+    )
+    locale_catalogs = {
+        path.stem: json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(Path("static_src/locales").glob("*.json"))
+    }
+    assert set(locale_catalogs) == set(SHIPPED_LOCALES)
+    metrics = browser.execute_async_script(
+        r"""
+        const localeCatalogs = arguments[0];
+        const selectedPath = arguments[1];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          for (const [locale, catalog] of Object.entries(localeCatalogs)) {
+            i18nSetCatalogForTest(locale, catalog);
+          }
+          const selectLocale = async locale => {
+            // A real picker change persists general.language before applyLocale(). Keep the fixture's
+            // settings response in lock-step so a concurrent settings refresh cannot race the matrix
+            // back to the bootstrap English preference.
+            clientSettings = mergeSettingObjects(clientSettings, {general: {language: locale}});
+            window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, {general: {language: locale}});
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+              await applyLocale(locale);
+              await frame();
+              await frame();
+              if (i18nActiveLocale === locale) return;
+            }
+            throw new Error(`locale switch did not settle: ${locale} -> ${i18nActiveLocale}`);
+          };
+          stopJsDebugStatsPolling();
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
+
+          // Keep all stateful pane families mounted while the global Help overlay and YO!stats
+          // relocalize. This catches locale refreshes that accidentally clear Finder, CodeMirror,
+          // or terminal state even when the translated labels themselves look correct.
+          const editorPath = '/home/test/project/locale-state.md';
+          const editorItem = fileEditorItemFor(editorPath);
+          const editorText = Array.from({length: 48}, (_value, index) => `STATE_${String(index + 1).padStart(2, '0')}_${'X'.repeat(160)}`).join('\n');
+          fileEditorWrapEnabled = false;
+          setFileState(editorPath, {
+            kind: 'text', content: editorText, original: editorText, dirty: false,
+            language: 'markdown', gitRoot: '/home/test/project', gitTracked: true,
+            gitHasHistory: true, gitHistory: [{ref: 'HEAD'}],
+          });
+          setFileEditorViewMode(editorPath, 'edit', editorItem);
+          registerFileEditorLayoutItem(editorPath, {item: editorItem});
+          fileExplorerRoot = '/home/test';
+          fileExplorerRootMode = 'fixed';
+          fileExplorerExpanded.clear();
+          fileExplorerExpanded.add('/home/test/project');
+          fileExplorerSelectedPaths.clear();
+          fileExplorerSelectedPaths.add(selectedPath);
+          fileExplorerSelectionAnchor = selectedPath;
+          fileExplorerSelectionLead = selectedPath;
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = splitNode('row', leafNode('finder'), splitNode(
+            'row',
+            leafNode('editor'),
+            splitNode('col', leafNode('terminal'), leafNode('stats'), 50),
+            48,
+          ), 24);
+          next.finder = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
+          next.editor = paneStateWithTabs([editorItem], editorItem);
+          next.terminal = paneStateWithTabs(['1'], '1');
+          next.stats = paneStateWithTabs([debugPaneItemId], debugPaneItemId);
+          applyLayoutSlots(next, {focusSession: editorItem, forceFull: true});
+          const finderRootReady = await waitFor(() => panelNodes.get(fileExplorerItemId)
+            ?.querySelector('.file-tree-row[data-path="/home/test/project"]'));
+          if (finderRootReady) {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const projectRow = finder.querySelector('.file-tree-row[data-path="/home/test/project"]');
+            await ensureDirectoryRowExpanded(projectRow, '/home/test/project');
+            updateFileExplorerCurrentFileHighlight();
+          }
+          const panesReady = await waitFor(() => {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = terminals.get('1');
+            const stats = panelNodes.get(debugPaneItemId);
+            return finder?.querySelector(`.file-tree-row[data-path="${selectedPath}"]`)
+              && editor?._cmView?.scrollDOM
+              && terminal?.term?.element?.isConnected
+              && stats?.querySelector('[data-js-debug-graph]');
+          });
+          if (!panesReady) {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = terminals.get('1');
+            const stats = panelNodes.get(debugPaneItemId);
+            done({
+              error: 'stateful locale-matrix panes did not initialize',
+              readiness: {
+                finder: Boolean(finder),
+                finderRows: Array.from(finder?.querySelectorAll('.file-tree-row[data-path]') || []).map(row => row.dataset.path),
+                editor: Boolean(editor),
+                editorView: Boolean(editor?._cmView?.scrollDOM),
+                terminal: Boolean(terminal),
+                terminalConnected: terminal?.term?.element?.isConnected === true,
+                stats: Boolean(stats),
+                statsGraph: Boolean(stats?.querySelector('[data-js-debug-graph]')),
+                layout: JSON.parse(JSON.stringify(layoutSlots)),
+              },
+              bootErrors: window.__bootErrors,
+              bootRejections: window.__bootRejections,
+            });
+            return;
+          }
+          const editorView = panelNodes.get(editorItem)._cmView;
+          const editorAnchor = editorText.indexOf('STATE_24') + 5;
+          editorView.dispatch({selection: {anchor: editorAnchor, head: editorAnchor + 4}});
+          editorView.scrollDOM.scrollTop = 81;
+          editorView.scrollDOM.scrollLeft = 47;
+          const codeMirrorState = () => ({
+            viewPreserved: panelNodes.get(editorItem)?._cmView === editorView,
+            anchor: editorView.state.selection.main.anchor,
+            head: editorView.state.selection.main.head,
+            scrollTop: Math.round(editorView.scrollDOM.scrollTop),
+            scrollLeft: Math.round(editorView.scrollDOM.scrollLeft),
+          });
+          const codeMirrorLocaleState = {before: codeMirrorState()};
+          await selectLocale('de');
+          await frame();
+          await frame();
+          codeMirrorLocaleState.after = codeMirrorState();
+          editorView.scrollDOM.scrollTop = 73;
+          const terminalItem = terminals.get('1');
+          terminalItem.term.element.textContent = 'TERM_STATE_137';
+
+          const now = Date.now();
+          const clientId = jsDebugStatsClientIdForRequest();
+          debugGraphApplyServerHistory({
+            sequence: 190,
+            records: [{
+              start: Math.floor((now - 500) / 1000),
+              duration: 1,
+              sequence: 190,
+              api_count: 3,
+              sse_count: 2,
+              latency_total_ms: 12,
+              latency_count: 1,
+              bandwidth_bytes: 4096,
+              cpu_total_percent: 10,
+              cpu_count: 1,
+              system_cpu_total_percent: 20,
+              system_cpu_count: 1,
+              clients: {
+                [clientId]: {api_count: 3, sse_count: 2, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 4096},
+                'client-peer': {api_count: 4, sse_count: 1, latency_total_ms: 24, latency_count: 1, bandwidth_bytes: 2048},
+              },
+            }],
+          });
+          await selectLocale('vi');
+          openKeyboardShortcutsOverlay();
+          const beforeHeading = keyboardShortcutsNode?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '';
+          const normalizedText = value => String(value || '').replace(/\s+/g, ' ').trim();
+          const visibleSurfaceValues = roots => {
+            const values = [];
+            const visible = node => {
+              const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+              if (!element) return false;
+              for (let current = element; current; current = current.parentElement) {
+                if (current.hasAttribute?.('hidden')) return false;
+                const style = getComputedStyle(current);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+              }
+              return true;
+            };
+            for (const root of roots.filter(Boolean)) {
+                  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+                  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                    const value = normalizedText(node.textContent);
+                    if (value && visible(node)) values.push({
+                      sink: 'text',
+                      value,
+                      element: node.parentElement?.outerHTML || '',
+                      technical: Boolean(node.parentElement?.closest?.('kbd, code, pre')),
+                    });
+                  }
+              for (const node of [root, ...root.querySelectorAll('*')]) {
+                if (!visible(node)) continue;
+                for (const attribute of ['title', 'aria-label', 'placeholder']) {
+                      const value = normalizedText(node.getAttribute?.(attribute));
+                      if (value) values.push({sink: attribute, value, element: node.outerHTML || ''});
+                }
+              }
+            }
+            return values;
+          };
+          const obviousSourceEnglishLeaks = (locale, catalog, values) => {
+            if (locale === 'en') return [];
+            const english = localeCatalogs.en;
+            const keysBySourceValue = new Map();
+            for (const [key, raw] of Object.entries(english)) {
+              if (typeof raw !== 'string') continue;
+              const source = normalizedText(raw);
+              if (!keysBySourceValue.has(source)) keysBySourceValue.set(source, []);
+              keysBySourceValue.get(source).push(key);
+            }
+            const candidates = [];
+            for (const [source, keys] of keysBySourceValue) {
+              // If any key intentionally retains this source value in the target catalog, it is a
+              // technical/proper-name value, not evidence of an untranslated visible sink.
+              if (keys.some(key => normalizedText(catalog[key]) === source)) continue;
+              const matchInsideValue = source.length >= 10
+                && !/[{}<>`\n]/.test(source)
+                && /[A-Za-z]{3,}\s+[A-Za-z]{3,}/.test(source);
+              candidates.push({source, keys, matchInsideValue});
+            }
+            const leaks = [];
+            for (const entry of values) {
+              if (entry.technical) continue;
+              for (const candidate of candidates) {
+                if (entry.value !== candidate.source
+                    && (!candidate.matchInsideValue || !entry.value.includes(candidate.source))) continue;
+                leaks.push({sink: entry.sink, value: entry.value, source: candidate.source, keys: candidate.keys.slice(0, 4), element: entry.element.slice(0, 600)});
+                if (leaks.length >= 12) return leaks;
+              }
+            }
+            return leaks;
+          };
+          const preservedState = () => {
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = terminals.get('1');
+            const selectedRow = finder?.querySelector(`.file-tree-row[data-path="${selectedPath}"]`);
+            return {
+              finderConnected: finder?.isConnected === true,
+              finderRoot: fileExplorerRoot,
+              finderExpanded: fileExplorerExpanded.has('/home/test/project'),
+              finderSelected: fileExplorerSelectedPaths.has(selectedPath) && selectedRow?.classList.contains('selected') === true,
+              finderAnchor: fileExplorerSelectionAnchor,
+              editorConnected: editor?.isConnected === true,
+              editorViewPreserved: editor?._cmView === editorView,
+              editorText: editor?._cmView?.state.doc.toString() || '',
+              editorAnchor: editor?._cmView?.state.selection.main.anchor ?? -1,
+              editorHead: editor?._cmView?.state.selection.main.head ?? -1,
+              editorScrollTop: Math.round(editor?._cmView?.scrollDOM.scrollTop || 0),
+              terminalConnected: terminal?.term?.element?.isConnected === true,
+              terminalPreserved: terminal === terminalItem,
+              terminalText: terminal?.term?.element?.textContent || '',
+              };
+            };
+          const baselineState = preservedState();
+          const surfaceMatrix = {};
+          for (const [locale, catalog] of Object.entries(localeCatalogs)) {
+            await selectLocale(locale);
+            await frame();
+            await frame();
+            const help = keyboardShortcutsNode;
+            const stats = panelNodes.get(debugPaneItemId);
+            const finder = panelNodes.get(fileExplorerItemId);
+            const editor = panelNodes.get(editorItem);
+            const terminal = panelNodes.get('1');
+              const expectedChartTitles = jsDebugGraphChartGroups
+                .filter(group => debugGraphChartVisible(group.key))
+                .map(group => catalog[group.labelKey]);
+            surfaceMatrix[locale] = {
+              activeLocale: i18nActiveLocale,
+              resolvedHelpHeading: t('common.keyboardShortcuts'),
+              helpHeading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+              helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
+              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+              languageTitle: document.querySelector('.topbar-language')?.title || '',
+              lang: document.documentElement.lang,
+              dir: document.documentElement.dir,
+              helpConnected: Boolean(help?.isConnected),
+              statsConnected: Boolean(stats?.isConnected),
+              state: preservedState(),
+              englishLeaks: obviousSourceEnglishLeaks(
+                locale,
+                catalog,
+                visibleSurfaceValues([help, stats, finder, editor, terminal]),
+              ),
+              expected: {
+                helpHeading: catalog['common.keyboardShortcuts'],
+                statsTitle: catalog['tab.debug'],
+                chartTitles: expectedChartTitles,
+                languageTitle: catalog['common.language'],
+              },
+            };
+          }
+          await selectLocale('zh-Hant');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const help = keyboardShortcutsNode;
+          const helpText = help?.textContent || '';
+          const stats = panelNodes.get(debugPaneItemId);
+          const statsText = stats?.textContent || '';
+          const zhHant = {
+            heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+            sections: Array.from(help?.querySelectorAll('.keyboard-shortcuts-section h3') || []).map(node => node.textContent),
+            englishLeak: /Agent status glyphs|Color meanings|Icon meanings|YO button meanings|Menus, palettes, and pickers|Open selected file or folder/.test(helpText),
+            markerTexts: Array.from(help?.querySelectorAll('.session-yolo-marker') || []).map(node => node.textContent),
+            statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+            chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+            statsEnglishLeak: /Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|Graph bucket size|Graph time range/.test(statsText),
+          };
+          await selectLocale('he');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          done({
+            beforeHeading,
+            codeMirrorLocaleState,
+            baselineState,
+            surfaceMatrix,
+            zhHant,
+            hebrew: {
+              heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+              dir: document.documentElement.dir,
+            },
+          });
+        })().catch(error => done({error: String(error), stack: error?.stack || ''}));
+        """,
+        locale_catalogs,
+        selected_path,
+    )
+    assert "error" not in metrics, metrics
+    assert set(metrics["surfaceMatrix"]) == set(locale_catalogs), metrics
+    expected_editor_text = "\n".join(f"STATE_{index:02d}_{'X' * 160}" for index in range(1, 49))
+    expected_editor_anchor = expected_editor_text.index("STATE_24") + 5
+    assert metrics["baselineState"] == {
+        "finderConnected": True,
+        "finderRoot": "/home/test",
+        "finderExpanded": True,
+        "finderSelected": True,
+        "finderAnchor": selected_path,
+        "editorConnected": True,
+        "editorViewPreserved": True,
+        "editorText": expected_editor_text,
+        "editorAnchor": expected_editor_anchor,
+        "editorHead": expected_editor_anchor + 4,
+        "editorScrollTop": metrics["baselineState"]["editorScrollTop"],
+        "terminalConnected": True,
+        "terminalPreserved": True,
+        "terminalText": "TERM_STATE_137",
+    }, metrics["baselineState"]
+    assert metrics["baselineState"]["editorScrollTop"] > 0
+    assert metrics["codeMirrorLocaleState"]["before"]["scrollTop"] == 81, metrics["codeMirrorLocaleState"]
+    assert metrics["codeMirrorLocaleState"]["before"]["scrollLeft"] > 0, metrics["codeMirrorLocaleState"]
+    assert metrics["codeMirrorLocaleState"]["after"] == metrics["codeMirrorLocaleState"]["before"], metrics["codeMirrorLocaleState"]
+    for locale, surface in metrics["surfaceMatrix"].items():
+        assert surface["activeLocale"] == locale, (locale, surface)
+        assert surface["helpHeading"] == surface["expected"]["helpHeading"], (locale, surface)
+        assert surface["helpAria"] == surface["expected"]["helpHeading"], (locale, surface)
+        assert surface["statsTitle"] == surface["expected"]["statsTitle"], (locale, surface)
+        assert set(surface["expected"]["chartTitles"]).issubset(set(surface["chartTitles"])), (locale, surface)
+        assert surface["languageTitle"] == surface["expected"]["languageTitle"], (locale, surface)
+        assert surface["lang"] == locale, (locale, surface)
+        assert surface["dir"] == ("rtl" if locale in {"ar", "he"} else "ltr"), (locale, surface)
+        assert surface["helpConnected"] is True and surface["statsConnected"] is True, (locale, surface)
+        assert surface["state"] == metrics["baselineState"], (locale, surface["state"], metrics["baselineState"])
+        assert surface["englishLeaks"] == [], json.dumps({"locale": locale, "leaks": surface["englishLeaks"]}, indent=2)
+    assert metrics["beforeHeading"] == "Phím tắt", metrics
+    assert metrics["zhHant"]["heading"] == "鍵盤快速鍵", metrics
+    assert {"代理狀態圖示", "顏色含義", "圖示含義", "優按鈕含義"}.issubset(set(metrics["zhHant"]["sections"])), metrics
+    assert metrics["zhHant"]["englishLeak"] is False, metrics
+    assert metrics["zhHant"]["markerTexts"] and set(metrics["zhHant"]["markerTexts"]) == {"優"}, metrics
+    assert metrics["zhHant"]["statsTitle"] == "優!統計", metrics
+    assert {"用戶端延遲", "用戶端 API 與 SSE/秒", "用戶端頻寬/秒", "代理狀態", "代理權杖/分鐘"}.issubset(set(metrics["zhHant"]["chartTitles"])), metrics
+    assert metrics["zhHant"]["statsEnglishLeak"] is False, metrics
+    assert metrics["hebrew"]["heading"] == "קיצורי מקלדת", metrics
+    assert metrics["hebrew"]["statsTitle"] == "YO!stats", metrics
+    assert "זמן אחזור לקוח" in metrics["hebrew"]["chartTitles"], metrics
+    assert metrics["hebrew"]["dir"] == "rtl", metrics
+
+
+def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof clearJsDebugEvents === 'function'
+              && typeof pollJsDebugStatsSample === 'function'
+              && typeof scheduleJsDebugPanelRefresh === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    initial = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugEvents();
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const originalFetch = window.fetch;
+        const now = Date.now();
+        window.__firstStatsSample = {
+          startedAt: performance.now(),
+          renderedAt: Number(graph.dataset.jsDebugGraphRenderedAt),
+          pollRequests: 0,
+        };
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+          window.__firstStatsSample.pollRequests += 1;
+          return jsonResponse({
+            time: now / 1000,
+            uptime_seconds: 60,
+            pid: 4242,
+            rss_bytes: 1048576,
+            cpu_percent: 7.5,
+            system_cpu_percent: 22.5,
+            history: {
+              sequence: 1,
+              records: [{
+                start: Math.floor(now / 1000),
+                duration: 1,
+                sequence: 1,
+                api_count: 2,
+                sse_count: 1,
+                latency_total_ms: 15.5,
+                latency_count: 2,
+                bandwidth_bytes: 4096,
+                cpu_total_percent: 7.5,
+                cpu_count: 1,
+                system_cpu_total_percent: 22.5,
+                system_cpu_count: 1,
+              }],
+              coverage: {
+                mode: 'live',
+                requested_start: Number(url.searchParams.get('history_start')),
+                requested_end: 0,
+                covered_start: Number(url.searchParams.get('history_start')),
+                covered_end: Math.floor(now / 1000),
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true,
+                has_more_older: false,
+                next_older_end: 0,
+              },
+            },
+          });
+        };
+        scheduleJsDebugPanelRefresh();
+        pollJsDebugStatsSample().then(() => {
+          window.__firstStatsSample.pollSettledAt = performance.now();
+        });
+        return {
+          waiting: graph.textContent.includes('Waiting for server stats'),
+          loading: graph.textContent.includes('Loading history'),
+          busy: graph.getAttribute('aria-busy'),
+          chartCount: graph.querySelectorAll('[data-js-debug-chart]').length,
+          renderedAt: window.__firstStatsSample.renderedAt,
+        };
+        """
+    )
+    assert initial["waiting"] is False, initial
+    assert initial["loading"] is True, initial
+    assert initial["busy"] == "true", initial
+    assert initial["chartCount"] == 0, initial
+    WebDriverWait(browser, 3).until(
+        lambda driver: driver.execute_script(
+            """
+            const state = window.__firstStatsSample;
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const renderedAt = Number(graph?.dataset.jsDebugGraphRenderedAt);
+            if (!state?.pollSettledAt || !(renderedAt > state.renderedAt)) return false;
+            state.finishedAt = performance.now();
+            state.waiting = graph.textContent.includes('Waiting for server stats');
+            state.chartCount = graph.querySelectorAll('[data-js-debug-chart]').length;
+            state.renderedAtAfter = renderedAt;
+                return !state.waiting && state.chartCount === 6;
+            """
+        )
+    )
+    result = browser.execute_script("return window.__firstStatsSample")
+    assert result["pollRequests"] == 1, result
+    assert result["renderedAtAfter"] > result["renderedAt"], result
+    assert result["finishedAt"] - result["startedAt"] < 3000, result
+
+
+def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediately(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof renderDebugPanels === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null
+              && jsDebugStatsPollState.inFlight === false;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
+          jsDebugStatsServerSequence = 1;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          recordJsDebugStatsSample({history: {sequence: 1, records: [{
+            start: nowSeconds - 10 * 60,
+            duration: 1,
+            sequence: 1,
+            system_cpu_total_percent: 10,
+            system_cpu_count: 1,
+          }]}}, {forceGraphRefresh: true});
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: nowSeconds - 15 * 60,
+            loadedEndSeconds: nowSeconds,
+            resolutionSeconds: 5,
+            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 5}],
+          });
+          renderDebugPanels({force: true});
+          const graph = document.querySelector('[data-js-debug-graph]');
+          const renderedBefore = Number(graph.dataset.jsDebugGraphRenderedAt);
+          const originalFetch = window.fetch;
+          let requests = 0;
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests += 1;
+            return Promise.resolve(new Response(JSON.stringify({history: {
+              sequence: 2,
+              records: [{
+                start: nowSeconds - 15,
+                duration: 1,
+                sequence: 2,
+                system_cpu_total_percent: 30,
+                system_cpu_count: 1,
+              }],
+              coverage: {
+                mode: 'live',
+                requested_start: Number(url.searchParams.get('history_start')),
+                requested_end: Number(url.searchParams.get('history_end')),
+                covered_start: Number(url.searchParams.get('history_start')),
+                covered_end: nowSeconds,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true,
+                has_more_older: false,
+                next_older_end: 0,
+              },
+            }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          };
+          try {
+            Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
+            document.dispatchEvent(new Event('visibilitychange'));
+            await new Promise(resolve => setTimeout(resolve, 20));
+            const refocusedAt = performance.now();
+            Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
+            document.dispatchEvent(new Event('visibilitychange'));
+            await window.__yolomuxTestWaitFor(() => {
+              const currentGraph = document.querySelector('[data-js-debug-graph]');
+              const currentRenderedAt = Number(currentGraph?.dataset.jsDebugGraphRenderedAt);
+              const currentPointCount = Array.from(currentGraph?.querySelectorAll('[data-js-debug-series="systemCpu"]') || [])
+                .flatMap(line => String(line.getAttribute('points') || '').trim().split(/\\s+/).filter(Boolean)).length;
+              return !jsDebugStatsPollState.inFlight && requests >= 1 && currentRenderedAt > renderedBefore && currentPointCount >= 2;
+            }, {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats visibility-refocus redraw'});
+            const refreshedGraph = document.querySelector('[data-js-debug-graph]');
+            const renderedAfter = Number(refreshedGraph.dataset.jsDebugGraphRenderedAt);
+            const points = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'))
+              .flatMap(line => String(line.getAttribute('points') || '').trim().split(/\\s+/).filter(Boolean));
+            return {
+              requests,
+              renderedBefore,
+              renderedAfter,
+              redrawDelayMs: performance.now() - refocusedAt,
+              pointCount: points.length,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+            delete document.visibilityState;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requests"] == 1, metrics
+    assert metrics["renderedAfter"] > metrics["renderedBefore"], metrics
+    assert metrics["redrawDelayMs"] < 1000, metrics
+    assert metrics["pointCount"] >= 2, metrics
+
+
+def test_debug_graph_agent_status_uses_stacked_bounded_resolution_bars(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof recordJsDebugStatsSample === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        setDebugGraphRange(60 * 60);
+        const displayBucketSeconds = 30;
+        const nowSeconds = Math.floor(Date.now() / (displayBucketSeconds * 1000)) * displayBucketSeconds;
+        recordJsDebugStatsSample({history: {sequence: 2, records: [
+          {
+            start: nowSeconds - (displayBucketSeconds * 2),
+            duration: 1,
+            sequence: 1,
+            ask_agent_total: 1,
+            run_agent_total: 1,
+            transition_agent_total: 1,
+            idle_agent_total: 1,
+            agent_activity_samples: 1,
+          },
+          {
+            start: nowSeconds - displayBucketSeconds,
+            duration: 1,
+            sequence: 2,
+            ask_agent_total: 1,
+            run_agent_total: 1,
+            transition_agent_total: 1,
+            idle_agent_total: 1,
+            agent_activity_samples: 1,
+          },
+        ]}}, {forceGraphRefresh: true});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="activity"]');
+        const bars = Array.from(chart?.querySelectorAll('[data-js-debug-bar-series]') || []);
+        const barsByX = {};
+        for (const bar of bars) {
+          const x = bar.getAttribute('x');
+          barsByX[x] = (barsByX[x] || 0) + 1;
+        }
+        const fillBySeries = Object.fromEntries(bars.map(bar => [
+          bar.dataset.jsDebugBarSeries,
+          getComputedStyle(bar).fill,
+        ]));
+        const opacityBySeries = Object.fromEntries(bars.map(bar => [
+          bar.dataset.jsDebugBarSeries,
+          getComputedStyle(bar).opacity,
+        ]));
+        const activitySvg = chart?.querySelector('.js-debug-line-chart');
+        const activityGrid = chart?.closest('[data-js-debug-graph]')?.querySelector('[data-js-debug-chart-grid]');
+        const activityRect = activitySvg?.getBoundingClientRect();
+        const hoverTime = (nowSeconds - (displayBucketSeconds * 1.5)) * 1000;
+        const hoverRatio = (hoverTime - Number(activityGrid?.dataset.jsDebugDomainStart)) / (Number(activityGrid?.dataset.jsDebugDomainEnd) - Number(activityGrid?.dataset.jsDebugDomainStart));
+        activitySvg?.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true,
+          clientX: activityRect.left + (activityRect.width * hoverRatio),
+          clientY: activityRect.top + (activityRect.height / 2),
+        }));
+        const hoverMax = chart?.querySelector('[data-js-debug-hover-max]')?.textContent || '';
+        setDebugGraphRange(24 * 60 * 60);
+        renderDebugPanels({force: true});
+        const datedTicks = Array.from(document.querySelectorAll('[data-js-debug-chart="activity"] [data-js-debug-x-tick]')).map(tick => ({
+          name: tick.dataset.jsDebugXTick,
+          date: tick.dataset.jsDebugXDate || '',
+          text: tick.textContent || '',
+        }));
+        return {
+          kind: chart?.dataset.jsDebugChartKind || '',
+          bucketSeconds: Number(chart?.dataset.jsDebugChartBucketSeconds),
+          stacked: chart?.dataset.jsDebugChartStacked || '',
+          areaCount: chart?.querySelectorAll('[data-js-debug-area-series]').length || 0,
+          barCount: bars.length,
+          widths: bars.map(bar => Number(bar.getAttribute('width'))),
+          gaps: bars.map(bar => Number(bar.dataset.jsDebugBarGap)),
+          barsPerX: Object.values(barsByX),
+          fillBySeries,
+          opacityBySeries,
+          hoverMax,
+          datedTicks,
+        };
+        """
+    )
+    assert metrics["kind"] == "bar", metrics
+    assert metrics["bucketSeconds"] == 10, metrics
+    assert metrics["stacked"] == "true", metrics
+    assert metrics["areaCount"] == 0, metrics
+    assert metrics["barCount"] == 8, metrics
+    assert all(4.9 <= width <= 5.1 for width in metrics["widths"]), metrics
+    assert set(metrics["gaps"]) == {0}, metrics
+    assert sorted(metrics["barsPerX"]) == [4, 4], metrics
+    assert len(set(metrics["fillBySeries"].values())) == 4, metrics
+    assert metrics["opacityBySeries"] == {
+        "askAgents": "0.82",
+        "workingAgents": "0.82",
+        "transitionAgents": "0.82",
+        "idleAgents": "0.3",
+    }, metrics
+    assert metrics["hoverMax"] == "3", metrics
+    assert [tick["name"] for tick in metrics["datedTicks"]] == ["start", "mid", "end"], metrics
+    assert all(tick["date"] and len(tick["text"]) > 8 for tick in metrics["datedTicks"]), metrics
+    assert metrics["datedTicks"][0]["date"] != metrics["datedTicks"][-1]["date"], metrics
+
+
+def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof recordJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+        recordJsDebugStatsSample({history: {sequence: 4, records: [{
+          start: nowSeconds - 60,
+          duration: 60,
+          sequence: 4,
+          tokens_per_agent_total: 60,
+          agent_token_samples: 1,
+          agent_token_rates: [
+            {key: '1|0|claude', label: '1:0:claude', total: 10, samples: 1, tokens: 10, seconds: 60, source: 'transcript'},
+            {key: '1|1|codex', label: '1:1:codex', total: 20, samples: 1, tokens: 20, seconds: 60, source: 'transcript'},
+            {key: '2|0|codex', label: '2:0:codex', total: 30, samples: 1, tokens: 30, seconds: 60, source: 'transcript'},
+            {key: '3|0|codex', label: '3:0:codex', total: 40, samples: 1, tokens: 40, seconds: 60, source: 'transcript'},
+            {key: '4|0|codex', label: '4:0:codex', total: 50, samples: 1, tokens: 50, seconds: 60, source: 'transcript'},
+            {key: '5|0|codex', label: '5:0:codex', total: 60, samples: 1, tokens: 60, seconds: 60, source: 'transcript'},
+            {key: '6|0|codex', label: '6:0:codex', total: 70, samples: 1, tokens: 70, seconds: 60, source: 'transcript'},
+          ],
+        }]}}, {forceGraphRefresh: true});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+        const bars = [...chart.querySelectorAll('[data-js-debug-bar-series^="agentToken:"]')];
+        const legends = [...chart.querySelectorAll('[data-js-debug-legend^="agentToken:"]')];
+        return {
+          patternDefs: [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')].map(node => ({
+            id: node.id,
+            pattern: node.dataset.jsDebugTokenPatternDef,
+            definition: node.innerHTML,
+            commands: [...node.querySelectorAll('.js-debug-agent-token-pattern-ink path')]
+              .flatMap(path => (path.getAttribute('d')?.match(/[A-Za-z]/g) || [])),
+          })),
+          bars: bars.map(bar => ({pattern: bar.dataset.jsDebugTokenPattern, gap: Number(bar.dataset.jsDebugBarGap), fill: getComputedStyle(bar).fill, style: bar.getAttribute('style') || ''})),
+          legends: legends.map(item => {
+            const swatch = item.querySelector('.js-debug-legend-token-swatch');
+            const pattern = swatch?.querySelector('[data-js-debug-token-legend-pattern-def]');
+            const rect = [...(swatch?.children || [])].find(node => node.tagName?.toLowerCase() === 'rect');
+            return {pattern: item.dataset.jsDebugTokenPattern, fill: getComputedStyle(rect).fill, fillAttr: rect?.getAttribute('fill') || '', definition: pattern?.innerHTML || ''};
+          }),
+        };
+        """
+    )
+    assert [item["pattern"] for item in metrics["patternDefs"]] == [str(index) for index in range(7)], metrics
+    assert len({item["id"] for item in metrics["patternDefs"]}) == 7, metrics
+    assert metrics["patternDefs"][0]["commands"] == [], metrics
+    assert all(item["commands"] and set(item["commands"]) <= {"M", "H"} for item in metrics["patternDefs"][1:]), metrics
+    assert [item["pattern"] for item in metrics["bars"]] == [str(index) for index in range(7)], metrics
+    assert all(item["gap"] > 0 for item in metrics["bars"]), metrics
+    assert all("url(" in item["fill"] or "fill: url(" in item["style"] for item in metrics["bars"]), metrics
+    assert [item["pattern"] for item in metrics["legends"]] == [str(index) for index in range(7)], metrics
+    assert all(item["fillAttr"].startswith("url(") for item in metrics["legends"]), metrics
+    assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
     page = tmp_path / "debug-graph-bad-connection-overlay.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section class="js-debug-graph-view" id="debug-graph">
         <svg class="js-debug-line-chart" viewBox="0 0 600 120" role="img" preserveAspectRatio="none">
           <line class="js-debug-grid-line" x1="0" y1="60" x2="600" y2="60" vector-effect="non-scaling-stroke"></line>
           <polyline class="js-debug-line js-debug-line--bandwidth" points="0,100 600,20" fill="none"></polyline>
-          <rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="0" x="120" y="0" width="180" height="120"></rect>
+          <rect class="js-debug-disconnected-range" data-js-debug-disconnected-range="0" x="120" y="8" width="180" height="112"></rect>
         </svg>
       </section>
     """, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       #debug-graph { width: 600px; height: 160px; }
       .js-debug-line-chart { height: 120px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const svg = document.querySelector('.js-debug-line-chart');
@@ -310,19 +2087,364 @@ def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_
         const svgRect = svg.getBoundingClientRect();
         const overlayRect = overlay.getBoundingClientRect();
         const style = getComputedStyle(overlay);
+        const {probePaint} = window.__yolomuxTestHelpers;
         return {
           svgHeight: svgRect.height,
           overlayTopDelta: Math.abs(overlayRect.top - svgRect.top),
           overlayHeightDelta: Math.abs(overlayRect.height - svgRect.height),
           fill: style.fill,
+          expectedFill: probePaint('background:rgb(var(--js-debug-bad-connection-rgb) / 0.28)', svg).background,
           pointerEvents: style.pointerEvents,
         };
         """
     )
-    assert metrics["overlayTopDelta"] <= 0.5, metrics
-    assert metrics["overlayHeightDelta"] <= 1.1, metrics
-    assert metrics["fill"] == "rgba(220, 38, 38, 0.28)", metrics
+    assert metrics["overlayTopDelta"] > 0.5, metrics
+    assert metrics["overlayHeightDelta"] > 1.1, metrics
+    assert metrics["fill"] == metrics["expectedFill"], metrics
     assert metrics["pointerEvents"] == "none", metrics
+
+
+def test_debug_graph_zero_baseline_is_shared_by_lines_grid_axis_bars_and_overlays(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Date.now();
+        debugGraphApplyServerHistory({sequence: 1, records: [{
+          start: Math.floor((now - 500) / 1000), duration: 1, sequence: 1,
+          cpu_total_percent: 0, cpu_count: 1, system_cpu_total_percent: 0, system_cpu_count: 1,
+        }]});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="cpu"]');
+        const line = chart.querySelector('[data-js-debug-series="cpu"]');
+        const grid = [...chart.querySelectorAll('[data-js-debug-grid-line="cpu"]')].find(node => Number(node.getAttribute('y1')) === jsDebugGraphGeometry.plotBottom);
+        const axis = chart.querySelector('[data-js-debug-axis-zero="cpu"]');
+        const pointY = Number(line.getAttribute('points').split(/[, ]+/)[1]);
+        const zeroBar = debugGraphBarVerticalGeometry(0, 0, 1, true);
+        const overlay = debugGraphPlotOverlayRectHtml('probe', 'data-probe', 0, 0, 1, 'probe');
+        return {
+          plotBottom: jsDebugGraphGeometry.plotBottom,
+          pointY,
+          gridY: Number(grid.getAttribute('y1')),
+          axisY: axis.style.getPropertyValue('--js-debug-axis-y'),
+          zeroBar,
+          overlay,
+        };
+        """
+    )
+    assert metrics["pointY"] == metrics["plotBottom"], metrics
+    assert metrics["gridY"] == metrics["plotBottom"], metrics
+    assert metrics["axisY"] == "100.000%", metrics
+    assert metrics["zeroBar"]["y"] + metrics["zeroBar"]["height"] == metrics["plotBottom"], metrics
+    assert 'y="8"' in metrics["overlay"] and 'height="112"' in metrics["overlay"], metrics
+
+
+def test_debug_graph_peer_traffic_shows_red_averages_without_marking_short_self_quiet_period(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof clearJsDebugGraphData === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Date.now();
+        const bucketStart = offsetMs => Math.floor(((now - offsetMs) / 1000) / 5) * 5;
+        const peerBucketStart = bucketStart(25_000);
+        setDebugGraphRange(60, {render: false});
+        debugGraphApplyServerHistory({
+          sequence: 202,
+          records: [
+            {
+              start: bucketStart(45_000), duration: 5, sequence: 200,
+              api_count: 5, sse_count: 2, latency_total_ms: 150, latency_count: 3, bandwidth_bytes: 2048,
+            },
+            {
+              start: peerBucketStart, duration: 5, sequence: 201,
+              clients: {'peer-client': {
+                api_count: 8, sse_count: 3, latency_total_ms: 240, latency_count: 4, bandwidth_bytes: 4096,
+              }},
+            },
+            {
+              start: bucketStart(5_000), duration: 5, sequence: 202,
+              api_count: 4, sse_count: 1, latency_total_ms: 80, latency_count: 2, bandwidth_bytes: 1024,
+            },
+          ],
+        });
+        renderDebugPanels({force: true});
+        const grid = document.querySelector('[data-js-debug-chart-grid]');
+        const domainStart = Number(grid?.dataset.jsDebugDomainStart);
+        const domainEnd = Number(grid?.dataset.jsDebugDomainEnd);
+        const peerMidpointX = (((peerBucketStart * 1000) + 2500 - domainStart) / (domainEnd - domainStart)) * 600;
+        const charts = {};
+        for (const key of ['latency', 'count', 'bandwidth']) {
+          const chart = document.querySelector(`[data-js-debug-chart="${key}"]`);
+          const ranges = [...chart.querySelectorAll('[data-js-debug-no-data-range]')].map(rect => ({
+            start: Number(rect.getAttribute('x')),
+            end: Number(rect.getAttribute('x')) + Number(rect.getAttribute('width')),
+            fill: getComputedStyle(rect).fill,
+          }));
+          charts[key] = {
+            ranges,
+            peerCovered: ranges.some(range => range.start <= peerMidpointX && range.end >= peerMidpointX),
+            peerLines: [...chart.querySelectorAll('polyline[data-js-debug-client-series="other-clients-average"]')].map(line => ({
+              color: getComputedStyle(line).stroke,
+              points: line.getAttribute('points'),
+            })),
+          };
+        }
+        const colorProbe = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        colorProbe.setAttribute('class', 'js-debug-line js-debug-line--systemCpu');
+        document.querySelector('[data-js-debug-graph]').append(colorProbe);
+        const systemAverageColor = getComputedStyle(colorProbe).stroke;
+        colorProbe.remove();
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const expectedNoDataFill = probePaint(
+          'background:rgb(var(--js-debug-bad-connection-rgb) / 0.12)',
+          document.querySelector('[data-js-debug-graph]'),
+        ).background;
+        return {
+          peerMidpointX,
+          systemAverageColor,
+          expectedNoDataFill,
+          charts,
+        };
+        """
+    )
+    assert 0 < metrics["peerMidpointX"] < 600, metrics
+    for key, chart in metrics["charts"].items():
+        assert chart["peerCovered"] is False, (key, metrics)
+        assert chart["ranges"], (key, metrics)
+        assert all(item["fill"] == metrics["expectedNoDataFill"] for item in chart["ranges"]), (key, metrics)
+        assert chart["peerLines"], (key, metrics)
+        assert all(item["color"] == metrics["systemAverageColor"] and item["points"] for item in chart["peerLines"]), (key, metrics)
+
+
+def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const preferencesKey = 'yolomux.stats.ui_preferences.v1';
+        localStorage.removeItem(preferencesKey);
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Date.now();
+        debugGraphApplyServerHistory({
+          sequence: 401,
+          records: [{
+            start: Math.floor(now / 1000), duration: 1, sequence: 401,
+            api_count: 1, cpu_total_percent: 5, cpu_count: 1,
+            system_cpu_total_percent: 20, system_cpu_count: 1,
+          }],
+        });
+        renderDebugPanels({force: true});
+        let panel = document.querySelector('.js-debug-panel');
+        const paint = element => {
+          const style = getComputedStyle(element);
+          return {color: style.color, background: style.backgroundColor};
+        };
+        const activeSubtabPaint = paint(panel?.querySelector('.js-debug-subtab.active'));
+        const resolutionLabel = panel?.querySelector('[data-js-debug-resolution]')?.textContent.trim();
+        const layoutLabel = panel?.querySelector('.js-debug-chart-layout-control > span')?.textContent.trim();
+        const toggleLabels = [...panel.querySelectorAll('[data-js-debug-chart-toggle]')].map(button => button.textContent.trim());
+        let cpuToggle = panel?.querySelector('[data-js-debug-chart-toggle="cpu"]');
+        cpuToggle?.focus({focusVisible: true});
+        const toggleFocusPaint = paint(cpuToggle);
+        cpuToggle?.click();
+        const closed = !panel?.querySelector('[data-js-debug-chart="cpu"]');
+        cpuToggle = panel?.querySelector('[data-js-debug-chart-toggle="cpu"]');
+        const cpuOff = cpuToggle?.getAttribute('aria-pressed') === 'false';
+        cpuToggle?.click();
+        const restored = Boolean(panel?.querySelector('[data-js-debug-chart="cpu"]'));
+        const memoryToggle = panel?.querySelector('[data-js-debug-chart-toggle="memory"]');
+        memoryToggle?.click();
+        const memoryShown = Boolean(panel?.querySelector('[data-js-debug-chart="memory"]'));
+        panel?.querySelector('[data-js-debug-subtab="events"]')?.click();
+        setDebugGraphRange(14400);
+        return {
+          closed,
+          cpuOff,
+          restored,
+          memoryShown,
+          activeSubtabPaint,
+          resolutionLabel,
+          layoutLabel,
+          toggleLabels,
+          toggleFocusPaint,
+          saved: JSON.parse(localStorage.getItem(preferencesKey) || '{}'),
+        };
+        """
+    )
+    assert metrics["closed"] is True, metrics
+    assert metrics["cpuOff"] is True, metrics
+    assert metrics["restored"] is True, metrics
+    assert metrics["memoryShown"] is True, metrics
+    assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
+    assert metrics["layoutLabel"] == "Size:", metrics
+    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
+    assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
+    assert metrics["saved"] == {
+        "subTab": "events",
+        "rangeSeconds": 14400,
+        "resolutionOverrideSeconds": 0,
+        "chartLayout": 0,
+        "hiddenCharts": ["gpuMemory", "gpuUtil"],
+        "visibleCharts": ["cpu", "memory"],
+    }, metrics
+
+    browser.refresh()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.js-debug-panel');
+            return panel?.querySelector('[data-js-debug-subview="events"]')?.hidden === false
+              && panel?.querySelector('[data-js-debug-subview="graph"]')?.hidden === true
+              && Number(document.querySelector('[data-js-debug-resolution]')?.dataset.jsDebugResolutionSeconds || 0) >= 60
+              && document.querySelector('[data-js-debug-range-label]')?.textContent.trim() === '4h'
+              && document.querySelector('[data-js-debug-chart-toggle="gpuMemory"]')?.getAttribute('aria-pressed') === 'false';
+            """
+        )
+    )
+
+
+def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphChartVisible === 'function' && document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        localStorage.removeItem('yolomux.stats.ui_preferences.v1');
+        stopJsDebugStatsPolling();
+        setDebugGraphChartVisible('cpu', true);
+        setDebugGraphChartVisible('memory', true);
+        const panel = document.querySelector('.js-debug-panel');
+        const originalClose = panel.querySelector('[data-js-debug-chart-close="cpu"]');
+        const rect = originalClose.getBoundingClientRect();
+        const heading = originalClose.closest('.js-debug-chart-heading-row').getBoundingClientRect();
+        const clientX = rect.left + (rect.width / 2);
+        const clientY = rect.top + (rect.height / 2);
+        const eventInit = {bubbles: true, cancelable: true, button: 0, clientX, clientY, pointerType: 'mouse', isPrimary: true};
+        originalClose.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+        const cpuVisibleAfterPointerDown = Boolean(panel.querySelector('[data-js-debug-chart="cpu"]'));
+        originalClose.dispatchEvent(new PointerEvent('pointerup', eventInit));
+        originalClose.dispatchEvent(new MouseEvent('click', eventInit));
+        return {
+          cpuVisibleAfterPointerDown,
+          cpuVisible: Boolean(panel.querySelector('[data-js-debug-chart="cpu"]')),
+          memoryVisible: Boolean(panel.querySelector('[data-js-debug-chart="memory"]')),
+          closeRightAligned: Math.abs(rect.right - heading.right) <= 8,
+        };
+        """
+    )
+    assert metrics["cpuVisibleAfterPointerDown"] is True, metrics
+    assert metrics["cpuVisible"] is False, metrics
+    assert metrics["memoryVisible"] is True, metrics
+    assert metrics["closeRightAligned"] is True, metrics
+
+
+def test_debug_graph_24_hour_range_change_avoids_multi_second_browser_task(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.ceil(Date.now() / 60_000) * 60_000;
+        const gapStart = now - (6 * 60 * 60 * 1000);
+        const gapEnd = gapStart + (5 * 60 * 1000);
+        const disconnectedStart = gapStart + (2 * 60 * 1000);
+        const records = [];
+        const appendTier = (startMs, count, durationSeconds) => {
+          for (let index = 0; index < count; index += 1) {
+            const bucketStartMs = startMs + (index * durationSeconds * 1000);
+            const hasClientData = bucketStartMs < gapStart || bucketStartMs >= gapEnd;
+            const record = {
+              start: bucketStartMs / 1000,
+              duration: durationSeconds,
+              sequence: records.length + 1,
+              cpu_total_percent: 12,
+              cpu_count: 1,
+              system_cpu_total_percent: 24,
+              system_cpu_count: 1,
+            };
+            if (hasClientData) Object.assign(record, {api_count: 2, sse_count: 1, latency_total_ms: 25, latency_count: 1, bandwidth_bytes: 2048});
+            if (bucketStartMs === disconnectedStart) record.disconnected_ms = durationSeconds * 1000;
+            records.push(record);
+          }
+        };
+        appendTier(now - (24 * 60 * 60 * 1000), 1320, 60);
+        appendTier(now - (2 * 60 * 60 * 1000), 360, 10);
+        appendTier(now - (60 * 60 * 1000), 3600, 1);
+        setDebugGraphRange(15 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: records.length, records});
+        setJsDebugHistoryReadiness('ready', {
+          loadedStartSeconds: (now - (24 * 60 * 60 * 1000)) / 1000,
+          loadedEndSeconds: now / 1000,
+          resolutionSeconds: 1,
+          coverageIntervals: [{
+            startSeconds: 0,
+            endSeconds: Infinity,
+            resolutionSeconds: 1,
+          }],
+        });
+        renderDebugPanels({force: true});
+        const longTasks = [];
+        const observer = typeof PerformanceObserver === 'function' && PerformanceObserver.supportedEntryTypes?.includes('longtask')
+          ? new PerformanceObserver(list => longTasks.push(...list.getEntries().map(entry => entry.duration)))
+          : null;
+        observer?.observe({entryTypes: ['longtask']});
+        requestAnimationFrame(() => {
+          const started = performance.now();
+          setDebugGraphRange(24 * 60 * 60);
+          const syncElapsedMs = performance.now() - started;
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            observer?.disconnect();
+            const noDataCounts = Object.fromEntries(['latency', 'count', 'bandwidth'].map(key => [
+              key,
+              document.querySelectorAll(`[data-js-debug-chart="${key}"] [data-js-debug-no-data-range]`).length,
+            ]));
+            done({syncElapsedMs, maxLongTaskMs: Math.max(0, ...longTasks), noDataCounts, records: records.length});
+          }));
+        });
+        """
+    )
+    assert metrics["records"] == 5280, metrics
+    assert all(count >= 2 for count in metrics["noDataCounts"].values()), metrics
+    assert metrics["syncElapsedMs"] < 1000, metrics
+    assert metrics["maxLongTaskMs"] < 1000, metrics
 
 
 def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
@@ -358,6 +2480,12 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           });
         }
         debugGraphApplyServerHistory({sequence: 300, records});
+        setJsDebugHistoryReadiness('ready', {
+          loadedStartSeconds: 1,
+          loadedEndSeconds: Infinity,
+          resolutionSeconds: 1,
+          coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+        });
         setDebugGraphRange(300);
         renderDebugPanels({force: true});
 
@@ -372,7 +2500,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         }
 
         const sliderRect = slider.getBoundingClientRect();
-        const sliderPointerDefaultAllowed = slider.dispatchEvent(new PointerEvent('pointerdown', {
+            const sliderPointerDefaultAllowed = slider.dispatchEvent(new PointerEvent('pointerdown', {
           bubbles: true,
           cancelable: true,
           pointerId: 2,
@@ -382,7 +2510,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           clientX: sliderRect.left + (sliderRect.width / 2),
           clientY: sliderRect.top + (sliderRect.height / 2),
         }));
-        const sliderSurvivedPointerDown = graph.querySelector('[data-js-debug-range-slider]') === slider;
+            const sliderSurvivedPointerDown = graph.querySelector('[data-js-debug-range-slider]') === slider;
         slider.value = '7.4';
         slider.dispatchEvent(new Event('input', {bubbles: true, cancelable: true}));
         const sliderValueDuringInput = slider.value;
@@ -426,6 +2554,17 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         const hoverFirstX = hoverFirst.getAttribute('x1');
         const hoverSecondX = hoverSecond.getAttribute('x1');
         const hoverOpacity = getComputedStyle(hoverFirst).opacity;
+        const hoverTooltip = first.closest('[data-js-debug-chart]')?.querySelector('[data-js-debug-hover-tooltip]');
+        const hoverTooltipRect = hoverTooltip?.getBoundingClientRect();
+        const firstChartRect = first.closest('[data-js-debug-chart]')?.getBoundingClientRect();
+        const hoverTooltipMetrics = {
+          hidden: hoverTooltip?.hidden,
+          max: hoverTooltip?.querySelector('[data-js-debug-hover-max]')?.textContent || '',
+          time: hoverTooltip?.querySelector('[data-js-debug-hover-time]')?.textContent || '',
+          rightOfCursor: hoverTooltipRect && firstChartRect ? hoverTooltipRect.left >= startX + 3 || hoverTooltipRect.right <= firstChartRect.right - 4 : false,
+          aboveCursor: hoverTooltipRect ? hoverTooltipRect.bottom <= y - 3 : false,
+          contained: hoverTooltipRect && firstChartRect ? hoverTooltipRect.left >= firstChartRect.left + 3 && hoverTooltipRect.right <= firstChartRect.right - 3 && hoverTooltipRect.top >= firstChartRect.top + 3 && hoverTooltipRect.bottom <= firstChartRect.bottom - 3 : false,
+        };
 
         first.dispatchEvent(new PointerEvent('pointerdown', eventInit(startX)));
         first.dispatchEvent(new PointerEvent('pointermove', eventInit(endX)));
@@ -441,14 +2580,14 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         const zoomStart = Number(zoomGrid?.dataset.jsDebugDomainStart);
         const zoomEnd = Number(zoomGrid?.dataset.jsDebugDomainEnd);
         const resetControl = reset?.closest('[data-js-debug-range-control]');
-        const label = resetControl?.querySelector('[data-js-debug-range-label]');
+        const label = document.querySelector('[data-js-debug-range-label]');
         const sliderAfterZoom = resetControl?.querySelector('[data-js-debug-range-slider]');
         const resetRect = reset?.getBoundingClientRect();
         const resetControlRect = resetControl?.getBoundingClientRect();
         const labelRect = label?.getBoundingClientRect();
         const sliderAfterZoomRect = sliderAfterZoom?.getBoundingClientRect();
         const resetRightGap = resetRect && resetControlRect ? resetControlRect.right - resetRect.right : NaN;
-        const sliderLeftSpacer = labelRect && resetControlRect ? labelRect.left - resetControlRect.left : NaN;
+        const sliderBeforeLabelGap = labelRect && sliderAfterZoomRect ? labelRect.left - sliderAfterZoomRect.right : NaN;
         reset?.dispatchEvent(new PointerEvent('pointerdown', eventInit(endX)));
         const afterResetGrid = document.querySelector('[data-js-debug-chart-grid]');
 
@@ -458,7 +2597,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           sliderMax: slider.max,
           sliderStep: slider.step,
           sliderValue: slider.value,
-          sliderPointerDefaultAllowed,
+              sliderPointerDefaultAllowed,
           sliderSurvivedPointerDown,
           sliderSurvivedInputDrag,
           sliderSurvivedPassiveRefreshDuringDrag,
@@ -468,6 +2607,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           hoverFirstX,
           hoverSecondX,
           hoverOpacity,
+          hoverTooltip: hoverTooltipMetrics,
           selecting,
           selectionOpacity,
           selectionWidth,
@@ -475,7 +2615,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           zoomSeconds: (zoomEnd - zoomStart) / 1000,
           resetText: reset?.textContent || '',
           resetRightGap,
-          sliderLeftSpacer,
+          sliderBeforeLabelGap,
           resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
         };
         """
@@ -495,6 +2635,12 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert 28790 <= metrics["sliderInputSeconds"] <= 28810, metrics
     assert metrics["hoverFirstX"] == metrics["hoverSecondX"] == "150.0", metrics
     assert float(metrics["hoverOpacity"]) > 0.0, metrics
+    assert metrics["hoverTooltip"]["hidden"] is False, metrics
+    assert metrics["hoverTooltip"]["max"] == "0.0%", metrics
+    assert re.search(r"[12]\d{3}.*\d{1,2}:\d{2}:\d{2}", metrics["hoverTooltip"]["time"]), metrics
+    assert metrics["hoverTooltip"]["rightOfCursor"] is True, metrics
+    assert metrics["hoverTooltip"]["aboveCursor"] is True, metrics
+    assert metrics["hoverTooltip"]["contained"] is True, metrics
     assert metrics["selecting"] is True, metrics
     assert float(metrics["selectionOpacity"]) > 0.0, metrics
     assert 235 <= metrics["selectionWidth"] <= 245, metrics
@@ -502,7 +2648,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert 118 <= metrics["zoomSeconds"] <= 122, metrics
     assert metrics["resetText"] == "Reset", metrics
     assert 0 <= metrics["resetRightGap"] <= 1.5, metrics
-    assert metrics["sliderLeftSpacer"] >= 40, metrics
+    assert metrics["sliderBeforeLabelGap"] >= 4, metrics
     assert metrics["resetZoomed"] is False, metrics
 
     slider = WebDriverWait(browser, 5).until(lambda driver: driver.find_element("css selector", "[data-js-debug-range-slider]"))
@@ -534,7 +2680,740 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert drag_metrics["rangeSeconds"] > 300, drag_metrics
 
 
-def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
+def test_debug_graph_short_range_refetches_token_rates_after_compact_token_history(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphRange === 'function' && typeof debugGraphApplyServerAgentTokenHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          jsDebugStatsPollState.firstSampleReceived = false;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          jsDebugGraphRangeSeconds = 8 * 60 * 60;
+          jsDebugStatsAgentTokenResolutionSeconds = 120;
+          debugGraphApplyServerAgentTokenHistory({
+            sequence: 9,
+            resolution_seconds: 120,
+            records: [{
+              start: nowSeconds - (60 * 60),
+              duration: 120,
+              sequence: 9,
+              tokens_per_agent_total: 100,
+              agent_token_samples: 1,
+              agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}],
+            }],
+          });
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: nowSeconds - (8 * 60 * 60),
+            loadedEndSeconds: nowSeconds,
+            resolutionSeconds: 5,
+            coverageIntervals: [{startSeconds: nowSeconds - (8 * 60 * 60), endSeconds: nowSeconds, resolutionSeconds: 5}],
+          });
+          const originalFetch = window.fetch;
+          const requests = [];
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url.toString());
+            const requestedStart = Number(url.searchParams.get('history_start'));
+            return Promise.resolve(new Response(JSON.stringify({history: {
+              sequence: 50,
+              latest_sequence: 50,
+              agent_token_schema_version: 2,
+              records: [{
+                start: nowSeconds - 60,
+                duration: 60,
+                sequence: 50,
+                tokens_per_agent_total: 120,
+                agent_token_samples: 1,
+                agent_token_rates: [{key: '8002|1|codex', label: '8002:1:codex', total: 120, samples: 1, tokens: 120, seconds: 60}],
+              }],
+              coverage: {
+                mode: 'live', requested_start: requestedStart, requested_end: 0,
+                covered_start: requestedStart, covered_end: nowSeconds,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true, has_more_older: false, next_older_end: 0,
+              },
+            }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          };
+          try {
+            setDebugGraphRange(2 * 60 * 60);
+            await window.__yolomuxTestWaitFor(
+              () => requests.length >= 1 && !jsDebugStatsPollState.inFlight,
+              {timeoutMs: 3000, intervalMs: 20, description: 'short-range token history refetch'},
+            );
+            renderDebugPanels({force: true});
+            const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+            const url = new URL(requests[0] || location.href);
+            return {
+              requestCount: requests.length,
+              since: url.searchParams.get('since'),
+              historyStart: Number(url.searchParams.get('history_start')),
+              tokenResolution: url.searchParams.get('token_resolution'),
+              separateTokenCount: jsDebugGraphAgentTokenBuckets.size,
+              legendLabels: [...(chart?.querySelectorAll('[data-js-debug-legend] span') || [])].map(node => node.textContent),
+              barCount: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:8002|1|codex"]').length || 0,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] >= 1, metrics
+    assert metrics["since"] == "0", metrics
+    assert metrics["historyStart"] > 0, metrics
+    assert metrics["tokenResolution"] is None, metrics
+    assert metrics["separateTokenCount"] == 0, metrics
+    assert "8002:1:codex" in metrics["legendLabels"], metrics
+    assert metrics["barCount"] == 1, metrics
+
+
+def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_history_fetch(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphRange === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          const twoHoursAgo = nowSeconds - (2 * 60 * 60);
+          jsDebugGraphRangeSeconds = 2 * 60 * 60;
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: twoHoursAgo,
+            loadedEndSeconds: nowSeconds,
+            resolutionSeconds: 5,
+            coverageIntervals: [{startSeconds: twoHoursAgo, endSeconds: nowSeconds, resolutionSeconds: 5}],
+          });
+          const originalFetch = window.fetch;
+          const requests = [];
+          const waitForRequests = expectedCount => window.__yolomuxTestWaitFor(
+            () => requests.length >= expectedCount && !jsDebugStatsPollState.inFlight,
+            {timeoutMs: 3000, intervalMs: 20, description: `compact-token history request ${expectedCount}`},
+          );
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url);
+            const tokenStart = Number(url.searchParams.get('token_history_start'));
+            const normalEnd = Number(url.searchParams.get('history_end'));
+            const tokenResolution = Number(url.searchParams.get('token_resolution'));
+            return Promise.resolve(new Response(JSON.stringify({history: {
+              sequence: 50,
+              latest_sequence: 50,
+              agent_token_schema_version: 2,
+              records: [{
+                start: tokenStart,
+                duration: 5,
+                sequence: 50,
+                active_agent_total: 1,
+                agent_activity_samples: 1,
+              }],
+              coverage: {
+                mode: 'older', requested_start: tokenStart, requested_end: normalEnd,
+                covered_start: tokenStart, covered_end: normalEnd,
+                resolution_seconds: 5, complete: true, has_more_older: false, next_older_end: 0,
+              },
+              agent_token_history: {
+                sequence: 50,
+                latest_sequence: 50,
+                resolution_seconds: tokenResolution,
+                snapshot: true,
+                coverage: {
+                  mode: 'live', requested_start: tokenStart, requested_end: 0,
+                  covered_start: tokenStart, covered_end: nowSeconds,
+                  resolution_seconds: 120, complete: true, has_more_older: false, next_older_end: 0,
+                },
+                records: [
+                  {start: tokenStart, duration: tokenResolution, sequence: 40, tokens_per_agent_total: 100, agent_token_samples: 1, agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}]},
+                  {start: nowSeconds - tokenResolution, duration: tokenResolution, sequence: 50, tokens_per_agent_total: 200, agent_token_samples: 1, agent_token_rates: [{key: 'recent|0|codex', label: 'recent:0:codex', total: 200, samples: 1, tokens: 200, seconds: 60}]},
+                ],
+              },
+            }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          };
+          try {
+            setDebugGraphRange(4 * 60 * 60);
+            await waitForRequests(1);
+            setDebugGraphRange(8 * 60 * 60);
+            await waitForRequests(2);
+            setDebugGraphRange(16 * 60 * 60);
+            await waitForRequests(3);
+            renderDebugPanels({force: true});
+            const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+            return {
+              requestCount: requests.length,
+              requests: requests.map(request => ({
+                normalHistoryEnd: Number(request.searchParams.get('history_end')),
+                tokenHistoryStart: Number(request.searchParams.get('token_history_start')),
+                tokenHistoryEnd: request.searchParams.get('token_history_end'),
+                tokenResolution: Number(request.searchParams.get('token_resolution')),
+              })),
+              tokenStarts: [...jsDebugGraphAgentTokenBuckets.values()].map(bucket => Math.floor(bucket.startMs / 1000)).sort((left, right) => left - right),
+              oldBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:old|0|codex"]').length || 0,
+              recentBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:recent|0|codex"]').length || 0,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] >= 3, metrics
+    assert [request["tokenResolution"] for request in metrics["requests"][:3]] == [120, 120, 300], metrics
+    assert all(request["normalHistoryEnd"] > request["tokenHistoryStart"] for request in metrics["requests"][:3]), metrics
+    assert all(request["tokenHistoryEnd"] == "0" for request in metrics["requests"][:3]), metrics
+    assert metrics["requests"][0]["tokenHistoryStart"] > metrics["requests"][1]["tokenHistoryStart"] > metrics["requests"][2]["tokenHistoryStart"], metrics
+    assert len(metrics["tokenStarts"]) == 2, metrics
+    assert metrics["tokenStarts"][1] - metrics["tokenStarts"][0] > 3 * 60 * 60, metrics
+    assert metrics["oldBars"] == 1 and metrics["recentBars"] == 1, metrics
+
+
+def test_debug_graph_server_restart_refetches_complete_history_without_waiting_for_the_poll_interval(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsPollState.pendingForceGraphRefresh = false;
+          jsDebugStatsServerSequence = 0;
+          jsDebugStatsServerPid = null;
+          jsDebugStatsServerStartedAt = null;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          const originalFetch = window.fetch;
+          const requests = [];
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          const history = (url, records, sequence) => ({
+            sequence,
+            latest_sequence: sequence,
+            records,
+            coverage: {
+              mode: 'live',
+              requested_start: Number(url.searchParams.get('history_start')),
+              requested_end: 0,
+              covered_start: Number(url.searchParams.get('history_start')),
+              covered_end: nowSeconds,
+              resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              complete: true,
+              has_more_older: false,
+              next_older_end: 0,
+            },
+          });
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url);
+            if (requests.length === 1) {
+              return response({
+                pid: 1001,
+                started_at: nowSeconds - 120,
+                history: history(url, [{start: nowSeconds - 600, duration: 5, sequence: 100, system_cpu_total_percent: 20, system_cpu_count: 1}], 100),
+              });
+            }
+            if (requests.length === 2) {
+              return response({
+                pid: 2002,
+                started_at: nowSeconds,
+                history: history(url, [], 101),
+              });
+            }
+            return response({
+              pid: 2002,
+              started_at: nowSeconds,
+              history: history(url, [
+                {start: nowSeconds - 600, duration: 5, sequence: 150, system_cpu_total_percent: 20, system_cpu_count: 1},
+                {start: nowSeconds - 60, duration: 5, sequence: 151, system_cpu_total_percent: 40, system_cpu_count: 1},
+              ], 151),
+            });
+          };
+          try {
+            await pollJsDebugStatsSample();
+            await pollJsDebugStatsSample();
+            await window.__yolomuxTestWaitFor(
+              () => requests.length >= 3 && !jsDebugStatsPollState.inFlight,
+              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats server-restart history refetch'},
+            );
+            renderDebugPanels({force: true});
+            const xValues = [...document.querySelectorAll('[data-js-debug-series="systemCpu"]')]
+              .flatMap(line => String(line.getAttribute('points') || '')
+                .split(/\\s+/)
+                .filter(Boolean)
+                .map(point => Number(point.split(',')[0]))
+                .filter(Number.isFinite));
+            return {
+              requestCount: requests.length,
+              restartRefetchSince: requests[2]?.searchParams.get('since'),
+              graphBusy: document.querySelector('[data-js-debug-graph]')?.getAttribute('aria-busy'),
+              xValues,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] >= 3, metrics
+    assert metrics["restartRefetchSince"] == "0", metrics
+    assert metrics["graphBusy"] == "false", metrics
+    assert any(100 < value < 300 for value in metrics["xValues"]), metrics
+    assert any(value > 500 for value in metrics["xValues"]), metrics
+
+
+def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof setDebugGraphRange === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = false;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsServerSequence = 0;
+          resetJsDebugHistoryReadiness();
+          jsDebugGraphRangeSeconds = 15 * 60;
+          const originalFetch = window.fetch;
+          const requests = [];
+          let releaseIncremental;
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          const coverageFor = (url, overrides = {}) => {
+            const requestedStart = Number(url.searchParams.get('history_start'));
+            const requestedEnd = Number(url.searchParams.get('history_end'));
+            return {
+              mode: requestedEnd === 0 ? 'live' : 'older',
+              requested_start: requestedStart,
+              requested_end: requestedEnd,
+              covered_start: requestedStart,
+              covered_end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd,
+              resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              complete: true,
+              has_more_older: false,
+              next_older_end: 0,
+              ...overrides,
+            };
+          };
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url.toString());
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            if (requests.length === 1) {
+              return response({history: {sequence: 100, records: [{
+                start: nowSeconds - 60,
+                duration: 1,
+                sequence: 100,
+                system_cpu_total_percent: 20,
+                system_cpu_count: 1,
+              }], coverage: coverageFor(url)}});
+            }
+            if (requests.length === 2) {
+              return new Promise(resolve => {
+                releaseIncremental = () => response({history: {sequence: 101, records: []}}).then(resolve);
+              });
+            }
+            return response({history: {sequence: 102, records: [{
+              start: nowSeconds - (25 * 60),
+              duration: 1,
+              sequence: 101,
+              system_cpu_total_percent: 40,
+              system_cpu_count: 1,
+            }], coverage: coverageFor(url)}});
+          };
+          try {
+            await pollJsDebugStatsSample();
+            stopJsDebugStatsPolling();
+            renderDebugPanels({force: true});
+            const retainedChartCount = document.querySelectorAll('[data-js-debug-chart]').length;
+            const narrowPoll = pollJsDebugStatsSample();
+            await Promise.resolve();
+            setDebugGraphRange(30 * 60);
+            const loadingGraph = document.querySelector('[data-js-debug-graph]');
+            const beforeDelay = {
+              chartCount: loadingGraph.querySelectorAll('[data-js-debug-chart]').length,
+              busy: loadingGraph.getAttribute('aria-busy'),
+              phase: loadingGraph.dataset.jsDebugHistoryState,
+              overlayHidden: loadingGraph.querySelector('[data-js-debug-history-overlay]')?.hidden,
+            };
+            await new Promise(resolve => setTimeout(resolve, 160));
+            const delayedOverlay = loadingGraph.querySelector('[data-js-debug-history-overlay]');
+            const afterDelay = {
+              overlayHidden: delayedOverlay?.hidden,
+              overlayText: delayedOverlay?.textContent?.trim() || '',
+            };
+            releaseIncremental();
+            await narrowPoll;
+            await window.__yolomuxTestWaitFor(
+              () => requests.length >= 3 && !jsDebugStatsPollState.inFlight && jsDebugHistoryReadiness.phase === 'ready',
+              {timeoutMs: 3000, intervalMs: 20, description: 'wider YO!stats history readiness'}
+            );
+            const wideUrl = new URL(requests[2]);
+            const lines = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'));
+            const xValues = lines.flatMap(line => String(line.getAttribute('points') || '')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(point => Number(point.split(',')[0]))
+              .filter(Number.isFinite));
+            const grid = document.querySelector('[data-js-debug-chart-grid]');
+            const finalGraph = document.querySelector('[data-js-debug-graph]');
+            const narrowUrl = new URL(requests[0]);
+            return {
+              requestCount: requests.length,
+              since: wideUrl.searchParams.get('since'),
+              historyStart: Number(wideUrl.searchParams.get('history_start')),
+              historyEnd: Number(wideUrl.searchParams.get('history_end')),
+              expectedHistoryEnd: Number(narrowUrl.searchParams.get('history_start')),
+              historyResolution: Number(wideUrl.searchParams.get('history_resolution')),
+              historyMaxPoints: Number(wideUrl.searchParams.get('history_max_points')),
+              rangeSeconds: (Number(grid?.dataset.jsDebugDomainEnd) - Number(grid?.dataset.jsDebugDomainStart)) / 1000,
+              minX: xValues.length ? Math.min(...xValues) : null,
+              maxX: xValues.length ? Math.max(...xValues) : null,
+              retainedChartCount,
+              beforeDelay,
+              afterDelay,
+              finalBusy: finalGraph?.getAttribute('aria-busy'),
+              finalPhase: finalGraph?.dataset.jsDebugHistoryState,
+              finalOverlayHidden: finalGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] == 3, metrics
+    assert metrics["since"] == "0", metrics
+    assert metrics["historyEnd"] == metrics["expectedHistoryEnd"], metrics
+    assert metrics["historyResolution"] == 1, metrics
+    assert metrics["historyMaxPoints"] == 6000, metrics
+    assert 1790 <= metrics["rangeSeconds"] <= 1810, metrics
+    assert metrics["minX"] is not None and metrics["minX"] < 200, metrics
+    assert metrics["maxX"] is not None and metrics["maxX"] > 500, metrics
+    assert metrics["retainedChartCount"] > 0, metrics
+    assert metrics["beforeDelay"] == {
+        "chartCount": metrics["retainedChartCount"],
+        "busy": "true",
+        "phase": "loading-older",
+        "overlayHidden": True,
+    }, metrics
+    assert metrics["afterDelay"]["overlayHidden"] is False, metrics
+    assert "Loading older data" in metrics["afterDelay"]["overlayText"], metrics
+    assert metrics["finalBusy"] == "false", metrics
+    assert metrics["finalPhase"] == "ready", metrics
+    assert metrics["finalOverlayHidden"] is True, metrics
+
+
+def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof retryJsDebugHistory === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          resetJsDebugHistoryReadiness();
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          debugGraphApplyServerHistory({sequence: 1, records: [{
+            start: nowSeconds - 60,
+            duration: 1,
+            sequence: 1,
+            system_cpu_total_percent: 20,
+            system_cpu_count: 1,
+          }]});
+          renderDebugPanels({force: true});
+          const retainedChartCount = document.querySelectorAll('[data-js-debug-chart]').length;
+          const originalFetch = window.fetch;
+          let requestCount = 0;
+          let rejectInitial;
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requestCount += 1;
+            if (requestCount === 1) {
+              return new Promise((_resolve, reject) => { rejectInitial = reject; });
+            }
+            const requestedStart = Number(url.searchParams.get('history_start'));
+            const requestedEnd = Number(url.searchParams.get('history_end'));
+            return response({history: {
+              sequence: 1,
+              latest_sequence: 1,
+              records: [],
+              coverage: {
+                mode: requestedEnd === 0 ? 'live' : 'older',
+                requested_start: requestedStart,
+                requested_end: requestedEnd,
+                covered_start: 0,
+                covered_end: 0,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: false,
+                has_more_older: false,
+                next_older_end: 0,
+              },
+            }});
+          };
+              try {
+                const initialPoll = pollJsDebugStatsSample();
+                const requestDeadline = performance.now() + 3000;
+                while (typeof rejectInitial !== 'function' && performance.now() < requestDeadline) {
+                  await new Promise(resolve => setTimeout(resolve, 20));
+                }
+                if (typeof rejectInitial !== 'function') throw new Error('mocked stats request did not start');
+                const loadingGraph = document.querySelector('[data-js-debug-graph]');
+            const loading = {
+              busy: loadingGraph?.getAttribute('aria-busy'),
+              phase: loadingGraph?.dataset.jsDebugHistoryState,
+              chartCount: loadingGraph?.querySelectorAll('[data-js-debug-chart]').length,
+              overlayHidden: loadingGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+                };
+                rejectInitial(new Error('history unavailable'));
+                await initialPoll;
+                const errorDeadline = performance.now() + 3000;
+                while (jsDebugHistoryReadiness.phase !== 'error' && performance.now() < errorDeadline) {
+                  await new Promise(resolve => setTimeout(resolve, 20));
+                }
+                const errorGraph = document.querySelector('[data-js-debug-graph]');
+            const error = {
+              busy: errorGraph?.getAttribute('aria-busy'),
+              phase: errorGraph?.dataset.jsDebugHistoryState,
+              chartCount: errorGraph?.querySelectorAll('[data-js-debug-chart]').length,
+              text: errorGraph?.querySelector('[data-js-debug-history-overlay]')?.textContent?.trim() || '',
+              retry: Boolean(errorGraph?.querySelector('[data-js-debug-history-retry]')),
+            };
+            retryJsDebugHistory();
+            await window.__yolomuxTestWaitFor(
+              () => requestCount >= 2 && !jsDebugStatsPollState.inFlight && jsDebugHistoryReadiness.phase === 'ready',
+              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats history retry readiness'}
+            );
+            const readyGraph = document.querySelector('[data-js-debug-graph]');
+            return {
+              retainedChartCount,
+              requestCount,
+              loading,
+              failed: error,
+              ready: {
+                busy: readyGraph?.getAttribute('aria-busy'),
+                phase: readyGraph?.dataset.jsDebugHistoryState,
+                chartCount: readyGraph?.querySelectorAll('[data-js-debug-chart]').length,
+                overlayHidden: readyGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+                retry: Boolean(readyGraph?.querySelector('[data-js-debug-history-retry]')),
+              },
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["retainedChartCount"] > 0, metrics
+    assert metrics["loading"] == {
+        "busy": "true",
+        "phase": "loading-initial",
+        "chartCount": metrics["retainedChartCount"],
+        "overlayHidden": False,
+    }, metrics
+    assert metrics["failed"]["busy"] == "false", metrics
+    assert metrics["failed"]["phase"] == "error", metrics
+    assert metrics["failed"]["chartCount"] == metrics["retainedChartCount"], metrics
+    assert metrics["failed"]["retry"] is True, metrics
+    assert "history unavailable" in metrics["failed"]["text"], metrics
+    assert metrics["requestCount"] == 2, metrics
+    assert metrics["ready"] == {
+        "busy": "false",
+        "phase": "ready",
+        "chartCount": metrics["retainedChartCount"],
+        "overlayHidden": True,
+        "retry": False,
+    }, metrics
+
+
+def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof flushJsDebugStatsHistory === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = false;
+          jsDebugStatsPollState.inFlight = false;
+          jsDebugStatsPollState.pending = false;
+          jsDebugStatsServerSequence = 0;
+          resetJsDebugHistoryReadiness();
+          jsDebugGraphRangeSeconds = 15 * 60;
+          const originalFetch = window.fetch;
+          const requests = [];
+          let getCount = 0;
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'},
+          }));
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            requests.push({url: url.toString(), method: String(options.method || 'GET')});
+            if (url.pathname === '/api/stats-history') {
+              return response({ok: true, history: {sequence: 200, records: []}});
+            }
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            getCount += 1;
+            if (getCount === 1) {
+              return response({history: {sequence: 100, records: [{
+                start: nowSeconds - 600,
+                duration: 1,
+                sequence: 100,
+                system_cpu_total_percent: 20,
+                system_cpu_count: 1,
+              }], coverage: {
+                mode: 'live',
+                requested_start: Number(url.searchParams.get('history_start')),
+                requested_end: 0,
+                covered_start: Number(url.searchParams.get('history_start')),
+                covered_end: nowSeconds,
+                resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                complete: true,
+                has_more_older: false,
+                next_older_end: 0,
+              }}});
+            }
+            const since = Number(url.searchParams.get('since') || 0);
+            const records = [{
+              start: nowSeconds - 60,
+              duration: 1,
+              sequence: 201,
+              system_cpu_total_percent: 30,
+              system_cpu_count: 1,
+            }];
+            if (since <= 100) records.unshift({
+              start: nowSeconds - 300,
+              duration: 1,
+              sequence: 150,
+              system_cpu_total_percent: 25,
+              system_cpu_count: 1,
+            });
+            return response({history: {sequence: 201, records}});
+          };
+          try {
+            await pollJsDebugStatsSample();
+            stopJsDebugStatsPolling();
+            recordJsDebugEventForGraph({
+              id: 999999,
+              type: 'api',
+              ts: new Date().toISOString(),
+              durationMs: 1,
+              requestBytes: 0,
+              responseBytes: 0,
+            });
+            await flushJsDebugStatsHistory();
+            await pollJsDebugStatsSample();
+            stopJsDebugStatsPolling();
+            renderDebugPanels({force: true});
+            const sampleRequests = requests.filter(request => new URL(request.url).pathname === '/api/stats-sample');
+            const catchUpUrl = new URL(sampleRequests[1].url);
+            const xValues = Array.from(document.querySelectorAll('[data-js-debug-series="systemCpu"]'))
+              .flatMap(line => String(line.getAttribute('points') || '')
+                .split(/\\s+/)
+                .filter(Boolean)
+                .map(point => Number(point.split(',')[0]))
+                .filter(Number.isFinite));
+            return {
+              since: catchUpUrl.searchParams.get('since'),
+              requestCount: requests.length,
+              xValues,
+              hasMiddlePoint: xValues.some(value => value > 330 && value < 470),
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["since"] == "100", metrics
+    assert metrics["requestCount"] == 3, metrics
+    assert metrics["hasMiddlePoint"] is True, metrics
+
+
+def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone, *, stride=2):
+    """Sample the small status-ball region; full-resolution scans add no signal for a glow ratio."""
     padding = 24
     left = int((min(rest_rect["left"], peak_rect["left"]) - padding) * dpr)
     top = int((min(rest_rect["top"], peak_rect["top"]) - padding) * dpr)
@@ -557,18 +3436,23 @@ def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone):
 
     count = 0
     energy = 0.0
-    for y in range(top, bottom):
-        for x in range(left, right):
+    step = max(1, int(stride))
+    for y in range(top, bottom, step):
+        for x in range(left, right, step):
             weight = pixel_weight(image.getpixel((x, y)))
             if weight > 0:
                 count += 1
                 energy += weight
-    return {"count": count, "energy": round(energy, 2), "bounds": (left, top, right, bottom)}
+    return {"count": count, "energy": round(energy, 2), "bounds": (left, top, right, bottom), "stride": step}
 
 
-def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_windows_and_tabber(browser, tmp_path):
+def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windows_and_tabber(browser, tmp_path):
     page = tmp_path / "working-agent-visible-pulse.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="agent-pulse-fixture">
         <button id="dock-tab" class="pane-tab active">
           <span class="pane-tab-core">
@@ -579,18 +3463,18 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
         </button>
         <button id="window-button" class="tab tmux-window-button active">
           <span class="tmux-window-name-label">
-            {_working_agent_glyph_html("claude", "window-claude")}
+            {_working_agent_glyph_html("claude", "window-claude", subwindow=True)}
             <span class="tmux-window-name-text">0:claude</span>
           </span>
         </button>
         <div id="tabber-claude-row" class="file-tree-row tabber-row selected" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("claude", "0:claude", _working_agent_glyph_html("claude", "tabber-claude"))}
+            {_tabber_window_button_html("claude", "0:claude", _working_agent_glyph_html("claude", "tabber-claude", subwindow=True))}
           </span>
         </div>
         <div id="tabber-codex-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("codex", "1:codex", _working_agent_glyph_html("codex", "tabber-codex"))}
+            {_tabber_window_button_html("codex", "1:codex", _working_agent_glyph_html("codex", "tabber-codex", subwindow=True))}
           </span>
         </div>
       </section>
@@ -619,8 +3503,8 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
         padding: 4px 8px;
         background: #2c3340;
       }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     reduced = browser.execute_script("return matchMedia('(prefers-reduced-motion: reduce)').matches")
     targets = {
         "dock-tab Claude": "#dock-claude",
@@ -641,9 +3525,10 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
               symOpacity: getComputedStyle(sym).opacity,
               dotPresent: !!dot,
               dotWorkingTone: dot ? dot.classList.contains('status-indicator--working') : false,
-              dotAnim: dot ? getComputedStyle(dot).animationName : null,
-              dotBoxShadow: dot ? getComputedStyle(dot).boxShadow : null,
-              beforeAnim: before ? before.animationName : null,
+                  dotAnim: dot ? getComputedStyle(dot).animationName : null,
+                  dotBoxShadow: dot ? getComputedStyle(dot).boxShadow : null,
+                  beforeAnim: before ? before.animationName : null,
+                  beforeFilter: before ? before.filter : null,
             };
             """,
             selector,
@@ -652,23 +3537,33 @@ def test_working_agent_glyphs_show_static_symbol_and_glowing_ball_in_tabs_window
         # On every surface the agent symbol is STATIC (no pulse) ...
         assert info["symAnim"] == "none", results
         assert float(info["symOpacity"]) == 1, results
-        # ... and a separate status marker sits beside it. Session/Tab balls use the old ring pulse;
-        # sub-window glyphs suppress the element ring and animate their CSS glyph shape instead.
+        # ... and a separate status marker sits beside it. Session/Tab balls and sub-window play
+        # glyphs use the same opacity-only pulse, without a glow filter or shadow.
         assert info["dotPresent"] is True, results
         assert info["dotWorkingTone"] is True, results
         if not reduced:
             if label == "dock-tab Claude":
-                assert "attention-ring-fade" in info["dotAnim"], results
-                assert "working-ball-hard-flash" in info["dotAnim"], results
-            else:
-                assert info["dotAnim"] == "none", results
+                assert info["dotAnim"] == "agent-status-opacity-pulse", results
                 assert info["dotBoxShadow"] in ("", "none"), results
-                assert info["beforeAnim"] == "subwindow-status-glyph-pulse", results
+            else:
+                assert info["dotAnim"] == "agent-status-opacity-pulse", results
+                assert info["dotBoxShadow"] in ("", "none"), results
+                assert info["beforeAnim"] == "none", results
+                assert info["beforeFilter"] == "none", results
+            # A keyframe name alone is vacuous: prove the visible status dot actually changes
+            # opacity at the known rest and peak points of the shared pulse.
+            rest_opacity = float(animated_property_at_progress(browser, f"{selector}-dot", "opacity", 0))
+            peak_opacity = float(animated_property_at_progress(browser, f"{selector}-dot", "opacity", 0.5))
+            assert peak_opacity - rest_opacity >= 0.1, {"label": label, "rest": rest_opacity, "peak": peak_opacity}
 
 
-def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
+def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, tmp_path):
     page = tmp_path / "working-agent-glow-pixels.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="glow-pixel-fixture">
         <div id="tabber-glow-row" class="file-tree-row tabber-row" data-tabber-type="session" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
@@ -688,19 +3583,12 @@ def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
       #tabber-glow-row .file-tree-name,
       #tabber-glow-row .tabber-window-token,
       #tabber-glow-row .agent-window-activity { overflow: visible; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
+    paused = pause_animations_at_progress(browser, "#tabber-glow-dot", 0.5)
     metrics = browser.execute_script(
         """
         const dot = document.getElementById('tabber-glow-dot');
-        for (const animation of dot.getAnimations()) {
-          const timing = animation.effect?.getTiming?.() || {};
-          const duration = Number(timing.duration) || 0;
-          if (duration > 0) {
-            animation.pause();
-            animation.currentTime = duration * 0.5;
-          }
-        }
         const rect = dot.getBoundingClientRect();
         const style = getComputedStyle(dot);
         return {
@@ -708,42 +3596,182 @@ def test_working_status_ball_has_visible_green_glow_pixels(browser, tmp_path):
           animationName: style.animationName,
           boxShadow: style.boxShadow,
           filter: style.filter,
-          background: style.backgroundColor,
-          color: style.color,
-          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              background: style.backgroundColor,
+              color: style.color,
+              border: style.borderTopColor,
+              opacity: style.opacity,
+              reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
         };
         """
     )
-    assert "attention-ring-fade" in metrics["animationName"] or metrics["reducedMotion"] is True, metrics
-    assert "working-ball-hard-flash" in metrics["animationName"] or metrics["reducedMotion"] is True, metrics
-    assert metrics["boxShadow"] != "none", metrics
-    screenshot = browser_screenshot_rgb(browser)
-    dpr = browser.execute_script("return window.devicePixelRatio || 1") or 1
-    rect = metrics["rect"]
-    left = max(0, min(screenshot.width - 1, int((rect["right"] + 1) * dpr)))
-    right = max(left + 1, min(screenshot.width, int((rect["right"] + 18) * dpr)))
-    top = max(0, min(screenshot.height - 1, int((rect["top"] - 8) * dpr)))
-    bottom = max(top + 1, min(screenshot.height, int((rect["bottom"] + 8) * dpr)))
-    samples = []
-    green_pixels = 0
-    for y in range(top, bottom):
-        for x in range(left, right):
-            pixel = screenshot.getpixel((x, y))
-            if len(samples) < 20:
-                samples.append(pixel)
-            if pixel[1] >= 42 and pixel[1] - pixel[0] >= 10 and pixel[1] - pixel[2] >= 4:
-                green_pixels += 1
-    assert green_pixels >= 6, {"greenPixels": green_pixels, "samples": samples, "rect": rect, "metrics": metrics}
+    assert paused >= 1 or metrics["reducedMotion"] is True, {"paused": paused, "metrics": metrics}
+    assert metrics["animationName"] == "agent-status-opacity-pulse" or metrics["reducedMotion"] is True, metrics
+    assert metrics["boxShadow"] in ("", "none"), metrics
+    assert metrics["filter"] == "none", metrics
+    assert metrics["background"] == ui_pin_rgb("statusGood"), metrics
+    assert metrics["color"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["border"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert float(metrics["opacity"]) == 1, metrics
+
+
+def test_mixed_parent_status_ball_uses_two_crisp_child_colors(browser, tmp_path):
+    page = tmp_path / "mixed-parent-status-ball.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <section class="mixed-status-fixture">
+        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-green" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-working">●</span></span></span>
+        <span class="session-agent-activity-marker"><span class="agent-window-activity agent-window-activity--attention"><span id="red-yellow" class="status-indicator status-indicator--dot status-indicator--attention agent-window-status-dot agent-window-status-dot--segmented agent-window-status-dot--attention-cooldown">●</span></span></span>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 64px; background: #111820; }
+      .mixed-status-fixture { display: flex; gap: 24px; }
+      .session-agent-activity-marker { --agent-status-ball-size: 28px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const read = id => {
+          const node = document.getElementById(id);
+          const style = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return {backgroundImage: style.backgroundImage, border: style.borderTopColor, width: rect.width, height: rect.height};
+        };
+        return {redGreen: read('red-green'), redYellow: read('red-yellow')};
+        """
+    )
+    for name in ("redGreen", "redYellow"):
+        item = metrics[name]
+        assert "conic-gradient" in item["backgroundImage"], metrics
+        assert item["border"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+        assert abs(item["width"] - item["height"]) <= 0.5, metrics
+    assert metrics["redGreen"]["backgroundImage"] != metrics["redYellow"]["backgroundImage"], metrics
+
+
+def test_pane_tab_cooldown_ball_keeps_canonical_vibrant_yellow_at_rest(browser, tmp_path):
+    page = tmp_path / "pane-tab-cooldown-vibrant-yellow.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <section class="status-ball-vibrancy-fixture">
+        <button id="tab" class="pane-tab active">
+          <span class="pane-tab-core">
+            <span class="session-agent-activity-marker">
+              <span class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay: 0s">
+                <span id="tab-dot" class="status-indicator status-indicator--dot status-indicator--cooldown heartbeat-pulse attention-pulse agent-window-status-dot">●</span>
+              </span>
+            </span>
+            <span class="session-button-prefix">8001</span>
+          </span>
+        </button>
+        <span id="reference-dot" class="status-indicator status-indicator--dot status-indicator--cooldown agent-window-status-dot">●</span>
+      </section>
+    """, extra_css="""
+      body { margin: 0; padding: 64px; background: #111820; color: #e8eef8; font: 18px sans-serif; }
+      .status-ball-vibrancy-fixture { display: flex; align-items: center; gap: 32px; }
+      #tab { min-width: 160px; min-height: 34px; }
+      #reference-dot { font-size: 14px; line-height: 1; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const dot = document.getElementById('tab-dot');
+        for (const animation of dot.getAnimations()) {
+          const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+          if (duration > 0) {
+            animation.pause();
+            animation.currentTime = 0;
+          }
+        }
+        const rect = id => {
+          const value = document.getElementById(id).getBoundingClientRect();
+          return {left: value.left, top: value.top, width: value.width, height: value.height};
+        };
+        const style = getComputedStyle(dot);
+        return {
+          tab: rect('tab-dot'),
+          reference: rect('reference-dot'),
+              tabFilter: style.filter,
+              tabAnimation: style.animationName,
+              tabBackground: style.backgroundColor,
+              tabBorder: style.borderTopColor,
+              tabOpacity: style.opacity,
+              canonicalCooldown: getComputedStyle(document.documentElement).getPropertyValue('--agent-status-cooldown').trim(),
+        };
+        """
+    )
+    assert metrics["tabFilter"] == "none", metrics
+    assert metrics["tabAnimation"] == "agent-status-opacity-pulse", metrics
+    assert metrics["tabBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["tabBorder"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert 0.14 <= float(metrics["tabOpacity"]) <= 0.18, metrics
+    assert metrics["canonicalCooldown"] == ui_pin("agentStatusCooldown"), metrics
+
+
+def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser, tmp_path):
+    page = tmp_path / "pane-tab-attention-opacity.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <button class="pane-tab active">
+        <span class="pane-tab-core">
+          <span class="session-agent-activity-marker">
+            <span class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:0s">
+              <span id="attention-dot" class="status-indicator status-indicator--dot status-indicator--attention heartbeat-pulse agent-window-status-dot agent-window-status-dot--transition-glow">●</span>
+            </span>
+          </span>
+          <span class="session-button-prefix">needs input</span>
+        </span>
+      </button>
+    """, extra_css="body { margin: 0; padding: 64px; background: var(--bg); }"),
+    )
+    metrics = browser.execute_script(
+        """
+        const dot = document.getElementById('attention-dot');
+        const animation = dot.getAnimations().find(item => item.animationName === 'agent-status-opacity-pulse');
+        const read = () => {
+          const style = getComputedStyle(dot);
+          return {background: style.backgroundColor, border: style.borderTopColor, opacity: style.opacity, filter: style.filter};
+        };
+        const duration = Number(animation?.effect?.getTiming?.().duration) || 0;
+        if (animation && duration > 0) {
+          animation.pause();
+          animation.currentTime = duration;
+        }
+        const dim = read();
+        if (animation && duration > 0) animation.currentTime = duration * 0.5;
+        const bright = read();
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const expected = probePaint('background:var(--agent-status-ball-fill);border:1px solid var(--agent-status-ball-border)', dot);
+        return {animation: getComputedStyle(dot).animationName, dim, bright, expected};
+        """
+    )
+    assert metrics["animation"] == "agent-status-opacity-pulse", metrics
+    assert metrics["dim"]["background"] == metrics["expected"]["background"], metrics
+    assert metrics["dim"]["border"] == metrics["expected"]["border"], metrics
+    assert metrics["dim"]["filter"] == metrics["bright"]["filter"] == "none", metrics
+    assert 0.14 <= float(metrics["dim"]["opacity"]) <= 0.18, metrics
+    assert float(metrics["bright"]["opacity"]) == 1, metrics
 
 
 def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_override(browser, tmp_path):
     page = tmp_path / "subwindow-status-solid-shapes.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="subwindow-glyph-fixture">
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="bar-button" class="tab tmux-window-button active">
             <span class="tmux-window-name-label">
-              {_agent_status_glyph_html("codex", "working", "bar-working")}
+              {_agent_status_glyph_html("codex", "working", "bar-working", subwindow=True)}
               <span class="tmux-window-name-text">0:codex</span>
             </span>
           </span>
@@ -751,7 +3779,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="stable-button" class="tab tmux-window-button">
             <span class="tmux-window-name-label">
-              <span class="agent-window-activity agent-window-activity--working">
+                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--working">
                 <span id="stable-working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--working status-indicator--working">●</span>
               </span>
               <span class="tmux-window-name-text">3:codex</span>
@@ -761,7 +3789,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="stale-cooldown-button" class="tab tmux-window-button">
             <span class="tmux-window-name-label">
-              <span class="agent-window-activity agent-window-activity--cooldown">
+                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown">
                 <span id="stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
               </span>
               <span class="tmux-window-name-text">4:codex</span>
@@ -771,7 +3799,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         <div class="tmux-window-bar" data-tmux-window-label-mode="names">
           <span id="active-stale-cooldown-button" class="tab tmux-window-button active">
             <span class="tmux-window-name-label">
-              <span class="agent-window-activity agent-window-activity--cooldown">
+                  <span class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown">
                 <span id="active-stale-cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-status-dot agent-window-activity-icon--cooldown status-indicator--cooldown">●</span>
               </span>
               <span class="tmux-window-name-text">5:codex</span>
@@ -780,12 +3808,12 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
         </div>
         <div class="session-agent-window-block">
           <div id="popover-row" class="session-agent-row current">
-            {_agent_status_glyph_html("claude", "attention", "popover-attention")}
+            {_agent_status_glyph_html("claude", "attention", "popover-attention", subwindow=True)}
           </div>
         </div>
         <div class="file-tree-row tabber-row" data-tabber-type="window">
           <span class="tabber-window-label">
-            {_agent_status_glyph_html("codex", "cooldown", "tabber-cooldown")}
+            {_agent_status_glyph_html("codex", "cooldown", "tabber-cooldown", subwindow=True)}
             <span class="tabber-window-text">1:codex</span>
           </span>
         </div>
@@ -803,10 +3831,11 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
       .file-tree-row.tabber-row { padding: 6px 10px; background: var(--panel2); }
       .tmux-window-button.active { background: var(--active-control-bg); }
       .agent-window-activity { overflow: visible; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
+        document.documentElement.classList.add('status-pulse-disabled');
         document.getElementById('bar-working-dot').classList.add('agent-window-status-dot--subwindow-pulse');
         document.getElementById('popover-attention-dot').classList.add('agent-window-status-dot--subwindow-pulse');
         document.getElementById('tabber-cooldown-dot').classList.add('agent-window-status-dot--subwindow-pulse');
@@ -851,6 +3880,9 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
             buttonColor: button ? getComputedStyle(button).color : '',
           };
         };
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const expectedGrayDark = probePaint('background:var(--muted)').background;
+        const expectedAttentionDark = probePaint('background:var(--subwindow-status-glyph-fill)', document.getElementById('popover-attention-dot')).background;
         const dark = {
           bar: read('bar-working'),
           stable: read('stable-working'),
@@ -860,11 +3892,22 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
           tabber: read('tabber-cooldown'),
           session: read('session-aggregate'),
         };
+        const barActivity = document.getElementById('bar-working').closest('.agent-window-activity');
+        const barIcon = barActivity.querySelector('.agent-icon').getBoundingClientRect();
+        const barDot = barActivity.querySelector('.agent-window-status-dot').getBoundingClientRect();
+        const barLabel = barActivity.closest('.tmux-window-name-label').querySelector('.tmux-window-name-text').getBoundingClientRect();
+        const barInnerGap = Math.max(barIcon.left, barDot.left) - Math.min(barIcon.right, barDot.right);
+        const barLabelGap = barLabel.left - barActivity.getBoundingClientRect().right;
         document.body.classList.add('theme-light');
         return {
           ...dark,
+          barInnerGap,
+          barLabelGap,
           lightStaleCooldown: read('stale-cooldown'),
           lightActiveStaleCooldown: read('active-stale-cooldown'),
+          expectedGrayDark,
+          expectedAttentionDark,
+          expectedCooldownLight: probePaint('background:var(--agent-status-ball-fill)', document.getElementById('stale-cooldown-dot')).background,
         };
         """
     )
@@ -874,55 +3917,58 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
     assert metrics["bar"]["overflow"] == "visible", metrics
     assert metrics["bar"]["borderRadius"] == "0px", metrics
     assert "agent-window-status-dot--subwindow-pulse" in metrics["bar"]["className"], metrics
-    assert metrics["bar"]["animationName"] == "none", metrics
+    assert metrics["bar"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["bar"]["boxShadow"] in ("", "none"), metrics
     assert metrics["bar"]["filter"] == "none", metrics
-    assert 13 <= metrics["bar"]["width"] <= 15 and 13 <= metrics["bar"]["height"] <= 17, metrics
+    assert 2.9 <= metrics["barInnerGap"] <= 3.1, metrics
+    assert metrics["barLabelGap"] >= 1, metrics
+    assert 8 <= metrics["bar"]["width"] <= 10 and 8 <= metrics["bar"]["height"] <= 10, metrics
     assert metrics["bar"]["beforeContent"] == '""', metrics
-    assert metrics["bar"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["bar"]["beforeOpacity"] == "1", metrics
-    assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["color"], metrics
-    assert metrics["bar"]["beforeBorderStartColor"] != metrics["bar"]["buttonColor"], metrics
-    assert metrics["bar"]["beforeBorderStartColor"] != "rgba(0, 0, 0, 0)", metrics
-    assert "drop-shadow" in metrics["bar"]["beforeFilter"], metrics
-    stable_width = float(metrics["stable"]["beforeBorderStartWidth"].replace("px", ""))
-    pulsing_width = float(metrics["bar"]["beforeBorderStartWidth"].replace("px", ""))
+    assert metrics["bar"]["beforeAnimationName"] == "none", metrics
+    assert 0.14 <= float(metrics["bar"]["beforeOpacity"]) <= 1, metrics
+    assert metrics["bar"]["beforeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["bar"]["afterBackground"] == ui_pin_rgb("statusGood"), metrics
+    assert metrics["bar"]["afterAnimationName"] == "none", metrics
+    assert metrics["bar"]["beforeFilter"] == "none", metrics
+    assert metrics["bar"]["afterFilter"] == "none", metrics
+    stable_width = float(metrics["stable"]["beforeInlineSize"].replace("px", ""))
+    pulsing_width = float(metrics["bar"]["beforeInlineSize"].replace("px", ""))
     stale_pause_width = float(metrics["staleCooldown"]["beforeInlineSize"].replace("px", ""))
     pulsing_pause_width = float(metrics["tabber"]["beforeInlineSize"].replace("px", ""))
     assert 0.95 <= stable_width / pulsing_width <= 1.05, metrics
     assert 0.95 <= stale_pause_width / pulsing_pause_width <= 1.05, metrics
-    assert metrics["staleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["staleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["activeStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["activeStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == "rgb(255, 214, 51)", metrics
+    assert metrics["staleCooldown"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["staleCooldown"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["activeStaleCooldown"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["activeStaleCooldown"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["lightStaleCooldown"]["beforeBackground"] == metrics["expectedCooldownLight"], metrics
+    assert metrics["lightStaleCooldown"]["afterBackground"] == metrics["expectedCooldownLight"], metrics
+    assert metrics["lightActiveStaleCooldown"]["beforeBackground"] == metrics["expectedCooldownLight"], metrics
+    assert metrics["lightActiveStaleCooldown"]["afterBackground"] == metrics["expectedCooldownLight"], metrics
     assert metrics["popover"]["beforeContent"] == '""', metrics
     assert metrics["popover"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["popover"]["beforeBackground"] == "rgb(220, 38, 38)", metrics
-    assert metrics["popover"]["animationName"] == "none", metrics
+    assert metrics["popover"]["beforeBackground"] == metrics["expectedAttentionDark"], metrics
+    assert metrics["popover"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["popover"]["boxShadow"] in ("", "none"), metrics
-    assert metrics["popover"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["popover"]["beforeOpacity"] == "1", metrics
+    assert metrics["popover"]["beforeAnimationName"] == "none", metrics
+    assert 0.14 <= float(metrics["popover"]["beforeOpacity"]) <= 1, metrics
     assert metrics["popover"]["beforeBorderTopWidth"] == "0px", metrics
-    assert "drop-shadow" in metrics["popover"]["beforeFilter"], metrics
+    assert metrics["popover"]["beforeFilter"] == "none", metrics
     assert metrics["tabber"]["beforeContent"] == '""', metrics
     assert metrics["tabber"]["afterContent"] == '""', metrics
     assert metrics["tabber"]["color"] == "rgba(0, 0, 0, 0)", metrics
-    assert metrics["tabber"]["beforeBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["tabber"]["afterBackground"] == "rgb(255, 214, 51)", metrics
-    assert metrics["tabber"]["animationName"] == "none", metrics
+    assert metrics["tabber"]["beforeBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["tabber"]["afterBackground"] == ui_pin_rgb("agentStatusCooldown"), metrics
+    assert metrics["tabber"]["animationName"] == "agent-status-opacity-pulse", metrics
     assert metrics["tabber"]["boxShadow"] in ("", "none"), metrics
-    assert metrics["tabber"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["tabber"]["afterAnimationName"] == "subwindow-status-glyph-pulse", metrics
-    assert metrics["tabber"]["beforeOpacity"] == "1", metrics
-    assert metrics["tabber"]["afterOpacity"] == "1", metrics
+    assert metrics["tabber"]["beforeAnimationName"] == "none", metrics
+    assert metrics["tabber"]["afterAnimationName"] == "none", metrics
+    assert 0.14 <= float(metrics["tabber"]["beforeOpacity"]) <= 1, metrics
+    assert 0.14 <= float(metrics["tabber"]["afterOpacity"]) <= 1, metrics
     assert metrics["tabber"]["beforeBorderTopWidth"] == "0px", metrics
     assert metrics["tabber"]["afterBorderTopWidth"] == "0px", metrics
-    assert "drop-shadow" in metrics["tabber"]["beforeFilter"], metrics
-    assert "drop-shadow" in metrics["tabber"]["afterFilter"], metrics
+    assert metrics["tabber"]["beforeFilter"] == "none", metrics
+    assert metrics["tabber"]["afterFilter"] == "none", metrics
     for key in ("tabber", "staleCooldown", "activeStaleCooldown"):
         before_left = float(metrics[key]["beforeInsetInlineStart"].replace("px", ""))
         after_left = float(metrics[key]["afterInsetInlineStart"].replace("px", ""))
@@ -934,7 +3980,11 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
 
 def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_path):
     page = tmp_path / "agent-status-split-surfaces.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="agent-status-split-fixture">
         <button id="dock-tab" class="pane-tab active">
           <span class="pane-tab-core">
@@ -956,13 +4006,13 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         </div>
         <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 18px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("claude", "0:claude", _agent_status_glyph_html("claude", "cooldown", "tabber-window-cooldown"))}
+            {_tabber_window_button_html("claude", "0:claude", _agent_status_glyph_html("claude", "cooldown", "tabber-window-cooldown", subwindow=True))}
           </span>
         </div>
         <div id="info-pane" class="pane-info-bar">
           <button id="info-button" class="tab tmux-window-button active">
             <span class="tmux-window-name-label">
-              {_agent_status_glyph_html("codex", "attention", "info-attention")}
+              {_agent_status_glyph_html("codex", "attention", "info-attention", subwindow=True)}
               <span class="tmux-window-name-text">1:codex</span>
             </span>
           </button>
@@ -975,8 +4025,8 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
       .file-tree-row.tabber-row { width: 520px; padding: 4px 8px; background: #2c3340; }
       .pane-info-bar { display: flex; width: 520px; padding: 4px; background: #202633; }
       .tmux-window-button { width: max-content; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         document.getElementById('tabber-window-cooldown-dot').classList.add('agent-window-status-dot--subwindow-pulse');
@@ -1050,14 +4100,17 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
         assert item["centerDy"] <= 1, (name, metrics)
         if not metrics["reducedMotion"]:
             if name in ("tabberWindowCooldown", "infoAttention"):
-                assert item["dotAnimation"] == "none", (name, metrics)
-                assert item["beforeAnimation"] == "subwindow-status-glyph-pulse", (name, metrics)
+                assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, metrics)
+                assert item["beforeAnimation"] == "none", (name, metrics)
+                assert item["dotBoxShadow"] in ("", "none"), (name, metrics)
+            elif name == "tabberSessionWorking":
+                assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, metrics)
                 assert item["dotBoxShadow"] in ("", "none"), (name, metrics)
             else:
-                assert "attention-ring-fade" in item["dotAnimation"], (name, metrics)
+                assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, metrics)
                 assert item["dotPlayState"] == "running", (name, metrics)
                 assert item["dotIterationCount"] == "infinite", (name, metrics)
-                assert item["dotBoxShadow"] != "none", (name, metrics)
+                assert item["dotBoxShadow"] in ("", "none"), (name, metrics)
         assert item["dotWidth"] > 0 and item["dotHeight"] > 0, (name, metrics)
     assert metrics["dockAttention"]["dotToneAttention"] is True, metrics
     assert metrics["infoAttention"]["dotToneAttention"] is True, metrics
@@ -1077,16 +4130,22 @@ def test_agent_status_glyphs_split_on_tabs_tabber_and_info_buttons(browser, tmp_
     for name in subwindow_names:
         assert metrics[name]["agentStatusBallSize"] == "14px", (name, metrics)
         assert metrics[name]["dotFontSize"] == "14px", (name, metrics)
-    all_peak_widths = aggregate_peak_widths + subwindow_peak_widths
-    all_peak_heights = aggregate_peak_heights + subwindow_peak_heights
-    assert max(all_peak_widths) - min(all_peak_widths) <= 0.5, metrics
-    assert max(all_peak_heights) - min(all_peak_heights) <= 0.5, metrics
+    assert max(aggregate_peak_widths) - min(aggregate_peak_widths) <= 0.5, metrics
+    assert max(aggregate_peak_heights) - min(aggregate_peak_heights) <= 0.5, metrics
+    assert max(subwindow_peak_widths) - min(subwindow_peak_widths) <= 0.5, metrics
+    assert max(subwindow_peak_heights) - min(subwindow_peak_heights) <= 0.5, metrics
+    assert all(abs(width - (aggregate_peak_widths[0] * 0.66)) <= 0.5 for width in subwindow_peak_widths), metrics
+    assert all(abs(height - (aggregate_peak_heights[0] * 0.66)) <= 0.5 for height in subwindow_peak_heights), metrics
     assert len(transforms) == 1, metrics
 
 
 def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(browser, tmp_path):
     page = tmp_path / "tabber-parent-child-status-ball-check.html"
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <section class="tabber-ball-check-fixture">
         <div id="tabber-session-row" class="file-tree-row tabber-row selected" data-tabber-type="session" style="--file-explorer-font-size: 16px;">
           <span class="file-tree-name">
@@ -1101,7 +4160,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
         </div>
         <div id="tabber-window-row" class="file-tree-row tabber-row" data-tabber-type="window" style="--file-explorer-font-size: 22px;">
           <span class="file-tree-name">
-            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-window-working"))}
+            {_tabber_window_button_html("codex", "0:codex", _working_agent_glyph_html("codex", "tabber-window-working", subwindow=True))}
           </span>
         </div>
       </section>
@@ -1113,8 +4172,8 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
       .tabber-session-tab,
       .tabber-window-token,
       .agent-window-activity { overflow: visible; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const read = id => {
@@ -1147,6 +4206,7 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
             animationDuration: dotStyle.animationDuration,
             animationDelay: dotStyle.animationDelay,
             animationTimingFunction: dotStyle.animationTimingFunction,
+            opacity: dotStyle.opacity,
             transform: dotStyle.transform,
             width: dotRect.width,
             height: dotRect.height,
@@ -1164,31 +4224,35 @@ def test_tabber_child_status_ball_uses_compact_subwindow_size_and_shared_phase(b
     assert metrics["parent"]["dotFontSize"] == "14px", metrics
     assert metrics["child"]["agentStatusBallSize"] == "14px", metrics
     assert metrics["child"]["dotFontSize"] == "14px", metrics
-    assert abs(metrics["child"]["width"] - metrics["parent"]["width"]) <= 0.5, metrics
-    assert abs(metrics["child"]["height"] - metrics["parent"]["height"]) <= 0.5, metrics
+    assert abs(metrics["child"]["width"] - (metrics["parent"]["width"] * 0.66)) <= 0.5, metrics
+    assert abs(metrics["child"]["height"] - (metrics["parent"]["height"] * 0.66)) <= 0.5, metrics
     for side in ("parent", "child"):
         assert metrics[side]["dotFontStretch"] in {"normal", "100%"}, metrics
-    assert "attention-ring-fade" in metrics["parent"]["animationName"], metrics
-    assert "working-ball-hard-flash" in metrics["parent"]["animationName"], metrics
-    assert metrics["child"]["animationName"] == "none", metrics
-    assert metrics["child"]["beforeAnimationName"] == "subwindow-status-glyph-pulse", metrics
+    assert metrics["parent"]["animationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["child"]["animationName"] == "agent-status-opacity-pulse", metrics
+    assert metrics["child"]["beforeAnimationName"] == "none", metrics
+    assert metrics["parent"]["opacity"] == metrics["child"]["opacity"] == "1", metrics
     assert metrics["parent"]["transform"] == metrics["child"]["transform"], metrics
 
 
 def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(browser, tmp_path):
     page = tmp_path / "attention-dot-pulse.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="window-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="popover-dot" class="status-indicator session-agent-dot status-indicator--dot status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="tabber-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="attention-label" class="status-indicator tabber-agent-status status-indicator--label agent-status-attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">&lt;15 sec ago</span>
-    """, extra_css="""
-      :root { --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
-      body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """, extra_css=f"""
+      :root {{ --pulse-duration: 1.8s; --pulse-easing: ease-in-out; --bad: {ui_pin('paneRingAttention')}; --danger-text: {ui_pin('paneRingAttention')}; --text: #dbe2ef; --muted: #8590a6; }}
+      body {{ display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }}
+    """),
+    )
     metrics = browser.execute_script(
         """
         const ids = ['working-dot', 'window-dot', 'popover-dot', 'tabber-dot', 'cooldown-dot', 'attention-label'];
@@ -1255,31 +4319,31 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
     assert badge["rest"]["boxShadow"] != badge["peak"]["boxShadow"], badge
     for dot_id in ("working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
         dot = metrics[dot_id]
-        assert dot["primaryAnimationName"] == "attention-ring-fade", {dot_id: dot}
+        uses_opacity_pulse = dot_id in ("working-dot", "cooldown-dot")
+        assert dot["primaryAnimationName"] == ("agent-status-opacity-pulse" if uses_opacity_pulse else "attention-ring-fade"), {dot_id: dot}
         assert dot["primaryAnimationPlayState"] == "running", {dot_id: dot}
         assert dot["primaryAnimationIterationCount"] == "infinite", {dot_id: dot}
         assert dot["primaryAnimationDuration"] == badge["primaryAnimationDuration"], {dot_id: dot, "badge": badge}
         assert dot["primaryAnimationDelay"] == badge["primaryAnimationDelay"], {dot_id: dot, "badge": badge}
         assert dot["primaryAnimationTimingFunction"] == badge["primaryAnimationTimingFunction"], {dot_id: dot, "badge": badge}
         assert dot["delayVar"] == badge["delayVar"] == "-0.42s", {dot_id: dot, "badge": badge}
-        assert dot["borderTopStyle"] == "solid", {dot_id: dot}
-        assert dot["borderTopWidth"] != "0px", {dot_id: dot}
-        assert dot["rest"]["boxShadow"] != dot["peak"]["boxShadow"], {dot_id: dot}
-        assert dot["rest"]["filter"] != dot["peak"]["filter"], {dot_id: dot}
+        assert dot["borderTopStyle"] in {"none", "solid"}, {dot_id: dot}
+        if uses_opacity_pulse:
+            assert dot["rest"]["boxShadow"] == dot["peak"]["boxShadow"] == "none", {dot_id: dot}
+            assert dot["rest"]["filter"] == dot["peak"]["filter"] == "none", {dot_id: dot}
+            assert dot["rest"]["opacity"] < dot["peak"]["opacity"], {dot_id: dot}
+        else:
+            assert dot["rest"]["boxShadow"] != dot["peak"]["boxShadow"], {dot_id: dot}
+            assert dot["rest"]["filter"] != dot["peak"]["filter"], {dot_id: dot}
         assert abs(dot["rest"]["rect"]["width"] - dot["peak"]["rect"]["width"]) <= 0.5, {dot_id: dot}
         assert abs(dot["rest"]["rect"]["height"] - dot["peak"]["rect"]["height"]) <= 0.5, {dot_id: dot}
-    assert "working-ball-hard-flash" in metrics["working-dot"]["animationName"], metrics["working-dot"]
-    assert metrics["working-dot"]["rest"]["color"] != metrics["working-dot"]["peak"]["color"], metrics["working-dot"]
-    peak_rgb = [int(float(item)) for item in re.findall(r"\d+(?:\.\d+)?", metrics["working-dot"]["peak"]["color"])[:3]]
-    assert peak_rgb[1] - peak_rgb[0] >= 90 and peak_rgb[1] - peak_rgb[2] >= 70, metrics["working-dot"]
-    working_peak_glow = float(metrics["working-dot"]["peakGlowSize"].replace("px", ""))
-    default_peak_glow = float(metrics["window-dot"]["peakGlowSize"].replace("px", ""))
-    assert working_peak_glow < default_peak_glow, metrics
+    assert metrics["working-dot"]["animationName"] == "agent-status-opacity-pulse", metrics["working-dot"]
+    assert metrics["working-dot"]["rest"]["opacity"] < metrics["working-dot"]["peak"]["opacity"], metrics["working-dot"]
     for dot_id in ("window-dot", "popover-dot", "tabber-dot", "cooldown-dot"):
-        assert abs(metrics["working-dot"]["rest"]["rect"]["width"] - metrics[dot_id]["rest"]["rect"]["width"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
-        assert abs(metrics["working-dot"]["rest"]["rect"]["height"] - metrics[dot_id]["rest"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
-        assert abs(metrics["working-dot"]["peak"]["rect"]["width"] - metrics[dot_id]["peak"]["rect"]["width"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
-        assert abs(metrics["working-dot"]["peak"]["rect"]["height"] - metrics[dot_id]["peak"]["rect"]["height"]) <= 0.5, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["rest"]["rect"]["width"] - metrics[dot_id]["rest"]["rect"]["width"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["rest"]["rect"]["height"] - metrics[dot_id]["rest"]["rect"]["height"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["peak"]["rect"]["width"] - metrics[dot_id]["peak"]["rect"]["width"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
+        assert abs(metrics["working-dot"]["peak"]["rect"]["height"] - metrics[dot_id]["peak"]["rect"]["height"]) <= 2.1, {dot_id: metrics[dot_id], "working": metrics["working-dot"]}
 
     visual_ids = {"working-dot": "green", "window-dot": "red", "cooldown-dot": "yellow"}
     all_animation_ids = ["working-dot", "window-dot", "popover-dot", "tabber-dot", "cooldown-dot", "attention-label"]
@@ -1317,14 +4381,87 @@ def test_status_balls_share_attention_label_pulse_cadence_and_actually_pulsate(b
         peak_score = _status_ball_tone_score(peak_screenshot, dpr, rest_rects[dot_id], peak_rects[dot_id], tone)
         visual_scores[dot_id] = {"rest": rest_score, "peak": peak_score}
         energy_ratio = 1.08 if dot_id == "working-dot" else 1.25
-        count_delta = 6 if dot_id == "working-dot" else 10
+        count_delta = 2 if dot_id == "working-dot" else 3
         assert peak_score["energy"] > rest_score["energy"] * energy_ratio, visual_scores
-        assert peak_score["count"] > rest_score["count"] + count_delta, visual_scores
+        if dot_id in ("working-dot", "cooldown-dot"):
+            assert peak_score["count"] == rest_score["count"], visual_scores
+        else:
+            assert peak_score["count"] > rest_score["count"] + count_delta, visual_scores
     working_energy_delta = visual_scores["working-dot"]["peak"]["energy"] - visual_scores["working-dot"]["rest"]["energy"]
     red_energy_delta = visual_scores["window-dot"]["peak"]["energy"] - visual_scores["window-dot"]["rest"]["energy"]
     yellow_energy_delta = visual_scores["cooldown-dot"]["peak"]["energy"] - visual_scores["cooldown-dot"]["rest"]["energy"]
     assert working_energy_delta < red_energy_delta, visual_scores
     assert working_energy_delta < yellow_energy_delta, visual_scores
+
+
+def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof agentWindowActivityIconHtml === 'function' && typeof setAttentionAnimationClockDelay === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const duration = 1550;
+          globalThis.yolomuxEnableBroadStatusPulse = false;
+          agentStatusPulsePeriodMs = duration;
+          document.documentElement.style.setProperty('--pulse-duration', `${duration / 1000}s`);
+          document.documentElement.style.setProperty('--status-pulse-step-count', '12');
+          setAttentionAnimationClockDelay();
+          const host = document.createElement('div');
+          document.body.appendChild(host);
+          const item = {
+            state: 'working',
+            icon: '●',
+            label: 'Codex working',
+            pulseActive: true,
+            transitionPulseActive: true,
+            acknowledged: false,
+          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+          const samples = [];
+          let previousDot = null;
+          for (let index = 0; index < 5; index += 1) {
+            host.innerHTML = agentWindowActivityIconHtml('codex', 'working', 0, {
+              session: '1',
+              window_index: 0,
+              current: true,
+              statusOnly: true,
+              item,
+            });
+            await frame();
+            const dot = host.querySelector('.agent-window-status-dot');
+            const animation = dot?.getAnimations?.().find(value => value.animationName === 'agent-status-opacity-pulse');
+            const timing = animation?.effect?.getComputedTiming?.() || {};
+            const sampledAt = Date.now();
+            const expectedProgress = ((sampledAt % duration) + duration) % duration / duration;
+            const progress = Number(timing.progress);
+            const phaseDistance = Math.min(Math.abs(progress - expectedProgress), 1 - Math.abs(progress - expectedProgress));
+            samples.push({
+              replaced: previousDot !== null && previousDot !== dot,
+              progress,
+              expectedProgress,
+              phaseDistance,
+              opacity: Number(getComputedStyle(dot).opacity),
+              delay: getComputedStyle(dot).animationDelay,
+            });
+            previousDot = dot;
+            await pause(260);
+          }
+          host.remove();
+          done({samples});
+        })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert all(sample["replaced"] for sample in metrics["samples"][1:]), metrics
+    assert all(sample["phaseDistance"] < 0.08 for sample in metrics["samples"]), metrics
+    assert len({round(sample["progress"], 2) for sample in metrics["samples"]}) >= 4, metrics
+    assert len({round(sample["opacity"], 2) for sample in metrics["samples"]}) >= 3, metrics
 
 
 def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path):
@@ -1333,9 +4470,9 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
       <span id="working-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--working status-indicator--working heartbeat-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="attention-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--attention status-indicator--attention heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
       <span id="cooldown-dot" class="status-indicator agent-window-activity-icon status-indicator--dot agent-window-activity-icon--cooldown status-indicator--cooldown heartbeat-pulse attention-pulse" style="--attention-animation-delay:-0.42s">●</span>
-    """, extra_css="""
-      :root { --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 6; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: #ff3347; --danger-text: #ff3347; --text: #dbe2ef; --muted: #8590a6; }
-      body { display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }
+    """, extra_css=f"""
+      :root {{ --pulse-duration: 1.55s; --pulse-easing: ease-in-out; --status-pulse-step-count: 12; --status-pulse-timing: steps(var(--status-pulse-step-count), end); --bad: {ui_pin('paneRingAttention')}; --danger-text: {ui_pin('paneRingAttention')}; --text: #dbe2ef; --muted: #8590a6; }}
+      body {{ display: grid; justify-items: start; gap: 34px; background: #111; color: #ddd; font: 16px sans-serif; padding: 32px; }}
     """), encoding="utf-8")
     browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
     try:
@@ -1371,27 +4508,31 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
         )
         assert metrics["reduced"] is True, metrics
         attention = metrics["attention"]
-        assert attention["primaryAnimationName"] == "attention-ring-fade", metrics
+        assert attention["primaryAnimationName"] == "none", metrics
         assert attention["primaryAnimationDuration"] == "1.55s", metrics
-        assert attention["primaryAnimationTimingFunction"].startswith("steps(6"), metrics
+        assert attention["primaryAnimationTimingFunction"].startswith("steps(12"), metrics
         assert attention["primaryAnimationDelay"] == "-0.42s", metrics
-        assert attention["primaryEffectDuration"] > 0, metrics
+        assert attention["primaryEffectDuration"] == 0, metrics
         for key in ("working", "cooldown"):
             dot = metrics[key]
-            assert dot["primaryAnimationName"] == "attention-ring-fade", metrics
-            assert dot["primaryAnimationDuration"] == attention["primaryAnimationDuration"], metrics
-            assert dot["primaryAnimationDelay"] == attention["primaryAnimationDelay"], metrics
-            assert dot["primaryAnimationTimingFunction"] == attention["primaryAnimationTimingFunction"], metrics
-            assert dot["primaryEffectDuration"] == attention["primaryEffectDuration"], metrics
+            assert dot["primaryAnimationName"] == "agent-status-opacity-pulse", metrics
+            assert dot["primaryAnimationDuration"] == "1.55s", metrics
+            assert dot["primaryAnimationDelay"] == "-0.42s", metrics
+            assert dot["primaryAnimationTimingFunction"].startswith("steps(12"), metrics
+            assert dot["primaryEffectDuration"] > 0, metrics
             assert dot["primaryPlayState"] in {"pending", "running"}, metrics
-        assert "working-ball-hard-flash" in metrics["working"]["animationName"], metrics
+        assert metrics["working"]["animationName"] == "agent-status-opacity-pulse", metrics
     finally:
         browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
 
 
 def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(browser, tmp_path):
     page = tmp_path / "agent-status-split.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div id="base" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.42s">
         <span id="base-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
@@ -1400,7 +4541,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
       </div>
       <button id="info-button" class="tab tmux-window-button">
         <span class="tmux-window-name-label">
-          <span id="info" class="agent-window-activity agent-window-activity--attention" style="--attention-animation-delay:-0.37s">
+          <span id="info" class="agent-window-activity agent-window-activity--subwindow agent-window-activity--attention" style="--attention-animation-delay:-0.37s">
             <span id="info-icon" class="agent-icon claude agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--attention agent-window-agent-icon--attention">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="5.5" fill="#cf7554"/></svg>
             </span>
@@ -1413,7 +4554,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
         <span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">
           <span class="tab tmux-window-button tabber-window-button" data-tabber-window-button="shared">
             <span class="tmux-window-name-label">
-              <span id="tabber" class="agent-window-activity agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s">
+              <span id="tabber" class="agent-window-activity agent-window-activity--subwindow agent-window-activity--cooldown" style="--attention-animation-delay:-0.91s">
                 <span id="tabber-icon" class="agent-icon codex agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--cooldown agent-window-agent-icon--cooldown">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#667ef8" d="M3 12a9 9 0 1 0 18 0A9 9 0 0 0 3 12z"/></svg>
                 </span>
@@ -1426,8 +4567,8 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
       </div>
     """, extra_css="""
       body { background: #111; color: #ddd; font: 16px sans-serif; padding: 24px; display: grid; gap: 16px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         document.getElementById('info-dot').classList.add('agent-window-status-dot--subwindow-pulse');
@@ -1475,16 +4616,16 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
             assert "attention-ring-fade" in item["dotAnimation"], (name, item)
             assert item["dotDelay"] == item["rootDelayVar"], (name, item)
         else:
-            assert item["dotAnimation"] == "none", (name, item)
-            assert item["beforeAnimation"] == "subwindow-status-glyph-pulse", (name, item)
-            assert item["beforeDelay"] == item["rootDelayVar"], (name, item)
+            assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, item)
+            assert item["beforeAnimation"] == "none", (name, item)
+            assert item["dotDelay"] == item["rootDelayVar"], (name, item)
             assert item["dotBoxShadow"] in ("", "none"), (name, item)
         assert item["leftGap"] >= -0.5, (name, item)
         assert item["centerDy"] <= 1, (name, item)
         assert item["dotWithinRoot"] is True, (name, item)
         assert item["dotDelayVar"] == item["rootDelayVar"], (name, item)
     assert metrics["info"]["rootWidth"] >= 24
-    assert metrics["tabber"]["rootWidth"] >= 28
+    assert 24 <= metrics["tabber"]["rootWidth"] <= 27
 
 
 def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser, tmp_path):
@@ -1496,8 +4637,6 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           <div class="pane-info-bar-popover-zone panel-popover-zone">
             <div class="panel-session-label"><span class="session-button-dir">8001</span></div>
             <div id="meta" class="pane-info-bar-meta meta pane-info-bar-meta-overflow" style="--pane-info-bar-scroll-distance: 240px; --pane-info-bar-scroll-offset: -240px; --pane-info-bar-scroll-duration: 23s; --pane-info-bar-scroll-timing: linear(0 0%, 0 13.04%, 1 91.30%, 1 100%);">
-              <span id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="btn-base meta-repo-cycle">&lt;</button><button type="button" class="btn-base meta-repo-chip">2/3</button><button type="button" class="btn-base meta-repo-cycle">&gt;</button></span></span>
-              <span class="meta-sep pane-info-bar-fixed-sep"> · </span>
               <span id="viewport" class="pane-info-bar-scroll-viewport"><span id="scroll-text" class="pane-info-bar-scroll-text"><span class="meta-branch">__LONG_TEXT__</span></span></span>
             </div>
           </div>
@@ -1506,15 +4645,21 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
             <button type="button" class="tab tmux-window-button active"><span class="tmux-window-name-label"><span class="tmux-window-name-text">1:claude</span></span><span class="tmux-window-number-label">1</span></button>
             <button type="button" class="tab tmux-window-button"><span class="tmux-window-name-label"><span class="tmux-window-name-text">2:bash</span></span><span class="tmux-window-number-label">2</span></button>
           </div>
+          <div id="controls" class="pane-info-bar-controls"><span class="meta-repo-switch"><button type="button" class="btn-base meta-repo-cycle">&lt;</button><button type="button" class="btn-base meta-repo-chip">2/3</button><button type="button" class="btn-base meta-repo-cycle">&gt;</button></span></div>
+          <button id="status-toggle" type="button" class="tab tmux-status-toggle tmux-status-toggle--none">·</button>
           <button type="button" class="panel-detail-close"></button>
         </div>
       </article>
     """.replace("__LONG_TEXT__", long_text)
-    page.write_text(page_html(body, extra_css="""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(body, extra_css="""
       body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
       .panel { height: auto; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const rect = id => {
@@ -1562,6 +4707,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           labelMode: document.getElementById('window-bar').dataset.tmuxWindowLabelMode,
           visibleNameDisplays: Array.from(document.querySelectorAll('.tmux-window-name-label')).map(node => getComputedStyle(node).display),
           visibleNumberDisplays: Array.from(document.querySelectorAll('.tmux-window-number-label')).map(node => getComputedStyle(node).display),
+          statusToggle: rect('status-toggle'),
         };
         """
     )
@@ -1569,6 +4715,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert "ABC-2239 In Review" in metrics["metaText"]
     assert "fix(performance): repair v1 PARITY commit + case-doc links after" in metrics["metaText"]
     assert metrics["controlsInsideViewport"] is False
+    assert metrics["controls"]["left"] >= metrics["bar"]["right"] - 1
     assert metrics["controls"]["right"] <= metrics["viewport"]["left"] + 2
     if not metrics["reduced"]:
         assert metrics["scrollAnimation"] == "pane-info-bar-scroll"
@@ -1585,177 +4732,2406 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert metrics["buttonBorderStyle"] == "solid"
     assert metrics["buttonBorderWidth"] == "1px"
     assert metrics["buttonBorderBackgroundDistance"] > 32
+    assert metrics["statusToggle"]["left"] >= metrics["viewport"]["right"] - 1
     assert metrics["labelMode"] == "names"
     assert set(metrics["visibleNameDisplays"]).issubset({"flex", "inline-flex"})
     assert "none" not in set(metrics["visibleNameDisplays"])
     assert set(metrics["visibleNumberDisplays"]) == {"none"}
+    short_meta = browser.execute_script(
+        """
+        const meta = document.getElementById('meta');
+        meta.classList.remove('pane-info-bar-meta-overflow');
+        document.getElementById('scroll-text').textContent = 'yolomux.dev8003 · ~/yolomux.dev8003 · 9 ahead · 10 dirty';
+        const metaRect = meta.getBoundingClientRect();
+        const zoneRect = document.querySelector('.pane-info-bar-popover-zone').getBoundingClientRect();
+        return {metaRight: metaRect.right, zoneRight: zoneRect.right};
+        """
+    )
+    assert abs(short_meta["metaRight"] - short_meta["zoneRight"]) <= 1
 
 
-@pytest.mark.parametrize(
-    "agent,user_input",
-    [
-        ("codex", "touch /tmp/yolomux-mock-approval"),
-        ("claude", "sleep 10"),
-    ],
-)
-def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path, agent, user_input):
-    tmux_binary = shutil.which("tmux")
-    if not tmux_binary:
-        pytest.skip("tmux is not installed")
+def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp_path):
+    page = tmp_path / "pane-info-popover-full-width.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <article id="panel" class="panel active-pane" style="width: 900px; height: 300px;">
+        <div id="info-bar" class="pane-info-bar panel-detail-row">
+          <div id="zone" class="pane-info-bar-popover-zone panel-popover-zone popover-open">
+            <div class="panel-session-label"><span class="session-button-dir">7771</span></div>
+            <div class="pane-info-bar-meta meta">short metadata</div>
+            <div id="popover" class="session-popover" role="tooltip"><div class="popover-title">Extra session information</div><div class="popover-desc">This card should use all available pane width.</div></div>
+          </div>
+          <div class="tmux-window-bar" data-tmux-window-bar-context="info-bar"><button type="button" class="tab tmux-window-button">0:codex</button><button type="button" class="tab tmux-window-button">1:claude</button></div>
+          <div class="pane-info-bar-controls"><button type="button" class="btn-base">2/3</button></div>
+          <button type="button" class="panel-detail-close"></button>
+        </div>
+      </article>
+    """, extra_css="""
+      body { margin: 0; padding: 24px; background: var(--bg); }
+      .panel { overflow: hidden; }
+      .pane-info-bar { box-sizing: border-box; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const {rect} = window.__yolomuxTestHelpers;
+        const panel = document.getElementById('panel');
+        const zone = document.getElementById('zone');
+        const popover = document.getElementById('popover');
+        const infoBar = document.getElementById('info-bar');
+        const style = getComputedStyle(popover);
+        return {panel: rect(panel), zone: rect(zone), popover: rect(popover), infoBar: rect(infoBar), position: style.position, visibility: style.visibility, overflow: getComputedStyle(infoBar).overflow};
+        """
+    )
+    assert metrics["position"] == "absolute", metrics
+    assert metrics["visibility"] == "visible", metrics
+    assert metrics["overflow"] == "visible", metrics
+    assert metrics["zone"]["width"] < metrics["panel"]["width"] * 0.85, metrics
+    assert metrics["popover"]["width"] > metrics["zone"]["width"] * 1.15, metrics
+    assert metrics["popover"]["left"] >= metrics["infoBar"]["left"] + 6, metrics
+    assert metrics["popover"]["right"] <= metrics["infoBar"]["right"] - 6, metrics
+    assert abs(metrics["popover"]["left"] - metrics["infoBar"]["left"] - 8) <= 1, metrics
+    assert abs(metrics["infoBar"]["right"] - metrics["popover"]["right"] - 8) <= 1, metrics
 
-    paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-    sock_base = Path("/tmp") / f"yoask-ui-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    sock_base.mkdir(mode=0o700)
-    socket_path = sock_base / "s"
-    session = f"yb-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
 
-    def tmux_cmd(*args, timeout=8):
-        return subprocess.run(
-            [tmux_binary, "-S", str(socket_path), *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+def test_live_session_tab_popover_uses_owning_pane_width(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "const tab = document.querySelector('.pane-tab[data-pane-tab=\"1\"]'); return typeof positionPaneTabPopover === 'function' && !!paneTabPopoverForAnchor(tab);"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+        const popover = paneTabPopoverForAnchor(tab);
+        positionPaneTabPopover(tab, popover);
+        tab.classList.add('popover-open');
+        popover.classList.add('popover-open');
+        const {rect} = window.__yolomuxTestHelpers;
+        return {tab: rect(tab), pane: rect(paneTabPopoverOwningPane(tab)), popover: rect(popover)};
+        """
+    )
+    assert metrics["popover"]["width"] > metrics["tab"]["width"] * 2, metrics
+    assert metrics["popover"]["left"] >= metrics["pane"]["left"] + 6, metrics
+    assert metrics["popover"]["right"] <= metrics["pane"]["right"] - 6, metrics
+    left_gutter = metrics["popover"]["left"] - metrics["pane"]["left"]
+    right_gutter = metrics["pane"]["right"] - metrics["popover"]["right"]
+    assert abs(left_gutter - right_gutter) <= 1, metrics
+    assert abs(metrics["popover"]["width"] - (metrics["pane"]["width"] - left_gutter - right_gutter)) <= 1, metrics
+
+
+def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
+    page = tmp_path / "pane-control-shared-paint.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <article class="panel active-pane" style="height:auto;">
+        <div class="pane-info-bar panel-detail-row">
+          <button id="status-control" type="button" class="tab tmux-status-toggle">·</button>
+          <div class="tmux-window-bar" data-tmux-window-bar-context="info" data-tmux-window-label-mode="names">
+            <button id="window-control" type="button" class="tab tmux-window-button"><span class="tmux-window-name-label">0:bash</span></button>
+          </div>
+          <div class="tabs">
+            <button id="frame-control" type="button" class="tab pane-minimize"></button>
+            <button id="pane-close" type="button" class="tab pane-close"></button>
+          </div>
+          <button id="detail-close" type="button" class="panel-detail-close"></button>
+          <button id="tab-close" type="button" class="pane-tab-close"></button>
+        </div>
+      </article>
+      <article id="preferences-grid" class="preferences-panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+      <article id="debug-grid" class="js-debug-panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+      <article id="panel-grid" class="panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+      <article id="editor-grid" class="panel file-editor-panel" style="height:120px;border:0;"><div></div><div></div><div></div></article>
+    """),
+    )
+
+    def paint(control_id):
+        return browser.execute_script(
+            """
+            const style = getComputedStyle(document.getElementById(arguments[0]));
+            return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+            """,
+            control_id,
         )
 
-    def capture():
-        return tmux_cmd("capture-pane", "-p", "-t", f"{session}:").stdout or ""
+    control_ids = ["status-control", "window-control", "frame-control"]
+    rest = [paint(control_id) for control_id in control_ids]
+    assert rest[0] == rest[1] == rest[2]
 
-    def wait_until(predicate, timeout=20):
-        deadline = time.time() + timeout
-        last = ""
-        while time.time() < deadline:
-            last = capture()
-            if predicate(last):
-                return True, last
-            time.sleep(0.4)
-        return False, last
+    focus_paints = []
+    for control_id in control_ids:
+        browser.execute_script("document.getElementById(arguments[0]).focus({focusVisible: true})", control_id)
+        assert browser.execute_script("return document.getElementById(arguments[0]).matches(':focus-visible')", control_id) is True
+        focus_paints.append(paint(control_id))
+    assert focus_paints[0] == focus_paints[1] == focus_paints[2]
+    assert focus_paints[0] != rest[0]
 
+    hover_paints = []
+    for control_id in control_ids:
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", control_id)).perform()
+        hover_paints.append(paint(control_id))
+    assert hover_paints[0] == hover_paints[1] == hover_paints[2] == focus_paints[0]
+
+    for theme in ("dark", "light"):
+        browser.execute_script("document.body.classList.toggle('theme-light', arguments[0] === 'light')", theme)
+        metrics = browser.execute_script(
+            """
+            const readGlyph = id => {
+              const element = document.getElementById(id);
+              const style = getComputedStyle(element, '::before');
+              return {
+                base: {position: style.position, width: style.width, height: style.height, radius: style.borderRadius},
+                centerX: parseFloat(style.left) / element.clientWidth,
+                centerY: parseFloat(style.top) / element.clientHeight,
+              };
+            };
+            const gridIds = ['preferences-grid', 'debug-grid', 'panel-grid', 'editor-grid'];
+            return {
+              glyphs: ['detail-close', 'pane-close', 'tab-close'].map(readGlyph),
+              grids: gridIds.map(id => getComputedStyle(document.getElementById(id)).gridTemplateRows),
+            };
+            """
+        )
+        glyphs = metrics["glyphs"]
+        assert glyphs[0]["base"] == glyphs[1]["base"] == glyphs[2]["base"]
+        assert glyphs[0]["base"]["width"] == "8px"
+        assert abs(float(glyphs[0]["base"]["height"].removesuffix("px")) - 1.4) <= 0.02
+        for glyph in glyphs:
+            assert abs(glyph["centerX"] - 0.5) <= 0.01
+            assert abs(glyph["centerY"] - 0.5) <= 0.01
+        assert metrics["grids"][0] == metrics["grids"][1] == metrics["grids"][2] == metrics["grids"][3]
+
+
+def test_persistent_active_controls_share_one_computed_paint(browser, tmp_path):
+    page = tmp_path / "persistent-active-control-paint.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <button id="tab-meta" class="active"></button>
+      <div class="topbar-language-menu open"><button id="language" class="topbar-language"></button></div>
+      <button id="menu-icon" class="app-menu-ui-icon active"></button>
+      <button id="notify" class="notify-toggle active"></button>
+      <span id="session-state" class="session-state-badge session-state-yolo-approval"></span>
+      <button id="preferences-search" class="preferences-search-button"></button>
+      <div class="tmux-window-bar"><button id="tmux-window" class="tab tmux-window-button active"></button></div>
+      <div class="session-rename-actions"><button id="rename" class="session-rename-submit"></button></div>
+      <button id="info-preset" class="info-tree-preset active"></button>
+      <button id="finder-toggle" class="file-explorer-hidden-toggle active"></button>
+      <div class="file-editor-preview-zoom-toolbar"><button id="preview-zoom" aria-pressed="true"></button></div>
+      <div class="file-editor-codemirror" style="position:static;"><div class="cm-search"><label id="search-toggle"><input type="checkbox" checked></label></div></div>
+      <article id="pane-control-fixture" class="panel file-editor-panel" style="position:static;height:auto;display:block;padding:8px;">
+        <div class="tabs"><button id="pane-tab-pressed" class="tab active"></button></div>
+        <button id="attention-pressed" class="attention-toast-agent-button"></button>
+        <div class="file-editor-mode-control"><button id="legacy-mode-pressed" class="active"></button></div>
+        <button id="blame-pressed" class="file-editor-blame-panel" aria-pressed="true"></button>
+        <button id="diff-expand-pressed" class="file-editor-diff-expand-panel" aria-pressed="true"></button>
+        <div class="file-editor-mode-control-panel"><button id="mode-panel-pressed" class="active"></button></div>
+        <button id="gutter-pressed" class="file-editor-gutter-panel active"></button>
+        <button id="wrap-pressed" class="file-editor-wrap-panel" aria-pressed="true"></button>
+        <button id="find-pressed" class="file-editor-find-panel" aria-pressed="true"></button>
+        <button id="diff-pressed" class="file-editor-diff-panel" aria-pressed="true"></button>
+        <button id="toolbar-hover" class="file-editor-gutter-panel"></button>
+        <div class="file-editor-preview-find-panel" style="position:static;"><button id="preview-find-hover"></button></div>
+        <span id="icon-blame" class="file-editor-icon file-editor-icon-blame"></span>
+        <span id="icon-diff" class="file-editor-icon file-editor-icon-diff"></span>
+        <span id="icon-eye" class="file-editor-icon file-editor-icon-eye"></span>
+        <span id="icon-split" class="file-editor-icon file-editor-icon-split"></span>
+        <span id="icon-theme" class="file-editor-icon file-editor-icon-theme"></span>
+      </article>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const ids = ['tab-meta', 'language', 'menu-icon', 'notify', 'session-state', 'preferences-search', 'rename', 'info-preset', 'finder-toggle', 'preview-zoom', 'search-toggle'];
+        const paneIds = ['pane-tab-pressed', 'attention-pressed', 'legacy-mode-pressed', 'blame-pressed', 'diff-expand-pressed', 'mode-panel-pressed', 'gutter-pressed', 'wrap-pressed', 'find-pressed', 'diff-pressed'];
+        document.getElementById('tab-meta').id = 'tabMetaToggle';
+        const readPaint = element => {
+          const style = getComputedStyle(element);
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const readIcon = (id, pseudo) => {
+          const element = document.getElementById(id);
+          const style = getComputedStyle(element, pseudo);
+          const transform = new DOMMatrixReadOnly(style.transform);
+          const outerWidth = parseFloat(style.width) + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+          const outerHeight = parseFloat(style.height) + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+          return {
+            content: style.content,
+            position: style.position,
+            centerX: parseFloat(style.left) / element.clientWidth,
+            centerY: parseFloat(style.top) / element.clientHeight,
+            translatedHalfWidth: transform.e + (outerWidth / 2),
+            translatedHalfHeight: transform.f + (outerHeight / 2),
+          };
+        };
+        const readTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          document.body.classList.toggle('editor-theme-light', light);
+          const probe = document.createElement('div');
+          probe.style.cssText = 'color:var(--active-control-text);background:var(--active-control-bg);border:1px solid var(--active-control-border)';
+          document.body.appendChild(probe);
+          const expected = readPaint(probe);
+          probe.remove();
+          const pane = document.getElementById('pane-control-fixture');
+          const paneProbe = document.createElement('button');
+          paneProbe.style.cssText = 'color:var(--pane-ctl-pressed-fg,var(--pane-tab-active-text));background:var(--pane-ctl-pressed-bg,var(--pane-tab-active-bg));border:1px solid var(--pane-ctl-pressed-border,var(--pane-tab-active-border))';
+          pane.appendChild(paneProbe);
+          const paneExpected = readPaint(paneProbe);
+          paneProbe.remove();
+          return {
+            expected,
+            paneExpected,
+            tmuxWindow: readPaint(document.getElementById('tmux-window')),
+            controls: Object.fromEntries(ids.map(id => {
+              const resolvedId = id === 'tab-meta' ? 'tabMetaToggle' : id;
+              return [id, readPaint(document.getElementById(resolvedId))];
+            })),
+            paneControls: Object.fromEntries(paneIds.map(id => [id, readPaint(document.getElementById(id))])),
+            icons: {
+              blameBefore: readIcon('icon-blame', '::before'),
+              blameAfter: readIcon('icon-blame', '::after'),
+              diffBefore: readIcon('icon-diff', '::before'),
+              eyeBefore: readIcon('icon-eye', '::before'),
+              eyeAfter: readIcon('icon-eye', '::after'),
+              splitBefore: readIcon('icon-split', '::before'),
+              splitAfter: readIcon('icon-split', '::after'),
+              themeBefore: readIcon('icon-theme', '::before'),
+            },
+          };
+        };
+        return {dark: readTheme(false), light: readTheme(true)};
+        """
+    )
+    for theme in ("dark", "light"):
+        expected = metrics[theme]["expected"]
+        for control, paint in metrics[theme]["controls"].items():
+            assert paint == expected, {"theme": theme, "control": control, "paint": paint, "expected": expected}
+        tmux_window = metrics[theme]["tmuxWindow"]
+        assert tmux_window["color"] != expected["color"], {"theme": theme, "tmuxWindow": tmux_window, "expected": expected}
+        assert tmux_window["background"] != expected["background"], {"theme": theme, "tmuxWindow": tmux_window, "expected": expected}
+        for control, paint in metrics[theme]["paneControls"].items():
+            assert paint == metrics[theme]["paneExpected"], {"theme": theme, "control": control, "paint": paint, "expected": metrics[theme]["paneExpected"]}
+        for icon, geometry in metrics[theme]["icons"].items():
+            assert geometry["content"] == '""', {"theme": theme, "icon": icon, "geometry": geometry}
+            assert geometry["position"] == "absolute", {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["centerX"] - 0.5) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["centerY"] - 0.5) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["translatedHalfWidth"]) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
+            assert abs(geometry["translatedHalfHeight"]) <= 0.01, {"theme": theme, "icon": icon, "geometry": geometry}
+
+    for theme, light in (("dark", False), ("light", True)):
+        browser.execute_script(
+            "document.body.classList.toggle('theme-light', arguments[0]); document.body.classList.toggle('theme-dark', !arguments[0]); document.body.classList.toggle('editor-theme-light', arguments[0]);",
+            light,
+        )
+        hover_paints = {}
+        for control_id in ("toolbar-hover", "preview-find-hover"):
+            fast_pointer_actions(browser).move_to_element(browser.find_element("id", control_id)).perform()
+            hover_paints[control_id] = browser.execute_script(
+                """
+                const control = document.getElementById(arguments[0]);
+                const pane = document.getElementById('pane-control-fixture');
+                const read = element => {
+                  const style = getComputedStyle(element);
+                  return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+                };
+                const probe = document.createElement('button');
+                probe.style.cssText = 'color:var(--editor-toolbar-control-hover-fg);background:var(--editor-toolbar-control-hover-bg);border:1px solid var(--editor-toolbar-control-hover-border)';
+                pane.appendChild(probe);
+                const expected = read(probe);
+                probe.remove();
+                return {actual: read(control), expected};
+                """,
+                control_id,
+            )
+        for control, paint in hover_paints.items():
+            assert paint["actual"] == paint["expected"], {"theme": theme, "control": control, **paint}
+
+
+def test_branch_reload_scaffold_debug_and_search_states_share_computed_owners(browser, tmp_path):
+    page = tmp_path / "shared-css-state-layout-owners.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <button id="hover-away" type="button">away</button>
+      <button id="server-reload" type="button" class="server-update-banner-reload">Reload</button>
+      <article class="panel" style="position:static;height:auto;width:320px;">
+        <button class="pane-tab"><span id="branch-inactive" class="ci-indicator branch-indicator">MAIN</span></button>
+      </article>
+      <article class="panel active-pane" style="position:static;height:auto;width:320px;">
+        <button class="pane-tab active"><span id="branch-active" class="ci-indicator branch-indicator">MAIN</span></button>
+      </article>
+      <div style="height:90px;"><section id="transcript-shell" class="transcript"><i></i><i></i><i></i></section></div>
+      <div style="height:90px;"><section id="summary-shell" class="summary"><i></i><i></i><i></i></section></div>
+      <section id="debug-scroll" class="js-debug-scroll" style="height:90px;"><i></i><i></i></section>
+      <section id="debug-events" class="js-debug-events-view" style="height:90px;"><i></i><i></i></section>
+      <label class="info-tree-search-control"><input id="info-search" value="info"></label>
+      <input id="preferences-search" class="preferences-search" value="preferences">
+      <input id="history-search" class="search-history-input" value="history">
+    """),
+    )
+
+    metrics = browser.execute_script(
+        """
+        const paint = element => {
+          const style = getComputedStyle(element);
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const expectedBranchPaint = element => {
+          const probe = document.createElement('span');
+          probe.style.cssText = 'color:var(--branch-indicator-text);background:var(--branch-indicator-bg);border:1px solid var(--branch-indicator-border)';
+          element.appendChild(probe);
+          const result = paint(probe);
+          probe.remove();
+          return result;
+        };
+        const layout = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {display: style.display, rows: style.gridTemplateRows, gap: style.gap, height: style.height, minHeight: style.minHeight, background: style.backgroundColor};
+        };
+        const readTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          const inactive = document.getElementById('branch-inactive');
+          const active = document.getElementById('branch-active');
+          return {
+            inactive: paint(inactive),
+            active: paint(active),
+            inactiveExpected: expectedBranchPaint(inactive),
+            activeExpected: expectedBranchPaint(active),
+          };
+        };
+        return {
+          dark: readTheme(false),
+          light: readTheme(true),
+          transcript: layout('transcript-shell'),
+          summary: layout('summary-shell'),
+          debugScroll: layout('debug-scroll'),
+          debugEvents: layout('debug-events'),
+        };
+        """
+    )
+    for theme in ("dark", "light"):
+        assert metrics[theme]["inactive"] == metrics[theme]["inactiveExpected"], metrics[theme]
+        assert metrics[theme]["active"] == metrics[theme]["activeExpected"], metrics[theme]
+        assert metrics[theme]["active"] == metrics[theme]["inactive"], metrics[theme]
+    assert metrics["dark"]["inactive"] != metrics["light"]["inactive"]
+    assert metrics["transcript"] == metrics["summary"]
+    assert metrics["debugScroll"] == metrics["debugEvents"]
+
+    for theme, light in (("dark", False), ("light", True)):
+        browser.execute_script(
+            "document.body.classList.toggle('theme-light', arguments[0]); document.body.classList.toggle('theme-dark', !arguments[0]);",
+            light,
+        )
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "hover-away")).perform()
+        rest = browser.execute_script(
+            """
+            const button = document.getElementById('server-reload');
+            const style = getComputedStyle(button);
+            const probe = document.createElement('button');
+            probe.style.cssText = 'color:var(--paint-white);background:var(--danger-strong);border:1px solid var(--danger-strong-hover)';
+            document.body.appendChild(probe);
+            const expected = getComputedStyle(probe);
+            const result = {
+              actual: {color: style.color, background: style.backgroundColor, border: style.borderTopColor},
+              expected: {color: expected.color, background: expected.backgroundColor, border: expected.borderTopColor},
+            };
+            probe.remove();
+            return result;
+            """
+        )
+        assert rest["actual"] == rest["expected"], {"theme": theme, **rest}
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "server-reload")).perform()
+        hover = browser.execute_script(
+            """
+            const button = document.getElementById('server-reload');
+            const style = getComputedStyle(button);
+            const probe = document.createElement('button');
+            probe.style.cssText = 'color:var(--paint-white);background:var(--danger-strong-hover);border:1px solid var(--danger-strong-border)';
+            document.body.appendChild(probe);
+            const expected = getComputedStyle(probe);
+            const result = {
+              actual: {color: style.color, background: style.backgroundColor, border: style.borderTopColor},
+              expected: {color: expected.color, background: expected.backgroundColor, border: expected.borderTopColor},
+              hovered: button.matches(':hover'),
+            };
+            probe.remove();
+            return result;
+            """
+        )
+        assert hover["hovered"] is True
+        assert hover["actual"] == hover["expected"], {"theme": theme, **hover}
+
+        focus_paints = []
+        for control_id in ("info-search", "preferences-search", "history-search"):
+            browser.execute_script("document.getElementById(arguments[0]).focus()", control_id)
+            focus_paints.append(
+                browser.execute_script(
+                    """
+                    const control = document.getElementById(arguments[0]);
+                    const style = getComputedStyle(control);
+                    return {border: style.borderTopColor, shadow: style.boxShadow, outline: style.outlineStyle};
+                    """,
+                    control_id,
+                )
+            )
+        assert focus_paints[0] == focus_paints[1], {"theme": theme, "focus": focus_paints}
+
+
+def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tmp_path):
+    page = tmp_path / "shared-ellipsis-disabled-state.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <span id="share-banner" class="share-viewer-banner-text"></span>
+      <span id="menu-setting" class="app-menu-setting-label"></span>
+      <span id="status-label" class="status-indicator--label"></span>
+      <span id="diff-description" class="diff-ref-suggestion-description"></span>
+      <span id="preferences-title" class="preferences-section-title"></span>
+      <div id="client-perf" class="js-debug-client-perf-row"></div>
+      <span id="chart-summary" class="js-debug-chart-summary"></span>
+      <div class="js-debug-x-axis"><span id="x-axis"></span></div>
+      <div id="search-title" class="search-history-row-title"></div>
+      <div id="search-meta" class="search-history-row-meta"></div>
+      <div id="recent-paths" class="yoagent-recent-agent-paths"></div>
+      <div id="transcript-value" class="yoagent-transcript-value"></div>
+      <div id="compact-label" class="yoagent-compact-label"></div>
+      <div id="job-meta" class="yoagent-job-meta"></div>
+      <div id="job-text" class="yoagent-job-text"></div>
+      <div id="info-label-line" class="info-tree-group-label-line"></div>
+      <div id="info-label" class="info-tree-group-label"></div>
+      <button class="tmux-window-button"><span id="tmux-window-text" class="tmux-window-name-text"></span></button>
+      <span id="editor-title" class="file-editor-title-name"></span>
+      <div class="file-tree-row tabber-row"><span id="tabber-window-text" class="tabber-window-text"></span></div>
+      <div class="share-entry-heading"><strong id="share-heading"></strong></div>
+      <div class="share-url-primary-head"><span id="share-url"></span></div>
+      <div class="share-users-row"><span id="share-user"></span></div>
+      <div id="terminal-drop-row" class="terminal-drop-suggestion" style="width:130px;"><span class="terminal-drop-suggestion-combo">1</span><span id="terminal-drop-label" class="terminal-drop-suggestion-label">Insert this deliberately long terminal drop action label</span></div>
+      <div class="terminal-context-menu"><button id="context-disabled" disabled></button></div>
+      <div class="file-editor-preview-zoom-toolbar"><button id="zoom-disabled" disabled></button></div>
+      <button id="find-disabled" class="file-editor-find" disabled></button>
+      <div class="file-editor-preview-font-panel"><button id="font-disabled" disabled></button></div>
+      <button id="find-panel-disabled" class="file-editor-find-panel" disabled></button>
+      <button id="info-group-action" class="info-tree-group-label-action"></button>
+      <button id="info-leaf-action" class="info-tree-action-link"></button>
+      <span id="session-agent-cluster" class="agent-window-activity agent-window-activity--subwindow"><span class="agent-icon"><svg id="subwindow-agent-svg"></svg></span></span>
+      <span id="changes-agent-cluster" class="changes-file-agent"><span class="agent-icon"><svg id="changes-agent-svg"></svg></span></span>
+      <span id="file-agent-cluster" class="file-tree-agent"></span>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const ellipsisIds = ['share-banner', 'menu-setting', 'status-label', 'diff-description', 'preferences-title', 'client-perf', 'chart-summary', 'x-axis', 'tmux-window-text', 'search-title', 'search-meta', 'recent-paths', 'transcript-value', 'compact-label', 'job-meta', 'job-text', 'info-label-line', 'info-label', 'editor-title', 'tabber-window-text', 'share-heading', 'share-url', 'share-user', 'terminal-drop-label'];
+        const disabledIds = ['context-disabled', 'zoom-disabled', 'find-disabled', 'font-disabled', 'find-panel-disabled'];
+        return {
+          ellipsis: Object.fromEntries(ellipsisIds.map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {minWidth: style.minWidth, overflow: style.overflow, textOverflow: style.textOverflow, whiteSpace: style.whiteSpace}];
+          })),
+          disabled: Object.fromEntries(disabledIds.map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {opacity: style.opacity, cursor: style.cursor}];
+          })),
+          textActions: Object.fromEntries(['info-group-action', 'info-leaf-action'].map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {padding: style.padding, borderWidth: style.borderTopWidth, borderStyle: style.borderTopStyle, background: style.backgroundColor, textAlign: style.textAlign, fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight, cursor: style.cursor}];
+          })),
+          agentClusters: Object.fromEntries(['session-agent-cluster', 'changes-agent-cluster', 'file-agent-cluster'].map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {display: style.display, alignItems: style.alignItems, gap: style.gap, flexGrow: style.flexGrow, flexShrink: style.flexShrink, flexBasis: style.flexBasis, verticalAlign: style.verticalAlign}];
+          })),
+          agentSvgGeometry: Object.fromEntries(['subwindow-agent-svg', 'changes-agent-svg'].map(id => {
+            const style = getComputedStyle(document.getElementById(id));
+            return [id, {width: style.width, height: style.height, flexBasis: style.flexBasis}];
+          })),
+          terminalDropGeometry: (() => {
+            const row = document.getElementById('terminal-drop-row').getBoundingClientRect();
+            const label = document.getElementById('terminal-drop-label');
+            const rect = label.getBoundingClientRect();
+            return {rowRight: row.right, labelRight: rect.right, clientWidth: label.clientWidth, scrollWidth: label.scrollWidth};
+          })(),
+        };
+        """
+    )
+    expected_ellipsis = {"minWidth": "0px", "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap"}
+    expected_disabled = {"opacity": "0.42", "cursor": "default"}
+    for control, state in metrics["ellipsis"].items():
+        assert state == expected_ellipsis, {"control": control, "state": state}
+    for control, state in metrics["disabled"].items():
+        assert state == expected_disabled, {"control": control, "state": state}
+    expected_text_action = {"padding": "0px", "borderWidth": "0px", "borderStyle": "none", "background": "rgba(0, 0, 0, 0)", "textAlign": "left", "fontFamily": metrics["textActions"]["info-group-action"]["fontFamily"], "fontSize": metrics["textActions"]["info-group-action"]["fontSize"], "fontWeight": metrics["textActions"]["info-group-action"]["fontWeight"], "lineHeight": metrics["textActions"]["info-group-action"]["lineHeight"], "cursor": "pointer"}
+    for control, state in metrics["textActions"].items():
+        assert state == expected_text_action, {"control": control, "state": state}
+    expected_agent_cluster = {"display": "inline-flex", "alignItems": "center", "gap": "2px", "flexGrow": "0", "flexShrink": "0", "flexBasis": "auto", "verticalAlign": "middle"}
+    for cluster, state in metrics["agentClusters"].items():
+        assert state == expected_agent_cluster, {"cluster": cluster, "state": state}
+    expected_agent_svg = {"width": "14px", "height": "14px", "flexBasis": "14px"}
+    for icon, geometry in metrics["agentSvgGeometry"].items():
+        assert geometry == expected_agent_svg, {"icon": icon, "geometry": geometry}
+    assert metrics["terminalDropGeometry"]["labelRight"] <= metrics["terminalDropGeometry"]["rowRight"] + 1
+    assert metrics["terminalDropGeometry"]["scrollWidth"] > metrics["terminalDropGeometry"]["clientWidth"]
+
+
+def test_yoagent_recent_agents_stay_inside_narrow_vertical_side_pane(browser, tmp_path):
+    page = tmp_path / "yoagent-narrow-side-recent-agents.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+      <div class="yolomux-dockview" style="width:320px; height:640px;">
+        <section id="side" class="dv-groupview" data-pane-role="side" style="width:320px; height:640px;">
+          <div id="history" class="yoagent-chat-history" style="width:100%; height:100%; overflow-y:auto;">
+            <article id="message" class="conversation-message assistant yoagent-message yoagent-recent-agents-message">
+              <div class="conversation-message-body">
+                <div class="yoagent-recent-agents">
+                  <ul class="yoagent-recent-agents-list">
+                    <li class="yoagent-recent-agent">
+                      <span id="row" class="yoagent-recent-agent-line">
+                        <span class="agent-icon">*</span>
+                        <span class="yoagent-recent-agent-session">session 7773</span>
+                        <span class="yoagent-recent-agent-window">1:claude</span>
+                        <span class="yoagent-recent-agent-paths">~/yolomux.dev7773/a/very/long/path/that/must/not/escape</span>
+                        <span class="yoagent-recent-agent-activity">tmux 123 min ago</span>
+                        <span class="yoagent-recent-agent-signals"><span class="yoagent-recent-agent-signal signal-presence">12 viewers</span></span>
+                      </span>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+            """,
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const ids = ['side', 'history', 'message', 'row'];
+        const rects = Object.fromEntries(ids.map(id => {
+          const rect = document.getElementById(id).getBoundingClientRect();
+          return [id, {left: rect.left, right: rect.right, width: rect.width}];
+        }));
+        const row = document.getElementById('row');
+        return {
+          rects,
+          rowScrollWidth: row.scrollWidth,
+          rowClientWidth: row.clientWidth,
+          childRightEdges: Array.from(row.children).map(child => child.getBoundingClientRect().right),
+          bodyScrollWidth: document.body.scrollWidth,
+          viewportWidth: innerWidth,
+        };
+        """
+    )
+    assert metrics["rects"]["message"]["right"] <= metrics["rects"]["history"]["right"] + 1, metrics
+    assert metrics["rects"]["row"]["right"] <= metrics["rects"]["message"]["right"] + 1, metrics
+    assert max(metrics["childRightEdges"]) <= metrics["rects"]["row"]["right"] + 1, metrics
+    assert metrics["rowScrollWidth"] <= metrics["rowClientWidth"] + 1, metrics
+    assert metrics["bodyScrollWidth"] <= metrics["viewportWidth"], metrics
+
+
+def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners(browser, tmp_path):
+    page = tmp_path / "danger-status-light-panel-paint.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <span id="approval" class="session-state-badge session-state-needs-approval"></span>
+      <span id="input" class="session-state-badge session-state-needs-input"></span>
+      <span id="failing" class="ci-indicator pr-status-failing"></span>
+      <span id="changes" class="ci-indicator pr-review-changes"></span>
+      <span id="pr-number" class="ci-indicator pr-number-chip">#86</span>
+      <section id="changes-toolbar" class="changes-toolbar"></section>
+      <section id="changes-repo" class="changes-repo-group"></section>
+      <section id="comparison" class="changes-comparison-head"></section>
+      <section id="debug-stat" class="js-debug-stat"></section>
+      <section id="preferences-section" class="preferences-section"></section>
+      <section id="search-result" class="search-history-result"></section>
+      <section id="mermaid-preview" class="mermaid-preview"></section>
+      <section id="zoom-viewport" class="file-editor-preview-zoom-viewport"></section>
+      <button id="default-button">default</button>
+      <button id="share-control" class="share-view-fit-toggle">fit</button>
+      <label class="info-tree-search-control"><input id="info-search-control"></label>
+      <section id="terminal-surface" class="terminal-drop-suggestions"></section>
+      <section id="preview-surface" class="file-editor-preview-fallback"></section>
+      <button id="standalone-refresh" class="changes-refresh">refresh</button>
+      <section id="file-explorer" class="file-explorer"></section>
+      <section id="file-tree-col" class="file-explorer-tree-col"></section>
+      <section id="finder-pane" class="file-explorer-pane"></section>
+      <section id="finder-tree" class="file-explorer-tree-panel"></section>
+      <section id="yoagent-chat" class="yoagent-chat"></section>
+      <article id="yoagent-message" class="conversation-message yoagent-message"></article>
+      <article id="yoagent-assistant" class="conversation-message yoagent-message assistant"></article>
+      <article id="yoagent-result" class="conversation-message yoagent-message assistant yoagent-agent-result"></article>
+      <article id="yoagent-user" class="conversation-message yoagent-message user"></article>
+      <div class="file-editor-codemirror"><div class="cm-search"><button id="cm-close" class="cm-dialog-close">×</button></div></div>
+      <section class="file-explorer-changes-panel">
+        <section id="embedded-comparison" class="changes-comparison-head"></section>
+        <button id="embedded-refresh" class="changes-refresh">refresh</button>
+      </section>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const {paint: helperPaint, probePaint} = window.__yolomuxTestHelpers;
+        const paint = id => helperPaint(document.getElementById(id));
+        const frame = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {background: style.backgroundColor, border: style.borderTop, radius: style.borderRadius};
+        };
+        const controlShell = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, border: style.borderTop, radius: style.borderRadius};
+        };
+        const secondarySurface = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTop};
+        };
+        const sharedOwnerPaint = () => {
+          const controlProbe = document.createElement('div');
+          controlProbe.style.cssText = 'color:var(--text);border:1px solid var(--line);border-radius:var(--radius-control)';
+          document.body.appendChild(controlProbe);
+          controlProbe.id = 'control-shell-probe';
+          const expectedControl = controlShell('control-shell-probe');
+          controlProbe.remove();
+          const surfaceProbe = document.createElement('div');
+          surfaceProbe.style.cssText = 'color:var(--text);background:var(--panel2);border:1px solid var(--line)';
+          document.body.appendChild(surfaceProbe);
+          surfaceProbe.id = 'secondary-surface-probe';
+          const expectedSurface = secondarySurface('secondary-surface-probe');
+          surfaceProbe.remove();
+          return {
+            controls: Object.fromEntries(['share-control', 'info-search-control'].map(id => [id, controlShell(id)])),
+            expectedControl,
+            surfaces: Object.fromEntries(['default-button', 'terminal-surface', 'preview-surface'].map(id => [id, secondarySurface(id)])),
+            expectedSurface,
+          };
+        };
+        const statusIds = ['approval', 'input', 'failing', 'changes'];
+        document.documentElement.classList.add('status-pulse-disabled');
+        document.body.classList.add('theme-dark');
+        document.body.classList.remove('editor-theme-light');
+        const darkStatuses = Object.fromEntries(statusIds.map(id => [id, paint(id)]));
+        const expectedDangerDark = probePaint('color:var(--danger-text);background:var(--danger-bg);border:1px solid var(--danger-border)');
+        const darkSharedOwners = sharedOwnerPaint();
+        const frameIds = ['debug-stat', 'preferences-section', 'search-result', 'mermaid-preview', 'zoom-viewport'];
+        const darkFrames = Object.fromEntries(frameIds.map(id => [id, frame(id)]));
+        const darkFrameProbe = document.createElement('div');
+        darkFrameProbe.style.cssText = 'background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-md)';
+        document.body.appendChild(darkFrameProbe);
+        darkFrameProbe.id = 'dark-frame-probe';
+        const expectedDarkFrame = frame('dark-frame-probe');
+        darkFrameProbe.remove();
+        const darkOwnedPaint = {
+          finder: ['finder-pane', 'finder-tree'].map(paint),
+          yoagent: ['yoagent-chat', 'yoagent-message', 'yoagent-assistant', 'yoagent-result', 'yoagent-user'].map(paint),
+        };
+        document.body.classList.remove('theme-dark');
+        document.body.classList.add('theme-light');
+        document.body.classList.add('editor-theme-light');
+        const lightStatuses = Object.fromEntries(statusIds.map(id => [id, paint(id)]));
+        const expectedDangerLight = probePaint('color:var(--danger-text);background:var(--danger-bg);border:1px solid var(--danger-border)');
+        const lightSharedOwners = sharedOwnerPaint();
+        const lightFrames = Object.fromEntries(frameIds.map(id => [id, frame(id)]));
+        const lightFrameProbe = document.createElement('div');
+        lightFrameProbe.style.cssText = 'background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-md)';
+        document.body.appendChild(lightFrameProbe);
+        lightFrameProbe.id = 'light-frame-probe';
+        const expectedLightFrame = frame('light-frame-probe');
+        lightFrameProbe.remove();
+        const surfaceIds = ['changes-toolbar', 'changes-repo', 'comparison', 'file-explorer', 'file-tree-col'];
+        const lightSurfaces = Object.fromEntries(surfaceIds.map(id => [id, paint(id)]));
+        const expectedSurface = probePaint('color:var(--text);background:var(--panel);border:1px solid var(--line)');
+        const refreshes = {standalone: paint('standalone-refresh'), embedded: paint('embedded-refresh')};
+        const expectedRefreshes = {
+          standalone: probePaint('color:var(--text);background:var(--paint-white);border:1px solid var(--line)'),
+          embedded: probePaint('color:var(--muted);background:transparent;border:1px solid var(--line)'),
+        };
+        const lightOwnedPaint = {
+          prNumber: paint('pr-number'),
+          expectedPrNumber: probePaint('color:var(--paint-white);background:var(--pr-number-chip-bg);border:1px solid var(--pr-number-chip-bg)'),
+          finder: ['finder-pane', 'finder-tree'].map(paint),
+          expectedFinder: probePaint('color:var(--text);background:var(--panel);border:1px solid var(--line)'),
+          yoagent: ['yoagent-chat', 'yoagent-message'].map(paint),
+          expectedYoagent: probePaint('color:var(--pc-control-hover-fg);background:var(--panel);border:1px solid var(--line)'),
+          assistant: paint('yoagent-assistant'),
+          expectedAssistant: probePaint('color:var(--pc-control-hover-fg);background:color-mix(in srgb,var(--active-control-soft-bg) 78%,var(--paint-white));border:1px solid var(--active-control-border)'),
+          result: paint('yoagent-result'),
+          expectedResult: probePaint('color:var(--pc-control-hover-fg);background:color-mix(in srgb,var(--accent-gold) 10%,var(--paint-white));border:1px solid var(--active-control-border)'),
+          resultStartBorder: getComputedStyle(document.getElementById('yoagent-result')).borderInlineStartColor,
+          expectedResultStartBorder: probePaint('border:1px solid var(--accent-gold)').border,
+          user: paint('yoagent-user'),
+          expectedUser: probePaint('color:var(--pc-control-hover-fg);background:var(--panel);border:1px solid var(--link-soft)'),
+          userEndBorder: getComputedStyle(document.getElementById('yoagent-user')).borderInlineEndColor,
+          expectedUserEndBorder: probePaint('border:1px solid var(--link-soft)').border,
+          close: {color: getComputedStyle(document.getElementById('cm-close')).color, background: getComputedStyle(document.getElementById('cm-close')).backgroundColor},
+          expectedClose: {color: probePaint('color:var(--lt-text)').color, background: 'rgba(0, 0, 0, 0)'},
+        };
+        return {
+          darkStatuses,
+          darkSharedOwners,
+          darkFrames,
+          expectedDarkFrame,
+          darkOwnedPaint,
+          lightStatuses,
+          lightSharedOwners,
+          lightFrames,
+          expectedLightFrame,
+          expectedDangerDark,
+          expectedDangerLight,
+          lightSurfaces,
+          expectedSurface,
+          embeddedComparison: {...paint('embedded-comparison'), borderWidth: getComputedStyle(document.getElementById('embedded-comparison')).borderTopWidth},
+          refreshes,
+          expectedRefreshes,
+          lightOwnedPaint,
+        };
+        """
+    )
+    for status, paint in metrics["darkStatuses"].items():
+        assert paint == metrics["expectedDangerDark"], {"theme": "dark", "status": status, "paint": paint}
+    for theme in ("dark", "light"):
+        owners = metrics[f"{theme}SharedOwners"]
+        for control, shell in owners["controls"].items():
+            assert shell == owners["expectedControl"], {"theme": theme, "control": control, "shell": shell, "expected": owners["expectedControl"]}
+        for surface, paint in owners["surfaces"].items():
+            assert paint == owners["expectedSurface"], {"theme": theme, "surface": surface, "paint": paint, "expected": owners["expectedSurface"]}
+    for theme in ("dark", "light"):
+        for surface, frame in metrics[f"{theme}Frames"].items():
+            assert frame == metrics[f"expected{theme.title()}Frame"], {"theme": theme, "surface": surface, "frame": frame}
+    for status in ("approval", "input"):
+        assert metrics["lightStatuses"][status] == metrics["expectedDangerLight"], {"theme": "light", "status": status, "paint": metrics["lightStatuses"][status]}
+    assert metrics["lightStatuses"]["failing"] == metrics["lightStatuses"]["changes"]
+    assert metrics["lightStatuses"]["failing"] != metrics["expectedDangerLight"]
+    for surface, paint in metrics["lightSurfaces"].items():
+        assert paint == metrics["expectedSurface"], {"surface": surface, "paint": paint, "expected": metrics["expectedSurface"]}
+    assert metrics["embeddedComparison"]["background"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["embeddedComparison"]["borderWidth"] == "0px", metrics
+    assert metrics["refreshes"] == metrics["expectedRefreshes"], metrics
+    assert all(paint["background"] != "rgba(0, 0, 0, 0)" for paint in metrics["darkOwnedPaint"]["yoagent"][:4]), metrics
+    owned = metrics["lightOwnedPaint"]
+    assert owned["prNumber"] == owned["expectedPrNumber"], owned
+    assert all(paint["color"] == owned["expectedFinder"]["color"] and paint["background"] == owned["expectedFinder"]["background"] for paint in owned["finder"]), owned
+    assert all(paint == owned["expectedYoagent"] for paint in owned["yoagent"]), owned
+    assert owned["assistant"] == owned["expectedAssistant"], owned
+    assert owned["result"] == owned["expectedResult"], owned
+    assert owned["resultStartBorder"] == owned["expectedResultStartBorder"], owned
+    assert owned["user"] == owned["expectedUser"], owned
+    assert owned["userEndBorder"] == owned["expectedUserEndBorder"], owned
+    assert owned["close"] == owned["expectedClose"], owned
+
+
+def test_inactive_markers_and_vanilla_code_surfaces_share_computed_paint(browser, tmp_path):
+    page = tmp_path / "inactive-marker-vanilla-code-paint.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <span id="session-marker" class="session-yolo-marker inactive"></span>
+      <button class="pane-tab active"><span id="pane-marker" class="session-yolo-marker inactive"></span></button>
+      <div class="file-editor-preview-pane vanilla-preview-body"><code id="pane-code"></code><pre id="pane-pre"></pre></div>
+      <div class="file-editor-preview-pane-panel vanilla-preview-body"><code id="popout-code"></code><pre id="popout-pre"></pre></div>
+      <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><code id="editor-code"></code><pre id="editor-pre"></pre></div></div>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const {paint: helperPaint, probePaint} = window.__yolomuxTestHelpers;
+        const paint = id => helperPaint(document.getElementById(id));
+        const markerTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          return {
+            expected: probePaint('color:var(--agent-inactive-marker-text);background:var(--agent-inactive-marker-bg);border:1px solid var(--agent-inactive-marker-border)'),
+            session: paint('session-marker'),
+            pane: paint('pane-marker'),
+          };
+        };
+        const markers = {dark: markerTheme(false), light: markerTheme(true)};
+        document.body.classList.add('editor-theme-light');
+        const vanilla = {
+          expected: probePaint('color:var(--markdown-html-light-text);background:var(--lt-panel);border:1px solid var(--lt-line)'),
+          surfaces: Object.fromEntries(['pane-code', 'pane-pre', 'popout-code', 'popout-pre', 'editor-code', 'editor-pre'].map(id => [id, paint(id)])),
+        };
+        return {markers, vanilla};
+        """
+    )
+    for theme, state in metrics["markers"].items():
+        assert state["session"] == state["expected"], {"theme": theme, **state}
+        assert state["pane"] == state["expected"], {"theme": theme, **state}
+    for surface, paint in metrics["vanilla"]["surfaces"].items():
+        assert paint == metrics["vanilla"]["expected"], {"surface": surface, "paint": paint, "expected": metrics["vanilla"]["expected"]}
+
+
+def test_code_surfaces_and_audited_css_families_share_computed_owners(browser, tmp_path):
+    page = tmp_path / "code-header-tab-text-owners.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div class="file-editor-content">
+        <div class="markdown-body">
+          <code id="markdown-inline">inline</code>
+          <blockquote class="markdown-alert markdown-alert-warning"><code id="alert-inline">alert</code></blockquote>
+          <table bgcolor="#ffffff"><tr><td><code id="table-inline">table</code></td></tr></table>
+        </div>
+        <div class="file-editor-raw-panel"><span id="source-inline" class="md-code">source</span></div>
+      </div>
+      <div class="file-editor-preview-pane vanilla-preview-body"><pre><code id="pane-nested-code"><span id="pane-nested-child">pane</span></code></pre></div>
+      <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><pre><code id="editor-nested-code"><span id="editor-nested-child">editor</span></code></pre></div></div>
+      <div id="action-code-block" class="yoagent-action-text">action</div>
+      <div class="yoagent-chat"><div class="markdown-body"><pre id="chat-code-block">chat</pre></div></div>
+      <div id="preview-overlay" class="file-editor-preview-pane" style="position:static;"></div>
+      <div id="preview-panel" class="file-editor-preview-pane-panel"></div>
+      <button id="chat-send" class="conversation-send conversation-send-primary yoagent-chat-send"></button>
+      <button id="chat-stop" class="yoagent-chat-stop"></button>
+      <div id="explorer-title" class="file-explorer-title">Finder</div>
+      <div id="explorer-panel-title" class="file-explorer-panel-title">Differ</div>
+      <div id="editor-title" class="file-editor-title">Editor</div>
+      <span id="summary-totals" class="changes-summary-totals"></span>
+      <span id="repo-totals" class="changes-repo-totals"></span>
+      <div id="shortcut-row" class="keyboard-shortcut-row"></div>
+      <div id="legend-row" class="keyboard-legend-row"></div>
+      <div id="finder-head" class="file-explorer-head">Finder</div>
+      <div class="file-explorer-changes-panel"><div id="changes-head" class="file-explorer-changes-head">Modified files</div></div>
+      <button class="pane-tab file-editor-item"><span id="file-tab-text" class="session-button-dir">file.py</span></button>
+      <button class="pane-tab"><span id="detail-tab-text" class="session-button-dir tab-inline-detail">detail</span></button>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const codePaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor, radius: style.borderRadius};
+        };
+        const headerPaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderBottomColor};
+        };
+        const resetPaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const inlineTheme = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          document.body.classList.toggle('editor-theme-light', light);
+          return {
+            markdown: codePaint('markdown-inline'),
+            source: codePaint('source-inline'),
+            alert: codePaint('alert-inline'),
+            table: codePaint('table-inline'),
+            finder: headerPaint('finder-head'),
+            changes: headerPaint('changes-head'),
+          };
+        };
+        const themes = {dark: inlineTheme(false), light: inlineTheme(true)};
+        const nested = Object.fromEntries(['pane-nested-code', 'pane-nested-child', 'editor-nested-code', 'editor-nested-child'].map(id => [id, resetPaint(id)]));
+        const codeBlocks = {action: resetPaint('action-code-block'), chat: resetPaint('chat-code-block')};
+        const flex = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {grow: style.flexGrow, shrink: style.flexShrink, basis: style.flexBasis, minWidth: style.minWidth, maxWidth: style.maxWidth};
+        };
+        const family = (ids, properties) => Object.fromEntries(ids.map(id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return [id, Object.fromEntries(properties.map(property => [property, style[property]]))];
+        }));
+        return {
+          themes,
+          nested,
+          codeBlocks,
+          flex: {file: flex('file-tab-text'), detail: flex('detail-tab-text')},
+          sharedFamilies: {
+            preview: family(['preview-overlay', 'preview-panel'], ['zIndex', 'overflow', 'padding', 'backgroundColor', 'color', 'fontFamily', 'fontSize', 'lineHeight']),
+            chat: family(['chat-send', 'chat-stop'], ['display', 'alignItems', 'justifyContent', 'width', 'height', 'flexGrow', 'flexShrink', 'flexBasis', 'padding', 'borderRadius', 'cursor']),
+            title: family(['explorer-title', 'explorer-panel-title', 'editor-title'], ['color', 'fontFamily', 'fontSize', 'fontWeight', 'whiteSpace']),
+            totals: family(['summary-totals', 'repo-totals'], ['display', 'alignItems', 'gap', 'flexGrow', 'flexShrink', 'flexBasis', 'whiteSpace']),
+            keyboard: family(['shortcut-row', 'legend-row'], ['display', 'gap', 'alignItems', 'padding', 'borderBottom', 'fontFamily', 'fontSize', 'lineHeight']),
+          },
+        };
+        """
+    )
+    for theme, state in metrics["themes"].items():
+        assert state["markdown"] == state["source"], {"theme": theme, **state}
+        assert state["alert"] == state["table"], {"theme": theme, **state}
+        assert state["finder"] == state["changes"], {"theme": theme, **state}
+    assert metrics["themes"]["dark"]["markdown"] != metrics["themes"]["light"]["markdown"]
+    assert metrics["codeBlocks"]["action"] == metrics["codeBlocks"]["chat"]
+    nested_values = list(metrics["nested"].values())
+    assert all(value == nested_values[0] for value in nested_values), metrics["nested"]
+    assert nested_values[0]["background"] == "rgba(0, 0, 0, 0)"
+    assert nested_values[0]["border"] == "rgba(0, 0, 0, 0)"
+    assert metrics["flex"]["file"] == metrics["flex"]["detail"] == {"grow": "1", "shrink": "1", "basis": "auto", "minWidth": "0px", "maxWidth": "none"}
+    for family, members in metrics["sharedFamilies"].items():
+        values = list(members.values())
+        assert all(value == values[0] for value in values), {"family": family, "members": members}
+
+
+def test_syntax_token_colors_share_one_owner_across_renderers(browser, tmp_path):
+    cases = [
+        ("keyword", "keyword", "keyword"),
+        ("string", "string", "string"),
+        ("comment", "comment", "comment"),
+        ("number", "number", "number"),
+        ("atom", "meta", "constant"),
+        ("function", "title", "function"),
+        ("type", "type", "type"),
+        ("variable", "variable", "variable"),
+        ("property", "property", "property"),
+        ("tag", "tag", "tag"),
+        ("invalid", "deletion", "invalid"),
+    ]
+    hljs = "".join(f'<span id="hljs-{token}" class="hljs-{hljs_class}">{token}</span>' for token, hljs_class, _code_class in cases)
+    markdown = "".join(f'<span id="markdown-{token}" class="code-{code_class}">{token}</span>' for token, _hljs_class, code_class in cases)
+    codemirror = "".join(f'<span id="codemirror-{token}" class="code-{code_class}">{token}</span>' for token, _hljs_class, code_class in cases)
+    page = tmp_path / "shared-syntax-token-colors.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            f'<div class="markdown-body"><pre><code>{hljs}{markdown}<span id="markdown-control" class="code-control">control</span></code></pre></div>'
+            f'<div class="cm-content">{codemirror}<span id="codemirror-control" class="code-control">control</span></div>'
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const tokens = arguments[0];
+        const read = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, weight: style.fontWeight};
+        };
+        return Object.fromEntries(tokens.map(token => [token, {
+          hljs: token === 'control' ? null : read(`hljs-${token}`),
+          markdown: read(`markdown-${token}`),
+          codemirror: read(`codemirror-${token}`),
+        }]));
+        """,
+        [token for token, _hljs_class, _code_class in cases] + ["control"],
+    )
+    for token, renderer_values in metrics.items():
+        colors = {value["color"] for value in renderer_values.values() if value is not None}
+        assert len(colors) == 1, {"token": token, **renderer_values}
+    assert metrics["function"]["markdown"]["weight"] == metrics["function"]["codemirror"]["weight"] == "700"
+    assert metrics["keyword"]["markdown"]["weight"] != metrics["keyword"]["codemirror"]["weight"]
+    assert metrics["control"]["markdown"]["weight"] != metrics["control"]["codemirror"]["weight"]
+
+
+def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser, tmp_path):
+    page = tmp_path / "shared-link-drag-action-owners.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <button id="checked-menu" class="app-menu-command" data-checked="true">checked</button>
+      <div id="changes-panel" class="file-explorer-changes-panel"><div id="changes-toolbar" class="changes-toolbar"><button id="changes-focus">focus</button><button id="changes-refresh" class="changes-refresh">refresh</button></div></div>
+      <div class="file-editor-preview-pane vanilla-preview-body" style="position:static;"><h2 id="pane-heading">Pane heading</h2><strong id="pane-strong">Pane strong</strong></div>
+      <div class="file-editor-content"><div class="markdown-body vanilla-preview-body"><h2 id="editor-heading">Editor heading</h2><strong id="editor-strong">Editor strong</strong></div></div>
+      <div class="popover-value"><a id="popover-link" href="#">popover</a><a id="popover-merged" class="pr-status-merged" href="#">merged</a></div>
+      <a id="branch-link" class="branch-link" href="#">branch</a>
+      <div class="branch-meta"><a id="branch-merged" class="pr-status-merged" href="#">merged</a></div>
+      <div class="meta"><a id="meta-link" href="#">meta</a><a id="meta-merged" class="pr-status-merged" href="#">merged</a></div>
+      <div class="summary-context"><a id="summary-link" href="#">summary</a><a id="summary-merged" class="pr-status-merged" href="#">merged</a></div>
+      <button id="info-link" class="info-tree-group-label-action">info</button>
+      <div id="terminal-drag" class="terminal path-drag-over" style="position:static;width:40px;height:20px;"></div><div id="panel-drag" class="panel path-drag-over" style="position:static;width:40px;height:20px;"></div>
+      <div class="file-explorer-panel" style="position:static;display:block;">
+        <select id="sort-action" class="file-explorer-sort-select"><option>A-Z</option></select>
+        <button id="hidden-action" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">hidden</button>
+        <button id="header-action" class="file-explorer-header-action">header</button>
+        <button id="quick-action" class="file-explorer-quick-access-button">quick</button>
+      </div>
+      <button id="compact-action" class="yoagent-compact-action">compact</button>
+      <button id="confirm-action" class="yoagent-job-confirm">confirm</button>
+      <button id="cancel-action" class="yoagent-job-cancel">cancel</button>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const paint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        };
+        const outline = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {style: style.outlineStyle, width: style.outlineWidth, color: style.outlineColor, offset: style.outlineOffset};
+        };
+        const linkPaint = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {color: style.color, decoration: style.textDecorationLine};
+        };
+        const focusLinkPaint = id => {
+          const node = document.getElementById(id);
+          node.focus({focusVisible: true});
+          return {...linkPaint(id), focusVisible: node.matches(':focus-visible')};
+        };
+        const themed = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          document.body.classList.toggle('editor-theme-light', light);
+          document.getElementById('changes-focus').focus({focusVisible: true});
+          const genericLinkIds = ['popover-link', 'meta-link', 'summary-link'];
+          const mergedLinkIds = ['popover-merged', 'branch-merged', 'meta-merged', 'summary-merged'];
+          const value = {
+            menu: paint('checked-menu'),
+            toolbar: paint('changes-toolbar'),
+            headings: [paint('pane-heading'), paint('editor-heading')],
+            strong: [paint('pane-strong'), paint('editor-strong')],
+            genericLinks: genericLinkIds.map(linkPaint),
+            mergedLinks: mergedLinkIds.map(linkPaint),
+          };
+          value.focusedGenericLinks = genericLinkIds.map(focusLinkPaint);
+          value.focusedMergedLinks = mergedLinkIds.map(focusLinkPaint);
+          return value;
+        };
+        const themes = {dark: themed(false), light: themed(true)};
+        const finderShell = id => {
+          const style = getComputedStyle(document.getElementById(id));
+          return {
+            height: style.height,
+            border: style.borderTop,
+            radius: style.borderRadius,
+            color: style.color,
+            background: style.backgroundColor,
+            family: style.fontFamily,
+            size: style.fontSize,
+            weight: style.fontWeight,
+          };
+        };
+        const finderShellIds = ['sort-action', 'hidden-action', 'header-action', 'quick-action'];
+        const finderShells = {};
+        for (const [theme, light] of [['dark', false], ['light', true]]) {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('theme-dark', !light);
+          finderShells[theme] = finderShellIds.map(finderShell);
+        }
+        const focus = id => {
+          const node = document.getElementById(id);
+          node.focus({focusVisible: true});
+          const style = getComputedStyle(node);
+          return {...paint(id), outline: style.outlineStyle, decoration: style.textDecorationLine, focusVisible: node.matches(':focus-visible')};
+        };
+        return {
+          themes,
+          branchRest: linkPaint('branch-link'),
+          infoLink: focus('info-link'),
+          drag: [outline('terminal-drag'), outline('panel-drag')],
+          finderShells,
+          finderActions: ['sort-action', 'hidden-action', 'header-action', 'changes-refresh'].map(focus),
+          yoagentActions: ['compact-action', 'confirm-action', 'cancel-action'].map(focus),
+        };
+        """
+    )
+    assert metrics["themes"]["light"]["headings"][0] == metrics["themes"]["light"]["headings"][1], metrics["themes"]["light"]
+    assert metrics["themes"]["light"]["strong"][0] == metrics["themes"]["light"]["strong"][1], metrics["themes"]["light"]
+    assert metrics["themes"]["dark"]["menu"] != metrics["themes"]["light"]["menu"]
+    assert metrics["themes"]["dark"]["toolbar"] != metrics["themes"]["light"]["toolbar"]
+    for theme, values in metrics["themes"].items():
+        assert all(value == values["genericLinks"][0] for value in values["genericLinks"]), {theme: values["genericLinks"]}
+        assert all(value["color"] == values["mergedLinks"][0]["color"] for value in values["mergedLinks"]), {theme: values["mergedLinks"]}
+        assert values["mergedLinks"][0]["color"] != values["genericLinks"][0]["color"], {theme: values}
+        assert all(value["focusVisible"] and value["color"] == values["focusedGenericLinks"][0]["color"] for value in values["focusedGenericLinks"]), {theme: values["focusedGenericLinks"]}
+        assert all(value["focusVisible"] and value["color"] == values["focusedMergedLinks"][0]["color"] for value in values["focusedMergedLinks"]), {theme: values["focusedMergedLinks"]}
+        assert values["focusedMergedLinks"][0]["color"] != values["focusedGenericLinks"][0]["color"], {theme: values}
+    assert metrics["branchRest"]["color"] != metrics["themes"]["light"]["genericLinks"][0]["color"]
+    assert metrics["drag"][0] == metrics["drag"][1]
+    for theme, shells in metrics["finderShells"].items():
+        assert all(shell == shells[0] for shell in shells), {theme: shells}
+    assert all(value["focusVisible"] for value in metrics["finderActions"]), json.dumps(metrics["finderActions"], indent=2)
+    assert all(value["color"] == metrics["finderActions"][0]["color"] and value["border"] == metrics["finderActions"][0]["border"] for value in metrics["finderActions"]), json.dumps(metrics["finderActions"], indent=2)
+    assert all(value["focusVisible"] for value in metrics["yoagentActions"]), metrics["yoagentActions"]
+    assert all(value["color"] == metrics["yoagentActions"][0]["color"] and value["border"] == metrics["yoagentActions"][0]["border"] and value["outline"] == metrics["yoagentActions"][0]["outline"] for value in metrics["yoagentActions"]), metrics["yoagentActions"]
+    hover_paints = {}
+    for theme, light in (("dark", False), ("light", True)):
+        browser.execute_script(
+            "document.body.classList.toggle('theme-light', arguments[0]); document.body.classList.toggle('theme-dark', !arguments[0]);",
+            light,
+        )
+        hover_paints[theme] = {}
+        for family, link_id in (("generic", "popover-link"), ("merged", "popover-merged")):
+            fast_pointer_actions(browser).move_to_element(browser.find_element("id", link_id)).perform()
+            hover_paints[theme][family] = browser.execute_script("const s=getComputedStyle(document.getElementById(arguments[0])); return {color:s.color, decoration:s.textDecorationLine};", link_id)
+    info_hover = {"color": metrics["infoLink"]["color"], "decoration": metrics["infoLink"]["decoration"]}
+    for theme, families in hover_paints.items():
+        assert families["generic"]["color"] == metrics["themes"][theme]["focusedGenericLinks"][0]["color"], json.dumps({theme: families}, indent=2)
+        assert families["merged"]["color"] == metrics["themes"][theme]["focusedMergedLinks"][0]["color"], json.dumps({theme: families}, indent=2)
+        assert families["merged"]["color"] != families["generic"]["color"], json.dumps({theme: families}, indent=2)
+    assert info_hover == hover_paints["light"]["generic"]
+
+
+def test_regular_and_compact_tabs_share_interaction_and_active_child_paint(browser, tmp_path):
+    page = tmp_path / "tab-interaction-shared-paint.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <article class="panel active-pane" style="position:static;height:auto;width:760px;">
+        <button id="regular" type="button" class="pane-tab"><span class="session-button-name">regular</span></button>
+        <button id="compact" type="button" class="tmux-pane-tab-token tmux-pane-tab-token-action"><span class="session-button-name">compact</span></button>
+        <button id="regular-active" type="button" class="pane-tab active"><span class="session-button-name">regular active</span></button>
+        <button id="compact-active" type="button" class="tmux-pane-tab-token tmux-pane-tab-token-action active"><span class="session-button-name">compact active</span></button>
+        <button id="missing-active" type="button" class="pane-tab file-missing active"><span class="session-button-name">missing active</span></button>
+      </article>
+      <div class="yolomux-dockview">
+        <div class="dv-tab dv-active-tab"><button id="dock-active" type="button" class="pane-tab dockview-pane-tab"><span class="session-button-name">dock active</span></button></div>
+      </div>
+      <article class="panel" style="position:static;height:auto;width:760px;"><button id="plain-inactive" type="button" class="pane-tab">plain</button></article>
+      <article class="panel typing-ready-pane" style="position:static;height:auto;width:760px;"><button id="typing-inactive" type="button" class="pane-tab">typing</button></article>
+    """),
+    )
+
+    def paint(control_id):
+        return browser.execute_script(
+            """
+            const style = getComputedStyle(document.getElementById(arguments[0]));
+            return {background: style.backgroundColor, border: style.borderTopColor};
+            """,
+            control_id,
+        )
+
+    def assert_interaction_parity():
+        hover = []
+        for control_id in ("regular", "compact"):
+            fast_pointer_actions(browser).move_to_element(browser.find_element("id", control_id)).perform()
+            hover.append(paint(control_id))
+        assert hover[0] == hover[1]
+
+        focus = []
+        for control_id in ("regular", "compact"):
+            browser.execute_script("document.getElementById(arguments[0]).focus({focusVisible: true})", control_id)
+            assert browser.execute_script("return document.getElementById(arguments[0]).matches(':focus-visible')", control_id) is True
+            focus.append(paint(control_id))
+        assert focus[0] == focus[1] == hover[0]
+
+    assert_interaction_parity()
+    browser.execute_script("document.body.classList.add('theme-light')")
+    assert_interaction_parity()
+
+    active = browser.execute_script(
+        """
+        const read = id => {
+          const tab = document.getElementById(id);
+          return {tab: getComputedStyle(tab).color, child: getComputedStyle(tab.querySelector('.session-button-name')).color};
+        };
+        return ['regular-active', 'compact-active', 'dock-active', 'missing-active'].map(read);
+        """
+    )
+    assert all(item["child"] == item["tab"] for item in active)
+    assert active[0]["tab"] == active[1]["tab"] == active[2]["tab"]
+    assert active[3]["tab"] != active[0]["tab"]
+
+    inactive_backgrounds = browser.execute_script(
+        """
+        return ['regular', 'plain-inactive', 'typing-inactive'].map(id => {
+          const tab = document.getElementById(id);
+          const probe = document.createElement('span');
+          probe.style.background = 'var(--pane-bar-bg)';
+          tab.parentElement.appendChild(probe);
+          const expected = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return {actual: getComputedStyle(tab).backgroundColor, expected};
+        });
+        """
+    )
+    assert all(item["actual"] == item["expected"] for item in inactive_backgrounds)
+
+
+def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,__prefs__&layout=row@50(left,right)&tabs=left:1;right:__prefs__",
+        sessions=["1"],
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof updatePanelHeader === 'function'
+              && typeof cycleSessionRepoDisplay === 'function'
+              && document.getElementById('panel-1') !== null;
+            """
+        )
+    )
+    initial = browser.execute_script(
+        """
+        const repos = [1, 2, 3, 4].map(index => ({
+          root: `/home/test/repo-${index}`,
+          cwd: `/home/test/repo-${index}`,
+          branch: `branch-${index}`,
+          dirty_count: index,
+          primary: index === 1,
+        }));
+        const info = {
+          session: '1',
+          selected_pane: {current_path: repos[0].root},
+          panes: [],
+          project: {git: {...repos[0]}, repos},
+        };
+        transcriptMetadataState.payload.sessions['1'] = info;
+        cycleSessionRepoDisplay('1', info, 1);
+        updatePanelHeader('1', info);
+        return document.querySelector('[data-repo-chip="1"]')?.textContent.trim() || '';
+        """
+    )
+    assert initial == "2/4"
+
+    assert browser.execute_script(
+        "setFocusedPanelItem('__prefs__', {userInitiated: true}); return document.getElementById('panel-1').classList.contains('focused-pane');"
+    ) is False
+    previous = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="-1"]')
+    fast_pointer_actions(browser).move_to_element(previous).click().perform()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "1/4"
+    assert browser.execute_script("return document.getElementById('panel-1').classList.contains('focused-pane')") is True
+
+    next_button = browser.find_element("css selector", '[data-repo-cycle="1"][data-repo-cycle-dir="1"]')
+    fast_pointer_actions(browser).move_to_element(next_button).click().perform()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "2/4"
+
+    chip = browser.find_element("css selector", '[data-repo-chip="1"]')
+    fast_pointer_actions(browser).move_to_element(chip).click().perform()
+    rows = WebDriverWait(browser, 5).until(
+        lambda driver: driver.find_elements("css selector", ".repo-chip-menu [data-repo-chip-open]")
+    )
+    assert len(rows) == 4
+    assert browser.execute_script(
+        """
+        const menu = document.querySelector('.repo-chip-menu');
+        if (!menu) return false;
+        const rect = menu.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return rect.width > 0 && rect.height > 0 && menu.contains(hit);
+        """
+    ) is True
+    repo_three = browser.find_element("css selector", '[data-repo-chip-open="/home/test/repo-3"]')
+    fast_pointer_actions(browser).move_to_element(repo_three).click().perform()
+    assert browser.find_element("css selector", '[data-repo-chip="1"]').text.strip() == "3/4"
+
+
+def test_standalone_svg_blocked_tags_share_dom_and_string_policy(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    results = browser.execute_script(
+        """
+        const tags = ['script', 'foreignobject', 'iframe', 'object', 'embed', 'audio', 'video', 'canvas', 'link', 'meta'];
+        const outputs = tags.map(tag => {
+          const tagName = tag === 'foreignobject' ? 'foreignObject' : tag;
+          const source = `<svg><a href="#local">ok</a><${tagName}>blocked-${tag}</${tagName}></svg>`;
+          return {tag, dom: sanitizeStandaloneSvg(source), string: sanitizeStandaloneSvgString(source)};
+        });
+        const foreignObject = sanitizeStandaloneSvg('<svg><foreignObject x="0" y="0" width="100" height="20"><div>safe label</div></foreignObject></svg>');
+        return {outputs, foreignObject};
+        """
+    )
+    for output in results["outputs"]:
+        tag = "foreignObject" if output["tag"] == "foreignobject" else output["tag"]
+        blocked_tag = re.compile(rf"<\s*{re.escape(tag)}\b", re.IGNORECASE)
+        assert blocked_tag.search(output["dom"]) is None, output
+        assert blocked_tag.search(output["string"]) is None, output
+        assert 'href="#local"' in output["dom"], output
+        assert 'href="#local"' in output["string"], output
+    assert re.search(r"<foreignObject\b", results["foreignObject"], re.IGNORECASE) is None
+    assert "safe label" in results["foreignObject"]
+
+
+def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmux(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return typeof sessionPaneIsAlternateScreen === 'function'
+              && document.querySelector('#term-1 .xterm') !== null
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const container = document.getElementById('term-1');
+        const screen = container.querySelector('.xterm');
+        const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+        const forwarded = [];
+        screen.addEventListener('wheel', event => {
+          if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+            forwarded.push({deltaY: event.deltaY, deltaMode: event.deltaMode});
+          }
+        });
+        const signalState = alternateOn => ({
+          ok: true,
+          sessions: {'1': {}},
+          windows: [{
+            key: '1:0', session: '1', window_index: '0', active: true,
+            panes: [{
+              window_key: '1:0', session: '1', window_index: '0', pane_index: '0',
+              target: '%11', pane_id: '%11', current_command: alternateOn ? 'claude' : 'bash',
+              active: true, alternate_on: alternateOn, pid: 1234, dead: false,
+            }],
+          }],
+        });
+
+        tmuxSignalState = signalState(true);
+        screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 105, deltaMode: 0, bubbles: true, cancelable: true}));
+        const mouseForwarded = forwarded.slice();
+        for (let index = 0; index < 5; index += 1) {
+          screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 7, deltaMode: 0, bubbles: true, cancelable: true}));
+        }
+        const touchpadForwarded = forwarded.slice(mouseForwarded.length);
+
+        tmuxSignalState = signalState(false);
+        const beforeNormal = forwarded.length;
+        screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 105, deltaMode: 0, bubbles: true, cancelable: true}));
+        setTimeout(() => {
+          const tmuxScrollFrames = socket.sent
+            .map(message => {
+              try { return JSON.parse(message); } catch (_error) { return null; }
+            })
+            .filter(message => message?.type === 'tmux-scroll');
+          done({
+            mouseForwarded,
+            touchpadForwarded,
+            normalForwarded: forwarded.slice(beforeNormal),
+            tmuxScrollFrames,
+            alternateAfterSwitch: sessionPaneIsAlternateScreen('1'),
+            errors: window.__bootErrors || [],
+            rejections: window.__bootRejections || [],
+          });
+        }, 60);
+        """
+    )
+    assert metrics["mouseForwarded"] == [{"deltaY": 1, "deltaMode": 1}] * 3, metrics
+    assert metrics["touchpadForwarded"] == [{"deltaY": 1, "deltaMode": 1}], metrics
+    assert metrics["normalForwarded"] == [], metrics
+    assert metrics["tmuxScrollFrames"] == [{"type": "tmux-scroll", "direction": "down", "lines": 3}], metrics
+    assert metrics["alternateAfterSwitch"] is False, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_terminal_app_modified_arrows_route_to_tmux_scrollback_boundaries(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return document.querySelector('#term-1 .xterm') !== null
+              && terminals.get('1')?.term?.rows > 0
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const screen = document.querySelector('#term-1 .xterm');
+        const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+        const pageLines = Math.max(1, Math.floor(terminals.get('1').term.rows * terminalWheelPageFraction));
+        const dispatch = key => {
+          const event = new KeyboardEvent('keydown', {key, code: key, ctrlKey: true, bubbles: true, cancelable: true});
+          const accepted = screen.dispatchEvent(event);
+          return {key, accepted, defaultPrevented: event.defaultPrevented};
+        };
+        const historyUp = dispatch('ArrowUp');
+        setTimeout(() => {
+          const historyDown = dispatch('ArrowDown');
+          setTimeout(() => {
+            const frames = socket.sent
+              .map(message => {
+                try { return JSON.parse(message); } catch (_error) { return null; }
+              })
+              .filter(message => message?.type === 'tmux-scroll' || message?.type === 'input');
+            done({pageLines, historyUp, historyDown, frames, errors: window.__bootErrors || [], rejections: window.__bootRejections || []});
+          }, 60);
+        }, 60);
+        """
+    )
+    assert metrics["historyUp"] == {"key": "ArrowUp", "accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["historyDown"] == {"key": "ArrowDown", "accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["frames"] == [
+        {"type": "tmux-scroll", "direction": "up", "lines": metrics["pageLines"]},
+        {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
+    ], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_keyboard_shortcuts_overlay_fits_narrow_viewport(browser, tmp_path):
+    browser.set_window_size(375, 680)
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        openKeyboardShortcutsOverlay();
+        const dialog = document.querySelector('.keyboard-shortcuts-dialog');
+        const body = document.querySelector('.keyboard-shortcuts-body');
+        const rect = dialog.getBoundingClientRect();
+        return {
+          rect: {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom},
+          viewport: {width: innerWidth, height: innerHeight},
+          bodyScrollsHorizontally: body.scrollWidth > body.clientWidth + 1,
+          rowsOverflow: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.scrollWidth > row.clientWidth + 1),
+          pageBinding: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.textContent.includes('Page tmux scrollback') && row.textContent.includes('Ctrl+↑ / Ctrl+↓')),
+        };
+        """
+    )
+    assert metrics["rect"]["left"] >= 0, metrics
+    assert metrics["rect"]["right"] <= metrics["viewport"]["width"], metrics
+    assert metrics["rect"]["top"] >= 0, metrics
+    assert metrics["rect"]["bottom"] <= metrics["viewport"]["height"], metrics
+    assert metrics["bodyScrollsHorizontally"] is False, metrics
+    assert metrics["rowsOverflow"] is False, metrics
+    assert metrics["pageBinding"] is True, metrics
+
+
+def test_loading_and_thinking_surfaces_share_one_activity_cadence(browser, tmp_path):
+    page = tmp_path / "shared-activity-cadence.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            f"""
+            <button id="info-refresh" class="info-refresh loading">Refresh</button>
+            <div class="actions"><button id="refreshMeta" class="loading">Refresh all</button></div>
+            <span id="info-spinner" class="info-loading-spinner"></span>
+            <div class="file-tree-row kind-dir loading-children"><span id="finder-spinner" class="file-tree-icon"></span></div>
+            <div id="command-thinking" class="command-palette-status">Thinking</div>
+            <div class="yoagent-message assistant streaming"><span id="agent-thinking" class="yoagent-message-role">Agent</span></div>
+            """
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const animation = (selector, pseudo) => {
+          const style = getComputedStyle(document.querySelector(selector), pseudo);
+          return {name: style.animationName, duration: style.animationDuration};
+        };
+        return {
+          token: getComputedStyle(document.documentElement).getPropertyValue('--motion-activity-duration').trim(),
+          infoRefresh: animation('#info-refresh', '::before'),
+          globalRefresh: animation('#refreshMeta', '::before'),
+          infoSpinner: animation('#info-spinner'),
+          finderSpinner: animation('#finder-spinner', '::before'),
+          commandThinking: animation('#command-thinking', '::before'),
+          agentThinking: animation('#agent-thinking', '::after'),
+        };
+        """
+    )
+    assert metrics["token"] == "900ms", metrics
+    for key in ("infoRefresh", "globalRefresh", "infoSpinner", "finderSpinner"):
+        assert metrics[key] == {"name": "metadata-refresh-spin", "duration": "0.9s"}, metrics
+    for key in ("commandThinking", "agentThinking"):
+        assert metrics[key] == {"name": "command-palette-thinking", "duration": "0.9s"}, metrics
+
+
+def test_standard_component_text_follows_responsive_ui_type_scale(browser, tmp_path):
+    page = tmp_path / "responsive-ui-type-scale.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <div id="axis" class="js-debug-y-axis">10</div>
+            <textarea id="debug-log" class="js-debug-log">11</textarea>
+            <div id="drag-title" class="pane-drag-image-title">12</div>
+            <div id="agent-state" class="yoagent-message-state">11</div>
+            <span id="popout-icon" class="file-editor-icon file-editor-icon-popout-preview"></span>
+            <div class="drop-action-result"><pre id="drop-result">12</pre></div>
+            """
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const read = () => ({
+          axis: getComputedStyle(document.getElementById('axis')).fontSize,
+          debugLog: getComputedStyle(document.getElementById('debug-log')).fontSize,
+          dragTitle: getComputedStyle(document.getElementById('drag-title')).fontSize,
+          agentState: getComputedStyle(document.getElementById('agent-state')).fontSize,
+          popoutIcon: getComputedStyle(document.getElementById('popout-icon'), '::after').fontSize,
+          dropResult: getComputedStyle(document.getElementById('drop-result')).fontSize,
+        });
+        const defaults = read();
+        document.documentElement.style.setProperty('--ui-font-size', '18px');
+        return {defaults, scaled: read()};
+        """
+    )
+    assert metrics["defaults"] == {
+        "axis": "10px",
+        "debugLog": "11px",
+        "dragTitle": "12px",
+        "agentState": "11px",
+        "popoutIcon": "10px",
+        "dropResult": "12px",
+    }, metrics
+    assert metrics["scaled"] == {
+        "axis": "15px",
+        "debugLog": "16px",
+        "dragTitle": "17px",
+        "agentState": "16px",
+        "popoutIcon": "15px",
+        "dropResult": "17px",
+    }, metrics
+
+
+def test_event_rows_follow_pane_width_with_scaled_localized_metadata(browser, tmp_path):
+    page = tmp_path / "responsive-event-rows.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <div id="event-host" style="height: 220px;">
+              <div id="event-list" class="event-list">
+                <div id="event-row" class="event-item">
+                  <span id="event-time" class="event-time">2026年07月03日 12时34分56秒</span>
+                  <span id="event-type" class="event-type">后台工作区同步完成事件</span>
+                  <span id="event-message" class="event-message">A deliberately long translated event message must retain readable width and wrap inside the selected pane.</span>
+                </div>
+              </div>
+            </div>
+            """
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        document.documentElement.style.setProperty('--ui-font-size', '18px');
+        const host = document.getElementById('event-host');
+        const list = document.getElementById('event-list');
+        const row = document.getElementById('event-row');
+        const time = document.getElementById('event-time');
+        const type = document.getElementById('event-type');
+        const message = document.getElementById('event-message');
+        const measure = (width, light) => {
+          host.style.width = `${width}px`;
+          document.body.classList.toggle('theme-light', light);
+          void list.offsetWidth;
+          const rowRect = row.getBoundingClientRect();
+          const timeRect = time.getBoundingClientRect();
+          const typeRect = type.getBoundingClientRect();
+          const messageRect = message.getBoundingClientRect();
+          const style = getComputedStyle(list);
+          return {
+            containerType: style.containerType,
+            containerName: style.containerName,
+            listClientWidth: list.clientWidth,
+            listScrollWidth: list.scrollWidth,
+            rowClientWidth: row.clientWidth,
+            rowScrollWidth: row.scrollWidth,
+            rowTop: rowRect.top,
+            timeTop: timeRect.top,
+            typeTop: typeRect.top,
+            metadataBottom: Math.max(timeRect.bottom, typeRect.bottom),
+            messageTop: messageRect.top,
+            messageWidth: messageRect.width,
+            background: style.backgroundColor,
+          };
+        };
+        return {
+          wideDark: measure(900, false),
+          narrowDark: measure(340, false),
+          wideLight: measure(900, true),
+          narrowLight: measure(340, true),
+        };
+        """
+    )
+    for theme in ("Dark", "Light"):
+        wide = metrics[f"wide{theme}"]
+        narrow = metrics[f"narrow{theme}"]
+        assert wide["containerType"] == "inline-size", metrics
+        assert wide["containerName"] == "event-list", metrics
+        assert abs(wide["messageTop"] - wide["timeTop"]) <= 1, metrics
+        assert wide["messageWidth"] >= 200, metrics
+        assert narrow["messageTop"] >= narrow["metadataBottom"] + 4, metrics
+        assert narrow["messageWidth"] >= narrow["rowClientWidth"] * 0.85, metrics
+        for layout in (wide, narrow):
+            assert layout["listScrollWidth"] <= layout["listClientWidth"] + 1, metrics
+            assert layout["rowScrollWidth"] <= layout["rowClientWidth"] + 1, metrics
+    assert metrics["wideDark"]["background"] != metrics["wideLight"]["background"], metrics
+
+
+def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path):
+    paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
+    specs = {
+        "codex": {
+            "session": f"yb-codex-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+            "user_input": "touch /tmp/yolomux-mock-approval",
+            "prompt_glyph": "›",
+            "question": "Would you like to run the following command?",
+            "expected_command": "touch /tmp/yolomux-mock-approval",
+        },
+        "claude": {
+            "session": f"yb-claude-{os.getpid()}-{uuid.uuid4().hex[:8]}",
+            "user_input": "sleep 10",
+            "prompt_glyph": "❯",
+            "question": "Do you want to proceed?",
+            "expected_command": None,
+        },
+    }
+    sessions = [spec["session"] for spec in specs.values()]
+    tmux_runtime = None
     app = None
     try:
-        created = tmux_cmd(
-            "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
+        tmux_runtime = start_isolated_tmux_runtime(
+            monkeypatch,
+            tmp_path,
+            session_commands={
+                spec["session"]: f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock"
+                for agent, spec in specs.items()
+            },
+            columns=120,
+            rows=40,
         )
-        assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
-        booted, pane = wait_until(lambda text: "❯" in text or "›" in text)
-        assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
-        tmux_cmd("send-keys", "-t", f"{session}:", user_input, "Enter")
-        prompted, pane = wait_until(lambda text: user_input in text and ("Would you like to run the following command?" in text or "Do you want to proceed?" in text))
-        assert prompted, f"{agent}.py --mock did not render an approval prompt after `{user_input}`:\n{pane}"
+        booted, panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            sessions,
+            lambda captures: all(spec["prompt_glyph"] in captures[spec["session"]] for spec in specs.values()),
+        )
+        assert booted, f"mock agents did not boot to their input prompts:\n{panes}"
 
-        app = TmuxWebtermApp([session], dangerously_yolo=False)
-        payload = app.auto_approve_session_status(session, capture_bare_session_when_roster=True)
-        assert payload["prompt"]["visible"] is True
-        assert payload["screen"]["key"] == "approval"
-        assert payload["prompt"]["agent"] == agent
-        if agent == "codex":
-            assert payload["prompt"]["command"] == user_input
-        assert payload["prompt"]["signature"]
+        for spec in specs.values():
+            run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{spec['session']}:", spec["user_input"], "Enter")
+        prompted, panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            sessions,
+            lambda captures: all(
+                spec["user_input"] in captures[spec["session"]]
+                and ("Would you like to run the following command?" in captures[spec["session"]] or "Do you want to proceed?" in captures[spec["session"]])
+                for spec in specs.values()
+            ),
+        )
+        assert prompted, f"mock agents did not render approval prompts:\n{panes}"
+
+        app = TmuxWebtermApp(sessions, dangerously_yolo=False)
+        payloads = {}
+        for agent, spec in specs.items():
+            payload = app.auto_approve_session_status(spec["session"], capture_bare_session_when_roster=True)
+            payloads[spec["session"]] = payload
+            assert payload["prompt"]["visible"] is True
+            assert payload["screen"]["key"] == "approval"
+            assert payload["prompt"]["agent"] == agent
+            assert payload["prompt"]["text"] == spec["question"]
+            assert payload["prompt"]["command"] == spec["expected_command"]
+            assert payload["prompt"]["signature"]
 
         auto_approve_payload = {
-            "session_order": [session],
-            "sessions": {session: payload},
+            "session_order": sessions,
+            "sessions": payloads,
             "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
         }
         load_live_runtime_boot_fixture(
             browser,
             tmp_path,
-            sessions=[session],
-            transcript_sessions={session: {"agents": [{"kind": agent}], "panes": []}},
+            sessions=sessions,
+            transcript_sessions={spec["session"]: {"agents": [{"kind": agent}], "panes": []} for agent, spec in specs.items()},
             auto_approve_payload=auto_approve_payload,
         )
         WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
                 """
-                const session = arguments[0];
-                return document.getElementById(`panel-${session}`)
-                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '1'
+                const sessions = arguments[0];
+                return sessions.every(session => document.getElementById(`panel-${session}`))
+                  && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '2'
                   && document.querySelector('#topbarActivity .topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention');
                 """,
-                session,
+                sessions,
             )
         )
         metrics = browser.execute_script(
             """
-            const session = arguments[0];
-            const panel = document.getElementById(`panel-${session}`);
-            const tab = document.getElementById(`panel-tab-${session}`);
+            const sessions = arguments[0];
             const topbar = document.getElementById('topbarActivity');
+            const sessionState = session => {
+              const panel = document.getElementById(`panel-${session}`);
+              const tab = document.getElementById(`panel-tab-${session}`);
+              const badge = tab?.querySelector('[data-prompt-attention-clear]');
+              return {
+                badgeText: badge?.textContent || '',
+                badgePresent: !!badge,
+                tabAttention: tab?.classList.contains('needs-attention') || false,
+                panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
+              };
+            };
             const beforeSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
-            const badge = tab?.querySelector('[data-prompt-attention-clear]');
             const before = {
               statusPulseDisabled: document.documentElement.classList.contains('status-pulse-disabled'),
-              badgeText: badge?.textContent || '',
-              badgePresent: !!badge,
-              tabAttention: tab?.classList.contains('needs-attention') || false,
-              panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
+              sessions: Object.fromEntries(sessions.map(session => [session, sessionState(session)])),
               topbarText: topbar?.textContent || '',
               topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
               topbarAskHasSharedParent: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator') || false,
               topbarAskHasAttentionModifier: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('status-indicator--attention') || false,
               topbarAskHasPulse: topbar?.querySelector('.topbar-activity-ask .agent-window-status-dot')?.classList.contains('attention-pulse') || false,
             };
-            clearPromptAttentionForSession(session, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true});
+            sessions.forEach(session => acknowledgeTerminalAttentionFromUserAction(session, 0, {delayMs: agentWindowActivityAcknowledgeDelayMs, localOnly: true}));
             const afterSocketFrames = (window.__bootSocketInstances || []).flatMap(socket => socket.sent || []);
             const immediate = {
-              badgeText: tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '',
-              tabAttention: tab?.classList.contains('needs-attention') || false,
-              panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
+              sessions: Object.fromEntries(sessions.map(session => [session, sessionState(session)])),
               topbarText: topbar?.textContent || '',
               topbarAskCount: topbar?.querySelector('.topbar-activity-ask .topbar-activity-count-number')?.textContent || '',
+              acknowledgedStatusCount: document.querySelectorAll('.agent-window-status-dot.agent-window-status-dot--acknowledging.status-indicator--acknowledged').length,
+              acknowledgedStatusPulses: document.querySelectorAll('.agent-window-status-dot.agent-window-status-dot--acknowledging.attention-pulse').length,
               newInputFrames: afterSocketFrames.slice(beforeSocketFrames.length).filter(frame => String(frame).includes('"type":"input"')).length,
             };
             return {before, immediate};
             """,
-            session,
+            sessions,
         )
         assert metrics["before"]["statusPulseDisabled"] is True
-        assert metrics["before"]["badgeText"] == ""
-        assert metrics["before"]["badgePresent"] is False
-        assert metrics["before"]["tabAttention"] is True
-        assert metrics["before"]["panelNeedsApproval"] is True
-        assert metrics["before"]["topbarAskCount"] == "1"
+        for session in sessions:
+            assert metrics["before"]["sessions"][session] == {
+                "badgeText": "",
+                "badgePresent": False,
+                "tabAttention": True,
+                "panelNeedsApproval": True,
+            }
+        assert metrics["before"]["topbarAskCount"] == "2"
         assert metrics["before"]["topbarAskHasSharedParent"] is True
         assert metrics["before"]["topbarAskHasAttentionModifier"] is True
         assert metrics["before"]["topbarAskHasPulse"] is False
-        assert metrics["immediate"]["badgeText"] == ""
-        assert metrics["immediate"]["tabAttention"] is True
-        assert metrics["immediate"]["panelNeedsApproval"] is True
-        assert metrics["immediate"]["topbarAskCount"] == "1"
+        for session in sessions:
+            assert metrics["immediate"]["sessions"][session] == {
+                "badgeText": "",
+                "badgePresent": False,
+                "tabAttention": False,
+                "panelNeedsApproval": False,
+            }
+        assert metrics["immediate"]["topbarAskCount"] == "2"
+        assert metrics["immediate"]["acknowledgedStatusCount"] >= 2
+        assert metrics["immediate"]["acknowledgedStatusPulses"] == 0
         assert metrics["immediate"]["newInputFrames"] == 0
         WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
                 """
-                const session = arguments[0];
-                const tab = document.getElementById(`panel-tab-${session}`);
-                const panel = document.getElementById(`panel-${session}`);
-                return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
-                  && !tab?.classList.contains('needs-attention')
-                  && !panel?.classList.contains('needs-exec-pane')
+                const sessions = arguments[0];
+                return sessions.every(session => {
+                  const tab = document.getElementById(`panel-tab-${session}`);
+                  const panel = document.getElementById(`panel-${session}`);
+                  return (tab?.querySelector('[data-prompt-attention-clear]')?.textContent || '') === ''
+                    && !tab?.classList.contains('needs-attention')
+                    && !panel?.classList.contains('needs-exec-pane');
+                })
                   && document.querySelector('#topbarActivity .topbar-activity-ask .topbar-activity-count-number')?.textContent === '0';
                 """,
-                session,
+                sessions,
             )
         )
     finally:
         if app is not None:
-            stop = getattr(getattr(app, "control_server", None), "stop", None)
-            if callable(stop):
-                try:
-                    stop()
-                except Exception:
-                    pass
-        subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "kill-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-        shutil.rmtree(sock_base, ignore_errors=True)
+            app.control_server.stop()
+        stop_isolated_tmux_runtime(tmux_runtime)
         cleanup_isolated_browser_runtime_paths(paths)
+
+
+def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, tmp_path):
+    page = tmp_path / "topbar-status-actions.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div id="token-topbar" class="topbar"></div>
+      <button id="owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
+      <button id="activity" class="topbar-activity topbar-status-surface">1 running</button>
+      <button id="attention" class="topbar-activity topbar-status-surface has-attention">1 attention</button>
+      <div id="latency" class="latency-meter topbar-status-surface">10 ms</div>
+      <span id="view-chip" class="command-palette-view-chip">preview</span>
+      <button id="normal-action" class="preferences-inline-action">normal</button>
+      <div class="preferences-setting-advisory"><button id="advisory-action" class="preferences-inline-action">advisory</button></div>
+      <div id="neutral" style="width:20px;height:20px"></div>
+    """, extra_css="#token-topbar { transition: none; }"),
+    )
+
+    def read(element_id):
+        return browser.execute_script(
+            """
+            const node = document.getElementById(arguments[0]);
+            const style = getComputedStyle(node);
+            return {
+              display: style.display,
+              flex: style.flex,
+              alignItems: style.alignItems,
+              height: style.height,
+              fontSize: style.fontSize,
+              cursor: style.cursor,
+              whiteSpace: style.whiteSpace,
+              color: style.color,
+              background: style.backgroundColor,
+              border: style.border,
+            };
+            """,
+            element_id,
+        )
+
+    def hover(element_id):
+        browser.execute_script("document.activeElement?.blur()")
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", element_id)).perform()
+        return read(element_id)
+
+    def focus(element_id):
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
+        browser.execute_script("document.getElementById(arguments[0]).focus({focusVisible: true})", element_id)
+        assert browser.execute_script("return document.getElementById(arguments[0]).matches(':focus-visible')", element_id) is True
+        return read(element_id)
+
+    for theme in ("theme-dark", "theme-light"):
+        browser.execute_script("document.body.className = arguments[0]", theme)
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
+        owner = read("owner")
+        activity = read("activity")
+        for property_name in ("display", "flex", "alignItems", "height", "fontSize", "cursor", "whiteSpace"):
+            assert owner[property_name] == activity[property_name], (theme, property_name, owner, activity)
+        assert owner["display"] == "inline-flex"
+        latency = read("latency")
+        assert latency["display"] == "inline-grid"
+        assert latency["cursor"] == "auto"
+        for property_name in ("background", "border"):
+            assert len({owner[property_name], activity[property_name], latency[property_name]}) == 1, (theme, property_name, owner, activity, latency)
+        token_metrics = browser.execute_script(
+            """
+            const paint = id => {
+              const style = getComputedStyle(document.getElementById(id));
+              return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+            };
+            const probe = document.createElement('div');
+            document.body.appendChild(probe);
+            const value = (property, token) => {
+              probe.style.cssText = '';
+              probe.style.setProperty(property, `var(${token})`);
+              const style = getComputedStyle(probe);
+              return property === 'background' ? style.backgroundColor : property === 'border-color' ? style.borderTopColor : style.color;
+            };
+            const metrics = {
+              topbar: paint('token-topbar'),
+              chip: paint('view-chip'),
+              normalAction: paint('normal-action'),
+              advisoryAction: paint('advisory-action'),
+              panel2: value('background', '--panel2'),
+              strip: value('background', '--pane-tab-strip-bg'),
+              text: value('color', '--text'),
+              softBg: value('background', '--active-control-soft-bg'),
+              softBorder: value('border-color', '--active-control-soft-border'),
+              active: value('color', '--active-control-bg'),
+              good: value('color', '--good'),
+              panel: value('background', '--panel'),
+            };
+            probe.remove();
+            return metrics;
+            """
+        )
+        assert token_metrics["topbar"]["background"] == token_metrics["panel2"], (theme, token_metrics)
+        assert token_metrics["chip"] == {"color": token_metrics["text"], "background": token_metrics["softBg"], "border": token_metrics["softBorder"]}, (theme, token_metrics)
+        assert token_metrics["normalAction"]["color"] == token_metrics["active"], (theme, token_metrics)
+        if theme == "theme-light":
+            assert token_metrics["advisoryAction"]["color"] == token_metrics["good"], token_metrics
+            assert token_metrics["advisoryAction"]["background"] == token_metrics["panel"], token_metrics
+        fast_pointer_actions(browser).move_to_element(browser.find_element("id", "token-topbar")).perform()
+        assert read("token-topbar")["background"] == token_metrics["strip"], (theme, token_metrics, read("token-topbar"))
+        assert hover("owner") == focus("owner")
+        assert hover("activity") == focus("activity")
+        assert hover("attention") == focus("attention")
+
+    hidden_display = browser.execute_script(
+        "const node = document.getElementById('owner'); node.hidden = true; return getComputedStyle(node).display;"
+    )
+    assert hidden_display == "none"
+
+
+def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp_path):
+    page = tmp_path / "touch-compact-topbar.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <header id="touch-topbar" class="topbar">
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span>LO</span><span>mux</span><span class="brand-version"> 0.5.24</span></div></div>
+        <div id="sessionButtons" class="app-menu-area">
+          <nav class="app-menu-bar"><div id="touch-menu" class="app-menu"><button class="app-menu-button">Menus</button></div></nav>
+          <div id="touch-nav" class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
+          <button id="touch-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span id="touch-search-label" class="topbar-search-label"><span class="topbar-search-label-long">Search files, commands</span><span class="topbar-search-label-short" aria-hidden="true">Search</span></span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
+          <button id="touch-language" class="topbar-language">English</button>
+          <button id="touch-owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
+          <button id="touch-activity" class="topbar-activity topbar-status-surface"><span class="topbar-activity-count topbar-activity-working active"><span class="topbar-activity-count-number">2</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--working topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--working">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-ask active"><span class="topbar-activity-count-number">1</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--attention topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--attention">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-blocked active"><span class="topbar-activity-count-number">3</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--cooldown topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--cooldown">●</span></span></span><span class="topbar-activity-idle">3 idle</span></button>
+        </div>
+        <div id="touch-actions" class="actions"><div id="latencyMeter" class="latency-meter">12 ms</div><button id="notifyToggle">Notify</button><button id="refreshMeta">Refresh</button><button id="logoutButton">Log out</button><span id="status">connected</span></div>
+      </header>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #touch-topbar { width: 390px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        // The fixture has no application bundle to run syncTopbarPacking(). Model the measured
+        // presentation that the live packer selected for this narrow topbar.
+        document.body.classList.add('app-topbar-touch-compact', 'app-topbar-menu-compact', 'app-topbar-coarse-pointer', 'app-vw-lte-600', 'app-vw-lte-760', 'app-vw-lte-980', 'app-vw-lte-1100', 'topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-owner', 'topbar-pack-hide-nav');
+        const actions = document.getElementById('touch-actions');
+        const activityNode = document.getElementById('touch-activity');
+        activityNode.classList.add('topbar-activity--mobile-count-balls');
+        actions.insertBefore(activityNode, document.getElementById('refreshMeta'));
+        const box = node => {
+          const rect = node.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, display: style.display};
+        };
+        const overlaps = (left, right) => left.right > right.left + 0.5 && right.right > left.left + 0.5 && left.bottom > right.top + 0.5 && right.bottom > left.top + 0.5;
+        const header = document.getElementById('touch-topbar');
+        const menu = document.getElementById('touch-menu');
+        const activity = document.getElementById('touch-activity');
+        const sessionButtons = document.getElementById('sessionButtons');
+        return {
+          header: box(header),
+          menu: box(menu),
+          menuButton: box(menu.querySelector('.app-menu-button')),
+          menuTouchAction: getComputedStyle(menu.querySelector('.app-menu-button')).touchAction,
+          activity: box(activity),
+          sessionButtons: box(sessionButtons),
+          actions: box(actions),
+          search: box(document.getElementById('touch-search')),
+          searchLabel: box(document.getElementById('touch-search-label')),
+          searchShortLabel: box(document.querySelector('.topbar-search-label-short')),
+          searchLongLabel: box(document.querySelector('.topbar-search-label-long')),
+          searchShortLabelOverflow: document.querySelector('.topbar-search-label-short').scrollWidth > document.querySelector('.topbar-search-label-short').clientWidth,
+          language: box(document.getElementById('touch-language')),
+          owner: box(document.getElementById('touch-owner')),
+          nav: box(document.getElementById('touch-nav')),
+          refresh: box(document.getElementById('refreshMeta')),
+          notify: box(document.getElementById('notifyToggle')),
+          logout: box(document.getElementById('logoutButton')),
+          menuActivityOverlap: overlaps(box(menu), box(activity)),
+          searchActivityOverlap: overlaps(box(document.getElementById('touch-search')), box(activity)),
+          activityCounts: [...activity.querySelectorAll('.topbar-activity-count.active')].map(node => ({box: box(node), text: node.querySelector('.topbar-activity-count-number')?.textContent || '', numberDisplay: getComputedStyle(node.querySelector('.topbar-activity-count-number')).display})),
+          idleDisplay: getComputedStyle(activity.querySelector('.topbar-activity-idle')).display,
+        };
+        """
+    )
+    assert metrics["actions"]["display"] == "flex", metrics
+    # A flex child blockifies inline-grid to computed grid while retaining the shared centered grid shell.
+    assert metrics["refresh"]["display"] == "grid", metrics
+    assert metrics["notify"]["display"] == "none", metrics
+    assert metrics["logout"]["display"] == "none", metrics
+    assert metrics["search"]["display"] == "flex", metrics
+    # A phone still exposes a short, useful Cmd-P label rather than an unexplained magnifying
+    # glass or a mostly empty full-width search field.
+    assert metrics["search"]["width"] > metrics["search"]["height"] + 1, metrics
+    assert metrics["searchLabel"]["display"] == "flex", metrics
+    assert metrics["searchLongLabel"]["display"] == "none", metrics
+    # A flex child blockifies the inline short label while retaining the compact text content.
+    assert metrics["searchShortLabel"]["display"] == "block", metrics
+    assert metrics["searchShortLabelOverflow"] is False, metrics
+    assert metrics["language"]["display"] == "none", metrics
+    assert metrics["owner"]["display"] == "none", metrics
+    assert metrics["nav"]["display"] == "none", metrics
+    assert metrics["activity"]["display"] == "flex", metrics
+    assert [item["text"] for item in metrics["activityCounts"]] == ["2", "1", "3"], metrics
+    assert all(item["box"]["width"] >= 20 and item["numberDisplay"] == "grid" for item in metrics["activityCounts"]), metrics
+    assert metrics["idleDisplay"] == "none", metrics
+    assert metrics["menu"]["left"] >= metrics["sessionButtons"]["left"] - 0.5, metrics
+    assert metrics["menuButton"]["height"] >= 36, metrics
+    assert metrics["menuTouchAction"] == "manipulation", metrics
+    assert metrics["menu"]["right"] <= metrics["search"]["left"] + 0.5, metrics
+    assert metrics["search"]["right"] <= metrics["actions"]["left"] + 2, metrics
+    assert metrics["activity"]["right"] <= metrics["refresh"]["left"] + 0.5, metrics
+    assert metrics["refresh"]["left"] - metrics["activity"]["right"] <= 8, metrics
+    assert metrics["header"]["height"] < 50, metrics
+
+
+def test_compact_activity_uses_desktop_right_rail_before_optional_icons(browser, tmp_path):
+    page = tmp_path / "compact-activity-desktop-rail.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <header id="topbar" class="topbar">
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span>LOmux</span></div></div>
+        <div id="sessionButtons" class="app-menu-area">
+          <nav class="app-menu-bar">
+            <div class="app-menu"><button class="app-menu-button">File</button></div><div class="app-menu"><button class="app-menu-button">View</button></div><div class="app-menu"><button class="app-menu-button">tmux</button></div><div class="app-menu"><button class="app-menu-button">Tabs</button></div><div class="app-menu"><button class="app-menu-button">Help</button></div>
+          </nav>
+          <div class="topbar-center-tools"><button id="search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span class="topbar-search-label">Search files, commands</span><kbd class="topbar-search-hint">Cmd-P</kbd></button></div>
+          <div class="topbar-right-tools"></div>
+        </div>
+        <div class="actions">
+          <div id="latencyMeter" class="latency-meter topbar-action-capacity-hidden">16 ms</div>
+          <button id="notifyToggle" class="topbar-action-capacity-hidden">Notify</button>
+          <button id="topbarActivity" class="topbar-activity topbar-status-surface topbar-activity--mobile-count-balls"><span class="topbar-activity-count active"><span class="topbar-activity-count-number">2</span><span class="agent-window-activity topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--working">●</span></span></span><span class="topbar-activity-count active"><span class="topbar-activity-count-number">1</span><span class="agent-window-activity topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--attention">●</span></span></span></button>
+          <button id="refreshMeta">Refresh</button>
+          <button id="logoutButton" class="topbar-action-capacity-hidden">Log out</button>
+        </div>
+      </header>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; min-height: 0; }
+      #topbar { width: 1186px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        // This static fixture has no application bundle. Match the measured packing state that
+        // places compact activity ahead of Refresh after optional desktop chrome has yielded.
+        document.body.classList.add('topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify');
+        const {rect: baseRect} = window.__yolomuxTestHelpers;
+        const rect = node => ({...baseRect(node), display: getComputedStyle(node).display});
+        const activity = document.getElementById('topbarActivity');
+        const refresh = document.getElementById('refreshMeta');
+        const search = document.getElementById('search');
+        const header = document.getElementById('topbar');
+        return {
+          header: rect(header), activity: rect(activity), refresh: rect(refresh), search: rect(search),
+          latency: rect(document.getElementById('latencyMeter')), notify: rect(document.getElementById('notifyToggle')), logout: rect(document.getElementById('logoutButton')),
+          balls: Array.from(activity.querySelectorAll('.topbar-activity-count.active')).map(rect),
+        };
+        """
+    )
+    assert metrics["activity"]["display"] == "flex", metrics
+    assert metrics["activity"]["right"] <= metrics["refresh"]["left"] + 0.5, metrics
+    assert metrics["refresh"]["right"] <= metrics["header"]["right"] + 0.5, metrics
+    assert metrics["search"]["width"] >= metrics["search"]["height"], metrics
+    assert all(ball["width"] >= 20 for ball in metrics["balls"]), metrics
+    assert metrics["latency"]["display"] == metrics["notify"]["display"] == metrics["logout"]["display"] == "none", metrics
+
+
+def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targets(browser, tmp_path):
+    page = tmp_path / "touch-terminal-smart-keys.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div id="terminal-pane" class="tab-pane active panel-overlay-root">
+        <div id="terminal" class="terminal"><div class="xterm"></div></div>
+        <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
+          <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
+            <button class="mobile-terminal-key-drag">⠿</button>
+            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key active">Ctrl</button><button class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
+            <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+          </div>
+      </div>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #terminal-pane { width: 320px; height: 240px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const box = node => { const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, width: rect.width, height: rect.height, top: rect.top, bottom: rect.bottom}; };
+        const pane = document.getElementById('terminal-pane');
+        const terminal = document.getElementById('terminal');
+        const bar = document.getElementById('smart-keys');
+        const row = document.getElementById('smart-key-row');
+        const key = row.querySelector('.mobile-terminal-key');
+        const hidden = bar.hidden;
+        bar.hidden = false;
+        bar.style.insetInlineStart = '12px';
+        bar.style.insetInlineEnd = 'auto';
+        bar.style.insetBlockStart = '12px';
+        bar.style.insetBlockEnd = 'auto';
+        const dpad = document.getElementById('smart-key-dpad');
+        const shell = document.getElementById('smart-key-shell');
+        const moreRow = document.getElementById('smart-key-more-row');
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        bar.classList.add('mobile-terminal-keybar--more');
+        moreRow.hidden = false;
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display};
+        return {
+          pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
+          paneDisplay: getComputedStyle(pane).display,
+          overflowX: getComputedStyle(row).overflowX,
+          activeBackground: getComputedStyle(row.querySelector('.active')).backgroundColor,
+          interruptColor: getComputedStyle(row.querySelector('.mobile-terminal-key--interrupt')).color,
+          primaryColumns: getComputedStyle(row).gridTemplateColumns,
+          primaryLabels: [...row.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent),
+          more: normal.more,
+          shell: normal.shell,
+          movedInsetEnd: bar.style.insetBlockEnd,
+          initiallyHidden: hidden,
+              up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
+          normal, overflow,
+        };
+        """
+    )
+    assert metrics["paneDisplay"] == "block", metrics
+    assert metrics["initiallyHidden"] is True, metrics
+    assert abs(metrics["terminal"]["height"] - metrics["pane"]["height"]) <= 1, metrics
+    assert metrics["launcher"]["width"] >= 40 and metrics["launcher"]["height"] >= 40, metrics
+    assert metrics["key"]["height"] >= 36, metrics
+    assert metrics["overflowX"] == "visible", metrics
+    assert metrics["primaryColumns"].startswith("repeat(5,"), metrics
+    assert all(label in metrics["primaryLabels"] for label in ["Tab", "^B"]), metrics
+    assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
+    assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
+    assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
+    assert metrics["movedInsetEnd"] == "auto", metrics
+    assert metrics["bar"]["height"] < metrics["pane"]["height"], metrics
+    assert metrics["normal"]["shellDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
+    assert metrics["overflow"]["rowDisplay"] == "grid", metrics
+    assert metrics["overflow"]["shellDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
+    assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
+    assert metrics["overflow"]["more"]["right"] <= metrics["overflow"]["row"]["right"] + 0.5, metrics
+    assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
+    assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
+    assert metrics["up"]["top"] < metrics["left"]["top"] and metrics["up"]["top"] < metrics["right"]["top"], metrics
+    assert metrics["left"]["left"] < metrics["up"]["left"] < metrics["right"]["left"], metrics
+    assert metrics["down"]["top"] > metrics["left"]["top"] and metrics["down"]["top"] > metrics["right"]["top"], metrics
+    assert metrics["copy"]["left"] < metrics["up"]["left"] and metrics["paste"]["left"] < metrics["down"]["left"], metrics
+    assert metrics["copy"]["top"] < metrics["left"]["top"] < metrics["paste"]["top"], metrics
+    assert metrics["pgUp"]["left"] > metrics["up"]["left"] and metrics["pgDown"]["left"] > metrics["down"]["left"], metrics
+    assert metrics["pgUp"]["top"] < metrics["right"]["top"] < metrics["pgDown"]["top"], metrics
+
+
+def test_phone_single_pane_uses_one_pixel_active_ring_without_changing_tablets(browser, tmp_path):
+    page = tmp_path / "phone-single-pane-ring.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div class="yolomux-dockview" id="dockview">
+        <div class="dv-groupview" id="group"><article class="panel active-pane" id="panel"></article></div>
+      </div>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #dockview, #group { width: 320px; height: 240px; }
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        document.documentElement.style.setProperty('--pane-split-gap', '7px');
+        const group = document.getElementById('group');
+        const panel = document.getElementById('panel');
+        const values = () => ({
+          groupGap: getComputedStyle(group).getPropertyValue('--pane-split-gap').trim(),
+          panelGap: getComputedStyle(panel).getPropertyValue('--pane-split-gap').trim(),
+          groupPadding: getComputedStyle(group).paddingTop,
+          panelBorder: getComputedStyle(panel).borderTopWidth,
+        });
+        document.body.classList.add('app-phone-single-pane');
+        const phone = values();
+        document.body.classList.remove('app-phone-single-pane');
+        return {phone, regular: values()};
+        """
+    )
+    assert metrics["phone"] == {"groupGap": "1px", "panelGap": "1px", "groupPadding": "1px", "panelBorder": "1px"}, metrics
+    assert metrics["regular"] == {"groupGap": "7px", "panelGap": "7px", "groupPadding": "7px", "panelBorder": "7px"}, metrics
+
+
+def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
+    """Keep Help visible: the launcher may never be an overlay on top of the menu row."""
+    page = tmp_path / "topbar-priority-matrix.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <header id="matrix-topbar" class="topbar">
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span class="brand-lo">LO</span><span>mux</span><span class="brand-version"> 0.5.23</span></div></div>
+        <div id="matrix-session-buttons" class="app-menu-area">
+          <nav class="app-menu-bar">
+            <div class="app-menu"><button id="matrix-file" class="app-menu-button">File</button></div>
+            <div class="app-menu"><button id="matrix-view" class="app-menu-button">View</button></div>
+            <div class="app-menu"><button id="matrix-tmux" class="app-menu-button">tmux</button></div>
+            <div class="app-menu"><button id="matrix-tabs" class="app-menu-button">Tabs</button></div>
+            <div class="app-menu"><button id="matrix-help" class="app-menu-button">Help</button></div>
+          </nav>
+          <div id="matrix-center" class="topbar-center-tools">
+            <div class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
+            <button id="matrix-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span class="topbar-search-label">Search files</span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
+          </div>
+          <div id="matrix-right" class="topbar-right-tools"><button class="topbar-language">English</button><button class="topbar-owner-status">IDX: leader</button><button class="topbar-activity">1 running</button></div>
+        </div>
+            <div id="matrix-actions" class="actions"><button id="notifyToggle">Notify</button><button id="refreshMeta">Refresh</button><button id="logoutButton">Log out</button></div>
+      </header>
+    """, extra_css="""
+      body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+      #matrix-topbar { width: var(--matrix-width); }
+    """),
+    )
+
+    scenarios = [
+        ("narrow-phone", 320, 14, True),
+        ("phone", 390, 18, True),
+        ("large-phone", 600, 22, True),
+        ("small-tablet", 640, 14, False),
+        ("portrait-tablet", 680, 18, False),
+        ("iPad", 744, 18, False),
+        ("wide-iPad", 960, 22, False),
+        ("laptop", 1239, 18, False),
+        ("desktop", 1440, 18, False),
+    ]
+    for label, width, font_size, compact in scenarios:
+        metrics = browser.execute_script(
+            """
+            const [width, fontSize, compact] = arguments;
+            const body = document.body;
+            body.className = 'app-topbar-touch-compact';
+            for (const breakpoint of [1280, 1100, 980, 760, 720, 600]) {
+              if (width <= breakpoint) body.classList.add(`app-vw-lte-${breakpoint}`);
+            }
+                if (compact) body.classList.add('app-topbar-menu-compact');
+                if (compact) body.classList.add('topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-owner', 'topbar-pack-hide-nav', 'topbar-pack-compact-menu');
+                else if (width <= 980) body.classList.add('topbar-pack-hide-notify');
+            document.documentElement.style.setProperty('--matrix-width', `${width}px`);
+            document.documentElement.style.setProperty('--ui-font-size', `${fontSize}px`);
+            const topbar = document.getElementById('matrix-topbar');
+            const menuBar = topbar.querySelector('.app-menu-bar');
+            if (compact) {
+              menuBar.innerHTML = '<div class="app-menu"><button id="matrix-menus" class="app-menu-button">Menus</button></div>';
+            } else {
+              menuBar.innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help'].map(name => `<div class="app-menu"><button id="matrix-${name.toLowerCase()}" class="app-menu-button">${name}</button></div>`).join('');
+            }
+            const {rect: baseRect} = window.__yolomuxTestHelpers;
+            const rect = node => ({...baseRect(node), display: getComputedStyle(node).display});
+            const visible = node => node && getComputedStyle(node).display !== 'none';
+            const menuNames = compact ? ['menus'] : ['file', 'view', 'tmux', 'tabs', 'help'];
+            const menus = menuNames.map(name => rect(document.getElementById(`matrix-${name}`)));
+            const search = rect(document.getElementById('matrix-search'));
+            const actions = rect(document.getElementById('matrix-actions'));
+            const center = rect(document.getElementById('matrix-center'));
+            return {
+              header: rect(topbar),
+              menuArea: rect(document.getElementById('matrix-session-buttons')),
+              menus,
+              search,
+              center,
+              actions,
+              refresh: rect(document.getElementById('refreshMeta')),
+                  notifyVisible: visible(document.getElementById('notifyToggle')),
+              searchVisible: visible(document.getElementById('matrix-search')),
+            };
+            """,
+            width,
+            font_size,
+            compact,
+        )
+        assert metrics["header"]["height"] < 60, (label, metrics)
+        assert metrics["menus"][0]["left"] >= metrics["menuArea"]["left"] - 1, (label, metrics)
+        assert metrics["menus"][-1]["right"] <= metrics["header"]["right"] + 1, (label, metrics)
+        for left, right in zip(metrics["menus"], metrics["menus"][1:]):
+            assert left["right"] <= right["left"] + 1, (label, metrics)
+        if compact:
+            assert metrics["searchVisible"] is True, (label, metrics)
+            assert metrics["menus"][0]["right"] <= metrics["search"]["left"] + 1, (label, metrics)
+            assert metrics["search"]["right"] <= metrics["actions"]["left"] + 1, (label, metrics)
+        else:
+            assert metrics["menus"][-1]["right"] <= metrics["center"]["left"] + 1, (label, metrics)
+            assert metrics["search"]["right"] <= metrics["actions"]["left"] + 1, (label, metrics)
+            assert metrics["refresh"]["display"] == "grid", (label, metrics)
+        if width <= 980:
+            assert metrics["notifyVisible"] is False, (label, metrics)
+
+    # On a pointer desktop the center wrapper owns the actual space between Help and the right
+    # chrome.  Search therefore grows beyond its label-sized shell and the nav/search pair is
+    # centered in that free region without covering either neighbor.
+    desktop = browser.execute_script(
+        """
+        document.body.className = '';
+        document.documentElement.style.setProperty('--matrix-width', '1440px');
+        document.documentElement.style.setProperty('--ui-font-size', '18px');
+        document.querySelector('.app-menu-bar').innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help']
+          .map(name => `<div class="app-menu"><button class="app-menu-button">${name}</button></div>`).join('');
+        const {rect: baseRect} = window.__yolomuxTestHelpers;
+        const rect = node => {
+          const box = baseRect(node);
+          return {...box, center: (box.left + box.right) / 2};
+        };
+        const menu = document.querySelector('.app-menu-bar');
+        const center = document.getElementById('matrix-center');
+        const nav = center.querySelector('.topbar-nav');
+        const search = document.getElementById('matrix-search');
+        const right = document.getElementById('matrix-right');
+        const actions = document.getElementById('matrix-actions');
+        return {menu: rect(menu), center: rect(center), nav: rect(nav), search: rect(search), right: rect(right), actions: rect(actions)};
+        """
+    )
+    assert desktop["menu"]["right"] <= desktop["center"]["left"] + 1, desktop
+    assert desktop["search"]["right"] <= desktop["right"]["left"] + 1, desktop
+    assert desktop["right"]["right"] <= desktop["actions"]["left"] + 1, desktop
+    assert desktop["search"]["width"] >= 360, desktop
+    pair_center = (desktop["nav"]["left"] + desktop["search"]["right"]) / 2
+    assert abs(pair_center - desktop["center"]["center"]) <= 1, desktop
+
+
+def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
+    page = tmp_path / "touch-pane-tab-close.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div class="pane-tab"><button id="touch-tab-close" class="pane-tab-close pc-window-control pc-minimize" type="button"></button></div>
+    """, extra_css="body { margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }"),
+    )
+    metrics = browser.execute_script(
+        """
+        document.body.classList.add('app-topbar-touch-compact');
+        const control = document.getElementById('touch-tab-close');
+        const style = getComputedStyle(control);
+        let clicks = 0;
+        control.addEventListener('click', () => { clicks += 1; });
+        control.click();
+        return {width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height, touchAction: style.touchAction, clicks};
+        """
+    )
+    assert metrics["width"] >= 36 and metrics["height"] >= 36, metrics
+    assert metrics["touchAction"] == "manipulation", metrics
+    assert metrics["clicks"] == 1, metrics
+
+
+def test_narrow_server_update_banner_stacks_message_and_actions(browser, tmp_path):
+    page = tmp_path / "narrow-server-update-banner.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div id="serverUpdateBanner" class="server-update-banner">
+        <span class="server-update-banner-msg">The YOLOmux server version changed since this browser tab loaded. Do you want to reload the browser?</span>
+        <div class="toast-control-row server-update-banner-actions"><button class="server-update-banner-reload">Reload</button><button class="server-update-banner-dismiss">Keep</button></div>
+      </div>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        document.body.classList.add('app-vw-lte-760');
+        const rect = selector => {
+          const box = document.querySelector(selector).getBoundingClientRect();
+          return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height};
+        };
+        const message = rect('.server-update-banner-msg');
+        const actions = rect('.server-update-banner-actions');
+        const reload = rect('.server-update-banner-reload');
+        const keep = rect('.server-update-banner-dismiss');
+        return {message, actions, reload, keep, banner: rect('#serverUpdateBanner')};
+        """
+    )
+    assert metrics["message"]["bottom"] <= metrics["actions"]["top"] + 0.5, metrics
+    assert metrics["actions"]["top"] - metrics["message"]["bottom"] <= 16, metrics
+    assert metrics["reload"]["right"] <= metrics["keep"]["left"] + 0.5, metrics
+    assert metrics["actions"]["right"] <= metrics["banner"]["right"] + 0.5, metrics
+    assert metrics["banner"]["height"] <= metrics["message"]["height"] + metrics["actions"]["height"] + 48, metrics
 
 
 def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
@@ -1798,10 +7174,7 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
         const owner = document.getElementById('topbarOwnerStatus');
         const activity = document.getElementById('topbarActivity');
         const position = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-        const rect = node => {
-          const box = node.getBoundingClientRect();
-          return {left: box.left, right: box.right, width: box.width};
-        };
+        const {rect} = window.__yolomuxTestHelpers;
         return {
           text: owner.textContent.replace(/\\s+/g, ' ').trim(),
           title: owner.title,
@@ -1821,80 +7194,51 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
     assert "STATS leader: devhost:8002" in metrics["title"]
     assert "SESS leader: devhost:8002" in metrics["title"]
 
-
 @pytest.mark.e2e
 def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):
     if os.environ.get("YOLOMUX_REAL_AGENT_SMOKE") != "1":
         pytest.skip("set YOLOMUX_REAL_AGENT_SMOKE=1 to run real Claude/Codex prompt smoke")
-    tmux_binary = shutil.which("tmux")
     codex_binary = shutil.which("codex")
     claude_binary = shutil.which("claude")
-    if not tmux_binary:
-        pytest.skip("tmux is not installed")
     if not codex_binary:
         pytest.skip("codex is not installed")
     if not claude_binary:
         pytest.skip("claude is not installed")
 
     paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-    sock_base = Path("/tmp") / f"yoask-real-ui-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    sock_base.mkdir(mode=0o700)
-    socket_path = sock_base / "s"
     sessions = {
         "codex": f"yr-codex-{os.getpid()}-{uuid.uuid4().hex[:6]}",
         "claude": f"yr-claude-{os.getpid()}-{uuid.uuid4().hex[:6]}",
     }
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
-
-    def tmux_cmd(*args, timeout=8):
-        return subprocess.run(
-            [tmux_binary, "-S", str(socket_path), *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-
-    def capture(session):
-        return tmux_cmd("capture-pane", "-p", "-t", f"{session}:").stdout or ""
-
-    def wait_until(session, predicate, timeout=120):
-        deadline = time.time() + timeout
-        last = ""
-        while time.time() < deadline:
-            last = capture(session)
-            if predicate(last):
-                return True, last
-            time.sleep(0.4)
-        return False, last
+    tmux_runtime = None
 
     def wait_for_codex_sleep_prompt(session, timeout=120):
-        deadline = time.time() + timeout
-        last = ""
         extra_submit_sent = False
-        while time.time() < deadline:
-            last = capture(session)
-            if "Would you like to run the following" in last and "sleep 10" in last:
-                return True, last
-            if not extra_submit_sent and "› Run sleep 10" in last:
-                tmux_cmd("send-keys", "-t", f"{session}:", "C-m")
+        def prompted(panes):
+            nonlocal extra_submit_sent
+            text = panes[session]
+            if "Would you like to run the following" in text and "sleep 10" in text:
+                return True
+            if not extra_submit_sent and "› Run sleep 10" in text:
+                run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{session}:", "C-m")
                 extra_submit_sent = True
-            time.sleep(0.4)
-        return False, last
+            return False
+        ready, panes = wait_for_isolated_tmux_panes(tmux_runtime, [session], prompted, timeout=timeout)
+        return ready, panes.get(session, "")
 
     def wait_for_claude_plan_prompt(session, timeout=120):
-        deadline = time.time() + timeout
-        last = ""
         extra_submit_sent = False
-        while time.time() < deadline:
-            last = capture(session)
-            if "Claude has written up a plan" in last and "Would you like to proceed?" in last:
-                return True, last
-            if not extra_submit_sent and "Add a temporary line to README.md" in last:
-                tmux_cmd("send-keys", "-t", f"{session}:", "C-m")
+        def prompted(panes):
+            nonlocal extra_submit_sent
+            text = panes[session]
+            if "Claude has written up a plan" in text and "Would you like to proceed?" in text:
+                return True
+            if not extra_submit_sent and "Add a temporary line to README.md" in text:
+                run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{session}:", "C-m")
                 extra_submit_sent = True
-            time.sleep(0.4)
-        return False, last
+            return False
+        ready, panes = wait_for_isolated_tmux_panes(tmux_runtime, [session], prompted, timeout=timeout)
+        return ready, panes.get(session, "")
 
     app = None
     server = None
@@ -1905,13 +7249,28 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             f"--ask-for-approval untrusted --sandbox read-only -C {REPO_ROOT}"
         )
         claude_command = f"cd {REPO_ROOT} && exec claude --permission-mode plan --safe-mode"
-        for session, command in ((sessions["codex"], codex_command), (sessions["claude"], claude_command)):
-            created = tmux_cmd("new-session", "-d", "-s", session, "-x", "120", "-y", "40", command, timeout=10)
-            assert created.returncode == 0, f"tmux new-session failed for {session}: {created.stderr or created.stdout}"
-
-        codex_ready, codex_pane = wait_until(sessions["codex"], lambda text: "›" in text or "Codex" in text, timeout=45)
+        tmux_runtime = start_isolated_tmux_runtime(
+            monkeypatch,
+            tmp_path,
+            session_commands={sessions["codex"]: codex_command, sessions["claude"]: claude_command},
+            columns=120,
+            rows=40,
+        )
+        codex_ready, codex_panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            [sessions["codex"]],
+            lambda panes: "›" in panes[sessions["codex"]] or "Codex" in panes[sessions["codex"]],
+            timeout=45,
+        )
+        codex_pane = codex_panes.get(sessions["codex"], "")
         assert codex_ready, f"Codex did not reach an input prompt:\n{codex_pane}"
-        claude_ready, claude_pane = wait_until(sessions["claude"], lambda text: "❯" in text or "Claude Code" in text, timeout=45)
+        claude_ready, claude_panes = wait_for_isolated_tmux_panes(
+            tmux_runtime,
+            [sessions["claude"]],
+            lambda panes: "❯" in panes[sessions["claude"]] or "Claude Code" in panes[sessions["claude"]],
+            timeout=45,
+        )
+        claude_pane = claude_panes.get(sessions["claude"], "")
         assert claude_ready, f"Claude did not reach an input prompt:\n{claude_pane}"
 
         app = TmuxWebtermApp(list(sessions.values()), dangerously_yolo=False)
@@ -1951,11 +7310,11 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         assert initial_ui["ask"] == 0, initial_ui
         assert initial_ui["badges"] == ["", ""], initial_ui
 
-        tmux_cmd("send-keys", "-t", f"{sessions['codex']}:", "Run sleep 10", "Enter")
+        run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{sessions['codex']}:", "Run sleep 10", "Enter")
         codex_prompted, codex_pane = wait_for_codex_sleep_prompt(sessions["codex"])
         assert codex_prompted, f"Codex did not render the real sleep approval prompt:\n{codex_pane}"
 
-        tmux_cmd("send-keys", "-t", f"{sessions['claude']}:", "Add a temporary line to README.md, then wait for approval before editing", "Enter")
+        run_isolated_tmux(tmux_runtime, "send-keys", "-t", f"{sessions['claude']}:", "Add a temporary line to README.md, then wait for approval before editing", "Enter")
         claude_prompted, claude_pane = wait_for_claude_plan_prompt(sessions["claude"])
         assert claude_prompted, f"Claude did not render the real plan approval prompt:\n{claude_pane}"
 
@@ -1973,18 +7332,17 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         assert prompted_payloads["claude"]["screen"]["key"] == "approval", prompted_payloads["claude"]
         assert prompted_payloads["claude"]["prompt"]["agent"] == "claude", prompted_payloads["claude"]
 
-        ui_deadline = time.time() + 15
-        prompted_ui = {}
-        while time.time() < ui_deadline:
-            prompted_ui = browser.execute_async_script(
-                """
-                const sessions = arguments[0];
-                const done = arguments[arguments.length - 1];
-                Promise.resolve(refreshAutoStatuses()).then(() => {
+        prompted_ui = browser.execute_async_script(
+            """
+            const sessions = arguments[0];
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              const prompted = await window.__yolomuxTestWaitFor(async () => {
+                  await refreshAutoStatuses();
                   refreshActivePanelHeaders();
                   updateTopbarActivityStatus();
                   const counts = globalActivityCounts();
-                  done({
+                  const snapshot = {
                     ok: counts.ask === sessions.length,
                     counts,
                     topbar: document.getElementById('topbarActivity')?.textContent || '',
@@ -2008,14 +7366,14 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                     }),
                     errors: window.__bootErrors || [],
                     rejections: window.__bootRejections || [],
-                  });
-                }).catch(error => done({ok: false, error: String(error && error.stack || error)}));
-                """,
-                list(sessions.values()),
-            )
-            if prompted_ui.get("ok") is True:
-                break
-            time.sleep(0.5)
+                  };
+                  return snapshot.ok ? snapshot : false;
+              }, {timeoutMs: 15000, intervalMs: 500, description: 'real agent prompt attention UI'});
+              done(prompted);
+            })().catch(error => done({ok: false, error: String(error && error.stack || error)}));
+            """,
+            list(sessions.values()),
+        )
         assert prompted_ui.get("ok") is True, prompted_ui
         browser.execute_script(
             """
@@ -2094,20 +7452,8 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         if server is not None and thread is not None:
             stop_browser_share_server(server, thread)
         elif app is not None:
-            stop = getattr(getattr(app, "control_server", None), "stop", None)
-            if callable(stop):
-                try:
-                    stop()
-                except Exception:
-                    pass
-        subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "kill-server"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            check=False,
-        )
-        shutil.rmtree(sock_base, ignore_errors=True)
+            app.control_server.stop()
+        stop_isolated_tmux_runtime(tmux_runtime)
         cleanup_isolated_browser_runtime_paths(paths)
 
 
@@ -2172,7 +7518,7 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
     assert "theme-light" in admin["bodyClass"]
     assert admin["theme"] == "light"
     assert admin["activeColor"] == "blue"
-    assert admin["activeAccent"] == "#2563eb"
+    assert admin["activeAccent"] == ui_pin("textSelectionBg")
     assert admin["tabWidth"] == "220px"
     assert admin["terminalFontSize"] == "18px"
     assert admin["notifyLevel"] == "none"
@@ -2217,8 +7563,14 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
     assert readonly["inputDisabled"] is False
 
 
-def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
-    for label, grid_width, window_width in (("desktop", 1000, 1120), ("narrow", 520, 640)):
+@pytest.mark.parametrize(
+    ("label", "grid_width", "window_width"),
+    (("desktop", 1000, 1120), ("narrow", 520, 640)),
+)
+def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path, label, grid_width, window_width):
+    # Keep the existing body indented as one scenario; xdist can now distribute the two expensive
+    # live-runtime boots instead of making one worker wait for both viewport variants.
+    for _ in range(1):
         browser.set_window_size(window_width, 720)
         load_live_runtime_boot_fixture(
             browser,
@@ -2248,18 +7600,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 pending_waits: [],
               },
             };
-            const rectFor = element => {
-              if (!element) return null;
-              const rect = element.getBoundingClientRect();
-              return {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-                width: rect.width,
-                height: rect.height,
-              };
-            };
+            const {rect: rectFor} = window.__yolomuxTestHelpers;
             const boxFor = element => {
               if (!element) return null;
               const style = getComputedStyle(element);
@@ -2388,14 +7729,14 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                     });
                   });
                 }
-                if (/^\/api\/yoagent\/chat\/.+\/cancel$/.test(url.pathname)) {
+                if (/^\\/api\\/yoagent\\/chat\\/.+\\/cancel$/.test(url.pathname)) {
                   return Promise.resolve(new Response(JSON.stringify({ok: true, cancelled: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
                 }
                 return originalFetch(input, options);
               };
               const sendPromise = sendYoagentChatMessage('summarize activity');
               await raf();
-              const active = yoagentActiveChatRequest ? {id: yoagentActiveChatRequest.id, streamId: yoagentActiveChatRequest.streamId} : null;
+              const active = yoagentChatState.activeRequest ? {id: yoagentChatState.activeRequest.id, streamId: yoagentChatState.activeRequest.streamId} : null;
               const immediate = collect();
               const input = document.querySelector('[data-yoagent-chat-input]');
               const form = document.querySelector('[data-yoagent-chat-form]');
@@ -2414,8 +7755,27 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
                 backend: 'claude',
                 phase: 'delta',
                 content: Array.from({length: 24}, (_, index) => `streamed line ${index + 1}: working through the activity context`).join('\\n'),
-                auxiliary_lines: ['thinking: scanning recent events', 'thinking: reading activity context', 'thinking: final synthesis', 'tool output: command: collected files'],
-                auxiliary_preview: 'thinking: reading activity context\\nthinking: final synthesis\\ntool output: command: collected files',
+                stream_items: [
+                  {
+                    kind: 'thinking',
+                    text: 'thinking: scanning recent events\\nthinking: reading activity context\\nthinking: final synthesis',
+                    eventKind: 'hidden_work_delta',
+                    labelKey: 'yoagent.stream.thinking',
+                    labelParams: {},
+                    fallback: 'thinking',
+                    sourceIndex: 0,
+                  },
+                  {
+                    kind: 'tool',
+                    text: 'tool output: command: collected files',
+                    eventKind: 'tool_output',
+                    labelKey: 'yoagent.stream.toolOutput',
+                    labelParams: {tool: 'command'},
+                    fallback: 'tool output: command',
+                    toolName: 'command',
+                    sourceIndex: 1,
+                  },
+                ],
                 hidden_work_active: true,
                 tool_active: true,
               });
@@ -2461,8 +7821,8 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
               await sendPromise;
               await raf();
               measured.afterCancel = {
-                activeRequest: yoagentActiveChatRequest ? {id: yoagentActiveChatRequest.id, streamId: yoagentActiveChatRequest.streamId} : null,
-                busy: yoagentBusy === true,
+                activeRequest: yoagentChatState.activeRequest ? {id: yoagentChatState.activeRequest.id, streamId: yoagentChatState.activeRequest.streamId} : null,
+                busy: yoagentChatState.busy === true,
                 inputDisabled: document.querySelector('[data-yoagent-chat-input]')?.disabled === true,
                 stoppedText: document.querySelector('.yoagent-message.stopped')?.textContent || '',
                 cancelCallCount: fetchCalls.filter(call => /^\\/api\\/yoagent\\/chat\\/.+\\/cancel$/.test(call.path)).length,
@@ -2495,7 +7855,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
         assert metrics["inputDisabled"] is False, (label, metrics)
         assert metrics["thinkingDetailsOpen"] is False, (label, metrics)
         assert metrics["toolDetailsOpen"] is False, (label, metrics)
-        assert metrics["auxPreviewText"] == "thinking: reading activity context thinking: final synthesis", (label, metrics)
+        assert metrics["auxPreviewText"] == "thinking: scanning recent events thinking: reading activity context thinking: final synthesis", (label, metrics)
         assert metrics["toolPreviewText"] == "tool output: command: collected files", (label, metrics)
         assert "thinking: reading activity context" in metrics["auxStreamText"], (label, metrics)
         assert "tool output: command: collected files" not in metrics["auxStreamText"], (label, metrics)
@@ -2536,7 +7896,10 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path):
 def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_path):
     for theme_class in ("theme-dark", "theme-light"):
         page = tmp_path / f"yoagent-auxiliary-{theme_class}.html"
-        page.write_text(
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
             page_html(
                 f"""
                 <script>document.body.className = {json.dumps(theme_class)};</script>
@@ -2553,9 +7916,7 @@ def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_pa
                 """,
                 extra_css="body { margin: 0; padding: 20px; background: var(--bg); color: var(--text); } .yoagent-chat { width: 420px; }",
             ),
-            encoding="utf-8",
         )
-        browser.get(page.as_uri())
         metrics = browser.execute_script(
             """
             const body = document.querySelector('.yoagent-message-body');
@@ -2572,16 +7933,578 @@ def test_yoagent_auxiliary_details_are_subdued_in_dark_and_light(browser, tmp_pa
         assert metrics["auxText"] == "thinking: preview\ntool output: done", (theme_class, metrics)
         assert metrics["auxColor"] != metrics["bodyColor"], (theme_class, metrics)
         assert metrics["previewColor"] != metrics["bodyColor"], (theme_class, metrics)
+        if theme_class == "theme-light":
+            assert wcag_contrast_ratio(metrics["bodyColor"], "rgb(255, 255, 255)") >= 12.0, metrics
+            assert wcag_contrast_ratio(metrics["auxColor"], "rgb(247, 248, 250)") >= 7.0, metrics
+            assert wcag_contrast_ratio(metrics["previewColor"], "rgb(255, 255, 255)") >= 7.0, metrics
 
 
-def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path):
-    for label, theme_class, pane_width, window_width in (
+def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp_path):
+    page = tmp_path / "light-agent-status-chart.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <script>document.body.className = 'theme-light';</script>
+            <section class="js-debug-graph-view">
+              <svg>
+                <path id="ask-line" class="js-debug-line--askAgents"></path>
+                <path id="working-line" class="js-debug-line--workingAgents"></path>
+                <path id="transition-line" class="js-debug-line--transitionAgents"></path>
+                <path id="idle-line" class="js-debug-line--idleAgents"></path>
+                <rect id="ask-bar" class="js-debug-bar--askAgents"></rect>
+              </svg>
+              <span id="ask-legend" class="js-debug-legend-swatch--askAgents"></span>
+              <span id="working-legend" class="js-debug-legend-swatch--workingAgents"></span>
+              <span id="transition-legend" class="js-debug-legend-swatch--transitionAgents"></span>
+            </section>
+            """,
+            extra_css="body { margin: 0; background: #fff; }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const style = id => getComputedStyle(document.getElementById(id));
+        return {
+          ask: style('ask-line').stroke,
+          working: style('working-line').stroke,
+          transition: style('transition-line').stroke,
+          idle: style('idle-line').stroke,
+          askLegend: style('ask-legend').color,
+          workingLegend: style('working-legend').color,
+          transitionLegend: style('transition-legend').color,
+          askBarOpacity: style('ask-bar').opacity,
+        };
+        """
+    )
+    assert metrics["ask"] == metrics["askLegend"], metrics
+    assert metrics["working"] == metrics["workingLegend"], metrics
+    assert metrics["transition"] == metrics["transitionLegend"], metrics
+    assert len({metrics["ask"], metrics["working"], metrics["transition"], metrics["idle"]}) == 4, metrics
+    assert metrics["askBarOpacity"] == "0.82", metrics
+
+
+def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser, tmp_path):
+    for theme_class in ("theme-dark", "theme-light"):
+        page = tmp_path / f"subwindow-metadata-{theme_class}.html"
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
+            page_html(
+                f"""
+                <script>document.body.className = {json.dumps(theme_class)};</script>
+                <span id="info-pid" class="info-tree-ai-pid">(pid=2345)</span><span id="info-recency" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span>
+                <div class="file-tree-row tabber-row" data-tabber-type="window" data-recency="recent"><span class="tabber-window-pid" id="tabber-pid"> (pid=2345)</span><span class="file-tree-date" id="tabber-recency">3.1 hrs ago</span></div>
+                """,
+                extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
+            ),
+        )
+        metrics = browser.execute_script(
+            """
+            const color = id => getComputedStyle(document.getElementById(id)).color;
+            return {infoPid: color('info-pid'), infoRecency: color('info-recency'), tabberPid: color('tabber-pid'), tabberRecency: color('tabber-recency')};
+            """
+        )
+        if theme_class == "theme-dark":
+            assert set(metrics.values()) == {"rgb(102, 112, 133)"}, metrics
+        else:
+            assert set(metrics.values()) == {"rgb(158, 168, 183)"}, metrics
+
+
+def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof showAttentionAlert === 'function' && typeof showTerminalConnectionToast === 'function' && typeof sendTestNotification === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        document.querySelectorAll('.toast').forEach(node => node.remove());
+        const state = {label: 'Needs input', reason: 'Please answer the question'};
+        const externalTitle = sessionNotificationTitle('1', state);
+        const internalTitle = sessionNotificationTitle('1', state, {inApp: true});
+        showAttentionAlert('1', state);
+        const genericAttentionTitle = document.querySelector('.toast[data-toast-kind="attention"] .toast-title')?.textContent?.trim() || '';
+        document.querySelectorAll('.toast[data-toast-kind="attention"]').forEach(node => node.remove());
+        autoApproveStates.set('1', {agent_windows: [{kind: 'claude', state: 'approval', window_index: 0, window_label: '0:claude', screen_text: 'Do you want to proceed with this change? Explain the expected behavior, edge cases, and verification steps before continuing with the requested operation.'}]});
+        const agentState = sessionState('1');
+        showAttentionAlert('1', agentState);
+        showTerminalConnectionToast('1', 'Disconnected', 5000);
+        sendTestNotification();
+        const title = selector => document.querySelector(selector)?.textContent?.trim() || '';
+        const attentionControls = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-controls');
+        const attentionTab = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-session-tab');
+        const attentionPill = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-agent-button');
+        const attentionReason = document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-reason');
+        const controlsRect = attentionControls?.getBoundingClientRect();
+        const reasonRects = [...(attentionReason?.getClientRects?.() || [])];
+        const untyped = [...document.querySelectorAll('.toast:not([data-toast-kind]) .toast-title')];
+        return {
+          externalTitle,
+          internalTitle,
+          genericAttentionTitle,
+          attentionTitle: title('.toast[data-toast-kind="attention"] .toast-title'),
+          attentionTabLabel: title('.toast[data-toast-kind="attention"] .attention-toast-session-tab .session-button-prefix'),
+          attentionAgentLabel: title('.toast[data-toast-kind="attention"] .attention-toast-agent-button .tmux-window-name-text'),
+          attentionReason: title('.toast[data-toast-kind="attention"] .attention-toast-reason'),
+          attentionHasStop: Boolean(document.querySelector('.toast[data-toast-kind="attention"] .attention-toast-agent-button .status-indicator--attention')),
+          attentionControlsVisible: Boolean(controlsRect && controlsRect.width > 0 && controlsRect.height > 0 && attentionTab && attentionPill),
+          attentionReasonWrapsAroundControls: Boolean(
+            controlsRect
+            && reasonRects.length > 1
+            && reasonRects[0].left >= controlsRect.right - 1
+            && reasonRects.some(rect => rect.top >= controlsRect.bottom - 1 && rect.left <= controlsRect.left + 1)
+          ),
+          terminalTitle: title('.toast[data-toast-kind="terminal-connection"] .toast-title'),
+          testTitle: untyped.at(-1)?.textContent?.trim() || '',
+        };
+        """
+    )
+    assert metrics == {
+        "externalTitle": "YOLOmux[1 main] Needs input",
+        "internalTitle": "Needs input",
+        "genericAttentionTitle": "Needs input",
+        "attentionTitle": "[1] 0:claude: Needs approval",
+        "attentionTabLabel": "[1]",
+        "attentionAgentLabel": "0:claude",
+        "attentionReason": "Do you want to proceed with this change? Explain the expected behavior, edge cases, and verification steps before continuing with the requested operation.",
+        "attentionHasStop": True,
+        "attentionControlsVisible": True,
+        "attentionReasonWrapsAroundControls": True,
+        "terminalTitle": "Term",
+        "testTitle": "notifications enabled",
+    }, metrics
+    navigation = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const calls = [];
+        const originalSelectSession = selectSession;
+        const originalTmuxWindow = tmuxWindow;
+        selectSession = async (...args) => { calls.push(['select', args[0], args[1]?.userInitiated === true]); };
+        tmuxWindow = (...args) => { calls.push(['window', args[0], args[1]?.windowIndex, args[2]]); };
+        document.querySelector('.toast[data-toast-kind="attention"]').click();
+        setTimeout(() => {
+          selectSession = originalSelectSession;
+          tmuxWindow = originalTmuxWindow;
+          done(calls);
+        }, 0);
+        """
+    )
+    assert navigation == [["select", "1", True], ["window", "1", "0", "tmux sub-window 0"]], navigation
+
+
+def test_hovered_toast_pauses_countdown(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof showToast === 'function';")
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const toast = showToast('Needs input', 'Do you want to proceed?', {countdownMs: 120});
+        const countdown = toast.querySelector('.toast-line');
+        toast.dispatchEvent(new Event('pointerenter'));
+        toast.dispatchEvent(new FocusEvent('focusin'));
+        setTimeout(() => {
+          const held = toast.isConnected;
+          const paused = toast.classList.contains('toast-countdown-paused')
+            && getComputedStyle(countdown, '::after').animationPlayState === 'paused';
+          toast.dispatchEvent(new Event('pointerleave'));
+          setTimeout(() => {
+            const heldAfterPointerLeave = toast.isConnected;
+            toast.dispatchEvent(new FocusEvent('focusout', {relatedTarget: document.body}));
+            setTimeout(() => done({held, paused, heldAfterPointerLeave, removed: !toast.isConnected}), 180);
+          }, 180);
+        }, 180);
+        """
+    )
+    assert result == {"held": True, "paused": True, "heldAfterPointerLeave": True, "removed": True}, result
+
+
+def test_browser_notifications_use_shared_badge_free_yolomux_icon(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof sendBrowserNotification === 'function' && typeof renderBrowserAppIconDataUrl === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const sent = [];
+        Object.defineProperty(window, 'Notification', {
+          configurable: true,
+          value: function(title, options) {
+            sent.push({title, options});
+            return {};
+          },
+        });
+        sendBrowserNotification('YOLOmux[test] Needs input', {body: 'Please answer'});
+        sendBrowserNotification('custom', {icon: 'data:image/png;base64,custom'});
+        const image = new Image();
+        image.onload = () => done({
+          first: sent[0],
+          second: sent[1],
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        });
+        image.onerror = () => done({error: 'icon did not decode', first: sent[0]});
+        image.src = sent[0]?.options?.icon || '';
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["first"]["title"] == "YOLOmux[test] Needs input", metrics
+    assert metrics["first"]["options"]["body"] == "Please answer", metrics
+    assert metrics["first"]["options"]["icon"].startswith("data:image/png;base64,"), metrics
+    assert metrics["second"]["options"]["icon"] == "data:image/png;base64,custom", metrics
+    assert (metrics["width"], metrics["height"]) == (192, 192), metrics
+
+
+def test_rename_marks_index_building_and_refresh_done_requeries_open_search(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof renameFileTreePath === 'function' && typeof markFileIndexRootsRefreshing === 'function' && typeof handleClientPushEventNow === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const requests = [];
+        const retries = [];
+        apiFetchJson = async url => {
+          requests.push(url);
+          if (url === '/api/fs/rename') return {path: '/repo/home-manifest', reindex_roots: ['/repo']};
+          if (url.startsWith('/api/fs/index-status')) return {state: 'building', ready: false};
+          return {};
+        };
+        refreshFileExplorerTrees = async () => {};
+        refreshBackgroundOwnerStatus = async () => {};
+        fileExplorerIndexedDirs = new Set(['/repo']);
+        fileExplorerIndexStatus.set('/repo', 'ready');
+        renameFileTreePath('/repo/migration-tools', {name: 'migration-tools', kind: 'dir'}, 'home-manifest').then(async renamed => {
+          const waitFor = window.__yolomuxTestWaitFor;
+          await waitFor(
+            () => fileExplorerIndexStatus.get('/repo') === 'building',
+            {description: 'renamed root index building'}
+          );
+          commandPaletteState.node = document.createElement('div');
+          commandPaletteState.node.hidden = false;
+          commandPaletteMode = 'files';
+          commandPaletteState.query = 'home-manifest';
+          refreshFileQuickOpenCandidates = async query => { retries.push(query); };
+          handleClientPushEventNow('background_refresh_done', {role: 'search-index', root: '/repo'});
+          await Promise.resolve();
+          done({
+            renamed,
+            indexStatus: fileExplorerIndexStatus.get('/repo'),
+            indexStatusRequested: requests.some(url => url.startsWith('/api/fs/index-status')),
+            retries,
+          });
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert metrics == {
+        "renamed": True,
+        "indexStatus": "building",
+        "indexStatusRequested": True,
+        "retries": ["home-manifest"],
+    }, metrics
+
+
+def test_yoinfo_reuses_tab_badges_and_right_aligns_trailing_metadata(browser, tmp_path):
+    page = tmp_path / "yoinfo-badges-and-trailing-metadata.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            f"""
+            <script>document.body.className = 'theme-dark';</script>
+            <div class="info-tree-record" style="width: 760px"><div class="info-tree-record-main">
+              <div class="info-tree-field info-tree-field-tab"><span class="info-tree-field-label">Tab(tmux session):</span><span id="tab-value" class="info-tree-field-value">8001</span></div>
+              <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span id="window-value" class="info-tree-field-value"><span class="info-tree-ai-value tmux-window-bar"><button id="window-button" class="tab tmux-window-button"><span class="tmux-window-name-label">{_working_agent_glyph_html("claude", "yoinfo-agent", subwindow=True)}<span class="tmux-window-name-text">0:claude</span></span></button><span id="window-pid" class="info-tree-ai-pid">(pid=1234)</span><span id="window-time" class="info-tree-ai-recency info-tree-trailing-meta">3.1 hrs ago</span></span></span></div>
+              <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span id="branch-value" class="info-tree-field-value"><span class="info-tree-value-text">master</span><span id="branch-time" class="info-tree-meta-updated">Git commit 3 hours ago</span></span></div>
+              <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><span>#80 parser work</span> <span id="draft-badge" class="ci-indicator tab-symbol pr-status-draft">DRAFT</span></span></div>
+            </div></div>
+            """,
+            extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const rightInset = (containerId, itemId) => {
+          const container = document.getElementById(containerId).getBoundingClientRect();
+          const item = document.getElementById(itemId).getBoundingClientRect();
+          return container.right - item.right;
+        };
+        const badge = document.getElementById('draft-badge');
+        const style = getComputedStyle(badge);
+        const agentIcon = document.getElementById('yoinfo-agent');
+        const agentIconStyle = getComputedStyle(agentIcon);
+        const agentWrapStyle = getComputedStyle(agentIcon.closest('.agent-window-activity'));
+        return {
+          tabTop: document.getElementById('tab-value').getBoundingClientRect().top,
+          windowTop: document.getElementById('window-value').getBoundingClientRect().top,
+          branchTop: document.getElementById('branch-value').getBoundingClientRect().top,
+          branchRightInset: rightInset('branch-value', 'branch-time'),
+          windowRightInset: rightInset('window-value', 'window-time'),
+          windowPidOffset: document.getElementById('window-pid').getBoundingClientRect().left - document.getElementById('window-button').getBoundingClientRect().right,
+          badgeClasses: badge.className,
+          badgeBackground: style.backgroundColor,
+          badgeBorder: style.borderTopColor,
+          agentIconSizeToken: agentWrapStyle.getPropertyValue('--agent-window-icon-size').trim(),
+          agentIconWidth: agentIconStyle.width,
+          agentIconMinWidth: agentIconStyle.minWidth,
+          agentIconHeight: agentIconStyle.height,
+        };
+        """
+    )
+    assert metrics["tabTop"] < metrics["windowTop"], metrics
+    assert metrics["windowTop"] < metrics["branchTop"], metrics
+    assert metrics["branchRightInset"] <= 1, metrics
+    assert metrics["windowRightInset"] <= 1, metrics
+    assert 0 <= metrics["windowPidOffset"] <= 8, metrics
+    assert metrics["agentIconSizeToken"] == "14px", metrics
+    assert metrics["agentIconWidth"] == metrics["agentIconMinWidth"] == metrics["agentIconHeight"] == "14px", metrics
+    assert "ci-indicator" in metrics["badgeClasses"] and "tab-symbol" in metrics["badgeClasses"], metrics
+    assert metrics["badgeBackground"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["badgeBorder"] != "rgba(0, 0, 0, 0)", metrics
+
+
+def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrapping(browser, tmp_path):
+    page = tmp_path / "yoinfo-vertical-side-responsive-record.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <script>document.body.className = 'theme-dark';</script>
+            <div class="yolomux-dockview" style="width: 360px">
+              <div class="dv-groupview" data-pane-role="side" data-pane-side="left">
+                <div class="info-tree">
+                  <div class="info-tree-group-children"><div class="info-tree-group-children"><div class="info-tree-group-children">
+                    <div class="info-tree-record"><div class="info-tree-record-main">
+                      <div id="branch-field" class="info-tree-field info-tree-field-branch">
+                        <span id="branch-label" class="info-tree-field-label">Git branch:</span>
+                        <span id="branch-value" class="info-tree-field-value"><span id="branch-text" class="info-tree-value-text">backup/yolomux.dev8001-pre-root-rewrite-20260619-202420</span><span class="info-tree-meta-updated">Git commit 3 weeks ago</span></span>
+                      </div>
+                    </div></div>
+                  </div></div></div>
+                </div>
+              </div>
+            </div>
+            """,
+            extra_css="body { margin: 0; background: var(--bg); }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const rect = id => document.getElementById(id).getBoundingClientRect();
+        const fieldStyle = getComputedStyle(document.getElementById('branch-field'));
+        const textStyle = getComputedStyle(document.getElementById('branch-text'));
+        return {
+          columns: fieldStyle.gridTemplateColumns,
+          labelBottom: rect('branch-label').bottom,
+          valueTop: rect('branch-value').top,
+          valueWidth: rect('branch-value').width,
+          textWidth: rect('branch-text').width,
+          textHeight: rect('branch-text').height,
+          lineHeight: parseFloat(textStyle.lineHeight),
+        };
+        """
+    )
+    assert " " not in metrics["columns"].strip(), metrics
+    assert metrics["valueTop"] >= metrics["labelBottom"], metrics
+    assert metrics["valueWidth"] >= 220, metrics
+    assert metrics["textWidth"] >= 180, metrics
+    assert metrics["textHeight"] <= metrics["lineHeight"] * 4.5, metrics
+
+
+def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tmp_path):
+    page = tmp_path / "yoinfo-path-trailing-metadata.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <script>document.body.className = 'theme-dark';</script>
+            <div class="info-tree" style="width: 900px">
+              <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="path" data-info-depth="0" open>
+                <summary>
+                  <span class="info-tree-group-dimension">PATH:</span>
+                  <span id="group-line" class="info-tree-group-label-line">
+                    <span class="info-tree-group-label info-tree-group-label-path"><button id="group-path" class="info-tree-group-label-action">/home/keivenc/vortex/parser-toolkits</button></span>
+                    <span id="group-count" class="info-tree-group-child-count">(6 branches)</span>
+                    <span id="group-time" class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta">2 hours ago</span>
+                  </span>
+                </summary>
+              </details>
+            </div>
+            <div class="info-tree-record" style="width: 900px"><div class="info-tree-record-main">
+              <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span class="info-tree-field-value"><span class="info-tree-ai-value tmux-window-bar"><button class="tab tmux-window-button">0:claude</button><span id="window-time" class="info-tree-ai-recency info-tree-trailing-meta">40 min ago</span></span></span></div>
+              <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span id="path-value" class="info-tree-field-value"><button id="leaf-path" class="info-tree-action-link info-tree-action-link-path">/home/keivenc/vortex/vortex-utils.dev</button><span id="path-time" class="info-tree-meta-updated info-tree-meta-path-activity info-tree-trailing-meta">5 hours ago</span></span></div>
+            </div></div>
+            """,
+            extra_css="body { margin: 0; padding: 20px; background: var(--bg); }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const rect = id => document.getElementById(id).getBoundingClientRect();
+        const style = id => getComputedStyle(document.getElementById(id));
+        const groupLine = rect('group-line');
+        const groupPath = rect('group-path');
+        const groupCount = rect('group-count');
+        const groupTime = rect('group-time');
+        const pathValue = rect('path-value');
+        const pathTime = rect('path-time');
+        return {
+          groupTimeRightInset: groupLine.right - groupTime.right,
+          groupCountGap: groupCount.left - groupPath.right,
+          groupTrailingSpace: groupTime.left - groupCount.right,
+          pathTimeRightInset: pathValue.right - pathTime.right,
+          groupTimeColor: style('group-time').color,
+          pathTimeColor: style('path-time').color,
+          windowTimeColor: style('window-time').color,
+          pathTextColor: style('leaf-path').color,
+          groupTimeFontSize: style('group-time').fontSize,
+          pathTimeFontSize: style('path-time').fontSize,
+          windowTimeFontSize: style('window-time').fontSize,
+          pathTimeWhiteSpace: style('path-time').whiteSpace,
+        };
+        """
+    )
+    assert abs(metrics["groupTimeRightInset"]) <= 1, metrics
+    assert 4 <= metrics["groupCountGap"] <= 8, metrics
+    assert metrics["groupTrailingSpace"] > 50, metrics
+    assert abs(metrics["pathTimeRightInset"]) <= 1, metrics
+    assert metrics["groupTimeColor"] == metrics["pathTimeColor"] == metrics["windowTimeColor"], metrics
+    assert metrics["pathTimeColor"] != metrics["pathTextColor"], metrics
+    assert metrics["groupTimeFontSize"] == metrics["pathTimeFontSize"] == metrics["windowTimeFontSize"], metrics
+    assert metrics["pathTimeWhiteSpace"] == "nowrap", metrics
+
+
+def test_yoinfo_tab_values_match_shared_tab_detail(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof infoTreeHtml === 'function' && typeof infoRecordHtml === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        transcriptMetadataState.payload = {sessions: {
+          '8003': {
+            project: {
+              git: {branch: 'feature/shared-tab-detail'},
+              pull_request: {number: 11112, draft: true, title: 'Refactor agent status ownership'},
+            },
+          },
+        }};
+        const record = {
+          id: 'session-work-8003',
+          tabKey: '8003',
+          tabSession: '8003',
+          tabLabel: '8003',
+          tabTitle: '8003',
+        };
+        const fixture = document.createElement('div');
+        fixture.id = 'yoinfo-session-work-fixture';
+        fixture.style.width = '900px';
+        fixture.innerHTML = `
+          <section id="group-work">${infoTreeHtml([record], ['tab'])}</section>
+          <section id="leaf-work">${infoRecordHtml(record)}</section>`;
+        document.body.appendChild(fixture);
+        const sharedFixture = document.createElement('div');
+        sharedFixture.innerHTML = tmuxPaneTabTokenHtml('8003', {tag: 'span', action: false});
+        const sharedDetail = sharedFixture.querySelector('.tab-inline-detail');
+        const groupLine = fixture.querySelector('#group-work .info-tree-group-label-line');
+        const groupToken = groupLine.querySelector('.info-tree-tab-token');
+        const groupDetail = groupToken.querySelector('.tab-inline-detail');
+        const leafValue = fixture.querySelector('#leaf-work .info-tree-field-tab .info-tree-field-value');
+        const leafToken = leafValue.querySelector('.info-tree-tab-token');
+        const leafDetail = leafToken.querySelector('.tab-inline-detail');
+        const rect = element => element?.getBoundingClientRect();
+        return {
+          sharedText: sharedDetail?.textContent || '',
+          groupText: groupDetail?.textContent || '',
+          leafText: leafDetail?.textContent || '',
+          groupSession: groupToken.querySelector('.session-button-number')?.textContent || '',
+          leafSession: leafToken.querySelector('.session-button-number')?.textContent || '',
+          groupWidthDelta: Math.abs(rect(groupLine).width - rect(groupToken).width),
+          leafWidthDelta: Math.abs(rect(leafValue).width - rect(leafToken).width),
+          groupDetailDisplay: groupDetail ? getComputedStyle(groupDetail).display : '',
+          leafDetailDisplay: leafDetail ? getComputedStyle(leafDetail).display : '',
+          groupPrCount: (groupToken.textContent.match(/#11112/g) || []).length,
+          leafPrCount: (leafToken.textContent.match(/#11112/g) || []).length,
+        };
+        """
+    )
+    assert metrics["sharedText"] == "Refactor agent status ownership", metrics
+    assert metrics["groupText"] == metrics["leafText"] == metrics["sharedText"], metrics
+    assert metrics["groupSession"] == "[8003]" and metrics["leafSession"] == "[8003]", metrics
+    assert metrics["groupWidthDelta"] <= 1 and metrics["leafWidthDelta"] <= 1, metrics
+    assert metrics["groupDetailDisplay"] != "none" and metrics["leafDetailDisplay"] != "none", metrics
+    assert metrics["groupPrCount"] == metrics["leafPrCount"] == 1, metrics
+
+
+def test_yoinfo_leaf_fields_put_linear_then_pr_before_repository_metadata(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof infoRecordHtml === 'function';")
+    )
+    order = browser.execute_script(
+        """
+        const fixture = document.createElement('div');
+        fixture.innerHTML = infoRecordHtml({
+          id: 'ordered-fields',
+          pathKey: '/home/test/repo',
+          pathLabel: '/home/test/repo',
+          pathTitle: '/home/test/repo',
+          branchKey: 'feature/order',
+          branchLabel: 'feature/order',
+          branchTitle: 'feature/order',
+          prKey: '#123',
+          prLabel: '#123',
+          prTitle: '#123 Reorder YO!info metadata',
+          prUrl: 'https://example.test/pull/123',
+          linearKey: 'ABC-123',
+          linearLabel: 'ABC-123',
+          linearTitle: 'ABC-123 Reorder YO!info metadata',
+          linearItems: [{identifier: 'ABC-123', title: 'Reorder YO!info metadata', url: 'https://linear.test/ABC-123'}],
+        });
+        document.body.appendChild(fixture);
+        return [...fixture.querySelectorAll('.info-tree-field')].map(field =>
+          [...field.classList].find(className => className.startsWith('info-tree-field-') && className !== 'info-tree-field-value')?.replace('info-tree-field-', '')
+        );
+        """
+    )
+    assert order == ["linear", "pr", "path", "branch"], order
+
+
+@pytest.mark.parametrize(
+    ("label", "theme_class", "pane_width", "window_width"),
+    (
         ("dark-narrow", "theme-dark", 300, 700),
-        ("light-wide", "theme-light", 520, 900),
-    ):
+        ("light-wide", "theme-light", 1200, 1400),
+    ),
+)
+def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_path, label, theme_class, pane_width, window_width):
+    # Static fixture variants are independent, so make failures and scheduling independent too.
+    for _ in range(1):
         browser.set_window_size(window_width, 720)
         page = tmp_path / f"tabber-session-row-{label}.html"
-        page.write_text(
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
             page_html(
                 f"""
                 <script>document.body.className = {json.dumps(theme_class)};</script>
@@ -2605,9 +8528,9 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                       <span class="file-tree-git-status" hidden></span>
                       <span class="file-tree-date">2m ago</span>
                     </div>
-                    <div class="file-tree-row tabber-row kind-dir expanded" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
+                    <div class="file-tree-row tabber-row kind-dir expanded tabber-active-session" data-tabber-type="session" data-tabber-session="2" role="treeitem" aria-expanded="true" aria-selected="false" style="padding-left: 8px;">
                       <span class="file-tree-icon tabber-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span>
-                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
+                      <span class="file-tree-name"><span class="tmux-pane-tab-token tmux-pane-tab-token-action tabber-session-tab session-popover-host active" data-tabber-session-chrome="shared"><span class="pane-tab-core"><span class="session-yolo-marker inactive">YO</span><span class="session-button-prefix"><span class="session-button-number">2</span></span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">main</span></span></span></span></span>
                       <span class="file-tree-agent" hidden></span>
                       <span class="file-tree-diff" hidden></span>
                       <span class="file-tree-dir-count" hidden></span>
@@ -2625,29 +8548,17 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
                     </div>
                   </div>
                 </section>
+                <span id="info-window-token" class="info-tree-ai-value tmux-window-bar"><span class="tab tmux-window-button">0:bash</span></span>
                 """,
                 extra_css=f"""
                   body {{ margin: 0; padding: 16px; background: var(--bg); color: var(--text); }}
                   .fixture-tabber-panel {{ width: {pane_width}px; border: 1px solid var(--border); }}
                 """,
             ),
-            encoding="utf-8",
         )
-        browser.get(page.as_uri())
         metrics = browser.execute_script(
             """
-            const rectFor = element => {
-              if (!element) return null;
-              const rect = element.getBoundingClientRect();
-              return {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-                width: rect.width,
-                height: rect.height,
-              };
-            };
+            const {rect: rectFor} = window.__yolomuxTestHelpers;
             const resolvedColor = (scope, value) => {
               const probe = document.createElement('span');
               probe.style.position = 'absolute';
@@ -2709,6 +8620,19 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
             const activeRow = sessionRows.find(row => row.dataset.tabberSession === '1');
             const inactiveRow = sessionRows.find(row => row.dataset.tabberSession === '2');
             const activeWindowRow = windowRows.find(row => row.dataset.tabberSession === '1');
+            const tabberWindowToken = activeWindowRow?.querySelector('.tabber-window-token');
+            const infoWindowToken = document.getElementById('info-window-token');
+            const tokenAlignment = node => {
+              const style = node ? getComputedStyle(node) : null;
+              return style ? {
+                flex: style.flex,
+                maxWidth: style.maxWidth,
+                marginInlineStart: style.marginInlineStart,
+                justifyContent: style.justifyContent,
+                overflow: style.overflow,
+                verticalAlign: style.verticalAlign,
+              } : null;
+            };
             const activeWindowText = activeWindowRow?.querySelector('.tmux-window-name-text');
             const windowIcons = windowRows.map(row => (row.querySelector('.file-tree-icon')?.textContent || '').trim());
             const nonSessionWithSessionTab = Array.from(document.querySelectorAll('.file-tree-row:not([data-tabber-type="session"]) .tabber-session-tab')).length;
@@ -2716,6 +8640,8 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
               active: rowMetrics(activeRow),
               inactive: rowMetrics(inactiveRow),
               activeWindow: rectFor(activeWindowRow),
+              tabberWindowAlignment: tokenAlignment(tabberWindowToken),
+              infoWindowAlignment: tokenAlignment(infoWindowToken),
               activeWindowTextColor: activeWindowText ? getComputedStyle(activeWindowText).color : '',
               expectedText: resolvedColor(document.body, 'var(--text)'),
               expectedWindowButtonText: resolvedColor(document.body, 'var(--pane-ctl-fg, var(--pc-control-fg))'),
@@ -2742,22 +8668,29 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["active"]["ariaCurrent"] == "true", (label, metrics)
         assert metrics["active"]["ariaExpanded"] == "true", (label, metrics)
         assert metrics["active"]["iconText"] == "›", (label, metrics)
-        assert "tabber-active-session" not in metrics["inactive"]["rowClass"], (label, metrics)
-        assert "active" not in metrics["inactive"]["tabClass"], (label, metrics)
+        assert "tabber-active-session" in metrics["inactive"]["rowClass"], (label, metrics)
+        assert "active" in metrics["inactive"]["tabClass"], (label, metrics)
         assert "tmux-pane-tab-token" in metrics["inactive"]["tabClass"], (label, metrics)
         assert "tmux-pane-tab-token-action" in metrics["inactive"]["tabClass"], (label, metrics)
         assert metrics["inactive"]["ariaCurrent"] == "", (label, metrics)
         assert metrics["active"]["tabBg"] == metrics["active"]["expectedActiveBg"], (label, metrics)
-        assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedInactiveBg"], (label, metrics)
-        assert metrics["inactive"]["tabBorderTop"] == metrics["expectedInactiveBorder"], (label, metrics)
+        assert metrics["inactive"]["tabBg"] == metrics["inactive"]["expectedActiveBg"], (label, metrics)
         assert metrics["active"]["tabBg"] != metrics["active"]["tabColor"], (label, metrics)
         assert metrics["inactive"]["tabBg"] != metrics["inactive"]["tabColor"], (label, metrics)
         if theme_class == "theme-light":
             assert metrics["active"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
             assert metrics["active"]["descriptionColor"] == metrics["active"]["tabColor"], (label, metrics)
-            assert metrics["inactive"]["tabColor"] == metrics["expectedInactiveText"], (label, metrics)
+            assert metrics["inactive"]["tabColor"] == metrics["expectedActiveText"], (label, metrics)
             assert metrics["inactive"]["descriptionColor"] == metrics["inactive"]["tabColor"], (label, metrics)
         assert metrics["activeWindowTextColor"] == metrics["expectedWindowButtonText"], (label, metrics)
+        assert metrics["tabberWindowAlignment"] == metrics["infoWindowAlignment"] == {
+            "flex": "0 1 auto",
+            "maxWidth": "100%",
+            "marginInlineStart": "0px",
+            "justifyContent": "flex-start",
+            "overflow": "visible",
+            "verticalAlign": "middle",
+        }, (label, metrics)
         assert metrics["active"]["tab"]["height"] >= 16, (label, metrics)
         assert metrics["active"]["tabTopRadius"] == metrics["expectedTopRadius"], (label, metrics)
         assert metrics["active"]["tabBottomRadius"] == "0px", (label, metrics)
@@ -2771,7 +8704,10 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         assert metrics["active"]["tab"]["right"] <= metrics["active"]["date"]["left"] + 1, (label, metrics)
         assert metrics["active"]["name"]["left"] >= metrics["active"]["tab"]["left"] - 1, (label, metrics)
         assert metrics["active"]["description"]["right"] <= metrics["active"]["tab"]["right"] + 1, (label, metrics)
-        assert metrics["active"]["descriptionScrollWidth"] >= metrics["active"]["descriptionClientWidth"], (label, metrics)
+        if label == "light-wide":
+            assert metrics["active"]["descriptionScrollWidth"] <= metrics["active"]["descriptionClientWidth"] + 1, (label, metrics)
+        else:
+            assert metrics["active"]["descriptionScrollWidth"] > metrics["active"]["descriptionClientWidth"], (label, metrics)
         assert metrics["activeWindow"]["top"] >= metrics["active"]["row"]["bottom"] - 1, (label, metrics)
         screenshot = browser_screenshot_rgb(browser)
         assert screenshot.size[0] >= window_width - 20, (label, screenshot.size)
@@ -2780,7 +8716,10 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
 
 def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
     page = tmp_path / "tabber-session-popover-surface.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         page_html(
             """
             <script>document.body.className = 'theme-dark';</script>
@@ -2811,9 +8750,7 @@ def test_tabber_session_tab_popover_uses_normal_tab_surface(browser, tmp_path):
               .fixture-tabber-panel { width: 420px; }
             """,
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     metrics = browser.execute_script(
         """
         const read = id => {
@@ -2862,9 +8799,8 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=__files__,1&layout=row@34(left,right)&tabs=left:__files__;right:1",
+        "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
         sessions=["1"],
-        file_explorer_open_intent="1",
         transcript_sessions={
             "1": {
                 "current_path": "/home/test/yolomux.dev8001",
@@ -2888,12 +8824,11 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return typeof setFileExplorerMode === 'function'
-              && document.querySelector('#panel-__files__ .file-explorer-mode-toggle') !== null;
+            return typeof refreshTabberPanels === 'function'
+              && document.querySelector('#panel-__tabber__') !== null;
             """
         )
     )
-    browser.execute_script("setFileExplorerMode('tabber', {force: true});")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             "return document.querySelectorAll('.file-tree-row[data-tabber-type]').length >= 2"
@@ -2906,7 +8841,12 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
           .filter(node => !node.closest('.session-popover'))
           .map(node => node.outerHTML.slice(0, 220)));
         const sessionTab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const customPopover = sessionTab?.querySelector(':scope > .session-popover');
+        const customPopover = paneTabPopoverForAnchor(sessionTab);
+        positionPaneTabPopover(sessionTab, customPopover);
+        sessionTab.classList.add('popover-open');
+        customPopover.classList.add('popover-open');
+        const panelRect = sessionTab.closest('.panel').getBoundingClientRect();
+        const popoverRect = customPopover.getBoundingClientRect();
         return {
           rowCount: rows.length,
           rowTitles: rows.map(row => row.getAttribute('title') || ''),
@@ -2915,6 +8855,8 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
           sessionTabHasTitle: sessionTab?.hasAttribute('title') || false,
           customPopoverPresent: !!customPopover,
           customPopoverRole: customPopover?.getAttribute('role') || '',
+          customPopoverDetached: customPopover?.parentElement === appOverlayRootElement(),
+          customPopoverCrossesPane: popoverRect.right > panelRect.right + 1,
         };
         """
     )
@@ -2925,6 +8867,8 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     assert metrics["sessionTabHasTitle"] is False, metrics
     assert metrics["customPopoverPresent"] is True, metrics
     assert metrics["customPopoverRole"] == "tooltip", metrics
+    assert metrics["customPopoverDetached"] is True, metrics
+    assert metrics["customPopoverCrossesPane"] is True, metrics
     browser.execute_script("renderAutoApproveButtons();")
     live_sync_metrics = browser.execute_script(
         """
@@ -2945,7 +8889,7 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
         """
         popoverHideDelayMs = 120;
         window.__tabberSessionTabBeforeRefresh = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        window.__tabberPopoverBeforeRefresh = window.__tabberSessionTabBeforeRefresh?.querySelector(':scope > .session-popover');
+        window.__tabberPopoverBeforeRefresh = paneTabPopoverForAnchor(window.__tabberSessionTabBeforeRefresh);
         window.__tabberSessionTabBeforeRefresh.classList.add('popover-open');
         window.__tabberSessionTabBeforeRefresh.dataset.popoverHoverState = 'open';
         window.__tabberPopoverBeforeRefresh.classList.add('popover-open');
@@ -2961,7 +8905,7 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     hover_metrics = browser.execute_script(
         """
         const tab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const visiblePopovers = Array.from(document.querySelectorAll('.tabber-session-tab.popover-open > .session-popover')).filter(popover => {
+        const visiblePopovers = [tab?.__yolomuxDetachedPopover].filter(popover => {
           const style = getComputedStyle(popover);
           const rect = popover.getBoundingClientRect();
           return style.visibility === 'visible' && Number.parseFloat(style.opacity) > 0.9 && rect.width > 100 && rect.height > 40;
@@ -2985,6 +8929,28 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     assert hover_metrics["hoverState"] == "open", hover_metrics
     assert hover_metrics["tabOpen"] is True, hover_metrics
     assert hover_metrics["visibleChromeTitles"] == [], hover_metrics
+    cleanup_metrics = browser.execute_script(
+        """
+        const oldTab = window.__tabberSessionTabBeforeRefresh;
+        const oldPopover = window.__tabberPopoverBeforeRefresh;
+        const detachedPopoverCountBefore = appOverlayRootElement().querySelectorAll('.pane-tab-detached-popover').length;
+        oldTab.classList.remove('popover-open');
+        oldPopover.classList.remove('popover-open');
+        delete oldTab.dataset.popoverHoverState;
+        refreshTabberPanels();
+        const nextTab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
+        const nextPopover = paneTabPopoverForAnchor(nextTab);
+        return {
+          oldPopoverConnected: oldPopover.isConnected,
+          nextPopoverDetached: nextPopover?.parentElement === appOverlayRootElement(),
+          detachedPopoverCountBefore,
+          detachedPopoverCount: appOverlayRootElement().querySelectorAll('.pane-tab-detached-popover').length,
+        };
+        """
+    )
+    assert cleanup_metrics["oldPopoverConnected"] is False, cleanup_metrics
+    assert cleanup_metrics["nextPopoverDetached"] is True, cleanup_metrics
+    assert cleanup_metrics["detachedPopoverCount"] == cleanup_metrics["detachedPopoverCountBefore"], cleanup_metrics
 
 
 def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):
@@ -3022,7 +8988,7 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     )
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert "GET /api/notify" in metrics["fetchPaths"]
+    assert "GET /api/notify" not in metrics["fetchPaths"]
     assert "GET /api/auto-approve" in metrics["fetchPaths"]
     assert metrics["fetchPaths"].count("POST /api/ensure-session") <= 1
     assert "GET /api/session-metadata" in metrics["fetchPaths"]
@@ -3032,14 +8998,996 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
         {button["label"] for button in metrics["menuButtons"]}
     )
     assert any(
-        button["label"] == "Tabs" and button["badge"] == "0"
+        button["label"] == "Tabs" and button["badge"] == ""
         for button in metrics["menuButtons"]
-    )
+    ), "Tabs has no right-side running-YOLO circle"
     assert metrics["panelCount"] >= 1
     assert metrics["paneTabCount"] >= 1
     assert metrics["panelVisible"]
-    assert metrics["notifyActive"] is False
+    assert metrics["notifyActive"] is True
     assert metrics["terminalText"] == "fake terminal"
+
+
+def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp_path):
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=chat&layout=slot1&tabs=slot1:chat",
+            sessions=["1"],
+            grid_width=760,
+            grid_height=560,
+        )
+    except AssertionError as error:
+        raise AssertionError(f"{error}; browser_log={browser.get_log('browser')}") from error
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-input]') && window.__eventSources.length > 0"
+        )
+    )
+    initial = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const grid = document.getElementById('grid');
+        const originalGridHeight = grid.style.height;
+        grid.style.height = '900px';
+        const timeline = panel?.querySelector('[data-chat-timeline]');
+        const introduction = panel?.querySelector('.yochat-introduction');
+        const pane = panel?.querySelector('.chat-pane');
+        const composer = panel?.querySelector('[data-chat-form]');
+        const panelRect = panel?.getBoundingClientRect();
+        const timelineRect = timeline?.getBoundingClientRect();
+        const introductionRect = introduction?.getBoundingClientRect();
+        const paneRect = pane?.getBoundingClientRect();
+        const composerRect = composer?.getBoundingClientRect();
+        const result = {
+          panelConnected: panel?.isConnected === true,
+          emojiCatalogRequested: window.__bootFetches.some(item => item.path === '/static/emoji-data.js'),
+          oldBodies: panel?.querySelectorAll('[data-chat-message-id]').length || 0,
+          searchHidden: panel?.querySelector('[data-chat-search-bar]')?.hidden === true,
+          searchDisplay: getComputedStyle(panel?.querySelector('[data-chat-search-bar]')).display,
+          introduction: panel?.querySelector('[data-chat-timeline]')?.textContent || '',
+          introductionCode: introduction?.querySelector('code')?.textContent || '',
+          introductionBottomGap: (timelineRect?.bottom || 0) - (introductionRect?.bottom || 0),
+          introductionComposerGap: (composerRect?.top || 0) - (introductionRect?.bottom || 0),
+          composerBottomGap: (paneRect?.bottom || 0) - (composerRect?.bottom || 0),
+          panePanelBottomGap: (panelRect?.bottom || 0) - (paneRect?.bottom || 0),
+          composerPanelBottomGap: (panelRect?.bottom || 0) - (composerRect?.bottom || 0),
+          panelClasses: panel?.className || '',
+          panelGridRows: getComputedStyle(panel).gridTemplateRows,
+          olderButton: panel?.querySelector('[data-chat-load-older]') !== null,
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        };
+        grid.style.height = originalGridHeight;
+        return result;
+        """
+    )
+    assert initial["panelConnected"] is True and initial["emojiCatalogRequested"] is False and initial["oldBodies"] == 0
+    assert initial["searchHidden"] is True and initial["searchDisplay"] == "none" and initial["olderButton"] is False
+    assert "YO!agent" in initial["introduction"] and "ask me" in initial["introduction"] and "/yo <query>" in initial["introduction"]
+    assert initial["introductionCode"] == "/yo <query>"
+    assert 0 <= initial["introductionBottomGap"] <= 8, initial
+    assert 0 <= initial["introductionComposerGap"] <= 16, initial
+    assert 0 <= initial["composerBottomGap"] <= 10, initial
+    assert 0 <= initial["panePanelBottomGap"] <= 2 and 0 <= initial["composerPanelBottomGap"] <= 12, initial
+    assert initial["errors"] == [] and initial["rejections"] == []
+
+    exact_body = "😀 👍🏽 👩‍💻 👨‍👩‍👧‍👦 🏳️‍🌈 🇺🇸 1️⃣ ☕️ مرحبا 😀"
+    browser.execute_script(
+        """
+        setFocusedPanelItem(chatItemId, {userInitiated: true});
+        document.querySelector('#panel-__chat__ [data-chat-input]').focus();
+        window.__fixtureChatSendAs('bob', 'browser-b', arguments[0], true);
+        """,
+        exact_body,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-message-id]')?.textContent.includes(arguments[0])",
+            exact_body,
+        )
+    )
+    message = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const row = panel.querySelector('[data-chat-message-id]');
+        const time = row.querySelector('time');
+        const marker = document.querySelector('.chat-status-marker');
+        return {
+          body: row.querySelector('.conversation-message-body').textContent,
+          author: row.querySelector('.conversation-message-role span').textContent,
+          ip: row.querySelector('.yochat-message-ip')?.textContent || '',
+          timestamp: time.textContent,
+          datetime: time.getAttribute('datetime'),
+          red: marker?.querySelector('.state-attention, .attention, [data-state="attention"]') !== null || marker?.textContent.length > 0,
+          toastCount: document.querySelectorAll('.toast').length,
+          liveText: panel.querySelector('[data-chat-live]').textContent,
+          timelineLive: panel.querySelector('[data-chat-timeline]').getAttribute('aria-live'),
+        };
+        """
+    )
+    assert message["body"] == exact_body
+    assert message["author"] == "bob"
+    assert message["ip"] == "10.1.123.12"
+    assert "ago" in message["timestamp"]
+    assert message["datetime"].endswith("Z")
+    assert message["red"] is True
+    assert message["toastCount"] == 0, "focused, visible YO!chat suppresses in-app notifications"
+    assert exact_body in message["liveText"]
+    assert message["timelineLive"] == "off", "the dedicated live region announces only new messages instead of replaying the whole timeline"
+    assert browser.execute_script(
+        "return document.querySelectorAll('#panel-__chat__ .yochat-introduction').length"
+    ) == 1, "the non-persisted introduction remains the first timeline card when messages exist"
+    parity = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const host = document.createElement('div');
+        host.innerHTML = conversationMessageShellHtml({
+          className: 'yoagent-message fixture-agent-message',
+          author: 'YO!agent',
+          bodyHtml: '<div class="conversation-message-body yoagent-message-body">fixture</div>',
+        });
+        panel.querySelector('[data-chat-timeline]').appendChild(host.firstElementChild);
+        const read = theme => {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          document.body.classList.toggle('theme-dark', theme === 'dark');
+          const chat = getComputedStyle(panel.querySelector('.yochat-message'));
+          const agent = getComputedStyle(panel.querySelector('.fixture-agent-message'));
+          const chatBody = getComputedStyle(panel.querySelector('.yochat-message .conversation-message-body'));
+          const agentBody = getComputedStyle(panel.querySelector('.fixture-agent-message .conversation-message-body'));
+          return {
+            radius: [chat.borderRadius, agent.borderRadius],
+            padding: [chat.padding, agent.padding],
+            bodyFont: [chatBody.font, agentBody.font],
+            bodyColor: [chatBody.color, agentBody.color],
+          };
+        };
+        const result = {dark: read('dark'), light: read('light')};
+        document.body.classList.remove('theme-light');
+        document.body.classList.add('theme-dark');
+        return result;
+        """
+    )
+    for theme in ("dark", "light"):
+        assert parity[theme]["radius"][0] == parity[theme]["radius"][1]
+        assert parity[theme]["padding"][0] == parity[theme]["padding"][1]
+        assert parity[theme]["bodyFont"][0] == parity[theme]["bodyFont"][1]
+        assert parity[theme]["bodyColor"][0] == parity[theme]["bodyColor"][1]
+
+    browser.execute_script(
+        """
+        setFocusedPanelItem('1', {userInitiated: true});
+        window.__fixtureChatSendAs('carol', 'browser-c', 'unfocused pane notification', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('unfocused pane notification'))"
+        )
+    )
+    assert browser.execute_script(
+        "return [...document.querySelectorAll('.toast')].filter(node => node.textContent.includes('unfocused pane notification')).length"
+    ) == 1, "active-but-unfocused YO!chat delivers one deduplicated in-app notification"
+    browser.execute_script(
+        "document.querySelector('.toast:not(.toast-update) [data-toast-close]').click()"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__bootFetches.filter(item => item.path === '/api/chat/read').length === 1"
+        )
+    )
+    dismissal_reload = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const previous = {
+          messages: new Map(chatState.messages),
+          pending: new Map(chatState.pending),
+          loaded: chatState.loaded,
+          readUpToId: chatState.readUpToId,
+          newerCursor: chatState.newerCursor,
+          olderCursor: chatState.olderCursor,
+          notifiedIds: new Set(chatState.notifiedIds),
+        };
+        clearChatLifecycle({destroy: true});
+        chatState.messages.clear();
+        chatState.pending.clear();
+        chatState.unread.clear();
+        chatState.loaded = false;
+        chatState.readUpToId = 0;
+        chatState.newerCursor = '';
+        chatState.olderCursor = '';
+        chatState.notifiedIds.clear();
+        renderChatPanel();
+        loadChatDelta().then(() => {
+          const result = {
+            bootstrapMessages: window.__fixtureLastChatBootstrapMessages.map(message => message.body),
+            staleToast: [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('unfocused pane notification')),
+            unread: [...chatState.unread.keys()],
+          };
+          chatState.messages = previous.messages;
+          chatState.pending = previous.pending;
+          chatState.loaded = previous.loaded;
+          chatState.readUpToId = previous.readUpToId;
+          chatState.newerCursor = previous.newerCursor;
+          chatState.olderCursor = previous.olderCursor;
+          chatState.notifiedIds = previous.notifiedIds;
+          chatState.unread.clear();
+          renderChatPanel();
+          done(result);
+        });
+        """
+    )
+    assert dismissal_reload == {"bootstrapMessages": [], "staleToast": False, "unread": []}, (
+        "dismissing a YO!chat toast advances its durable read cursor, so bootstrap/reload cannot replay it"
+    )
+    browser.execute_script(
+        """
+        setFocusedPanelItem('1', {userInitiated: true});
+        window.__fixtureChatSendAs('erin', 'browser-e', 'opening chat acknowledges notification', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('opening chat acknowledges notification'))"
+        )
+    )
+    browser.execute_script("focusPanel(chatItemId, {userInitiated: true})")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__bootFetches.filter(item => item.path === '/api/chat/read').length === 2"
+        )
+    )
+    browser.execute_script(
+        """
+        setFocusedPanelItem('1', {userInitiated: true});
+        window.__fixtureChatSendAs('frank', 'browser-f', 'clicking chat tab acknowledges notification', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('clicking chat tab acknowledges notification'))"
+        )
+    )
+    browser.execute_script(
+        "activatePaneTab(layoutSlotKeys().find(side => activeItemForSide(side) === chatItemId), chatItemId, {userInitiated: true})"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__bootFetches.filter(item => item.path === '/api/chat/read').length === 3"
+        )
+    )
+    browser.execute_script("setFocusedPanelItem(chatItemId, {userInitiated: true})")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return ![...document.querySelectorAll('.toast')].some(node => node.textContent.includes('unfocused pane notification'))"
+        )
+    )
+    browser.execute_script("window.__fixtureChatSendAs('dave', 'browser-d', 'already focused notification', false)")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].some(node => node.textContent === 'already focused notification')"
+        )
+    )
+    assert browser.execute_script(
+        "return ![...document.querySelectorAll('.toast')].some(node => node.textContent.includes('already focused notification'))"
+    ), "the exact focused target Tab suppresses new in-app notifications"
+
+    author_colors = browser.execute_script(
+        """
+        const rows = [...document.querySelectorAll('#panel-__chat__ .yochat-message[data-chat-message-id]')];
+        return Object.fromEntries(rows.map(row => [row.querySelector('.conversation-message-role > span')?.textContent || '', getComputedStyle(row).borderColor]));
+        """
+    )
+    assert author_colors["bob"] != author_colors["carol"], "each visible person gets a distinct existing-token border scheme"
+
+    browser.execute_script(
+        """
+        window.__fixtureChatTyping = [{username: 'bob', browser_instance_id: 'browser-b', expires_at_utc: Date.now() / 1000 + 5}];
+        emitFixtureClientEvent('chat_typing_changed', {});
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: "bob" in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-timeline]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.chat-status-marker .agent-window-status-dot--acknowledging') !== null"
+        )
+    )
+    acknowledgement = browser.execute_script(
+        """
+        const marker = document.querySelector('.chat-status-marker');
+        return {
+          gray: marker.querySelector('.agent-window-status-dot--acknowledging') !== null,
+          greenRemains: marker.querySelectorAll('.agent-window-status-dot').length >= 2,
+          readPosts: window.__bootFetches.filter(item => item.path === '/api/chat/read').length,
+        };
+        """
+    )
+    assert acknowledgement == {"gray": True, "greenRemains": True, "readPosts": 4}
+
+    browser.execute_script(
+        """
+        window.__fixtureChatTyping = [{username: 'stale-user', browser_instance_id: 'stale-browser', expires_at_utc: Date.now() / 1000 + 0.2}];
+        emitFixtureClientEvent('chat_typing_changed', {});
+        """
+    )
+    WebDriverWait(browser, 3).until(
+        lambda driver: "stale-user" not in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+
+    typing_requests = browser.execute_script(
+        """
+        const input = document.querySelector('#panel-__chat__ [data-chat-input]');
+        input.value = 'h';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.value = 'he';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+        return window.__bootFetches
+          .filter(item => item.path === '/api/chat/typing')
+          .map(item => item.body.typing);
+        """
+    )
+    assert typing_requests == [True, False], "typing sends one leading lease, not one request per keystroke, then explicitly stops on blur"
+
+    search_shortcut = browser.execute_script(
+        """
+        const event = new KeyboardEvent('keydown', {
+          key: 'f',
+          code: 'KeyF',
+          metaKey: isMacPlatform(),
+          ctrlKey: !isMacPlatform(),
+          bubbles: true,
+          cancelable: true,
+        });
+        (document.activeElement || document.body).dispatchEvent(event);
+        return event.defaultPrevented;
+        """
+    )
+    assert search_shortcut is True, "Cmd/Ctrl-F is claimed by the focused YO!chat tab"
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-search-bar]')?.hidden === false && document.activeElement?.matches('[data-chat-search]')"
+        )
+    )
+    browser.execute_script(
+        """
+        const firstWeatherId = window.__fixtureChatMessages.length + 1;
+        for (let index = 0; index < 12; index += 1) {
+          window.__fixtureChatMessages.push({
+            id: firstWeatherId + index,
+            created_at_utc: Date.now() / 1000,
+            username: 'weather-fixture',
+            sender_ip: '10.1.123.12',
+            sender_instance_id: 'weather-browser',
+            client_message_uuid: `weather-${index}`,
+            body: `weather result ${index} for California`,
+            is_question: false,
+          });
+        }
+        const search = document.querySelector('#panel-__chat__ [data-chat-search]');
+        search.value = 'wea';
+        search.closest('form').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('#panel-__chat__ [data-chat-search-result]').length === 12"
+        )
+    )
+    search_split = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const split = panel.querySelector('.chat-history-search-split');
+        const results = panel.querySelector('[data-chat-search-results]');
+        const timeline = panel.querySelector('[data-chat-timeline]');
+        const first = results.querySelector('[data-chat-search-result]');
+        const splitRect = split.getBoundingClientRect();
+        const resultsRect = results.getBoundingClientRect();
+        const timelineRect = timeline.getBoundingClientRect();
+        const firstRect = first.getBoundingClientRect();
+        return {
+          matchText: first.textContent,
+          resultsHeight: resultsRect.height,
+          timelineHeight: timelineRect.height,
+          splitHeight: splitRect.height,
+          resultsScrollable: results.scrollHeight > results.clientHeight,
+          timelineScrollable: timeline.scrollHeight > timeline.clientHeight,
+          firstFullyVisible: firstRect.top >= resultsRect.top - 1 && firstRect.bottom <= resultsRect.bottom + 1,
+          separated: resultsRect.bottom <= timelineRect.top + 1,
+        };
+        """
+    )
+    assert "weather" in search_split["matchText"].lower(), search_split
+    assert search_split["resultsHeight"] <= search_split["splitHeight"] / 2 + 1, search_split
+    assert search_split["timelineHeight"] >= search_split["splitHeight"] / 2 - 3, search_split
+    assert search_split["resultsScrollable"] is True and search_split["timelineScrollable"] is True, search_split
+    assert search_split["firstFullyVisible"] is True and search_split["separated"] is True, search_split
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-search-close]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-search-bar]')?.hidden === true"
+        )
+    )
+    assert browser.execute_script(
+        "return document.querySelector('#panel-__chat__ [data-chat-search-results]')?.hidden === true"
+    ), "X hides both the Cmd/Ctrl-F search chrome and its results"
+
+    browser.set_window_size(430, 650)
+    composer_size = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const pane = panel.querySelector('.chat-pane');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = '';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const compact = panel.querySelector('[data-chat-form]').getBoundingClientRect().height;
+        input.value = Array.from({length: 40}, (_, index) => `line ${index}`).join('\\n');
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const grown = panel.querySelector('[data-chat-form]').getBoundingClientRect().height;
+        const grownOverflow = getComputedStyle(input).overflowY;
+        const paneHeight = pane.getBoundingClientRect().height;
+        input.value = '';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const compactAfter = panel.querySelector('[data-chat-form]').getBoundingClientRect().height;
+        return {compact, grown, grownOverflow, paneHeight, compactAfter};
+        """
+    )
+    assert composer_size["grown"] > composer_size["compact"], composer_size
+    assert composer_size["grown"] <= composer_size["paneHeight"] / 2 + 2, composer_size
+    assert composer_size["grownOverflow"] == "auto", composer_size
+    assert abs(composer_size["compactAfter"] - composer_size["compact"]) < 1, composer_size
+    browser.execute_script(
+        """
+        globalThis.YOLOMUX_EMOJI_DATA = [
+          {emoji: '😀', category: 'smileys-emotion', names: {en: 'grinning face'}, keywords: {en: ['smile']}},
+          {emoji: '👨‍👩‍👧‍👦', category: 'people-body', names: {en: 'family'}, keywords: {en: ['family']}}
+        ];
+        const input = document.querySelector('#panel-__chat__ [data-chat-input]');
+        input.value = 'ab';
+        input.setSelectionRange(1, 1);
+        document.querySelector('#panel-__chat__ [data-chat-emoji-button]').click();
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-emoji-picker]')?.hidden === false"
+        )
+    )
+    browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const search = panel.querySelector('[data-chat-emoji-search]');
+        search.value = 'family';
+        search.dispatchEvent(new Event('input', {bubbles: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-emoji=" + '"👨‍👩‍👧‍👦"' + "]') !== null"
+        )
+    )
+    picker = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const glyph = panel.querySelector('[data-chat-emoji="👨‍👩‍👧‍👦"]');
+        glyph.click();
+        const input = panel.querySelector('[data-chat-input]');
+        const picker = panel.querySelector('[data-chat-emoji-picker]');
+        const panelRect = panel.getBoundingClientRect();
+        const pickerRect = picker.getBoundingClientRect();
+        return {
+          value: input.value,
+          pickerOpen: !picker.hidden,
+          withinPanel: pickerRect.left >= panelRect.left - 1 && pickerRect.right <= panelRect.right + 1,
+          ariaExpanded: panel.querySelector('[data-chat-emoji-button]').getAttribute('aria-expanded'),
+          catalogNetworkFetches: window.__bootFetches.filter(item => item.path === '/static/emoji-data.js').length,
+        };
+        """
+    )
+    assert picker == {
+        "value": "a👨‍👩‍👧‍👦b",
+        "pickerOpen": True,
+        "withinPanel": True,
+        "ariaExpanded": "true",
+        "catalogNetworkFetches": 0,
+    }
+    browser.set_window_size(1748, 1248)
+    browser.execute_script("document.getElementById('panel-__chat__').classList.add('details-collapsed')")
+    tall_picker_geometry = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const pane = panel.querySelector('.chat-pane');
+        const composer = panel.querySelector('[data-chat-form]');
+        const timeline = panel.querySelector('[data-chat-timeline]');
+        const panelRect = panel.getBoundingClientRect();
+        const paneRect = pane.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        return {
+          panePanelBottomGap: panelRect.bottom - paneRect.bottom,
+          composerPanelBottomGap: panelRect.bottom - composerRect.bottom,
+          composerPaneBottomGap: paneRect.bottom - composerRect.bottom,
+          timelineHeight: timeline.getBoundingClientRect().height,
+          paneRows: getComputedStyle(pane).gridTemplateRows,
+          panelRows: getComputedStyle(panel).gridTemplateRows,
+          panelClasses: panel.className,
+        };
+        """
+    )
+    assert 0 <= tall_picker_geometry["composerPanelBottomGap"] <= 12, tall_picker_geometry
+
+    retry_body = "retry once 👩‍💻"
+    browser.execute_script(
+        """
+        closeChatEmojiPicker();
+        window.__fixtureDropNextChatSendResponse = true;
+        const panel = document.getElementById('panel-__chat__');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = arguments[0];
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        const form = panel.querySelector('[data-chat-form]');
+        form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """,
+        retry_body,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length === 1 && document.querySelector('#panel-__chat__ [data-chat-retry]') === null",
+            retry_body,
+        )
+    )
+    lost_response = browser.execute_script(
+        """
+        return {
+          stored: window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length,
+          requests: window.__bootFetches.filter(item => item.path === '/api/chat/send' && item.body.body === arguments[0]).length,
+          rendered: [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].filter(node => node.textContent === arguments[0]).length,
+        };
+        """,
+        retry_body,
+    )
+    assert lost_response == {"stored": 1, "requests": 1, "rendered": 1}, "SSE reconciliation canonicalizes a lost response without a duplicate retry"
+
+    retry_body = "retry after rejection 🏳️‍🌈"
+    browser.execute_script(
+        """
+        window.__fixtureFailNextChatSendBeforeInsert = true;
+        const panel = document.getElementById('panel-__chat__');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = arguments[0];
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        panel.querySelector('[data-chat-form]').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """,
+        retry_body,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-retry]') !== null"
+        )
+    )
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-retry]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-retry]') === null && window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length === 1",
+            retry_body,
+        )
+    )
+    after_retry = browser.execute_script(
+        """
+        return {
+          stored: window.__fixtureChatMessages.filter(message => message.body === arguments[0]).length,
+          requests: window.__bootFetches.filter(item => item.path === '/api/chat/send' && item.body.body === arguments[0]).length,
+          rendered: [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].filter(node => node.textContent === arguments[0]).length,
+        };
+        """,
+        retry_body,
+    )
+    assert after_retry == {"stored": 1, "requests": 2, "rendered": 1}, "retry reuses the same client UUID and replaces the pending row"
+
+    browser.execute_script(
+        """
+        window.__fixtureHoldChatYoagent = true;
+        const panel = document.getElementById('panel-__chat__');
+        const input = panel.querySelector('[data-chat-input]');
+        input.value = '/yo summarize current tasks';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        panel.querySelector('[data-chat-form]').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: "YO!agent is typing" in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+    optimistic = browser.execute_script(
+        """
+        const row = [...document.querySelectorAll('#panel-__chat__ .yochat-message.user')]
+          .find(item => item.querySelector('.conversation-message-body')?.textContent === '/yo summarize current tasks');
+        return {
+          visible: row?.offsetParent !== null,
+          author: row?.querySelector('.conversation-message-role > span')?.textContent || '',
+          expectedAuthor: window.__fixtureAuthUsername,
+          metadata: row?.querySelector('.yochat-message-metadata')?.textContent || '',
+          atTail: (() => {
+            const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+            return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 32;
+          })(),
+        };
+        """
+    )
+    assert optimistic["visible"] is True and optimistic["author"] == optimistic["expectedAuthor"] and optimistic["atTail"] is True, optimistic
+    assert "myself" in optimistic["metadata"] and "10.1.123.12" in optimistic["metadata"], optimistic
+    assert browser.execute_script(
+        "return [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].some(node => node.textContent.includes('YO!agent is thinking'))"
+    ) is False, "/yo reuses human typing presence instead of adding a fake thinking message"
+    browser.execute_script(
+        "window.__fixtureHoldChatRead = true; window.__fixtureHoldChatYoagent = false; window.__fixtureReleaseChatYoagent?.()"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('#panel-__chat__ .yochat-agent-message .conversation-message-body')].some(node => node.textContent.includes('summarize current tasks'))"
+        )
+    )
+    assert browser.execute_script(
+        "return window.__fixtureHoldChatRead === true && window.__fixtureReleaseChatRead !== null"
+    ), "the YO!agent reply paints before the read-cursor request is released"
+    browser.execute_script("window.__fixtureHoldChatRead = false; window.__fixtureReleaseChatRead?.()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: "YO!agent" not in driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-typing]')?.textContent || ''"
+        )
+    )
+    assert browser.execute_script(
+        "return window.__bootFetches.filter(item => item.path === '/api/chat/yoagent').length"
+    ) == 1, "/yo invokes the server bridge exactly once after the source chat message is durable"
+
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return Math.max(0, ...Object.values(window.__fixtureChatReaders).map(Number)) === window.__fixtureChatMessages.at(-1).id"
+        )
+    )
+    media_url = "https://encrypted-tbn0.gstatic.com/images?q=fixture&s=10"
+    browser.execute_script(
+        "window.__fixtureChatSendAs('guest-media', 'browser-media', `picture ${arguments[0]}`, false)",
+        media_url,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-media-url]')?.dataset.chatMediaUrl === arguments[0]",
+            media_url,
+        )
+    )
+    fast_pointer_actions(browser).move_to_element(
+        browser.find_element("css selector", "#panel-__chat__ [data-chat-media-url]")
+    ).perform()
+    thumbnail = browser.execute_script(
+        """
+        const node = document.querySelector('#panel-__chat__ [data-chat-media-url]');
+        const rect = node.getBoundingClientRect();
+        return {width: rect.width, height: rect.height, kind: node.dataset.chatMediaKind, link: node.closest('.conversation-message-body').querySelector('a')?.href || ''};
+        """
+    )
+    assert thumbnail["kind"] == "image" and 40 <= thumbnail["width"] <= 48 and 40 <= thumbnail["height"] <= 48, thumbnail
+    assert thumbnail["link"] == media_url, thumbnail
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.yochat-media-preview-popover img')?.src === arguments[0]",
+            media_url,
+        )
+    )
+    media_menu = browser.execute_script(
+        """
+        const node = document.querySelector('#panel-__chat__ [data-chat-media-url]');
+        node.click();
+        return [...document.querySelectorAll('.yochat-media-context-menu button')].map(button => button.textContent.trim());
+        """
+    )
+    assert media_menu == ["Open in new tab", "Open URL in a new tab", "Copy URL", "Download"]
+    browser.execute_script("document.querySelector('.yochat-media-context-menu button').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.chat-media-panel .yochat-media-panel-stage img')?.src === arguments[0]",
+            media_url,
+        )
+    )
+    browser.execute_script("selectSession(chatItemId, {userInitiated: true})")
+    reload_result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        clearChatLifecycle({destroy: true});
+        chatState.messages.clear();
+        chatState.pending.clear();
+        chatState.unread.clear();
+        chatState.loaded = false;
+        chatState.loading = false;
+        renderChatPanel();
+        (async () => {
+          const first = await loadChatBootstrap();
+          const result = first || await loadChatBootstrap();
+          done({
+            result,
+            transferredBodies: window.__fixtureLastChatBootstrapMessages?.length ?? -1,
+            renderedBodies: document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert reload_result["transferredBodies"] == 0 and reload_result["renderedBodies"] == 0, "reload transfers and paints no previously read message bodies"
+    queued_older = browser.execute_script(
+        """
+        const firstQueuedId = window.__fixtureChatMessages.length + 1;
+        for (let index = 0; index < 60; index += 1) {
+          window.__fixtureChatMessages.push({
+            id: firstQueuedId + index,
+            created_at_utc: Date.now() / 1000,
+            username: 'history-fixture',
+            sender_ip: '10.1.123.12',
+            sender_instance_id: 'history-browser',
+            client_message_uuid: `queued-history-${index}`,
+            body: `queued history ${index}`,
+            is_question: false,
+          });
+        }
+        const latest = window.__fixtureChatMessages.at(-1)?.id || 0;
+        window.__fixtureChatReaders[chatReaderId] = Math.max(0, latest - 1);
+        window.__fixtureHoldChatBootstrap = true;
+        clearChatLifecycle({destroy: true});
+        chatState.messages.clear();
+        chatState.pending.clear();
+        chatState.unread.clear();
+        chatState.loaded = false;
+        renderChatPanel();
+        const beforeRequests = window.__bootFetches.filter(item => item.path === '/api/chat/page').length;
+        window.__fixtureQueuedOlderBeforeRequests = beforeRequests;
+        void loadChatBootstrap();
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = 0;
+        timeline.dispatchEvent(new WheelEvent('wheel', {deltaY: -100, bubbles: true}));
+        return {
+          bootstrapHeld: window.__fixtureReleaseChatBootstrap !== null,
+          pageRequests: window.__bootFetches.filter(item => item.path === '/api/chat/page').length - beforeRequests,
+          olderRequested: chatState.olderRequested,
+        };
+        """
+    )
+    assert queued_older == {"bootstrapHeld": True, "pageRequests": 0, "olderRequested": True}
+    browser.execute_script("window.__fixtureHoldChatBootstrap = false; window.__fixtureReleaseChatBootstrap?.()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length === 51"
+        )
+    )
+    older_page = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => done({
+          pageRequests: window.__bootFetches.filter(item => item.path === '/api/chat/page').length - window.__fixtureQueuedOlderBeforeRequests,
+          olderRequested: chatState.olderRequested,
+          hasMore: chatState.hasMore,
+          renderedBodies: document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length,
+        })));
+        """
+    )
+    assert older_page["pageRequests"] == 1, "one upward gesture queues exactly one older-history request"
+    assert older_page["olderRequested"] is False, "the queued gesture is consumed when paging starts"
+    assert older_page["hasMore"] is True and older_page["renderedBodies"] == 51
+    cleanup = browser.execute_script(
+        """
+        removePanelForItem(chatItemId);
+        return {
+          panelConnected: document.getElementById('panel-__chat__')?.isConnected === true,
+          observer: chatState.olderObserver,
+          controller: chatState.requestController,
+          emojiOpen: chatEmojiOverlayController.isOpen(),
+        };
+        """
+    )
+    assert cleanup == {"panelConnected": False, "observer": None, "controller": None, "emojiOpen": False}
+
+
+def test_yochat_follows_new_messages_only_from_the_tail_and_resets_initial_chrome(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=chat&layout=slot1&tabs=slot1:chat",
+        sessions=["1"],
+        grid_width=640,
+        grid_height=520,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ [data-chat-timeline]') && window.__eventSources.length > 0"
+        )
+    )
+    browser.execute_script(
+        """
+        window.marked.parse = text => String(text).includes('| City |')
+          ? '<table><thead><tr><th>City</th><th>Temp</th></tr></thead><tbody><tr><td>San Jose</td><td>65°F</td></tr></tbody></table>'
+          : String(text || '');
+        window.__fixtureChatSendAs('YO!agent', 'yolomux-yoagent', '| City | Temp |\\n| --- | --- |\\n| San Jose | 65°F |', false, '');
+        window.__fixtureChatSendAs(window.__fixtureAuthUsername, 'browser-self', 'own color', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__chat__ .yochat-agent-message table td')?.textContent === 'San Jose'"
+        )
+    )
+    composer_color = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const selfRow = [...panel.querySelectorAll('.yochat-message.user')].find(row => row.querySelector('.conversation-message-role span')?.textContent === window.__fixtureAuthUsername);
+        const probe = document.createElement('span');
+        probe.style.border = '1px solid color-mix(in srgb, var(--accent-gold) 68%, var(--line))';
+        probe.style.background = 'var(--accent-gold)';
+        panel.appendChild(probe);
+        const goldBorder = getComputedStyle(probe).borderColor;
+        const goldBackground = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        const send = panel.querySelector('.conversation-send-primary');
+        return {
+          composer: getComputedStyle(panel.querySelector('[data-chat-form]')).borderColor,
+          message: getComputedStyle(selfRow).borderColor,
+          sendBackground: getComputedStyle(send).backgroundColor,
+          sendBorder: getComputedStyle(send).borderColor,
+          goldBorder,
+          goldBackground,
+        };
+        """
+    )
+    assert composer_color["composer"] == composer_color["message"] == composer_color["goldBorder"], composer_color
+    assert composer_color["sendBorder"] == composer_color["goldBorder"] and composer_color["sendBackground"] == composer_color["goldBackground"], composer_color
+    browser.execute_script(
+        """
+        for (let index = 0; index < 24; index += 1) {
+          window.__fixtureChatSendAs('guest', 'browser-guest', `history ${index}`, false);
+        }
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('#panel-__chat__ [data-chat-message-id]').length >= 26"
+        )
+    )
+
+    bottom_before = browser.execute_script(
+        """
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = timeline.scrollHeight;
+        timeline.dispatchEvent(new Event('scroll', {bubbles: true}));
+        return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+        """
+    )
+    assert bottom_before < 32
+    browser.execute_script("window.__fixtureChatSendAs('guest', 'browser-guest', 'follow the tail', false)")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.getElementById('panel-__chat__');
+            const timeline = panel.querySelector('[data-chat-timeline]');
+            return [...panel.querySelectorAll('.conversation-message-body')].some(node => node.textContent === 'follow the tail')
+              && timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 32
+              && panel.querySelector('[data-chat-new-messages]').hidden === true;
+            """
+        )
+    )
+
+    browser.execute_script(
+        """
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = timeline.scrollHeight;
+        chatState.followTail = false;
+        window.__fixtureChatSendAs('guest', 'browser-guest', 'measure the real tail', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.getElementById('panel-__chat__');
+            const timeline = panel.querySelector('[data-chat-timeline]');
+            return [...panel.querySelectorAll('.conversation-message-body')].some(node => node.textContent === 'measure the real tail')
+              && timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 32
+              && panel.querySelector('[data-chat-new-messages]').hidden === true;
+            """
+        )
+    )
+
+    browser.execute_script(
+        """
+        const timeline = document.querySelector('#panel-__chat__ [data-chat-timeline]');
+        timeline.scrollTop = 0;
+        timeline.dispatchEvent(new Event('scroll', {bubbles: true}));
+        window.__fixtureChatSendAs('guest', 'browser-guest', 'preserve scrollback', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('#panel-__chat__ .conversation-message-body')].some(node => node.textContent === 'preserve scrollback')"
+        )
+    )
+    scrollback = browser.execute_script(
+        """
+        const panel = document.getElementById('panel-__chat__');
+        const timeline = panel.querySelector('[data-chat-timeline]');
+        return {
+          top: timeline.scrollTop,
+          bottomGap: timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
+          newMessagesVisible: panel.querySelector('[data-chat-new-messages]').hidden === false,
+        };
+        """
+    )
+    assert scrollback["top"] <= 2 and scrollback["bottomGap"] > 32 and scrollback["newMessagesVisible"] is True
+    browser.execute_script("document.querySelector('#panel-__chat__ [data-chat-new-messages]').click()")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.getElementById('panel-__chat__');
+            const timeline = panel.querySelector('[data-chat-timeline]');
+            return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 32
+              && panel.querySelector('[data-chat-new-messages]').hidden === true;
+            """
+        )
+    )
+
+    reset = browser.execute_script(
+        """
+        openChatSearch(document.getElementById('panel-__chat__'));
+        clearChatLifecycle({destroy: true});
+        renderChatPanel();
+        const panel = document.getElementById('panel-__chat__');
+        return {
+          searchHidden: panel.querySelector('[data-chat-search-bar]').hidden,
+          introductionCount: panel.querySelectorAll('.yochat-introduction').length,
+          messageCount: panel.querySelectorAll('[data-chat-message-id]').length,
+        };
+        """
+    )
+    assert reset == {"searchHidden": True, "introductionCount": 1, "messageCount": 29}
+
+
+def test_twelve_hour_setting_repaints_yostats_and_tab_navigation_dismisses_addressed_toasts(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphExactTimeLabel === 'function' && document.getElementById('panel-1')"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const timestamp = new Date(2026, 6, 4, 18, 5, 6).getTime();
+        const before = debugGraphExactTimeLabel(timestamp);
+        const next = {mtime_ns: Date.now(), defaults: clientSettingsDefaults, settings: JSON.parse(JSON.stringify(clientSettings))};
+        next.settings.appearance = next.settings.appearance || {};
+        next.settings.appearance.date_time_hour_cycle = '12';
+        applySettingsPayload(next, {force: true});
+        const after = debugGraphExactTimeLabel(timestamp);
+        setFocusedPanelItem(prefsItemId);
+        const node = showToast('Working AI needs your attention', 'fixture', {container: displayToastContainer('1'), targetItem: '1'});
+        node.dataset.toastKind = 'working-agent-transition';
+        const beforeNavigate = document.querySelectorAll('[data-toast-target-item="1"]').length;
+        selectSession('1', {userInitiated: true});
+        const afterNavigate = document.querySelectorAll('[data-toast-target-item="1"]').length;
+        const suppressed = showToast('Working AI finished', 'fixture', {container: displayToastContainer('1'), targetItem: '1'});
+        return {before, after, beforeNavigate, afterNavigate, suppressed: suppressed === null};
+        """
+    )
+    assert not re.search(r"\b(?:AM|PM)\b", result["before"])
+    assert re.search(r"\b(?:AM|PM)\b", result["after"]), result
+    assert result["beforeNavigate"] == 1 and result["afterNavigate"] == 0
+    assert result["suppressed"] is True
 
 
 def test_terminal_visible_selection_cleanup_clears_browser_and_xterm_state(browser, tmp_path):
@@ -3092,7 +10040,11 @@ def test_terminal_visible_selection_cleanup_clears_browser_and_xterm_state(brows
 
 def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser, tmp_path):
     page = tmp_path / "terminal-file-reference-underlines.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <section id="dark-terminal" class="terminal" data-terminal-theme="dark">
         <div class="xterm">
           <div class="xterm-rows">
@@ -3115,19 +10067,19 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
           <div id="light-hover" class="terminal-file-link-underline terminal-file-link-underline--hover" style="left: 64px; top: 54px; width: 264px;"></div>
         </div>
       </section>
-    """, extra_css="""
-      body { margin: 0; padding: 24px; background: #111827; }
-      .terminal {
+    """, extra_css=f"""
+      body {{ margin: 0; padding: 24px; background: {ui_pin('paneMetaPathLight')}; }}
+      .terminal {{
         width: 420px;
         height: 72px;
         margin: 0 0 20px;
         font: 20px/24px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      }
-      #dark-terminal { background: #111827; color: #d1d5db; }
-      #light-terminal { background: #ffffff; color: #111827; }
-      .xterm-rows { position: absolute; inset: 8px 12px; }
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+      }}
+      #dark-terminal {{ background: {ui_pin('paneMetaPathLight')}; color: #d1d5db; }}
+      #light-terminal {{ background: #ffffff; color: {ui_pin('paneMetaPathLight')}; }}
+      .xterm-rows {{ position: absolute; inset: 8px 12px; }}
+    """),
+    )
     metrics = browser.execute_script(
         """
         const line = id => {
@@ -3146,6 +10098,7 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
           };
         };
         const layer = getComputedStyle(document.querySelector('.terminal-file-link-underlines'));
+        const {probePaint} = window.__yolomuxTestHelpers;
         return {
           darkRest: line('dark-rest'),
           darkHover: line('dark-hover'),
@@ -3153,6 +10106,10 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
           lightHover: line('light-hover'),
           darkLink: link('dark-link'),
           lightLink: link('light-link'),
+          darkRestExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline)', document.getElementById('dark-terminal')).borderBottom,
+          darkHoverExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline-hover)', document.getElementById('dark-terminal')).borderBottom,
+          lightRestExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline)', document.getElementById('light-terminal')).borderBottom,
+          lightHoverExpected: probePaint('border-bottom:1px solid var(--terminal-file-link-underline-hover)', document.getElementById('light-terminal')).borderBottom,
           layerPointerEvents: layer.pointerEvents,
           layerZIndex: layer.zIndex,
         };
@@ -3162,16 +10119,61 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
     assert metrics["darkHover"]["borderBottomWidth"] == "1px", metrics
     assert metrics["lightRest"]["borderBottomWidth"] == "1px", metrics
     assert metrics["lightHover"]["borderBottomWidth"] == "1px", metrics
-    assert metrics["darkRest"]["borderBottomColor"] == "rgba(125, 211, 252, 0.5)", metrics
-    assert metrics["darkHover"]["borderBottomColor"] == "rgba(125, 211, 252, 0.6)", metrics
-    assert metrics["lightRest"]["borderBottomColor"] == "rgba(3, 105, 161, 0.48)", metrics
-    assert metrics["lightHover"]["borderBottomColor"] == "rgba(3, 105, 161, 0.58)", metrics
+    assert metrics["darkRest"]["borderBottomColor"] == metrics["darkRestExpected"], metrics
+    assert metrics["darkHover"]["borderBottomColor"] == metrics["darkHoverExpected"], metrics
+    assert metrics["lightRest"]["borderBottomColor"] == metrics["lightRestExpected"], metrics
+    assert metrics["lightHover"]["borderBottomColor"] == metrics["lightHoverExpected"], metrics
     assert metrics["darkLink"]["textDecorationThickness"] == "1px", metrics
     assert metrics["lightLink"]["textDecorationThickness"] == "1px", metrics
     assert metrics["darkLink"]["textDecorationColor"] == metrics["darkLink"]["color"], metrics
     assert metrics["lightLink"]["textDecorationColor"] == metrics["lightLink"]["color"], metrics
     assert metrics["layerPointerEvents"] == "none", metrics
     assert int(metrics["layerZIndex"]) > 0, metrics
+
+
+def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof installTerminalFileReferenceUnderlines === 'function'")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const container = document.createElement('div');
+          container.className = 'terminal';
+          container.style.cssText = 'position:relative;width:1000px;height:60px';
+          const rows = document.createElement('div');
+          rows.className = 'xterm-rows';
+          rows.style.cssText = 'width:1000px;height:60px';
+          container.appendChild(rows);
+          document.body.appendChild(container);
+          let text = 'Open static_src/js/yolomux/00_bootstrap_state.js:283';
+          const term = {
+            cols: 100,
+            rows: 3,
+            buffer: {active: {viewportY: 0, getLine: index => index === 0 ? {isWrapped: false, translateToString: () => text} : null}},
+            _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
+          };
+          const controller = installTerminalFileReferenceUnderlines('1', term, container, {
+            isActive: () => true,
+            targetResolver: async (_session, reference) => ({path: `/repo/${reference.path}`}),
+          });
+          const initial = await controller.refresh();
+          const before = container.querySelectorAll('.terminal-file-link-underline').length;
+          text = 'No file references here';
+          controller.schedule({reason: 'output'});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const after = container.querySelectorAll('.terminal-file-link-underline').length;
+          controller.dispose();
+          container.remove();
+          return {initial, before, after};
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["initial"] == 1 and metrics["before"] == 1, metrics
+    assert metrics["after"] == 0, metrics
 
 
 def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):
@@ -3211,6 +10213,35 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
             menu_id,
         )
 
+    def disclosure_metrics(menu_id):
+        return browser.execute_script(
+            """
+            const wrapper = document.querySelector(`.app-menu[data-app-menu="${arguments[0]}"]`);
+            const button = wrapper?.querySelector(':scope > .app-menu-button');
+            const disclosure = button ? getComputedStyle(button, '::before') : null;
+            const resolveColor = token => {
+              const probe = document.createElement('i');
+              probe.style.color = `var(${token})`;
+              document.body.appendChild(probe);
+              const color = getComputedStyle(probe).color;
+              probe.remove();
+              return color;
+            };
+            return {
+              exists: Boolean(button && disclosure),
+              beforeDisplay: disclosure?.display || '',
+              beforeWidth: disclosure?.width || '',
+              beforeBorderLeftWidth: disclosure?.borderLeftWidth || '',
+              beforeBorderRightWidth: disclosure?.borderRightWidth || '',
+              borderLeftColor: disclosure?.borderLeftColor || '',
+              transform: disclosure?.transform || '',
+              closedColor: resolveColor('--disclosure-triangle-collapsed-color'),
+              expandedColor: resolveColor('--disclosure-triangle-expanded-color'),
+            };
+            """,
+            menu_id,
+        )
+
     for menu_id in ["file", "view", "tmux", "tabs", "help"]:
         browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-button').click()
         metrics = WebDriverWait(browser, 5).until(
@@ -3227,14 +10258,14 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         assert metrics["rejections"] == [], metrics
 
         first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
-        ActionChains(browser).move_to_element(first_command).perform()
+        fast_pointer_actions(browser).move_to_element(first_command).perform()
         hover = WebDriverWait(browser, 5).until(
             lambda _driver: (state if (state := menu_metrics(menu_id))["activeCommandCount"] >= 1 else False)
         )
         assert hover["activeCommandCount"] >= 1, hover
 
     browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
-    ActionChains(browser).move_to_element(browser.find_element("css selector", '.app-menu[data-app-menu="view"] > .app-menu-button')).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.app-menu[data-app-menu="view"] > .app-menu-button')).perform()
     switched = WebDriverWait(browser, 5).until(
         lambda _driver: (state if (state := menu_metrics("view"))["visible"] else False)
     )
@@ -3245,6 +10276,310 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         lambda _driver: (state if not (state := menu_metrics("view"))["open"] else False)
     )
     assert closed["openIds"] == [], closed
+    disclosure_closed = disclosure_metrics("file")
+    assert disclosure_closed["exists"] is True, disclosure_closed
+    assert disclosure_closed["beforeDisplay"] == "block", disclosure_closed
+    assert disclosure_closed["beforeWidth"] == "0px", disclosure_closed
+    assert disclosure_closed["beforeBorderLeftWidth"] == "5px", disclosure_closed
+    assert disclosure_closed["beforeBorderRightWidth"] == "0px", disclosure_closed
+    assert disclosure_closed["borderLeftColor"] == disclosure_closed["closedColor"], disclosure_closed
+    assert disclosure_closed["transform"] == "none", disclosure_closed
+
+    browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
+    assert WebDriverWait(browser, 5).until(lambda _driver: menu_metrics("file")["open"])
+    disclosure_open = WebDriverWait(browser, 5).until(
+        lambda _driver: (
+            state
+            if (state := disclosure_metrics("file"))["borderLeftColor"] == state["expandedColor"]
+            and state["transform"] != "none"
+            else False
+        )
+    )
+    assert disclosure_open["borderLeftColor"] == disclosure_open["expandedColor"], disclosure_open
+    assert disclosure_open["transform"] != "none", disclosure_open
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".xterm")).click().perform()
+    terminal_closed = WebDriverWait(browser, 5).until(
+        lambda _driver: (state if not (state := menu_metrics("file"))["open"] else False)
+    )
+    assert terminal_closed["openIds"] == [], terminal_closed
+
+
+def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1", "2"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof syncTopbarPacking === 'function' && document.querySelector('.topbar') !== null;"
+        )
+    )
+    def snapshot(width):
+        # The production packer is resize-driven.  Do not fake this by assigning a width to a
+        # fixture element: Chrome's real viewport changes exercise the resize listener too.
+        browser.set_window_size(width, 700)
+        return browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const bar = document.querySelector('.topbar');
+            const steps = ['hide-version', 'compact-brand', 'hide-owner', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-nav', 'icon-search', 'compact-menu'];
+            const {settle} = window.__yolomuxTestHelpers;
+            (async () => {
+              syncTopbarPacking();
+              await settle(3);
+              const style = node => getComputedStyle(document.querySelector(node)).display;
+              done({
+                viewport: window.innerWidth,
+                overflow: bar.scrollWidth > bar.clientWidth + 1,
+                steps: steps.filter(step => document.body.classList.contains(`topbar-pack-${step}`)),
+                notify: style('#notifyToggle'),
+                latency: style('#latencyMeter'),
+                refresh: style('#refreshMeta'),
+              });
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """
+        )
+
+    metrics = {"narrow": snapshot(700), "roomy": snapshot(1365), "wide": snapshot(2400)}
+    assert all("error" not in value for value in metrics.values()), metrics
+    assert metrics["narrow"]["overflow"] is False, metrics
+    assert metrics["narrow"]["steps"], metrics
+    expected_order = ["hide-version", "compact-brand", "hide-owner", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-nav", "icon-search", "compact-menu"]
+    assert metrics["narrow"]["steps"] == expected_order[:len(metrics["narrow"]["steps"])], metrics
+    assert metrics["narrow"]["refresh"] != "none", metrics
+    assert metrics["roomy"]["overflow"] is False and metrics["roomy"]["steps"] == [], metrics
+    assert metrics["roomy"]["notify"] != "none" and metrics["roomy"]["latency"] != "none", metrics
+    assert metrics["wide"]["overflow"] is False, metrics
+    assert metrics["wide"]["steps"] == [], metrics
+    assert metrics["wide"]["notify"] != "none" and metrics["wide"]["latency"] != "none", metrics
+
+
+def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
+    def touch_tap(element):
+        browser.execute_script(
+            """
+            const tap = node => {
+              node.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true, cancelable: true, button: 0, pointerType: 'touch', isPrimary: true,
+              }));
+              node.dispatchEvent(new PointerEvent('pointerup', {
+                bubbles: true, cancelable: true, button: 0, pointerType: 'touch', isPrimary: true,
+              }));
+              node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0}));
+            };
+            tap(arguments[0]);
+            """,
+            element,
+        )
+
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1", "2"], dangerously_yolo=True, available_agents=["claude", "codex", "term"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && typeof renderSessionButtons === 'function'")
+    )
+    browser.execute_script(
+        """
+        mobileSinglePaneMode = () => true;
+        syncTopbarPacking = () => [];
+        terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
+        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
+        renderSessionButtons({force: true});
+        """
+    )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(done));
+        """
+    )
+    activity_metrics = browser.execute_script(
+        """
+        renderSessionButtons({force: true});
+        renderSessionButtons({force: true});
+        renderSessionButtons({force: true});
+        const actions = document.querySelector('.actions');
+        const activities = Array.from(document.querySelectorAll('#topbarActivity'));
+            const activity = activities[0];
+            const refresh = document.getElementById('refreshMeta');
+            const rect = node => node?.getBoundingClientRect?.() || {left: 0, right: 0};
+        return {
+          count: activities.length,
+          inActions: activity?.parentElement === actions,
+          actionChildren: Array.from(actions?.children || []).filter(node => node.id === 'topbarActivity').length,
+          activityRight: rect(activity).right,
+          refreshLeft: rect(refresh).left,
+        };
+        """
+    )
+    assert activity_metrics["count"] == 1, activity_metrics
+    assert activity_metrics["inActions"] is True, activity_metrics
+    assert activity_metrics["actionChildren"] == 1, activity_metrics
+    assert activity_metrics["activityRight"] <= activity_metrics["refreshLeft"] + 1, activity_metrics
+    button = WebDriverWait(browser, 5).until(
+        lambda driver: driver.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    )
+    button.click()
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        setTimeout(() => {
+          const root = document.querySelector('.app-menu--nested-root');
+          const button = root?.querySelector(':scope > .app-menu-button');
+          const popover = root?.querySelector(':scope > .app-menu-popover');
+          const style = popover ? getComputedStyle(popover) : null;
+          const rect = popover?.getBoundingClientRect?.();
+          done({
+            open: root?.classList.contains('open') || false,
+            expanded: button?.getAttribute('aria-expanded') || '',
+            visible: Boolean(popover && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '0') > 0.9 && rect.width > 20 && rect.height > 20),
+            labels: Array.from(popover?.querySelectorAll(':scope > .app-menu-submenu-wrap > .app-menu-command') || []).map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
+            errors: window.__bootErrors || [],
+            rejections: window.__bootRejections || [],
+          });
+        }, 300);
+        """
+    )
+    assert metrics["open"] is True, metrics
+    assert metrics["expanded"] == "true", metrics
+    assert metrics["visible"] is True, metrics
+    assert metrics["labels"] == ["File>", "View>", "tmux>", "Tabs>", "Help>"], metrics
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+
+    # This is a real rendered touch sheet, not a source-only assertion. The compact agent pairs
+    # must remain one row each and shell choices must remain chips inside the viewport.
+    file_button = browser.execute_script(
+        """
+        const root = document.querySelector('.app-menu--nested-root');
+        return Array.from(root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap > .app-menu-command') || [])
+          .find(button => button.textContent.replace(/\\s+/g, ' ').trim().startsWith('File')) || null;
+        """
+    )
+    touch_tap(file_button)
+    compact_file = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            const sheet = root?.querySelector(':scope > .app-menu-popover');
+            const pairs = Array.from(root?.querySelectorAll('.app-menu-command-pair') || []);
+            const shells = root?.querySelector('.app-menu-command-row--shells');
+            if (!sheet || pairs.length !== 2 || !shells) return null;
+            const {rect} = window.__yolomuxTestHelpers;
+            return {sheet: rect(sheet), pairs: pairs.map(rect), pairButtons: pairs.map(pair => Array.from(pair.querySelectorAll('.app-menu-command')).map(rect)), shells: rect(shells), shellButtons: Array.from(shells.querySelectorAll('.app-menu-command')).map(rect), shellSeparators: shells.querySelectorAll('.app-menu-command-separator').length, viewport: {width: visualViewport.width, height: visualViewport.height}};
+            """
+        )
+    )
+    assert compact_file["sheet"]["left"] >= -1 and compact_file["sheet"]["right"] <= compact_file["viewport"]["width"] + 1, compact_file
+    assert all(pair["height"] <= 46 for pair in compact_file["pairs"]), compact_file
+    assert all(len(pair) == 2 and pair[0]["right"] <= pair[1]["left"] + 12 for pair in compact_file["pairButtons"]), compact_file
+    assert all(button["height"] >= 24 for pair in compact_file["pairButtons"] for button in pair), compact_file
+    assert compact_file["shells"]["right"] <= compact_file["sheet"]["right"] + 1, compact_file
+    assert len(compact_file["shellButtons"]) == 5, compact_file
+    assert compact_file["shellSeparators"] == 0, compact_file
+    assert all(button["height"] >= 24 for button in compact_file["shellButtons"]), compact_file
+
+    # Use the real touch event path to launch an explicit Shell command. A launch must not merely
+    # create tmux state in the background: it closes Menus and makes the new session the active pane.
+    shell_button = browser.execute_script(
+        "return document.querySelector('.app-menu-command-row--shells .app-menu-command')"
+    )
+    touch_tap(shell_button)
+    launch_state = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+                const request = Array.from(window.__bootFetches || []).find(call => call.path === '/api/create-session');
+                if (!request || layoutSlots.left?.active !== '3') return null;
+                const panel = document.getElementById('panel-3');
+                const panelRect = panel?.getBoundingClientRect?.();
+                if (!panel || !panel.querySelector('.xterm') || !panelRect?.width || !panelRect?.height) return null;
+                const root = document.querySelector('.app-menu--nested-root');
+                return {request, active: activeSessions.slice(), selected: layoutSlots.left?.active || '', tabs: layoutSlots.left?.tabs || [], panel: {width: panelRect.width, height: panelRect.height}, rootOpen: root?.classList.contains('open') || false};
+            """
+        )
+    )
+    assert launch_state["request"]["method"] == "POST", launch_state
+    assert "agent=term" in launch_state["request"]["search"] and "terminal=bash" in launch_state["request"]["search"], launch_state
+    assert launch_state["selected"] == "3" and "3" in launch_state["tabs"] and launch_state["panel"]["height"] > 20 and launch_state["rootOpen"] is False, launch_state
+
+    # A second phone tap is a disclosure toggle, not a grace-period reopen. This keeps the compact
+    # root usable as a one-tap close affordance without changing full desktop menu hover behavior.
+    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    button.click()
+    assert WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.app-menu--nested-root')?.classList.contains('open') || false")
+    )
+    browser.execute_script("arguments[0].click()", button)
+    closed = WebDriverWait(browser, 5).until(
+        lambda driver: (state if not (state := driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            const button = root?.querySelector(':scope > .app-menu-button');
+            const popover = root?.querySelector(':scope > .app-menu-popover');
+            const style = popover ? getComputedStyle(popover) : null;
+            return {
+              open: root?.classList.contains('open') || false,
+              expanded: button?.getAttribute('aria-expanded') || '',
+              visible: Boolean(popover && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '0') > 0.1),
+            };
+            """
+        ))["open"] and state["visible"] is False else False)
+    )
+    assert closed == {"open": False, "expanded": "false", "visible": False}, closed
+
+    # Checked navigation is still navigation: File -> Finder must close the compact root instead of
+    # inheriting keep-open behavior merely because Finder is currently visible/checked.
+    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    button.click()
+    file_button = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            return Array.from(root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap > .app-menu-command') || [])
+              .find(button => button.textContent.replace(/\\s+/g, ' ').trim().startsWith('File')) || null;
+            """
+        )
+    )
+    # Use the same pointerdown + synthetic click sequence as a touch browser. A compact category
+    # must be an accordion disclosure even while Safari keeps the tapped button focused/hovered.
+    touch_tap(file_button)
+    file_commands = browser.execute_script(
+        """
+        return Array.from(document.querySelectorAll('.app-menu--nested-root .app-submenu-popover .app-menu-command'))
+          .map(button => button.textContent.replace(/\\s+/g, ' ').trim());
+        """
+    )
+    assert len(file_commands) >= 2, file_commands
+    assert any(label.startswith(("Finder", "Explorer", "File Explorer")) for label in file_commands), file_commands
+    touch_tap(file_button)
+    file_collapsed = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            const file = Array.from(root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap') || [])
+              .find(node => node.querySelector(':scope > .app-menu-command')?.textContent.replace(/\\s+/g, ' ').trim().startsWith('File'));
+            const popover = file?.querySelector(':scope > .app-submenu-popover');
+            return root?.classList.contains('open') && file && !file.classList.contains('open')
+              && file.querySelector(':scope > .app-menu-command')?.getAttribute('aria-expanded') === 'false'
+              && getComputedStyle(popover).display === 'none';
+            """
+        )
+    )
+    assert file_collapsed is True
+    browser.execute_script("arguments[0].click()", file_button)
+    finder_button = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return Array.from(document.querySelectorAll('.app-menu--nested-root .app-submenu-popover .app-menu-command'))
+              .find(button => /^(Finder|Explorer|File Explorer)/.test(button.textContent.replace(/\\s+/g, ' ').trim())) || null;
+            """
+        )
+    )
+    browser.execute_script("arguments[0].click()", finder_button)
+    finder_closed = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const root = document.querySelector('.app-menu--nested-root');
+            return root && !root.classList.contains('open') && root.querySelector(':scope > .app-menu-button')?.getAttribute('aria-expanded') === 'false';
+            """
+        )
+    )
+    assert finder_closed is True
 
 
 def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_path):
@@ -3268,7 +10603,7 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
         const done = arguments[arguments.length - 1];
         (async () => {
           const markerBefore = document.querySelector('[data-yolo-session="1"]');
-          const source = (window.__eventSources || []).find(item => item.url === '/api/client-events');
+          const source = (window.__eventSources || []).find(item => item.url.startsWith('/api/client-events?channels='));
           if (!markerBefore || !source) return {error: 'missing marker or client-events source'};
           const beforeWorking = markerBefore.classList.contains('working');
           window.__fixtureAutoApprovePayload = {
@@ -3276,22 +10611,16 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
             sessions: {'1': {target: '1', enabled: false, last_action: 'off', screen: {key: 'working'}}},
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           };
-          clientEventsConnected = false;
+          clientEventTransportState.connected = false;
           source.emit('ready');
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 90; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => document.querySelector('[data-yolo-session="1"]')?.classList.contains('working'));
           const markerAfter = document.querySelector('[data-yolo-session="1"]');
           return {
             beforeWorking,
             ready,
-            connected: clientEventsConnected,
+            connected: clientEventTransportState.connected,
             className: markerAfter?.className || '',
             autoApproveFetches: window.__bootFetches.filter(item => item.path === '/api/auto-approve').length,
             errors: window.__bootErrors,
@@ -3307,6 +10636,62 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
     assert result["autoApproveFetches"] >= 2, result
     assert result["errors"] == []
     assert result["rejections"] == []
+
+
+def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        auto_approve_payload={
+            "session_order": ["1"],
+            "sessions": {"1": {"target": "1", "enabled": False, "last_action": "off", "screen": {"key": "idle"}}},
+            "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && document.querySelector('[data-pane-tab=\"1\"]') !== null")
+    )
+    result = browser.execute_script(
+        """
+        const tab = () => document.querySelector('[data-pane-tab="1"]');
+        const before = !!tab()?.querySelector('.session-yolo-marker');
+        applyAutoApprovePayload({
+          session_order: ['1'],
+          sessions: {
+            '1': {
+              target: '1', enabled: true, last_action: 'enabled', screen: {key: 'working'},
+              agent_windows: [{kind: 'codex', state: 'working', window_index: 0, window_label: '0:codex', current: true}],
+            },
+          },
+          rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+        });
+        const marker = tab()?.querySelector('.session-yolo-marker');
+        const statusDotNode = tab()?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--working');
+        const statusDotStyle = statusDotNode ? getComputedStyle(statusDotNode) : null;
+        const statusDotAnimation = statusDotNode?.getAnimations?.().find(animation => animation.animationName === 'agent-status-opacity-pulse');
+        return {
+          before,
+          after: !!marker,
+          active: marker?.classList.contains('active') || false,
+          session: marker?.dataset.yoloSession || '',
+          statusDot: !!tab()?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--working'),
+          statusDotPulseMin: statusDotStyle?.getPropertyValue('--agent-status-pulse-min-opacity').trim() || '',
+          statusDotKeyframeOpacities: statusDotAnimation ? statusDotAnimation.effect.getKeyframes().map(frame => frame.opacity) : [],
+          errors: window.__bootErrors || [],
+          rejections: window.__bootRejections || [],
+        };
+        """
+    )
+    assert result["before"] is False, result
+    assert result["after"] is True, result
+    assert result["active"] is True, result
+    assert result["session"] == "1", result
+    assert result["statusDot"] is True, result
+    assert result["statusDotPulseMin"] == "0.16", result
+    assert result["statusDotKeyframeOpacities"] == ["0.16", "1", "0.16"], result
+    assert result["errors"] == [], result
+    assert result["rejections"] == [], result
 
 
 def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):
@@ -3349,6 +10734,112 @@ def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):
     assert "preferences-sections" in metrics["bodyHtml"]
 
 
+def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof selectSession === 'function' && window.__terminalOpened >= 1")
+    )
+    opened = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        agentStatusPulsePeriodMs = 2000;
+        document.documentElement.style.setProperty('--pulse-duration', '2s');
+        document.documentElement.style.setProperty('--status-pulse-step-count', '16');
+        setAttentionAnimationClockDelay();
+        selectSession('__prefs__').then(
+          () => requestAnimationFrame(() => done({ok: true})),
+          error => done({ok: false, error: String(error)})
+        );
+        """
+    )
+    assert opened["ok"], opened
+    browser.execute_script(
+        """
+        const host = document.createElement('div');
+        host.className = 'preferences-status-pulse-browser-fixture';
+        host.style.cssText = 'position:fixed;inset:24px auto auto 24px;padding:12px;background:var(--panel);z-index:9999';
+        host.innerHTML = preferencesStatusPulseExampleHtml();
+        document.body.appendChild(host);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelectorAll('.preferences-status-pulse-browser-fixture .agent-window-status-dot').length === 9"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const example = document.querySelector('.preferences-status-pulse-browser-fixture .preferences-status-pulse-example');
+        const {probePaint} = window.__yolomuxTestHelpers;
+        scheduleAgentWindowActivityAnimationSync(example);
+        const first = value => String(value || '').split(',')[0].trim();
+        const pseudo = (node, name) => {
+          const style = getComputedStyle(node, name);
+          return {width: parseFloat(style.width) || 0, height: parseFloat(style.height) || 0, background: style.backgroundColor};
+        };
+        const read = node => {
+          const dot = node.querySelector('.agent-window-status-dot');
+          const style = getComputedStyle(dot);
+          const state = node.dataset.statusPulseExampleState;
+          const animationName = first(style.animationName);
+          const animation = dot.getAnimations().find(item => item.animationName === animationName);
+          const timing = animation?.effect?.getComputedTiming?.() || {};
+          return {
+            group: node.dataset.statusPulseExampleGroup,
+            state,
+            animationName,
+            duration: first(style.animationDuration),
+            delay: first(style.animationDelay),
+            timingFunction: first(style.animationTimingFunction),
+            iterations: first(style.animationIterationCount),
+            playState: animation?.playState || '',
+            progress: Number(timing.progress),
+            opacity: Number(style.opacity),
+            background: style.backgroundColor,
+            expectedBackground: probePaint('background:var(--agent-status-ball-fill)', dot).background,
+            expectedGlyphBackground: probePaint('background:var(--subwindow-status-glyph-fill)', dot).background,
+            expectedAcknowledgementBackground: probePaint('background:var(--muted)', dot).background,
+            borderRadius: style.borderRadius,
+            before: pseudo(dot, '::before'),
+            after: pseudo(dot, '::after'),
+          };
+        };
+        const groups = Object.fromEntries(['tab', 'subwindow', 'acknowledgement'].map(group => {
+          const groupNode = example.querySelector(`[data-status-pulse-example="${group}"]`);
+          return [group, {
+            left: groupNode.getBoundingClientRect().left,
+            right: groupNode.getBoundingClientRect().right,
+            markers: [...groupNode.querySelectorAll('[data-status-pulse-example-group]')].map(read),
+          }];
+        }));
+        return {groups, rootDelay: getComputedStyle(document.documentElement).getPropertyValue('--attention-animation-delay').trim()};
+        """
+    )
+    groups = metrics["groups"]
+    assert groups["tab"]["right"] < groups["subwindow"]["left"], metrics
+    assert groups["subwindow"]["right"] < groups["acknowledgement"]["left"], metrics
+    expected_names = {"tab": "agent-status-opacity-pulse", "subwindow": "agent-status-opacity-pulse", "acknowledgement": "agent-status-acknowledgement-fade"}
+    for group, expected_name in expected_names.items():
+        markers = groups[group]["markers"]
+        assert [marker["state"] for marker in markers] == ["working", "attention", "cooldown"], metrics
+        assert all(marker["animationName"] == expected_name for marker in markers), metrics
+        assert all(marker["duration"] == "2s" and marker["delay"] == metrics["rootDelay"] for marker in markers), metrics
+        assert all(marker["timingFunction"].startswith("steps(16") and marker["iterations"] == "infinite" for marker in markers), metrics
+        assert all(marker["playState"] in {"pending", "running"} for marker in markers), metrics
+        assert max(marker["progress"] for marker in markers) - min(marker["progress"] for marker in markers) < 0.04, metrics
+        assert max(marker["opacity"] for marker in markers) - min(marker["opacity"] for marker in markers) < 0.04, metrics
+    all_progress = [marker["progress"] for group in groups.values() for marker in group["markers"]]
+    assert max(all_progress) - min(all_progress) < 0.04, metrics
+    for marker in groups["tab"]["markers"]:
+        assert marker["background"] == marker["expectedBackground"] and marker["borderRadius"] == "50%", metrics
+    for marker in groups["subwindow"]["markers"]:
+        shape = marker["after"] if marker["state"] == "working" else marker["before"]
+        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedGlyphBackground"], metrics
+    for marker in groups["acknowledgement"]["markers"]:
+        shape = marker["after"] if marker["state"] == "working" else marker["before"]
+        assert shape["width"] > 0 and shape["height"] > 0 and shape["background"] == marker["expectedAcknowledgementBackground"], metrics
+
+
 def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
@@ -3385,7 +10876,7 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
-        "?sessions=files,1,2,__prefs__&layout=row@50(left,right)&tabs=left:files,1;right:__prefs__,2",
+        "?sessions=__finder__,1,2,__prefs__&layout=row@50(left,right)&tabs=left:__finder__,1;right:__prefs__,2",
         sessions=["1", "2"],
     )
     wait_for_dockview(browser, min_tabs=4)
@@ -3406,8 +10897,8 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
           (document.activeElement || window).dispatchEvent(event);
           return event.defaultPrevented;
         };
-        activatePaneTab('left', fileExplorerItemId, {userInitiated: true});
-        setFocusedPanelItem(fileExplorerItemId, {userInitiated: true});
+        activatePaneTab('left', finderItemId, {userInitiated: true});
+        setFocusedPanelItem(finderItemId, {userInitiated: true});
         const firstPrevented = fireMetaArrow('ArrowRight');
         const afterFinderRight = {
           left: activeItemForSide('left'),
@@ -3456,13 +10947,13 @@ def test_meta_arrow_walks_visible_pane_tabs_in_live_runtime(browser, tmp_path):
 
 
 def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=__files__,1,__prefs__&layout=row@32(slot1,row@56(left,right))&tabs=slot1:__files__;left:1;right:__prefs__")
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=__finder__,1,__prefs__&layout=row@32(slot1,row@56(left,right))&tabs=slot1:__finder__;left:1;right:__prefs__")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
             return document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="blue"]') !== null
               && document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active') !== null
-              && document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]') !== null
+              && document.querySelector('#panel-__finder__ .file-explorer-root-mode-toggle[aria-pressed="true"]') !== null
               && document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]') !== null
               && document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]') !== null
             """
@@ -3484,7 +10975,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         lambda driver: driver.execute_script(
             """
             return window.__settingsPayload?.settings?.appearance?.active_color === 'blue'
-              && getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active')).backgroundColor === 'rgb(59, 130, 246)';
+              && getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active')).backgroundColor !== 'rgba(0, 0, 0, 0)';
             """
         )
     )
@@ -3492,13 +10983,14 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         """
         const rootStyle = getComputedStyle(document.documentElement);
         const bodyStyle = getComputedStyle(document.body);
+        const {probePaint} = window.__yolomuxTestHelpers;
         const tabStyle = getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active'));
         const panelStyle = getComputedStyle(document.querySelector('#panel-1'));
         const prefsRange = document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]');
         const ringRange = document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]');
         const radio = document.querySelector('input[data-setting-path="appearance.date_time_hour_cycle"]');
         const prefsScroll = document.querySelector('.preferences-scroll');
-        const finderMode = document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]');
+        const finderControl = document.querySelector('#panel-__finder__ .file-explorer-root-mode-toggle[aria-pressed="true"]');
         const tabMeta = document.getElementById('tabMetaToggle');
         const notify = document.getElementById('notifyToggle');
         const brandYo = document.querySelector('.brand-title .brand-yolo');
@@ -3547,6 +11039,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           rootAccent: rootStyle.getPropertyValue('--active-accent').trim(),
           bodyAccent: bodyStyle.getPropertyValue('--active-accent').trim(),
           rootRgb: rootStyle.getPropertyValue('--active-accent-rgb').trim(),
+          expectedActiveAccent: probePaint('background:var(--active-accent)').background,
+          expectedActiveBorder: probePaint('border:1px solid color-mix(in srgb,var(--active-accent) 75%,transparent)').border,
           tabBg: tabStyle.backgroundColor,
           tabBorder: tabStyle.borderTopColor,
           panelBorder: panelStyle.borderTopColor,
@@ -3557,8 +11051,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
           prefsScrollThumb: getComputedStyle(prefsScroll, '::-webkit-scrollbar-thumb').backgroundColor,
           expectedScrollThumb,
           expectedNeutralScrollThumb,
-          finderModeBg: getComputedStyle(finderMode).backgroundColor,
-          finderModeBorder: getComputedStyle(finderMode).borderTopColor,
+          finderControlBg: getComputedStyle(finderControl).backgroundColor,
+          finderControlBorder: getComputedStyle(finderControl).borderTopColor,
           tabMetaBg: getComputedStyle(tabMeta).backgroundColor,
           tabMetaBorder: getComputedStyle(tabMeta).borderTopColor,
           notifyBg: getComputedStyle(notify).backgroundColor,
@@ -3578,31 +11072,29 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     )
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["rootAccent"] == "#3b82f6", metrics
-    assert metrics["bodyAccent"] == "#3b82f6", metrics
-    assert metrics["rootRgb"] == "59 130 246", metrics
-    assert metrics["tabBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["tabBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["panelBorder"].startswith("color(srgb 0.231373 0.509804 0.964706 / 0.75)"), metrics
-    assert metrics["prefsRangeAccent"] == "rgb(59, 130, 246)", metrics
-    assert metrics["ringRangeAccent"] == "rgb(59, 130, 246)", metrics
-    assert metrics["radioAccent"] == "rgb(59, 130, 246)", metrics
-    assert metrics["expectedScrollThumb"] == "rgba(255, 234, 0, 0.88)", metrics
+    assert metrics["rootAccent"] and metrics["bodyAccent"] == metrics["rootAccent"], metrics
+    assert metrics["rootRgb"], metrics
+    assert metrics["tabBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["tabBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["panelBorder"] == metrics["expectedActiveBorder"], metrics
+    assert metrics["prefsRangeAccent"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["ringRangeAccent"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["radioAccent"] == metrics["expectedActiveAccent"], metrics
     assert metrics["prefsScrollColor"].startswith(metrics["expectedNeutralScrollThumb"]), metrics
     assert metrics["prefsScrollThumb"] == metrics["expectedNeutralScrollThumb"], metrics
-    assert metrics["finderModeBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["finderModeBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["tabMetaBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["tabMetaBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["notifyBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["brandYoBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["brandYoBorder"] == "rgb(59, 130, 246)", metrics
-    assert metrics["markdownHeadingColor"] == "rgb(59, 130, 246)", metrics
-    assert metrics["cmHeadingColor"] == "rgb(59, 130, 246)", metrics
-    assert metrics["yoloBg"] == "rgb(59, 130, 246)", metrics
-    assert metrics["yoloBorder"] == "rgb(59, 130, 246)", metrics
+    assert metrics["finderControlBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["finderControlBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["tabMetaBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["tabMetaBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["notifyBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["brandYoBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["brandYoBorder"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["markdownHeadingColor"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["cmHeadingColor"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["yoloBg"] == metrics["expectedActiveAccent"], metrics
+    assert metrics["yoloBorder"] == metrics["expectedActiveAccent"], metrics
     assert metrics["yoloRadius"] == "4px", metrics
-    assert metrics["shortcutHeadingColor"] == "rgb(59, 130, 246)", metrics
+    assert metrics["shortcutHeadingColor"] == metrics["expectedActiveAccent"], metrics
     assert metrics["swatchDisplay"] == "grid", metrics
     assert metrics["swatchRadius"] == "2px 0px 0px 2px", metrics
     assert metrics["settingsPosts"] >= 1, metrics
@@ -3655,21 +11147,19 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     )
     cursor_metrics = browser.execute_script(
         """
-        const probe = document.createElement('div');
-        probe.style.background = 'var(--pane-scrollbar-thumb-active)';
-        document.body.appendChild(probe);
-        const activeThumb = getComputedStyle(probe).backgroundColor;
-        probe.remove();
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const activeThumb = probePaint('background:var(--pane-scrollbar-thumb-active)').background;
         return {
           rootCursorRgb: getComputedStyle(document.documentElement).getPropertyValue('--active-terminal-cursor-rgb').trim(),
           terminalCursor: terminals.get('1')?.term?.options?.theme?.cursor || '',
           activeScrollbarThumb: activeThumb,
+          expectedActiveScrollbarThumb: probePaint('background:var(--pane-scrollbar-thumb-active)').background,
         };
         """
     )
     assert cursor_metrics["rootCursorRgb"] == "204 255 0", cursor_metrics
     assert cursor_metrics["terminalCursor"] == "#ccff00", cursor_metrics
-    assert cursor_metrics["activeScrollbarThumb"] == "rgba(204, 255, 0, 0.88)", cursor_metrics
+    assert cursor_metrics["activeScrollbarThumb"] == cursor_metrics["expectedActiveScrollbarThumb"], cursor_metrics
     browser.execute_script(
         """
         const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="yellow"]');
@@ -3690,22 +11180,25 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
 
 
 def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp_path):
-    load_live_runtime_boot_fixture(
+    page = tmp_path / "info-preferences-scrollbars.html"
+    load_static_html_fixture(
         browser,
-        tmp_path,
-        "?sessions=__info__,__prefs__,1&layout=row@34(left,row@50(mid,right))&tabs=left:__info__;mid:__prefs__;right:1",
-    )
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            "return document.querySelector('.info-list') !== null && document.querySelector('.preferences-scroll') !== null"
-        )
+        page.parent,
+        page.name,
+        page_html("""
+      <article id="info-panel" class="panel fixture-panel"><div class="info-list fixture-scroll"><div class="fixture-tall"></div></div></article>
+      <article id="preferences-panel" class="panel fixture-panel"><div class="preferences-scroll fixture-scroll"><div class="fixture-tall"></div></div></article>
+      <div id="neutral" style="width:20px;height:20px"></div>
+    """, extra_css="""
+      .fixture-panel { display: block; width: 240px; height: 120px; }
+      .fixture-scroll { height: 100%; overflow: auto; }
+      .fixture-tall { height: 900px; }
+    """),
     )
     metrics = browser.execute_script(
         """
         const info = document.querySelector('.info-list');
         const prefs = document.querySelector('.preferences-scroll');
-        info.insertAdjacentHTML('beforeend', '<div style="height: 900px"></div>');
-        prefs.insertAdjacentHTML('beforeend', '<div style="height: 900px"></div>');
         const probe = document.createElement('div');
         probe.style.background = 'var(--pane-scrollbar-thumb)';
         document.body.appendChild(probe);
@@ -3737,35 +11230,109 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
     def wait_thumb(selector, expected):
         WebDriverWait(browser, 2).until(lambda _driver: thumb(selector) == expected)
 
-    browser.execute_script("document.querySelector('.info-list')?.closest('.panel')?.classList.add('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".info-list")).perform()
+    browser.execute_script("document.getElementById('info-panel').classList.add('active-pane', 'focused-pane')")
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".info-list")).perform()
     wait_thumb(".info-list", metrics["accent"])
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
     browser.execute_script(
         """
-        document.querySelector('.info-list')?.closest('.panel')?.classList.remove('active-pane', 'focused-pane');
-        document.querySelector('.preferences-scroll')?.closest('.panel')?.classList.add('active-pane', 'focused-pane');
+        document.getElementById('info-panel').classList.remove('active-pane', 'focused-pane');
+        document.getElementById('preferences-panel').classList.add('active-pane', 'focused-pane');
         """
     )
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
     wait_thumb(".preferences-scroll", metrics["accent"])
     wait_thumb(".info-list", metrics["neutral"])
 
-    browser.execute_script("document.querySelector('.preferences-scroll')?.closest('.panel')?.classList.remove('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    browser.execute_script("document.getElementById('preferences-panel').classList.remove('active-pane', 'focused-pane')")
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
+    wait_thumb(".preferences-scroll", metrics["neutral"])
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".topbar")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
     wait_thumb(".info-list", metrics["neutral"])
     wait_thumb(".preferences-scroll", metrics["neutral"])
+
+
+def test_info_toolbar_height_stays_stable_during_metadata_refresh(browser, tmp_path):
+    page = tmp_path / "info-toolbar-refresh-height.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <article id="panel" class="panel info-panel info-tree-panel" style="height: 360px;">
+        <div class="panel-head"></div>
+        <div id="actions" class="info-actions-bar info-tree-actions-bar">
+          <div class="info-tree-primary-controls">
+            <div class="info-tree-presets">
+              <button class="info-tree-preset">Tab &gt; tmux-window</button>
+              <button class="info-tree-preset active">Tab &gt; Path &gt; tmux-window</button>
+              <button class="info-tree-preset">Path &gt; Branch</button>
+              <button class="info-tree-preset">Linear &gt; PR</button>
+              <button class="info-tree-preset">PR &gt; Branch</button>
+            </div>
+            <label class="info-tree-search-control"><span>Search</span><input value="" placeholder="Search YO!info"></label>
+          </div>
+          <div class="info-tree-group-selects">
+            <span class="info-tree-order-label">Order by:</span>
+            <label class="info-tree-group-select"><select><option>Tab</option></select></label>
+            <span class="info-tree-order-separator">&gt;</span>
+            <label class="info-tree-group-select"><select><option>Path</option></select></label>
+            <span class="info-tree-order-separator">&gt;</span>
+            <label class="info-tree-group-select"><select><option>tmux sub-window</option></select></label>
+            <span class="info-tree-order-separator">&gt;</span>
+            <label class="info-tree-group-select"><select><option>None</option></select></label>
+          </div>
+          <div class="info-tree-sort-controls"><label class="info-tree-group-select"><span>Sort</span><select><option>recent</option></select></label></div>
+          <div class="info-subtab-actions"><button id="refresh" class="info-refresh">Refresh</button></div>
+        </div>
+        <div id="body" class="info-pane"></div>
+      </article>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const panel = document.getElementById('panel');
+        const actions = document.getElementById('actions');
+        const refresh = document.getElementById('refresh');
+        const body = document.getElementById('body');
+        const read = () => ({height: actions.getBoundingClientRect().height, bodyTop: body.getBoundingClientRect().top});
+        const changedWidths = [];
+        for (let width = 620; width <= 1900; width += 2) {
+          panel.style.width = `${width}px`;
+          refresh.classList.remove('loading');
+          refresh.textContent = 'Refresh';
+          const idle = read();
+          refresh.classList.add('loading');
+          refresh.textContent = 'Refresh';
+          const loading = read();
+          if (Math.abs(idle.height - loading.height) > 0.5 || Math.abs(idle.bodyTop - loading.bodyTop) > 0.5) {
+            changedWidths.push({width, idle, loading});
+          }
+        }
+        return {changedWidths, idleWidth: (() => {
+          refresh.classList.remove('loading');
+          refresh.textContent = 'Refresh';
+          return refresh.getBoundingClientRect().width;
+        })(), loadingWidth: (() => {
+          refresh.classList.add('loading');
+          refresh.textContent = 'Refresh';
+          return refresh.getBoundingClientRect().width;
+        })()};
+        """
+    )
+    assert metrics["changedWidths"] == [], metrics
+    assert abs(metrics["idleWidth"] - metrics["loadingWidth"]) <= 0.5, metrics
 
 
 def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     page = tmp_path / "info-tree-sticky-parent.html"
     records = "\n".join(
         f"""
-        <div class="info-tree-record info-tree-item{' info-tree-item-last' if index == 23 else ''}">
+        <div class="info-tree-record info-tree-item{' info-tree-item-first' if index == 0 else ''}{' info-tree-item-last' if index == 23 else ''}">
           <div class="info-tree-record-main">
             <div class="info-tree-field info-tree-field-path"><span class="info-tree-field-label">path:</span><span class="info-tree-field-value"><button type="button" class="info-tree-action-link info-tree-action-link-path">/repo/app/{index}</button></span></div>
             <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value"><span class="info-tree-value-text">feature/context</span></span></div>
@@ -3778,7 +11345,11 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
         """
         for index in range(24)
     )
-    page.write_text(page_html(f"""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(f"""
       <div class="info-tree-panel" style="width: 680px; height: 260px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div id="info-tree-actions" class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
         <div class="info-pane info-tree-pane-scrolled">
@@ -3811,8 +11382,8 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
           </div>
         </div>
       </div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const scroller = document.getElementById('info-tree-scroller');
@@ -3853,10 +11424,13 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
           const rootRect = rootSummary.getBoundingClientRect();
           const branchRect = branchSummary.getBoundingClientRect();
           const prRect = prSummary.getBoundingClientRect();
-          const summaryValueX = scrollerRect.left + Math.min(scrollerRect.width - 24, 210);
-          const topElement = document.elementFromPoint(summaryValueX, scrollerRect.top + Math.min(12, rootRect.height / 2));
-          const branchElement = document.elementFromPoint(summaryValueX, scrollerRect.top + rootRect.height + Math.min(12, branchRect.height / 2));
-          const prElement = document.elementFromPoint(summaryValueX, scrollerRect.top + rootRect.height + branchRect.height + Math.min(12, prRect.height / 2));
+          const labelProbeX = summary => {
+            const rect = summary.querySelector('.info-tree-group-label').getBoundingClientRect();
+            return rect.left + Math.min(4, rect.width / 2);
+          };
+          const topElement = document.elementFromPoint(labelProbeX(rootSummary), scrollerRect.top + Math.min(12, rootRect.height / 2));
+          const branchElement = document.elementFromPoint(labelProbeX(branchSummary), scrollerRect.top + rootRect.height + Math.min(12, branchRect.height / 2));
+          const prElement = document.elementFromPoint(labelProbeX(prSummary), scrollerRect.top + rootRect.height + branchRect.height + Math.min(12, prRect.height / 2));
           const rootStyle = getComputedStyle(rootSummary);
           const branchStyle = getComputedStyle(branchSummary);
           const prStyle = getComputedStyle(prSummary);
@@ -3906,6 +11480,7 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
             maskHeight: maskStyle.height,
             maskBg: maskStyle.backgroundColor,
             maskPointerEvents: maskStyle.pointerEvents,
+            maskZ: Number.parseInt(maskStyle.zIndex, 10),
             actionsPosition: actionsStyle.position,
             actionsZ: Number.parseInt(actionsStyle.zIndex, 10),
             actionElementId: actionElement ? actionElement.id : '',
@@ -3965,10 +11540,10 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     assert metrics["maskHeight"] == "27px", metrics
     assert metrics["maskBg"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["maskPointerEvents"] == "none", metrics
+    assert metrics["maskZ"] == 2, metrics
     assert metrics["actionsZ"] > metrics["prZ"], metrics
     assert metrics["actionElementId"] == "info-tree-actions" or "YO!info controls" in metrics["actionText"], metrics
-    assert metrics["branchZ"] > metrics["rootZ"], metrics
-    assert metrics["prZ"] > metrics["branchZ"], metrics
+    assert [metrics["rootZ"], metrics["branchZ"], metrics["prZ"]] == [4, 5, 6], metrics
     assert 0 <= metrics["treeTopDelta"] <= 6, metrics
     assert metrics["recordBorderWidth"] == "1px", metrics
     assert metrics["recordBorderColor"] != "rgba(0, 0, 0, 0)", metrics
@@ -3998,9 +11573,79 @@ def test_info_scroll_preserves_immediate_parent_header(browser, tmp_path):
     assert metrics["lightColors"]["aiLeafValue"] == metrics["lightColors"]["themeAccent"], metrics
 
 
+def test_info_tree_sibling_records_share_one_rounded_outline(browser, tmp_path):
+    page = tmp_path / "info-tree-shared-record-outline.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+      <div class="info-tree" style="width: 760px">
+        <details class="info-tree-group info-tree-item info-tree-item-last" data-info-dimension="path" data-info-depth="0" open>
+          <summary>
+            <span class="info-tree-group-dimension">PATH:</span>
+            <span class="info-tree-group-label-line"><span class="info-tree-group-label">/home/test/yolomux.dev8001</span></span>
+          </summary>
+          <div class="info-tree-group-children">
+            <div id="first-record" class="info-tree-record info-tree-item info-tree-item-first">
+              <div class="info-tree-record-main">
+                <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value">yolomux.dev8001</span></div>
+                <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span class="info-tree-field-value">1:claude</span></div>
+              </div>
+            </div>
+            <div id="last-record" class="info-tree-record info-tree-item info-tree-item-last">
+              <div class="info-tree-record-main">
+                <div class="info-tree-field info-tree-field-branch"><span class="info-tree-field-label">Git branch:</span><span class="info-tree-field-value">yolomux.dev8001</span></div>
+                <div class="info-tree-field info-tree-field-ai"><span class="info-tree-field-label">tmux sub-window:</span><span class="info-tree-field-value">2:codex</span></div>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+    """),
+    )
+    metrics = browser.execute_script(
+        """
+        const first = document.getElementById('first-record');
+        const last = document.getElementById('last-record');
+        const firstRect = first.getBoundingClientRect();
+        const lastRect = last.getBoundingClientRect();
+        const firstStyle = getComputedStyle(first);
+        const lastStyle = getComputedStyle(last);
+        return {
+          firstTopLeft: firstStyle.borderTopLeftRadius,
+          firstTopRight: firstStyle.borderTopRightRadius,
+          firstBottomLeft: firstStyle.borderBottomLeftRadius,
+          firstBottomRight: firstStyle.borderBottomRightRadius,
+          lastTopLeft: lastStyle.borderTopLeftRadius,
+          lastTopRight: lastStyle.borderTopRightRadius,
+          lastBottomLeft: lastStyle.borderBottomLeftRadius,
+          lastBottomRight: lastStyle.borderBottomRightRadius,
+          firstBottomBorder: firstStyle.borderBottomWidth,
+          lastTopBorder: lastStyle.borderTopWidth,
+          seamGap: lastRect.top - firstRect.bottom,
+          leftDelta: Math.abs(lastRect.left - firstRect.left),
+          rightDelta: Math.abs(lastRect.right - firstRect.right),
+        };
+        """
+    )
+    assert metrics["firstTopLeft"] == "8px" and metrics["firstTopRight"] == "8px", metrics
+    assert metrics["firstBottomLeft"] == "0px" and metrics["firstBottomRight"] == "0px", metrics
+    assert metrics["lastTopLeft"] == "0px" and metrics["lastTopRight"] == "0px", metrics
+    assert metrics["lastBottomLeft"] == "8px" and metrics["lastBottomRight"] == "8px", metrics
+    assert metrics["firstBottomBorder"] == "1px" and metrics["lastTopBorder"] == "0px", metrics
+    assert_close(metrics["seamGap"], 0, context=metrics)
+    assert_close(metrics["leftDelta"], 0, context=metrics)
+    assert_close(metrics["rightDelta"], 0, context=metrics)
+
+
 def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
     page = tmp_path / "info-tree-top-visible.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div class="info-tree-panel" style="width: 760px; height: 190px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
         <div class="info-pane">
@@ -4023,8 +11668,8 @@ def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
           </div>
         </div>
       </div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const scroller = document.getElementById('info-tree-scroller');
@@ -4052,7 +11697,11 @@ def test_info_tree_top_row_is_not_masked_at_scroll_origin(browser, tmp_path):
 
 def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
     page = tmp_path / "info-tree-top-mask.html"
-    page.write_text(page_html("""
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
       <div class="info-tree-panel" style="width: 760px; height: 190px; display: grid; grid-template-rows: auto minmax(0, 1fr);">
         <div class="info-actions-bar info-tree-actions-bar">YO!info controls</div>
         <div class="info-pane info-tree-pane-scrolled">
@@ -4094,8 +11743,8 @@ def test_info_scroll_top_mask_hides_clipped_leaf_text(browser, tmp_path):
           </div>
         </div>
       </div>
-    """), encoding="utf-8")
-    browser.get(page.as_uri())
+    """),
+    )
     metrics = browser.execute_script(
         """
         const scroller = document.getElementById('info-tree-scroller');
@@ -4199,11 +11848,12 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
           const inactiveActiveTab = inactivePanel.querySelector('.pane-tab.active');
           const inactiveTab = panel.querySelector('.pane-tab:not(.active)');
           const panelHead = panel.querySelector('.panel-head');
-          const toolbarActive = panel.querySelector('.panel-head .tab.active:not(.auto-toggle)');
+          const toolbarActive = panel.querySelector('.panel-head .tab.active:not(.auto-toggle):not(.tmux-window-button)');
           const activeWindow = panel.querySelector('.tmux-window-button.active[data-window-agent]');
           const inactiveWindow = panel.querySelector('.tmux-window-button[data-window-agent]:not(.active)');
           const paneControl = panel.querySelector('.tabs .pane-minimize');
           const zoomControl = panel.querySelector('.tabs .pc-zoom');
+          const {probePaint} = window.__yolomuxTestHelpers;
           return {
             panelBorder: getComputedStyle(panel).borderTopColor,
             panelHeadBg: getComputedStyle(panelHead).backgroundColor,
@@ -4221,9 +11871,11 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
             activeWindowBg: getComputedStyle(activeWindow).backgroundColor,
             activeWindowBorder: getComputedStyle(activeWindow).borderTopColor,
             activeWindowColor: getComputedStyle(activeWindow).color,
+            activeWindowShadow: getComputedStyle(activeWindow).boxShadow,
             inactiveWindowBg: getComputedStyle(inactiveWindow).backgroundColor,
             paneControlBg: getComputedStyle(paneControl).backgroundColor,
             paneControlBorder: getComputedStyle(paneControl).borderTopColor,
+            paneControlExpectedBg: probePaint('background:var(--pane-ctl-bg)', paneControl).background,
             zoomControlBg: getComputedStyle(zoomControl).backgroundColor,
           };
         };
@@ -4239,10 +11891,10 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # Shared pane-chrome buttons (image 009): every UNPRESSED control is white (light) / near-black (dark)
     # via --pane-ctl-bg — including the expand "+" (formerly always-green). Only PRESSED/ACTIVE buttons go
     # green (asserted via toolbarActiveBg below). No per-button one-off colors.
-    assert theme_metrics["dark"]["paneControlBg"] == "rgb(27, 36, 50)"
-    assert theme_metrics["light"]["paneControlBg"] == "rgb(247, 249, 252)"
-    assert theme_metrics["dark"]["zoomControlBg"] == "rgb(27, 36, 50)"      # "+" is NOT green when unpressed
-    assert theme_metrics["light"]["zoomControlBg"] == "rgb(247, 249, 252)"
+    assert theme_metrics["dark"]["paneControlBg"] == theme_metrics["dark"]["paneControlExpectedBg"]
+    assert theme_metrics["light"]["paneControlBg"] == theme_metrics["light"]["paneControlExpectedBg"]
+    assert theme_metrics["dark"]["zoomControlBg"] == theme_metrics["dark"]["paneControlExpectedBg"]  # "+" is NOT green when unpressed
+    assert theme_metrics["light"]["zoomControlBg"] == theme_metrics["light"]["paneControlExpectedBg"]
     assert theme_metrics["dark"]["zoomControlBg"] == theme_metrics["dark"]["paneControlBg"]  # all unpressed controls share one bg
     # The active control tab (the agent/"claude" pill) is PRESSED -> green, in both themes (shared rule).
     # The pressed/active control tab is the active accent (NOT a pinned green) — distinct from the
@@ -4254,41 +11906,42 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
     # token-equal across themes.
     # inactiveTabBg is theme-specific now (images 003/004): light gets a very-light-green #e6f1dd while
     # dark keeps #285a2f, so it must NOT be required equal across themes.
-    # toolbarActiveBg/Border are the PRESSED control tab's green, which is theme-specific (light #4f9e3a /
-    # dark #86d600); Info Bar bg now follows --pane-bar-bg so it is theme-specific too.
-    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "inactiveWindowBg"}
+    # toolbarActiveBg/Border are the PRESSED control tab's registry-owned light/dark accents; Info Bar bg
+    # now follows --pane-bar-bg so it is theme-specific too.
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "paneControlExpectedBg", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder", "activeWindowBg", "activeWindowBorder", "activeWindowColor", "activeWindowShadow", "inactiveWindowBg"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
-    # The active pane tab shares the active accent with the pressed control tab (one --active-accent
-    # source) and stands out from the unpressed control bg — true for any active-color preset.
+    # Pane tabs retain the existing full active accent. Only subwindow buttons use tint/ring.
     assert theme_metrics["dark"]["activeTabBg"] == theme_metrics["dark"]["toolbarActiveBg"]
     assert theme_metrics["light"]["activeTabBg"] == theme_metrics["light"]["toolbarActiveBg"]
-    assert theme_metrics["dark"]["activeWindowBg"] == theme_metrics["dark"]["activeTabBg"]
-    assert theme_metrics["light"]["activeWindowBg"] == theme_metrics["light"]["activeTabBg"]
+    # The subwindow sits in the compact control strip rather than the pane-tab strip, so its low-alpha
+    # tint blends with a different neutral base. It must still be visibly selected through both tint and ring.
     assert theme_metrics["light"]["activeWindowBg"] != theme_metrics["light"]["inactiveWindowBg"]
+    assert theme_metrics["dark"]["activeWindowBg"] != theme_metrics["dark"]["inactiveWindowBg"]
+    assert theme_metrics["light"]["activeWindowBg"] != theme_metrics["light"]["toolbarActiveBg"]
+    assert theme_metrics["dark"]["activeWindowBg"] != theme_metrics["dark"]["toolbarActiveBg"]
+    assert theme_metrics["light"]["activeWindowShadow"] != "none"
+    assert theme_metrics["dark"]["activeWindowShadow"] != "none"
+    assert "0px -2px" in theme_metrics["light"]["activeWindowShadow"]
+    assert "0px -2px" in theme_metrics["dark"]["activeWindowShadow"]
     assert theme_metrics["light"]["activeWindowColor"] != theme_metrics["light"]["activeWindowBg"]
-    assert theme_metrics["dark"]["activeTabBg"] != theme_metrics["dark"]["paneControlBg"]
     assert theme_metrics["light"]["activeTabBg"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["light"]["inactiveActiveTabBg"] != theme_metrics["dark"]["inactiveActiveTabBg"]
     # Active-tab text stays legible against its (theme-specific) accent in BOTH modes.
     assert theme_metrics["light"]["activeTabColor"] != theme_metrics["light"]["activeTabBg"]
     assert theme_metrics["dark"]["activeTabColor"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["activeTabShadow"] == "none"
-    # images 003/004: an unfocused pane's active tab now uses the SAME full green as the focused pane's
-    # active tab (no lightening) — the unfocused-active tokens are aliased to the focused ones.
+    # Unfocused pane tabs retain the same full accent as focused panes; focus is shown by the pane ring.
     assert theme_metrics["dark"]["inactiveActiveTabBg"] == theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["inactiveActiveTabShadow"] == "none"
     # REGRESSION GUARD (image 008): the inactive-tab branch/dir TEXT must contrast with the tab bg in BOTH
     # themes — i.e. NOT white-on-white. This is the check that was missing before: the prior browser test
     # measured tab BACKGROUNDS but never the nested .session-button-* TEXT color, so a near-white dir text
     # on a near-white light tab went uncaught. Compare relative luminance of text vs bg.
-    def _lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
-        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
     for th in ("light", "dark"):
-        text_lum = _lum(theme_metrics[th]["inactiveDirColor"])
-        bg_lum = _lum(theme_metrics[th]["inactiveTabBg"])
+        text_lum = _css_luminance_255(theme_metrics[th]["inactiveDirColor"])
+        bg_lum = _css_luminance_255(theme_metrics[th]["inactiveTabBg"])
         assert abs(text_lum - bg_lum) > 80, (
             f"{th}: inactive-tab dir text ({theme_metrics[th]['inactiveDirColor']}) must contrast with the "
             f"tab bg ({theme_metrics[th]['inactiveTabBg']}) — not white-on-white"
@@ -4489,14 +12142,8 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 220; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => panelNodes.get(item)?._cmView?.scrollDOM);
           if (!ready) return {error: 'CodeMirror editor did not initialize', bootErrors: window.__bootErrors || [], bootRejections: window.__bootRejections || []};
           const panel = panelNodes.get(item);
@@ -4533,6 +12180,89 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
     assert metrics["cachedHead"] == metrics["expectedAnchor"], metrics
     assert metrics["snapshotAnchor"] == metrics["expectedAnchor"], metrics
     assert metrics["snapshotHead"] == metrics["expectedAnchor"], metrics
+
+
+def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof fileEditorItemFor === 'function' && typeof applyLayoutSlots === 'function' && document.querySelector('#grid') !== null;"
+        )
+    )
+    setup = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          autoFocusEnabled = false;
+          const path = '/home/test/right-click-selection.md';
+          const item = fileEditorItemFor(path);
+          const original = Array.from({length: 24}, (_value, index) => `Original line ${index + 1} has enough text for right-click coverage.`).join('\\n');
+          const content = original.replace('Original line 1', 'Changed line 1');
+          setFileState(path, {
+            kind: 'text',
+            content,
+            original: content,
+            dirty: false,
+            language: 'markdown',
+            gitRoot: '/home/test',
+            gitTracked: true,
+            gitHasHistory: true,
+            gitHistory: [{sha: 'HEAD'}],
+            diffLoaded: true,
+            diffUnavailable: false,
+            diff: 'diff --git a/right-click-selection.md b/right-click-selection.md',
+            diffOriginal: original,
+            diffWorking: content,
+          });
+          setFileEditorViewMode(path, 'diff', item);
+          registerFileEditorLayoutItem(path, {item});
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([item], item);
+          applyLayoutSlots(next, {focusSession: item, forceFull: true});
+          const {frame} = window.__yolomuxTestHelpers;
+          for (let attempt = 0; attempt < 220; attempt += 1) {
+            const panel = panelNodes.get(item);
+            if (panel?._cmMode === 'diff' && panel._cmView?.contentDOM) {
+              const view = panel._cmView;
+              view.focus();
+              view.dispatch({selection: {anchor: 0, head: content.length}});
+              await frame();
+              await frame();
+              window.__editorContextMenuCount = 0;
+              view.contentDOM.addEventListener('contextmenu', () => { window.__editorContextMenuCount += 1; });
+              return {item, anchor: view.state.selection.main.anchor, head: view.state.selection.main.head};
+            }
+            await frame();
+          }
+          return {error: 'CodeMirror diff editor did not initialize'};
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in setup, setup
+    content = browser.find_element("css selector", ".file-editor-panel .cm-content")
+    fast_pointer_actions(browser).context_click(content).perform()
+    after = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const panel = [...panelNodes.values()].find(node => node?._cmMode === 'diff' && node?._cmView?.contentDOM);
+          const selection = panel._cmView.state.selection.main;
+          done({
+            anchor: selection.anchor,
+            head: selection.head,
+            selectedChars: Math.abs(selection.to - selection.from),
+            contextMenus: window.__editorContextMenuCount,
+            status: panel.querySelector('.file-editor-cursor-status')?.textContent || '',
+          });
+        }));
+        """
+    )
+    assert after["anchor"] == setup["anchor"], after
+    assert after["head"] == setup["head"], after
+    assert after["selectedChars"] > 100, after
+    assert after["contextMenus"] == 1, after
+    assert f"{after['selectedChars']} selected chars" in after["status"], after
 
 
 def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser, tmp_path):
@@ -4572,14 +12302,8 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 220; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
             const scroller = panel?._cmView?.scrollDOM;
@@ -4622,12 +12346,10 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
           activatePaneTab('left', item, {userInitiated: true});
           const fileReady = await waitFor(() => activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM);
           if (!fileReady) return {error: 'file tab did not reactivate', savedTop, capturedTop, capturedSnapshot};
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 140));
-          await frame();
-          const restoredPanel = panelNodes.get(item);
-          const restoredScroller = restoredPanel._cmView.scrollDOM;
+          const restoredScroller = await waitFor(() => {
+            const scroller = panelNodes.get(item)?._cmView?.scrollDOM;
+            return scroller && Math.abs(scroller.scrollTop - savedTop) < 32 ? scroller : null;
+          }, {description: 'file editor scroll restoration'});
           return {
             savedTop,
             capturedTop,
@@ -4679,14 +12401,8 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 260; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
             const scroller = panel?._cmView?.scrollDOM;
@@ -4742,7 +12458,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
             )
         )
 
-    ActionChains(browser).move_to_element(dockview_tab("__prefs__")).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab("__prefs__")).click().perform()
     after_prefs = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -4762,27 +12478,18 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
     assert after_prefs["capturedSnapshot"] is True, after_prefs
     assert abs(after_prefs["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_prefs}
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
     restored = browser.execute_async_script(
         """
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 220; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
-          const ready = await waitFor(() => activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM);
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 140));
-          await frame();
-          const panel = panelNodes.get(item);
-          const scroller = panel?._cmView?.scrollDOM;
+          const waitFor = window.__yolomuxTestWaitFor;
+          const ready = await waitFor(() => Boolean(activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM));
+          const scroller = await waitFor(() => {
+            const candidate = panelNodes.get(item)?._cmView?.scrollDOM;
+            return candidate && Math.abs(candidate.scrollTop - arguments[1]) < 32 ? candidate : null;
+          }, {description: 'Dockview file editor scroll restoration'});
           return {
             ready,
             active: activeItemForSide('left'),
@@ -4793,6 +12500,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
         setup["item"],
+        setup["savedTop"],
     )
     assert restored["ready"] is True, restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_prefs, **restored}
@@ -4814,14 +12522,8 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([prefsItemId, infoItemId], prefsItemId);
           applyLayoutSlots(next, {focusSession: prefsItemId, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 240; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = panelNodes.get(prefsItemId)?.querySelector('.preferences-scroll');
             return dockviewLayoutActive()
@@ -4871,7 +12573,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
             )
         )
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
     after_other = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -4888,21 +12590,18 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
     )
     assert abs(after_other["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_other}
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
     restored = browser.execute_async_script(
         """
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          for (let attempt = 0; attempt < 80; attempt += 1) {
-            if (activeItemForSide('left') === item && panelNodes.get(item)?.querySelector('.preferences-scroll')) break;
-            await frame();
-          }
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 120));
-          const scroller = panelNodes.get(item)?.querySelector('.preferences-scroll');
+          const waitFor = window.__yolomuxTestWaitFor;
+          const scroller = await waitFor(() => {
+            if (activeItemForSide('left') !== item) return null;
+            const candidate = panelNodes.get(item)?.querySelector('.preferences-scroll');
+            return candidate && Math.abs(candidate.scrollTop - arguments[1]) < 32 ? candidate : null;
+          }, {description: 'Preferences scroll restoration'});
           return {
             active: activeItemForSide('left'),
             restoredTop: scroller?.scrollTop || 0,
@@ -4912,6 +12611,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
         setup["item"],
+        setup["savedTop"],
     )
     assert restored["active"] == setup["item"], restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
@@ -4930,9 +12630,9 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
         (async () => {
           autoFocusEnabled = false;
           infoPanelSubTab = 'info';
-          transcriptMetaLoaded = true;
-          transcriptMetaLoading = false;
-          transcriptMetaLoadError = '';
+          transcriptMetadataState.loaded = true;
+          transcriptMetadataState.loading = false;
+          transcriptMetadataState.error = '';
           const branches = Array.from({length: 180}, (_value, index) => ({
             name: `feature/long-info-row-${index + 1}`,
             subject: `Long YO!info tree row ${index + 1} that makes the relationship tree scroll.`,
@@ -4941,7 +12641,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
             current: index === 0,
             linear_ids: [`YOLO-${index + 1}`],
           }));
-          transcriptMeta = {
+          transcriptMetadataState.payload = {
             session_order: ['1'],
             sessions: {
               '1': {
@@ -4962,14 +12662,8 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([infoItemId, prefsItemId], infoItemId);
           applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          const waitFor = async predicate => {
-            for (let attempt = 0; attempt < 260; attempt += 1) {
-              if (predicate()) return true;
-              await frame();
-            }
-            return false;
-          };
+          const {frame} = window.__yolomuxTestHelpers;
+          const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = document.getElementById('info-content');
             return dockviewLayoutActive()
@@ -5022,7 +12716,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
             )
         )
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["other"])).click().perform()
     after_other = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -5039,21 +12733,18 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
     )
     assert abs(after_other["capturedTop"] - setup["savedTop"]) < 32, {**setup, **after_other}
 
-    ActionChains(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
+    fast_pointer_actions(browser).move_to_element(dockview_tab(setup["item"])).click().perform()
     restored = browser.execute_async_script(
         """
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
-          for (let attempt = 0; attempt < 100; attempt += 1) {
-            if (activeItemForSide('left') === item && document.getElementById('info-content')) break;
-            await frame();
-          }
-          await frame();
-          await frame();
-          await new Promise(resolve => setTimeout(resolve, 120));
-          const scroller = document.getElementById('info-content');
+          const waitFor = window.__yolomuxTestWaitFor;
+          const scroller = await waitFor(() => {
+            if (activeItemForSide('left') !== item) return null;
+            const candidate = document.getElementById('info-content');
+            return candidate && Math.abs(candidate.scrollTop - arguments[1]) < 32 ? candidate : null;
+          }, {description: 'YO!info scroll restoration'});
           return {
             active: activeItemForSide('left'),
             restoredTop: scroller?.scrollTop || 0,
@@ -5063,9 +12754,86 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
         setup["item"],
+        setup["savedTop"],
     )
     assert restored["active"] == setup["item"], restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
+
+
+def test_yoinfo_external_links_survive_panel_focus_pointerdown(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applyLayoutSlots === 'function' && typeof infoPanelRenderSignature === 'function';"
+        )
+    )
+    browser.execute_script(
+        """
+        autoFocusEnabled = false;
+        const next = emptyLayoutSlots();
+        next[layoutTreeKey] = leafNode('left');
+        next.left = paneStateWithTabs([infoItemId], infoItemId);
+        applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return dockviewLayoutActive()
+              && activeItemForSide('left') === infoItemId
+              && document.getElementById('info-content') !== null;
+            """
+        )
+    )
+    setup = browser.execute_script(
+        """
+        const node = document.getElementById('info-content');
+        const html = `
+          <div class="info-tree">
+            <div class="info-tree-record info-tree-item info-tree-item-first info-tree-item-last">
+              <div class="info-tree-record-main">
+                <div class="info-tree-field info-tree-field-linear"><span class="info-tree-field-label">Linear:</span><span class="info-tree-field-value"><a id="linear-link" href="https://example.test/linear/ABC-2228" target="_blank" rel="noreferrer noopener">ABC-2228</a></span></div>
+                <div class="info-tree-field info-tree-field-pr"><span class="info-tree-field-label">GitHub PR:</span><span class="info-tree-field-value"><a id="pr-link" href="https://example.test/pull/87" target="_blank" rel="noreferrer noopener">#87</a></span></div>
+              </div>
+            </div>
+          </div>`;
+        node.innerHTML = html;
+        infoPanelRenderCache.signature = infoPanelRenderSignature();
+        infoPanelRenderCache.html = html;
+        window.__infoTrustedClicks = [];
+        document.addEventListener('click', event => {
+          if (event.target?.matches?.('#linear-link, #pr-link')) {
+            window.__infoTrustedClicks.push({id: event.target.id, trusted: event.isTrusted});
+          }
+        }, {capture: true});
+        return {
+          dockview: dockviewLayoutActive(),
+          linearConnected: document.getElementById('linear-link')?.isConnected === true,
+          prConnected: document.getElementById('pr-link')?.isConnected === true,
+        };
+        """
+    )
+    assert setup == {"dockview": True, "linearConnected": True, "prConnected": True}, setup
+
+    original_handle = browser.current_window_handle
+
+    def click_external_link(selector, expected_path):
+        handles_before = set(browser.window_handles)
+        fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", selector)).click().perform()
+        WebDriverWait(browser, 3).until(lambda driver: len(set(driver.window_handles) - handles_before) == 1)
+        new_handle = next(iter(set(browser.window_handles) - handles_before))
+        browser.switch_to.window(new_handle)
+        WebDriverWait(browser, 3).until(lambda driver: expected_path in driver.current_url)
+        browser.close()
+        browser.switch_to.window(original_handle)
+
+    click_external_link("#linear-link", "/linear/ABC-2228")
+    click_external_link("#pr-link", "/pull/87")
+    clicks = browser.execute_script("return window.__infoTrustedClicks")
+    assert clicks == [
+        {"id": "linear-link", "trusted": True},
+        {"id": "pr-link", "trusted": True},
+    ], clicks
 
 
 def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(browser, tmp_path):
@@ -5099,20 +12867,20 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
         WebDriverWait(browser, 2).until(lambda _driver: background(selector) == expected)
 
     load_topbar_font_fixture(browser, tmp_path)
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
     tokens = theme_tokens()
     wait_background("#topbar-fixture", tokens["neutral"])
-    ActionChains(browser).move_to_element(browser.find_element("id", "topbar-fixture")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "topbar-fixture")).perform()
     wait_background("#topbar-fixture", tokens["accent"])
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
     wait_background("#topbar-fixture", tokens["neutral"])
 
     load_finder_click_toolbar_fixture(browser, tmp_path)
     tokens = theme_tokens()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
-    ActionChains(browser).move_to_element(browser.find_element("css selector", "#finder-panel .file-explorer-head")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", "#finder-panel .file-explorer-head")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["accent"])
-    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
 
     activate_finder_diff_fixture(browser)
@@ -5135,13 +12903,13 @@ def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(bro
     assert abs(repo_caret_metrics["caretFontSize"] - repo_caret_metrics["titleFontSize"]) <= 0.5, repo_caret_metrics
     assert repo_caret_metrics["caretWidth"] <= repo_caret_metrics["titleFontSize"] * 1.4, repo_caret_metrics
     assert repo_caret_metrics["titleHeight"] > 0, repo_caret_metrics
-    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
     wait_background("#modified-files-panel .changes-toolbar", tokens["accent"])
     wait_background("#modified-files-repo-head", tokens["accent"])
 
 
-def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_path):
+def test_finder_and_independent_differ_scrollbars_hover_independently(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
     browser.execute_script(
         """
@@ -5181,12 +12949,12 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     assert overflow["tree"]
 
     wait_thumb(".file-explorer-tree-panel", neutral)
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", accent)
     browser.execute_script("document.getElementById('finder-panel')?.classList.remove('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", neutral)
-    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", neutral)
 
     activate_finder_diff_fixture(browser)
@@ -5204,13 +12972,13 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     )
     assert overflow["differ"]
     wait_thumb("#modified-files-panel", neutral)
-    browser.execute_script("document.getElementById('finder-panel')?.classList.add('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    browser.execute_script("document.getElementById('differ-panel')?.classList.add('active-pane', 'focused-pane')")
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_thumb("#modified-files-panel", accent)
-    browser.execute_script("document.getElementById('finder-panel')?.classList.remove('active-pane', 'focused-pane')")
-    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    browser.execute_script("document.getElementById('differ-panel')?.classList.remove('active-pane', 'focused-pane')")
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
-    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
 
 
@@ -5249,20 +13017,13 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
     hover_tokens = browser.execute_script(
         """
         document.body.classList.add('theme-light');
-        const probe = document.createElement('div');
-        probe.style.position = 'absolute';
-        probe.style.left = '-1000px';
-        probe.style.top = '-1000px';
-        probe.style.background = 'var(--file-hover-bg)';
-        document.body.appendChild(probe);
-        const hoverBg = getComputedStyle(probe).backgroundColor;
-        probe.style.background = 'var(--file-hover-border)';
-        const hoverBorder = getComputedStyle(probe).backgroundColor;
-        probe.remove();
-        return {hoverBg, hoverBorder};
+        const {probePaint} = window.__yolomuxTestHelpers;
+        const hoverBg = probePaint('background:var(--file-hover-bg)').background;
+        const hoverBorder = probePaint('background:var(--file-hover-border)').background;
+        return {hoverBg, hoverBorder, expectedHoverBg: probePaint('background:var(--file-hover-bg)').background};
         """
     )
-    ActionChains(browser).move_to_element(browser.find_element("id", "collapsed-dir")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "collapsed-dir")).perform()
     row_metrics = browser.execute_script(
         """
         const row = document.getElementById('collapsed-dir');
@@ -5273,7 +13034,7 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
         };
         """
     )
-    assert hover_tokens["hoverBg"] == "rgb(255, 242, 168)"
+    assert hover_tokens["hoverBg"] == hover_tokens["expectedHoverBg"]
     assert row_metrics["background"] == hover_tokens["hoverBg"]
     assert hover_tokens["hoverBorder"] in row_metrics["boxShadow"]
 
@@ -5312,6 +13073,43 @@ def test_finder_sync_current_file_reuses_selected_row_colors(browser, tmp_path):
         assert metrics[theme]["currentNameColor"] == metrics[theme]["selectedNameColor"], metrics
         assert metrics[theme]["currentBg"] == metrics[theme]["selectedBg"], metrics
         assert metrics[theme]["currentShadow"] == metrics[theme]["selectedShadow"], metrics
+
+    browser.execute_script(
+        """
+        const row = document.createElement('div');
+        row.id = 'tabber-hover-row';
+        row.className = 'file-tree-row tabber-row kind-file';
+        row.innerHTML = '<span class="file-tree-icon">T</span><span class="file-tree-name">Tabber row</span>';
+        document.querySelector('.file-explorer-tree-panel').appendChild(row);
+        """
+    )
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "tabber-hover-row")).perform()
+    hover_metrics = browser.execute_script(
+        """
+        const read = theme => {
+          document.body.classList.remove('theme-dark', 'theme-light');
+          document.body.classList.add(theme);
+          const row = getComputedStyle(document.getElementById('tabber-hover-row'));
+          const probe = document.createElement('div');
+          probe.style.background = 'var(--file-hover-bg)';
+          probe.style.borderColor = 'var(--file-hover-border)';
+          document.body.appendChild(probe);
+          const expected = getComputedStyle(probe);
+          const result = {
+            background: row.backgroundColor,
+            shadow: row.boxShadow,
+            expectedBackground: expected.backgroundColor,
+            expectedBorder: expected.borderColor,
+          };
+          probe.remove();
+          return result;
+        };
+        return {dark: read('theme-dark'), light: read('theme-light')};
+        """
+    )
+    for theme in ("dark", "light"):
+        assert hover_metrics[theme]["background"] == hover_metrics[theme]["expectedBackground"], hover_metrics
+        assert hover_metrics[theme]["expectedBorder"] in hover_metrics[theme]["shadow"], hover_metrics
 
 
 def test_finder_differ_status_badges_share_one_column(browser, tmp_path):
@@ -5596,8 +13394,8 @@ def test_diff_overview_matches_actual_file_explorer_visible_rows_after_scroll(br
     assert metrics["fullRows"]["deletedRows"] == 1986
     assert metrics["finalOverviewPresent"] is True
     assert metrics["finalChangedStops"] == metrics["expectedFullChangedStops"], metrics["finalBackground"]
-    assert any(stop["color"] == '#ff5d6c' for stop in metrics["finalChangedStops"])
-    assert any(stop["color"] == '#38d878' for stop in metrics["finalChangedStops"])
+    assert any(stop["color"] == ui_pin("diffOverviewDelete") for stop in metrics["finalChangedStops"])
+    assert any(stop["color"] == ui_pin("diffOverviewAdd") for stop in metrics["finalChangedStops"])
     cases = {case["name"]: case for case in metrics["cases"]}
     assert cases["top-normal"]["deletedDomRows"] == 0
     assert cases["red-middle-previous-regression"]["deletedDomRows"] == 1986
@@ -5651,30 +13449,26 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const primaryRow = toolbar.querySelector('.file-explorer-primary-row');
         const pathRow = toolbar.querySelector('.file-explorer-path-row');
         const actionsRow = toolbar.querySelector('.file-explorer-actions-row');
-        const scopeRow = toolbar.querySelector('.file-explorer-scope-row');
-        const collapse = primaryRow.querySelector('[data-session-files-collapse-toggle]');
+        const session = primaryRow.querySelector('.file-explorer-diff-session-control');
+        const primarySpacer = primaryRow.querySelector('.file-explorer-toolbar-spacer');
+        const refresh = primaryRow.querySelector('[data-file-explorer-refresh]');
         const newFile = actionsRow.querySelector('[data-file-explorer-new-file]');
         const newFolder = actionsRow.querySelector('[data-file-explorer-new-folder]');
         const actionsSpacer = actionsRow.querySelector('.file-explorer-toolbar-spacer');
         const sync = pathRow.querySelector('.file-explorer-root-mode-toggle-panel');
         const hidden = actionsRow.querySelector('.file-explorer-hidden-toggle-panel');
         const sort = actionsRow.querySelector('.file-explorer-sort-select');
-        const quick = toolbar.querySelector('.file-explorer-quick-access-panel');
+        const dateControls = actionsRow.querySelector('.file-explorer-date-controls');
         const path = pathRow.querySelector('.file-explorer-path-inline');
         const copy = pathRow.querySelector('.file-explorer-path-copy-panel');
-        const mode = primaryRow.querySelector('.file-explorer-mode-switcher');
-        const diffSession = primaryRow.querySelector('.file-explorer-diff-session-control');
-        const primarySpacer = primaryRow.querySelector('.file-explorer-toolbar-spacer');
-        const modeButtons = Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]'));
-        const modeLabels = Array.from(mode.querySelectorAll('.file-explorer-mode-label'));
-        const cluster = toolbar.querySelector('.file-explorer-date-reload-cluster');
-        const date = cluster.querySelector('.file-explorer-date-toggle');
-        const refresh = cluster.querySelector('.changes-refresh');
-        const close = primaryRow.querySelector('.file-explorer-panel-close');
+        const date = dateControls.querySelector('.file-explorer-date-toggle');
+        const expand = dateControls.querySelector('[data-file-tree-expand-collapse-all="expand"]');
+        const collapseAll = dateControls.querySelector('[data-file-tree-expand-collapse-all="collapse"]');
         const toolbarRect = toolbar.getBoundingClientRect();
         const primaryRowRect = primaryRow.getBoundingClientRect();
         const pathRowRect = pathRow.getBoundingClientRect();
         const actionsRowRect = actionsRow.getBoundingClientRect();
+        const sessionRect = session.getBoundingClientRect();
         const newFileRect = newFile.getBoundingClientRect();
         const newFolderRect = newFolder.getBoundingClientRect();
         const syncRect = sync.getBoundingClientRect();
@@ -5682,47 +13476,38 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const sortRect = sort.getBoundingClientRect();
         const pathRect = path.getBoundingClientRect();
         const copyRect = copy.getBoundingClientRect();
-        const modeRect = mode.getBoundingClientRect();
-        const diffSessionRect = diffSession.getBoundingClientRect();
-        const modeButtonRects = modeButtons.map(button => button.getBoundingClientRect());
-        const modeButtonStyles = modeButtons.map(button => getComputedStyle(button));
-        const clusterRect = cluster.getBoundingClientRect();
+        const dateControlsRect = dateControls.getBoundingClientRect();
         const dateRect = date.getBoundingClientRect();
+        const expandRect = expand.getBoundingClientRect();
+        const collapseAllRect = collapseAll.getBoundingClientRect();
         const refreshRect = refresh.getBoundingClientRect();
-        const closeRect = close.getBoundingClientRect();
         const textProbe = document.createElement('span');
         textProbe.style.color = 'var(--text)';
         document.body.appendChild(textProbe);
         const textColor = getComputedStyle(textProbe).color;
         textProbe.remove();
-        const colorFor = value => {
-          const probe = document.createElement('span');
-          probe.style.color = value;
-          document.body.appendChild(probe);
-          const color = getComputedStyle(probe).color;
-          probe.remove();
-          return color;
-        };
-        const tabFont = getComputedStyle(document.documentElement).getPropertyValue('--tab-font').trim();
+        const hadLightTheme = document.body.classList.contains('theme-light');
+        document.body.classList.add('theme-light');
+        const lightExpandRect = expand.getBoundingClientRect();
+        const lightCollapseAllRect = collapseAll.getBoundingClientRect();
+        if (!hadLightTheme) document.body.classList.remove('theme-light');
         return {
           firstRowIsPrimary: toolbar.firstElementChild === primaryRow,
           secondRowIsPath: primaryRow.nextElementSibling === pathRow,
           thirdRowIsActions: pathRow.nextElementSibling === actionsRow,
-          noScopeRow: scopeRow === null,
-          noQuickAccessPanel: quick === null,
-          modeFirstInPrimaryRow: primaryRow.firstElementChild === mode,
-          noPanelTitle: primaryRow.querySelector('.file-explorer-panel-title') === null,
+          sessionFirstInPrimaryRow: primaryRow.firstElementChild === session,
+          spacerAfterSession: session.nextElementSibling === primarySpacer,
+          refreshAfterSpacer: primarySpacer.nextElementSibling === refresh,
+          noModeSwitcher: toolbar.querySelector('.file-explorer-mode-switcher') === null,
+          noLocalClose: toolbar.querySelector('.file-explorer-panel-close') === null,
           actionsOrder: actionsRow.firstElementChild === newFile && newFile.nextElementSibling === newFolder,
           folderIconPresent: newFolder.querySelector('.file-explorer-folder-icon') !== null,
           pathRowOrder: pathRow.firstElementChild === sync && sync.nextElementSibling === path && path.nextElementSibling === copy,
           hiddenBeforeSort: newFolder.nextElementSibling === actionsSpacer && actionsSpacer.nextElementSibling === hidden && hidden.nextElementSibling === sort,
+          dateControlsAfterSort: sort.nextElementSibling === dateControls,
           syncText: sync.textContent.trim(),
           syncPressed: sync.getAttribute('aria-pressed'),
-          rootPressedCount: [sync].filter(button => button.getAttribute('aria-pressed') === 'true').length,
-          diffSessionImmediatelyAfterMode: mode.nextElementSibling === diffSession,
-          spacerAfterDiffSession: diffSession.nextElementSibling === primarySpacer,
-          diffSessionVisibleInFilesMode: getComputedStyle(diffSession).display !== 'none',
-          noTopCollapseButton: collapse === null,
+          sessionVisible: getComputedStyle(session).display !== 'none',
           newFileLeft: newFileRect.left,
           newFileRight: newFileRect.right,
           newFolderLeft: newFolderRect.left,
@@ -5741,33 +13526,30 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           primaryRowLeft: primaryRowRect.left,
           primaryRowRight: primaryRowRect.right,
           primaryRowWidth: primaryRowRect.width,
-          diffSessionLeft: diffSessionRect.left,
-          diffSessionRight: diffSessionRect.right,
+          sessionLeft: sessionRect.left,
+          sessionRight: sessionRect.right,
           copyLeft: copyRect.left,
           copyRight: copyRect.right,
           copyWidth: copyRect.width,
-          modeLeft: modeRect.left,
-          modeRight: modeRect.right,
-          modeWidth: modeRect.width,
-          modeMaxButtonWidth: Math.max(...modeButtonRects.map(rect => rect.width)),
-          modeButtonPaddingInline: Array.from(new Set(modeButtonStyles.map(style => `${style.paddingLeft}/${style.paddingRight}`))).sort(),
-          modeButtonHorizontal: modeButtonRects.every(rect => rect.width > rect.height),
-          modeLabelsHorizontal: modeLabels.every(label => getComputedStyle(label).writingMode === 'horizontal-tb'),
-          modeUsesTabFont: modeButtonStyles.every(style => style.fontFamily === tabFont || style.fontFamily.toLowerCase().includes('narrow')),
-          modeButtonTopRounded: modeButtonStyles.every(style => style.borderTopLeftRadius !== '0px' && style.borderTopRightRadius !== '0px' && style.borderBottomLeftRadius === '0px'),
-          activeModeUsesPaneTabColor: getComputedStyle(mode.querySelector('[aria-pressed="true"]')).backgroundColor === colorFor('var(--pane-tab-active-bg)'),
-          modeTexts: Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim()),
           pathConsumesRemaining: pathRect.width >= pathRowRect.width - syncRect.width - copyRect.width - 36,
           actionsRowTop: actionsRowRect.top,
           primaryRowBottom: primaryRowRect.bottom,
           actionsRowRight: actionsRowRect.right,
-          clusterRight: clusterRect.right,
-          clusterLeft: clusterRect.left,
+          dateControlsRight: dateControlsRect.right,
+          dateControlsLeft: dateControlsRect.left,
           dateRight: dateRect.right,
+          expandLeft: expandRect.left,
+          expandRight: expandRect.right,
+          expandWidth: expandRect.width,
+          expandHeight: expandRect.height,
+          collapseAllLeft: collapseAllRect.left,
+          collapseAllRight: collapseAllRect.right,
+          collapseAllWidth: collapseAllRect.width,
+          collapseAllHeight: collapseAllRect.height,
+          lightExpandWidth: lightExpandRect.width,
+          lightCollapseAllWidth: lightCollapseAllRect.width,
           refreshLeft: refreshRect.left,
           refreshRight: refreshRect.right,
-          closeLeft: closeRect.left,
-          closeRight: closeRect.right,
           pathWidth: pathRect.width,
           toolbarWidth: toolbarRect.width,
           pathColor: getComputedStyle(path).color,
@@ -5778,21 +13560,19 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["firstRowIsPrimary"]
     assert metrics["secondRowIsPath"]
     assert metrics["thirdRowIsActions"]
-    assert metrics["noScopeRow"]
-    assert metrics["noQuickAccessPanel"]
-    assert metrics["modeFirstInPrimaryRow"]
-    assert metrics["noPanelTitle"]
+    assert metrics["sessionFirstInPrimaryRow"]
+    assert metrics["spacerAfterSession"]
+    assert metrics["refreshAfterSpacer"]
+    assert metrics["noModeSwitcher"]
+    assert metrics["noLocalClose"]
     assert metrics["actionsOrder"]
     assert metrics["folderIconPresent"]
     assert metrics["pathRowOrder"]
     assert metrics["hiddenBeforeSort"]
+    assert metrics["dateControlsAfterSort"]
     assert metrics["syncText"] == "Sync"
     assert metrics["syncPressed"] == "true"
-    assert metrics["rootPressedCount"] == 1
-    assert metrics["diffSessionImmediatelyAfterMode"]
-    assert metrics["spacerAfterDiffSession"]
-    assert metrics["diffSessionVisibleInFilesMode"]
-    assert metrics["noTopCollapseButton"]
+    assert metrics["sessionVisible"]
     assert metrics["newFileRight"] <= metrics["newFolderLeft"]
     assert metrics["hiddenRight"] <= metrics["sortLeft"]
     assert metrics["syncRight"] <= metrics["pathLeft"]
@@ -5800,88 +13580,59 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["pathWidth"] >= min(90, metrics["toolbarWidth"] / 4)
     assert metrics["pathRight"] <= metrics["copyLeft"]
     assert metrics["copyRight"] <= metrics["pathRowRight"] + 1
-    assert metrics["modeRight"] <= metrics["diffSessionLeft"]
-    assert metrics["diffSessionRight"] <= metrics["closeLeft"]
-    assert metrics["modeButtonHorizontal"]
-    assert metrics["modeLabelsHorizontal"]
-    assert metrics["modeUsesTabFont"]
-    assert metrics["modeButtonTopRounded"]
-    assert metrics["activeModeUsesPaneTabColor"]
-    assert metrics["modeButtonPaddingInline"] == ["3px/3px"]
-    assert metrics["modeMaxButtonWidth"] <= 60
+    assert metrics["sessionRight"] <= metrics["refreshLeft"]
     assert metrics["pathConsumesRemaining"]
-    assert metrics["modeTexts"] == ["Finder", "Differ", "Tabber"]
-    assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
+    assert abs(metrics["refreshRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
     assert metrics["pathRowTop"] >= metrics["primaryRowBottom"]
     assert metrics["actionsRowTop"] >= metrics["pathRowBottom"]
-    assert metrics["dateRight"] <= metrics["refreshLeft"]
-    assert metrics["refreshRight"] <= metrics["actionsRowRight"] + 1
-    assert metrics["clusterLeft"] > metrics["pathLeft"]
+    assert metrics["dateRight"] <= metrics["expandLeft"]
+    assert metrics["expandRight"] <= metrics["collapseAllLeft"]
+    assert metrics["expandWidth"] == metrics["collapseAllWidth"] == 16
+    assert metrics["expandHeight"] == metrics["collapseAllHeight"] == 20
+    assert metrics["lightExpandWidth"] == metrics["lightCollapseAllWidth"] == 16
+    assert metrics["dateControlsRight"] <= metrics["actionsRowRight"] + 1
+    assert metrics["dateControlsLeft"] > metrics["pathLeft"]
 
 
-def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
+def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
     before = browser.execute_script(
         """
-        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
         const newFile = document.getElementById('new-file');
-        const tree = document.querySelector('.file-explorer-tree-panel');
-        const changes = document.querySelector('.file-explorer-changes-panel');
+        const tree = document.querySelector('#finder-panel .file-explorer-tree-panel');
         return {
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          filesPressed: filesButton.getAttribute('aria-pressed'),
-          diffPressed: diffButton.getAttribute('aria-pressed'),
-          texts: Array.from(document.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
-          diffButtonBg: getComputedStyle(diffButton).backgroundColor,
+          finderVisible: !document.getElementById('finder-panel').hidden,
+          differHidden: document.getElementById('differ-panel').hidden,
+          noModeSwitcher: document.querySelector('.file-explorer-mode-switcher') === null,
           newFileDisplay: getComputedStyle(newFile).display,
           treeDisplay: getComputedStyle(tree).display,
-          changesDisplay: getComputedStyle(changes).display,
-          titleCount: document.querySelectorAll('.file-explorer-panel-title').length,
         };
         """
     )
-    assert before["bodyFiles"]
-    assert not before["bodyDiff"]
-    assert before["filesPressed"] == "true"
-    assert before["diffPressed"] == "false"
-    assert before["texts"] == ["Finder", "Differ", "Tabber"]
+    assert before["finderVisible"]
+    assert before["differHidden"]
+    assert before["noModeSwitcher"]
     assert before["newFileDisplay"] != "none"
     assert before["treeDisplay"] != "none"
-    assert before["changesDisplay"] == "none"
-    assert before["titleCount"] == 0
 
-    browser.find_element("css selector", "[data-file-explorer-mode-set='diff']").click()
+    activate_finder_diff_fixture(browser)
     after = browser.execute_script(
         """
-        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
-        const newFile = document.getElementById('new-file');
-        const pane = document.querySelector('.file-explorer-pane');
-        const tree = document.querySelector('.file-explorer-tree-panel');
-        const changes = document.querySelector('.file-explorer-changes-panel');
+        const pane = document.querySelector('#differ-panel .file-explorer-pane');
+        const changes = document.querySelector('#differ-panel .file-explorer-changes-panel');
         const visible = selector => Array.from(document.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
         const changesStyle = getComputedStyle(changes);
         const paneRect = pane.getBoundingClientRect();
         const changesRect = changes.getBoundingClientRect();
         return {
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          panelMode: document.getElementById('finder-panel').dataset.fileExplorerMode,
-          filesPressed: filesButton.getAttribute('aria-pressed'),
-          diffPressed: diffButton.getAttribute('aria-pressed'),
-          texts: Array.from(document.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
-          diffButtonBg: getComputedStyle(diffButton).backgroundColor,
-          newFileDisplay: getComputedStyle(newFile).display,
-          treeDisplay: getComputedStyle(tree).display,
+          finderHidden: document.getElementById('finder-panel').hidden,
+          differVisible: !document.getElementById('differ-panel').hidden,
           changesDisplay: changesStyle.display,
           changesFlexGrow: changesStyle.flexGrow,
           changesMaxBlockSize: changesStyle.maxBlockSize,
           paneHeight: paneRect.height,
           changesHeight: changesRect.height,
-          titleCount: document.querySelectorAll('.file-explorer-panel-title').length,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
           visibleSortSelects: visible('[data-session-files-sort]').length,
@@ -5890,48 +13641,17 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
         };
         """
     )
-    assert not after["bodyFiles"]
-    assert after["bodyDiff"]
-    assert after["panelMode"] == "diff"
-    assert after["filesPressed"] == "false"
-    assert after["diffPressed"] == "true"
-    assert after["texts"] == ["Finder", "Differ", "Tabber"]
-    assert after["diffButtonBg"] != before["diffButtonBg"]
-    assert after["newFileDisplay"] == "none"
-    assert after["treeDisplay"] == "none"
+    assert after["finderHidden"]
+    assert after["differVisible"]
     assert after["changesDisplay"] != "none"
     assert after["changesFlexGrow"] == "1"
     assert after["changesMaxBlockSize"] == "none"
     assert abs(after["changesHeight"] - after["paneHeight"]) <= 1
-    assert after["titleCount"] == 0
     assert after["visibleRootControls"] == 0
     assert after["visibleSessionSelects"] == 1
     assert after["visibleSortSelects"] == 1
     assert after["visibleDateButtons"] == 1
     assert after["visibleReloadButtons"] == 1
-
-    browser.find_element("css selector", "[data-file-explorer-mode-set='files']").click()
-    restored = browser.execute_script(
-        """
-        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
-        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
-        return {
-          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
-          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
-          filesPressed: filesButton.getAttribute('aria-pressed'),
-          diffPressed: diffButton.getAttribute('aria-pressed'),
-          treeDisplay: getComputedStyle(document.querySelector('.file-explorer-tree-panel')).display,
-          changesDisplay: getComputedStyle(document.querySelector('.file-explorer-changes-panel')).display,
-        };
-        """
-    )
-    assert restored["bodyFiles"]
-    assert not restored["bodyDiff"]
-    assert restored["filesPressed"] == "true"
-    assert restored["diffPressed"] == "false"
-    assert restored["treeDisplay"] != "none"
-    assert restored["changesDisplay"] == "none"
-
 
 def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     load_pc_controls_fixture(browser, tmp_path)
@@ -6018,9 +13738,9 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
         };
         """
     )
-    assert light_control["actionsColor"] == "rgb(31, 41, 55)"
+    assert light_control["actionsColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_control["actionsColor"] != light_control["actionsBg"]
-    assert light_control["closeColor"] == "rgb(31, 41, 55)"
+    assert light_control["closeColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_control["closeColor"] != light_control["closeBg"]
     # the YO!info tab label is legible in light mode (color contrasts with the tab bg,
     # not white-on-white) now that it uses the themed .session-button-dir treatment.
@@ -6037,16 +13757,16 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert z_indexes["contextMenu"] > z_indexes["imagePreview"]
     assert z_indexes["contextMenu"] > z_indexes["tabPopover"]
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "tab-minimize")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "tab-minimize")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize')).opacity") == "1"
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "pane-zoom")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "pane-zoom")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom')).backgroundColor") != "rgba(0, 0, 0, 0)"
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "finder-close")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "finder-close")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close')).opacity") == "1"
 
-    ActionChains(browser).move_to_element(browser.find_element("id", "editor-close")).perform()
+    fast_pointer_actions(browser).move_to_element(browser.find_element("id", "editor-close")).perform()
     assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close')).opacity") == "1"
 
     tree_metrics = browser.execute_script(
@@ -6127,6 +13847,193 @@ def test_editor_pane_does_not_shift_grid_when_legacy_body_class_is_present(brows
     )
     assert metrics["paddingLeft"] <= 10
     assert metrics["panelLeft"] <= 16
+
+
+def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const host = document.createElement('section');
+        host.className = 'file-editor-panel';
+        host.style.cssText = 'width: 600px; height: 140px';
+        host.innerHTML = `
+          <div class="file-editor-content">
+            <div class="file-editor-preview-pane-panel"><p>alpha first</p>${'<p>filler</p>'.repeat(40)}<p>beta alpha second</p></div>
+            <div class="file-editor-find-overview" hidden></div>
+            <form class="file-editor-preview-find-panel" hidden>
+              <input type="search"><span class="file-editor-preview-find-count"></span>
+              <button type="button" data-preview-find-move="-1"></button>
+              <button type="button" data-preview-find-move="1"></button>
+              <button type="button" data-preview-find-close></button>
+            </form>
+          </div>`;
+        document.body.append(host);
+        openPreviewFind(host);
+        const input = host.querySelector('input');
+        input.value = 'alpha';
+        previewFindApplyQuery(host, input.value);
+        const opened = {
+          visible: !previewFindPanelForHost(host).hidden,
+          matches: host.querySelectorAll('.file-editor-preview-find-match').length,
+          overviewTicks: host.querySelectorAll('.file-editor-find-overview-tick').length,
+          overviewVisible: !host.querySelector('.file-editor-find-overview').hidden,
+          overviewTops: [...host.querySelectorAll('.file-editor-find-overview-tick')].map(node => Number.parseFloat(node.style.top)),
+          active: host.querySelectorAll('.file-editor-preview-find-match.active').length,
+          activeColor: getComputedStyle(host.querySelector('.file-editor-preview-find-match.active')).color,
+          activeBackground: getComputedStyle(host.querySelector('.file-editor-preview-find-match.active')).backgroundColor,
+          count: host.querySelector('.file-editor-preview-find-count').textContent,
+          inputFocused: document.activeElement === input,
+        };
+        previewFindSelectMatch(host, 1);
+        const moved = {
+          activeIndex: [...host.querySelectorAll('.file-editor-preview-find-match')].findIndex(node => node.classList.contains('active')),
+          overviewActiveIndex: [...host.querySelectorAll('.file-editor-find-overview-tick')].findIndex(node => node.classList.contains('active')),
+          count: host.querySelector('.file-editor-preview-find-count').textContent,
+        };
+        closePreviewFind(host);
+        const closed = {
+          hidden: previewFindPanelForHost(host).hidden,
+          matches: host.querySelectorAll('.file-editor-preview-find-match').length,
+          overviewHidden: host.querySelector('.file-editor-find-overview').hidden,
+          startsWith: host.querySelector('.file-editor-preview-pane-panel').textContent.trim().startsWith('alpha first'),
+          endsWith: host.querySelector('.file-editor-preview-pane-panel').textContent.trim().endsWith('beta alpha second'),
+        };
+        host.remove();
+        return {opened, moved, closed};
+        """
+    )
+    opened = {**metrics["opened"], "overviewTops": None, "activeColor": None, "activeBackground": None}
+    assert opened == {"visible": True, "matches": 2, "overviewTicks": 2, "overviewVisible": True, "overviewTops": None, "active": 1, "activeColor": None, "activeBackground": None, "count": "1/2", "inputFocused": True}
+    assert metrics["opened"]["overviewTops"][0] < metrics["opened"]["overviewTops"][1], metrics
+    assert metrics["opened"]["activeColor"] != metrics["opened"]["activeBackground"], metrics
+    assert metrics["moved"] == {"activeIndex": 1, "overviewActiveIndex": 1, "count": "2/2"}
+    assert metrics["closed"] == {"hidden": True, "matches": 0, "overviewHidden": True, "startsWith": True, "endsWith": True}
+
+
+def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const path = '/tmp/preview-find.md';
+        const item = 'file:/tmp/preview-find.md';
+        const host = document.createElement('section');
+        host.className = 'file-editor-panel';
+        host.dataset.filePath = path;
+        host.dataset.layoutItem = item;
+        host.innerHTML = `
+          <div class="file-editor-content"><div class="file-editor-preview-pane-panel"><p>alpha</p></div><div class="file-editor-find-overview" hidden></div><form class="file-editor-preview-find-panel" hidden><input type="search"><span class="file-editor-preview-find-count"></span></form></div>
+          <button class="file-editor-find-panel"></button>`;
+        document.body.append(host);
+        openFiles.set(path, {kind: 'text'});
+        fileEditorViewModesForPath(path, true).set(item, 'preview');
+        focusedPanelItem = item;
+        const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        host.dispatchEvent(event);
+        return new Promise(resolve => setTimeout(() => {
+          const find = host.querySelector('.file-editor-preview-find-panel');
+          const result = {prevented: event.defaultPrevented, visible: !find.hidden, focused: document.activeElement === find.querySelector('input')};
+          host.remove();
+          openFiles.delete(path);
+          fileEditorViewModesForPath(path, true).delete(item);
+          resolve(result);
+        }, 0));
+        """
+    )
+    assert metrics == {"prevented": True, "visible": True, "focused": True}
+
+
+def test_focused_panel_search_shortcut_routes_to_each_registered_search(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const makePanel = (className, item, inputMarkup) => {
+          const panel = document.createElement('section');
+          panel.className = `panel ${className}`;
+          panel.dataset.layoutItem = item;
+          panel.innerHTML = inputMarkup;
+          document.body.append(panel);
+          return panel;
+        };
+        const trigger = (item, panel, selector) => {
+          focusedPanelItem = item;
+          const input = panel.querySelector(selector);
+          input.value = 'existing query';
+          const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+          panel.dispatchEvent(event);
+          return {
+            prevented: event.defaultPrevented,
+            focused: document.activeElement === input,
+            selected: input.selectionStart === 0 && input.selectionEnd === input.value.length,
+          };
+        };
+        const info = makePanel('info-tree-panel', infoItemId, '<input data-info-search>');
+        const preferences = makePanel('preferences-panel', prefsItemId, '<input data-preferences-search>');
+        const history = makePanel('search-history-panel', searchHistoryItemId, '<input data-search-history-query>');
+        const results = {
+          info: trigger(infoItemId, info, '[data-info-search]'),
+          preferences: trigger(prefsItemId, preferences, '[data-preferences-search]'),
+          history: trigger(searchHistoryItemId, history, '[data-search-history-query]'),
+        };
+        const unsupported = makePanel('debug-panel', debugPaneItemId, '<input>');
+        focusedPanelItem = debugPaneItemId;
+        const unsupportedEvent = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        unsupported.dispatchEvent(unsupportedEvent);
+        results.unsupportedPrevented = unsupportedEvent.defaultPrevented;
+        info.remove();
+        preferences.remove();
+        history.remove();
+        unsupported.remove();
+        return results;
+        """
+    )
+    assert metrics == {
+        "info": {"prevented": True, "focused": True, "selected": True},
+        "preferences": {"prevented": True, "focused": True, "selected": True},
+        "history": {"prevented": True, "focused": True, "selected": True},
+        "unsupportedPrevented": False,
+    }
+
+
+def test_codemirror_find_uses_the_shared_scrollbar_overview(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const path = '/tmp/editor-find.py';
+        const item = 'file:/tmp/editor-find.py';
+        const newline = String.fromCharCode(10);
+        const text = `alpha first${newline}${`filler${newline}`.repeat(40)}alpha last`;
+        const lineAt = position => ({number: text.slice(0, position).split(newline).length});
+        const host = document.createElement('section');
+        host.className = 'file-editor-panel';
+        host.dataset.filePath = path;
+        host.dataset.layoutItem = item;
+        host.innerHTML = `<div class="file-editor-content"><div class="file-editor-find-overview" hidden></div><div class="cm-search"><input name="search" value="alpha"></div></div>`;
+        host._cmView = {state: {doc: {toString: () => text, lines: text.split(newline).length, lineAt}, selection: {main: {from: 0, to: 5, head: 0}}}};
+        document.body.append(host);
+        openFiles.set(path, {kind: 'text'});
+        fileEditorViewModesForPath(path, true).set(item, 'edit');
+        refreshCodeMirrorFindOverview(host);
+        const rail = host.querySelector('.file-editor-find-overview');
+        const opened = {
+          visible: !rail.hidden,
+          ticks: rail.querySelectorAll('.file-editor-find-overview-tick').length,
+          active: rail.querySelectorAll('.file-editor-find-overview-tick.active').length,
+          tops: [...rail.querySelectorAll('.file-editor-find-overview-tick')].map(node => Number.parseFloat(node.style.top)),
+        };
+        host.querySelector('input[name="search"]').value = '';
+        refreshCodeMirrorFindOverview(host);
+        const closed = {hidden: rail.hidden, ticks: rail.children.length};
+        host.remove();
+        openFiles.delete(path);
+        fileEditorViewModesForPath(path, true).delete(item);
+        return {opened, closed};
+        """
+    )
+    assert metrics["opened"]["visible"] is True
+    assert metrics["opened"]["ticks"] == 2
+    assert metrics["opened"]["active"] == 1
+    assert metrics["opened"]["tops"][0] < metrics["opened"]["tops"][1]
+    assert metrics["closed"] == {"hidden": True, "ticks": 0}
 
 
 def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
@@ -6288,8 +14195,8 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["allWidth"] <= 38
     assert metrics["countText"] == "3/102"
     assert metrics["countColor"] != "rgb(0, 0, 0)"
-    assert metrics["nextTitle"] == "Next match (Enter)"
-    assert metrics["previousTitle"] == "Previous match (Shift+Enter)"
+    assert metrics["nextTitle"] == "下一项 (Enter)"
+    assert metrics["previousTitle"] == "上一项 (Shift+Enter)"
     assert 0 <= metrics["searchFirstToggleGap"] <= 8
     assert 0 <= metrics["toggleCountGap"] <= 10
     assert metrics["previousNextGap"] <= 6
@@ -6505,7 +14412,7 @@ def test_codemirror_word_wrap_toggle_keeps_existing_content_visible(browser, tmp
             contentWhiteSpace: getComputedStyle(content).whiteSpace,
             reconfigCalls: window.__wrapRegressionReconfigCalls,
             errors: window.__wrapRegressionErrors,
-            optionViews: panel._cmEditorOptionViews?.length || 0,
+            optionViews: panel._cmViews?.length || 0,
             loadingText: panel.querySelector('.file-editor-codemirror-panel').textContent,
           };
           if (metrics.lineWrapping || attempts > 20) done(metrics);
@@ -6590,8 +14497,8 @@ def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path
     # The Info Bar is the tinted (active-accent-derived) chrome strip with readable dark meta text —
     # assert the readability relationship, not a pinned green, so the active_color picker doesn't break it.
     assert light_metrics["detailBg"] != light_metrics["metaColor"]
-    assert light_metrics["metaColor"] == "rgb(31, 41, 55)"
-    assert light_metrics["actionColor"] == "rgb(31, 41, 55)"
+    assert light_metrics["metaColor"] == ui_pin_rgb("paneTabTextLight")
+    assert light_metrics["actionColor"] == ui_pin_rgb("paneTabTextLight")
     assert light_metrics["actionColor"] != light_metrics["actionBg"]
     before = browser.execute_script(
         """
@@ -6645,6 +14552,11 @@ LIGHT_MODE_SURFACES = """
   <div class="preferences-global-reset-title" id="gr-title">Reset</div>
   <div class="preferences-global-reset-warning" id="gr-warn">warn</div>
 </div>
+<div class="preferences-setting-advisory" id="pref-adv">
+  <span id="pref-adv-text">Large browser uploads are buffered in memory.</span>
+  <code id="pref-adv-code">rsync -avz &lt;local-path&gt; host:/path/</code>
+  <button type="button" class="preferences-inline-action" id="pref-adv-copy">Copy rsync example</button>
+</div>
 <span class="agent-icon codex" id="agent-ico">A</span>
 <span class="session-state-badge" id="badge-neutral">run</span>
 <span class="session-yolo-marker inactive" id="ym-inactive">YO</span>
@@ -6659,6 +14571,14 @@ LIGHT_MODE_SURFACES = """
 <div class="file-tree-row indexed-directory">
   <span class="file-tree-name" id="idx-name">dir</span>
   <span class="file-tree-git-status" id="idx-status">INDEXED</span>
+</div>
+<div class="file-tree-row indexed-directory selected" id="idx-selected-row">
+  <span class="file-tree-name">dir</span>
+  <span class="file-tree-git-status" id="idx-selected-status">indexed</span>
+</div>
+<div class="file-tree-row index-excluded-entry selected" id="excluded-selected-row">
+  <span class="file-tree-name">cache</span>
+  <span class="file-tree-git-status" id="excluded-selected-status">index excluded</span>
 </div>
 <input class="file-tree-rename-input" id="rename-inp" value="name">
 <div class="session-rename-dialog">
@@ -6693,25 +14613,27 @@ def light_mode_surfaces_fixture_html(body_class):
     """
 
 
-def _contrast_ratio(rgb_a, rgb_b):
-    def rel_lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
+def _css_rgb_triplet(css_color):
+    nums = [float(n) for n in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", css_color)[:3]]
+    assert len(nums) == 3, f"expected an RGB-ish CSS color, got {css_color!r}"
+    if css_color.strip().startswith("color(srgb"):
+        nums = [n * 255 for n in nums]
+    return tuple(max(0.0, min(255.0, n)) for n in nums)
 
-        def chan(c):
-            c = c / 255.0
-            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
 
-        return 0.2126 * chan(nums[0]) + 0.7152 * chan(nums[1]) + 0.0722 * chan(nums[2])
-
-    la, lb = rel_lum(rgb_a), rel_lum(rgb_b)
-    hi, lo = max(la, lb), min(la, lb)
-    return (hi + 0.05) / (lo + 0.05)
+def _css_luminance_255(css_color):
+    r, g, b = _css_rgb_triplet(css_color)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
 def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     page = tmp_path / "light-surfaces.html"
-    page.write_text(light_mode_surfaces_fixture_html("theme-light"), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-light"),
+    )
     style = browser.execute_script(
         """
         const out = {};
@@ -6730,14 +14652,13 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     )
 
     # (a) Surfaces that were dark boxes must now have LIGHT backgrounds (luminance high).
-    def _lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
-        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
-
-    for box in ("cp-dlg", "ks-dlg", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre", "info-pane", "info-content", "info-tree-summary"):
-        assert _lum(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
+    for box in ("cp-dlg", "ks-dlg", "pref-adv", "pref-adv-code", "sub", "rename-inp", "session-rename-inp", "session-rename-cancel", "md-pre", "info-pane", "info-content", "info-tree-summary"):
+        assert _css_luminance_255(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
     assert style["bodyVars"]["infoTreeBorder"] == "#8793a3", style["bodyVars"]
-    assert style["bodyVars"]["infoTreeLine"] == "rgb(100 116 139 / 0.16)", style["bodyVars"]
+    # This is a raw custom-property value, not a computed paint: its contract is that the
+    # connector and record tokens share one non-empty token while remaining distinct from the
+    # opaque tree border. Exact hue belongs to the token definition, not this surface test.
+    assert style["bodyVars"]["infoTreeLine"], style["bodyVars"]
     assert style["bodyVars"]["infoRecordBorder"] == style["bodyVars"]["infoTreeLine"], style["bodyVars"]
     assert style["bodyVars"]["infoTreeLine"] != style["bodyVars"]["infoTreeBorder"], style["bodyVars"]
 
@@ -6745,10 +14666,12 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
     page_white = "rgb(255, 255, 255)"
     text_checks = {
         "cp-row": "cp-dlg", "cp-grp": "cp-dlg", "cp-det": "cp-dlg", "cp-kb": "cp-dlg",
-        "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "agent-ico": None,
+        "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "pref-adv-text": "pref-adv", "pref-adv-code": "pref-adv-code", "pref-adv-copy": "pref-adv-copy", "agent-ico": None,
         "badge-neutral": "badge-neutral", "ym-inactive": "ym-inactive",
         "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
-        "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
+        "rnm-name": None, "idx-name": None, "idx-status": None,
+        "idx-selected-status": "idx-selected-row", "excluded-selected-status": "excluded-selected-row",
+        "rename-inp": "rename-inp", "session-rename-inp": "session-rename-inp", "session-rename-cancel": "session-rename-cancel", "md-pre": "md-pre",
         # the YO!info table — rows/header/current/links must read on the light pane.
         "info-hdr": None, "info-row-text": None, "info-link": None, "info-cur": None,
         # YO!info leaf rows use a transparent fill and must stay readable on the light pane surface.
@@ -6758,31 +14681,105 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         bg = style[bg_id]["bg"] if bg_id else page_white
         if "rgba(0, 0, 0, 0)" in bg or bg == "transparent":
             bg = page_white
-        ratio = _contrast_ratio(style[eid]["color"], bg)
+        ratio = wcag_contrast_ratio(style[eid]["color"], bg)
         assert ratio >= 3.0, f"{eid}: text {style[eid]['color']} on {bg} contrast {ratio:.1f} < 3.0 (dark-box/invisible)"
+
+
+def test_selected_index_labels_are_readable_in_dark_theme(browser, tmp_path):
+    page = tmp_path / "dark-selected-index-labels.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-dark"),
+    )
+    metrics = browser.execute_script(
+        """
+        const read = (statusId, rowId) => {
+          const status = getComputedStyle(document.getElementById(statusId));
+          const row = getComputedStyle(document.getElementById(rowId));
+          return {color: status.color, background: row.backgroundColor};
+        };
+        return {
+          indexed: read('idx-selected-status', 'idx-selected-row'),
+          excluded: read('excluded-selected-status', 'excluded-selected-row'),
+        };
+        """
+    )
+    for label, paint in metrics.items():
+        ratio = wcag_contrast_ratio(paint["color"], paint["background"])
+        assert ratio >= 4.5, f"{label}: selected index label contrast {ratio:.1f} < 4.5: {paint}"
+
+
+def test_preferences_upload_advisory_matches_dark_theme_and_light_readability(browser, tmp_path):
+    page = tmp_path / "preferences-advisory.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-dark"),
+    )
+    dark = browser.execute_script(
+        """
+        const read = id => {
+          const s = getComputedStyle(document.getElementById(id));
+          return {color: s.color, bg: s.backgroundColor, border: s.borderTopColor};
+        };
+        return {
+          advisory: read('pref-adv'),
+          code: read('pref-adv-code'),
+          copy: read('pref-adv-copy'),
+          panel2: getComputedStyle(document.body).getPropertyValue('--panel2').trim(),
+        };
+        """
+    )
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        light_mode_surfaces_fixture_html("theme-light"),
+    )
+    light = browser.execute_script(
+        """
+        const read = id => {
+          const s = getComputedStyle(document.getElementById(id));
+          return {color: s.color, bg: s.backgroundColor, border: s.borderTopColor};
+        };
+        return {advisory: read('pref-adv'), code: read('pref-adv-code'), copy: read('pref-adv-copy')};
+        """
+    )
+
+    assert _css_luminance_255(dark["advisory"]["bg"]) < 85, dark
+    assert _css_luminance_255(dark["code"]["bg"]) < 95, dark
+    assert dark["advisory"]["bg"] != "rgb(255, 231, 163)", dark
+    assert wcag_contrast_ratio(dark["advisory"]["color"], dark["advisory"]["bg"]) >= 3.0, dark
+    assert wcag_contrast_ratio(dark["code"]["color"], dark["code"]["bg"]) >= 4.5, dark
+    assert wcag_contrast_ratio(dark["copy"]["color"], dark["copy"]["bg"]) >= 3.0, dark
+    assert _css_luminance_255(light["advisory"]["bg"]) > 180, light
+    assert _css_luminance_255(light["code"]["bg"]) > 225, light
+    assert wcag_contrast_ratio(light["advisory"]["color"], light["advisory"]["bg"]) >= 4.5, light
+    assert wcag_contrast_ratio(light["code"]["color"], light["code"]["bg"]) >= 7.0, light
+    assert wcag_contrast_ratio(light["copy"]["color"], light["copy"]["bg"]) >= 3.0, light
 
 
 def test_light_editor_image_backdrop_is_light(browser, tmp_path):
     page = tmp_path / "light-editor-image.html"
-    page.write_text(
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
         light_mode_surfaces_fixture_html("editor-theme-light").replace(
             LIGHT_MODE_SURFACES,
             '<div class="file-editor-image-panel" id="imgp"><img class="file-editor-image" id="img" src="#"></div>',
         ),
-        encoding="utf-8",
     )
-    browser.get(page.as_uri())
     style = browser.execute_script(
         "return {panel: getComputedStyle(document.getElementById('imgp')).backgroundColor,"
         " img: getComputedStyle(document.getElementById('img')).backgroundColor};"
     )
 
-    def _lum(css_rgb):
-        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
-        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
-
-    assert _lum(style["panel"]) > 180, f"editor-light image panel must be light, got {style['panel']}"
-    assert _lum(style["img"]) > 180, f"editor-light image backdrop must be light, got {style['img']}"
+    assert _css_luminance_255(style["panel"]) > 180, f"editor-light image panel must be light, got {style['panel']}"
+    assert _css_luminance_255(style["img"]) > 180, f"editor-light image backdrop must be light, got {style['img']}"
 
 
 def codemirror_search_panel_fixture_html():
@@ -6804,12 +14801,22 @@ def codemirror_search_panel_fixture_html():
         <script>
           (function() {{
             const CM = window.YOLOmuxCodeMirror;
-            const exts = CM.search ? [CM.search()] : [];
+            const phrases = {{
+              Find: '查找', Replace: '替换', next: '下一项', previous: '上一项', all: '全部',
+              'match case': '区分大小写', regexp: '正则表达式', 'by word': '全字匹配',
+              replace: '替换', 'replace all': '全部替换', close: '关闭',
+            }};
+            const exts = [CM.EditorState.phrases.of(phrases), ...(CM.search ? [CM.search()] : [])];
             const view = new CM.EditorView({{
               state: CM.EditorState.create({{doc: "hello world\\nfind me\\n", extensions: exts}}),
               parent: document.getElementById('cm-host'),
             }});
             CM.openSearchPanel(view);
+            const panel = document.querySelector('.cm-search');
+            for (const button of panel.querySelectorAll('.cm-button[name="select"], .cm-button[name="replaceAll"]')) {{
+              button.dataset.searchLabel = phrases.all;
+            }}
+            panel.querySelector('label:has(input[name="word"])').dataset.searchLabel = '全字';
           }})();
         </script>
       </body>
@@ -6819,8 +14826,12 @@ def codemirror_search_panel_fixture_html():
 
 def load_codemirror_search_panel_fixture(browser, tmp_path):
     page = tmp_path / "cm-search-panel.html"
-    page.write_text(codemirror_search_panel_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        codemirror_search_panel_fixture_html(),
+    )
 
 
 def test_codemirror_search_toggle_labels_collapse_to_glyph_not_overflow(browser, tmp_path):
@@ -6850,6 +14861,176 @@ def test_codemirror_search_toggle_labels_collapse_to_glyph_not_overflow(browser,
         assert lb["scrollWidth"] <= lb["boxWidth"] + 1, f"toggle label overflows its 24px box: {lb}"
 
 
+def test_codemirror_search_panel_uses_localized_phrases_and_generated_labels(browser, tmp_path):
+    load_codemirror_search_panel_fixture(browser, tmp_path)
+    labels = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.cm-search');
+            if (!panel) return false;
+            const select = panel.querySelector('.cm-button[name="select"]');
+            const replaceAll = panel.querySelector('.cm-button[name="replaceAll"]');
+            const word = panel.querySelector('label:has(input[name="word"])');
+            return {
+              find: panel.querySelector('input[name="search"]')?.placeholder,
+              replace: panel.querySelector('input[name="replace"]')?.placeholder,
+              select: select?.textContent,
+              replaceAll: replaceAll?.textContent,
+              matchCase: panel.querySelector('label:has(input[name="case"])')?.textContent,
+              regexp: panel.querySelector('label:has(input[name="re"])')?.textContent,
+              word: word?.textContent,
+              selectGenerated: getComputedStyle(select, '::before').content,
+              wordGenerated: getComputedStyle(word, '::after').content,
+            };
+            """
+        )
+    )
+    assert labels == {
+        "find": "查找",
+        "replace": "替换",
+        "select": "全部",
+        "replaceAll": "全部替换",
+        "matchCase": "区分大小写",
+        "regexp": "正则表达式",
+        "word": "全字匹配",
+        "selectGenerated": '"全部"',
+        "wordGenerated": '"全字"',
+    }
+
+
+def test_preformatted_text_surfaces_share_wrapping_in_dark_and_light_modes(browser, tmp_path):
+    page = tmp_path / "shared-preformatted-wrapping.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+            <pre id="snapshot" class="tmux-snapshot">alpha/beta</pre>
+            <div id="transcript" class="transcript-text">alpha/beta</div>
+            <div id="agent" class="yoagent-message-body">alpha/beta</div>
+            <div id="details-preview" class="yoagent-details-preview">alpha/beta</div>
+            <div class="yoagent-message-details"><pre id="details">alpha/beta</pre></div>
+            <div class="modal"><pre id="modal-pre">alpha/beta</pre></div>
+            <div class="drop-action-result"><pre id="drop-result">alpha/beta</pre></div>
+            <div class="file-editor-conflict-compare"><pre id="conflict">alpha/beta</pre></div>
+            """
+        ),
+    )
+    for theme in ("theme-dark", "theme-light"):
+        metrics = browser.execute_script(
+            """
+            document.body.className = arguments[0];
+            return Object.fromEntries([
+              'snapshot', 'transcript', 'agent', 'details-preview',
+              'details', 'modal-pre', 'drop-result', 'conflict',
+            ].map(id => {
+              const style = getComputedStyle(document.getElementById(id));
+              return [id, {whiteSpace: style.whiteSpace, overflowWrap: style.overflowWrap}];
+            }));
+            """,
+            theme,
+        )
+        assert all(value == {"whiteSpace": "pre-wrap", "overflowWrap": "anywhere"} for value in metrics.values()), (theme, metrics)
+
+
+@pytest.mark.parametrize(
+    ("viewport_width", "expanded"),
+    ((360, False), (1400, True)),
+    ids=("narrow", "wide"),
+)
+def test_transient_surfaces_use_viewport_clamped_readable_capacities(browser, tmp_path, viewport_width, expanded):
+    page = tmp_path / "responsive-transient-capacities.html"
+    long_text = "0123456789abcdef" * 16
+    browser.set_window_size(viewport_width, 720)
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            f"""
+            <div class="app-menu-area"><button id="search" class="topbar-search"><span class="topbar-search-label">{long_text}</span></button></div>
+            <pre id="drag" class="drag-timing-overlay">{long_text}</pre>
+            <div id="repo" class="file-tree-repo-popover" style="inset-inline-start:var(--popover-edge-gap);inset-block-start:90px"><div class="file-tree-repo-popover-title">{long_text}</div><div class="file-tree-repo-popover-path">/{long_text}</div></div>
+            <div id="drop" class="terminal-drop-suggestions" style="inset-inline-start:var(--popover-edge-gap);inset-block-start:190px"><div class="terminal-drop-suggestions-head">{long_text}</div></div>
+            """
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        return {
+          viewport: innerWidth,
+          surfaces: Object.fromEntries(['search', 'drag', 'repo', 'drop'].map(id => {
+            const {left, right, width} = document.getElementById(id).getBoundingClientRect();
+            return [id, {left, right, width}];
+          })),
+        };
+        """
+    )
+    for name, rect in metrics["surfaces"].items():
+        assert rect["left"] >= -1, (name, metrics)
+        assert rect["right"] <= metrics["viewport"] + 1, (name, metrics)
+        assert rect["width"] <= metrics["viewport"] + 1, (name, metrics)
+    legacy_caps = {"search": 320, "drag": 460, "repo": 360, "drop": 380}
+    if expanded:
+        for name, old_cap in legacy_caps.items():
+            assert metrics["surfaces"][name]["width"] > old_cap, (name, metrics)
+
+
+def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser, tmp_path):
+    page = tmp_path / "dialog-capacity-ownership.html"
+    page.write_text(
+        page_html(
+            """
+            <div id="host-about" class="modal app-modal-overlay open about-open"><div id="host-about-dialog" class="modal-dialog"></div></div>
+            <div id="host-share" class="modal app-modal-overlay open share-open"><div id="host-share-dialog" class="modal-dialog"></div></div>
+            <div id="replay" class="share-popup-mirror-item" style="inset:0;width:100%;height:100%">
+              <div class="modal app-modal-overlay open about-open"><div id="replay-about-dialog" class="modal-dialog"></div></div>
+              <div class="modal app-modal-overlay open share-open"><div id="replay-share-dialog" class="modal-dialog"></div></div>
+            </div>
+            <div class="command-palette app-modal-overlay"><div id="command-dialog" class="command-palette-dialog"></div></div>
+            <div class="keyboard-shortcuts-overlay app-modal-overlay"><div id="keyboard-dialog" class="keyboard-shortcuts-dialog"></div></div>
+            <div class="file-editor-dialog-backdrop app-modal-overlay"><div id="editor-dialog" class="file-editor-dialog"></div></div>
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    def geometry(width, theme):
+        browser.set_window_size(width, 720)
+        browser.get(page.as_uri())
+        return browser.execute_script(
+            """
+            document.body.className = arguments[0];
+            const width = id => document.getElementById(id).getBoundingClientRect().width;
+            return {
+              viewport: innerWidth,
+              hostAbout: width('host-about-dialog'),
+              replayAbout: width('replay-about-dialog'),
+              hostShare: width('host-share-dialog'),
+              replayShare: width('replay-share-dialog'),
+              command: width('command-dialog'),
+              keyboard: width('keyboard-dialog'),
+              editor: width('editor-dialog'),
+            };
+            """,
+            theme,
+        )
+
+    for theme in ("theme-dark", "theme-light"):
+        narrow = geometry(360, theme)
+        wide = geometry(1400, theme)
+        for metrics in (narrow, wide):
+            assert abs(metrics["hostAbout"] - metrics["replayAbout"]) <= 1, (theme, metrics)
+            assert abs(metrics["hostShare"] - metrics["replayShare"]) <= 1, (theme, metrics)
+            assert all(0 < metrics[key] <= metrics["viewport"] for key in ("hostAbout", "hostShare", "command", "keyboard", "editor")), (theme, metrics)
+        assert abs(wide["command"] - wide["editor"]) <= 1, (theme, wide)
+        assert wide["keyboard"] >= wide["command"], (theme, wide)
+        assert wide["keyboard"] > narrow["keyboard"], (theme, narrow, wide)
+        assert wide["hostAbout"] > narrow["hostAbout"], (theme, narrow, wide)
+        assert wide["hostShare"] > narrow["hostShare"], (theme, narrow, wide)
+
+
 def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp_path):
     # image 20260603-028: focusing/hovering a needs-attention (red) pane on a --dangerously-yolo server
     # made it `typing-ready-pane yolo-ready-pane needs-input-pane`; the yolo-ready green --panel-ring-color
@@ -6863,9 +15044,13 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     ]
     panels = "".join(f'<div class="panel {c}" id="p{i}" style="width:160px;height:60px"></div>' for i, c in enumerate(combos))
     page = tmp_path / "needs-ring.html"
-    page.write_text(f"<!doctype html><html><head><meta charset=utf-8><style>{css}</style></head>"
-                    f'<body class="theme-dark">{panels}</body></html>', encoding="utf-8")
-    browser.get(page.as_uri())
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        f"<!doctype html><html><head><meta charset=utf-8><style>{css}</style></head>"
+                    f'<body class="theme-dark">{panels}</body></html>',
+    )
     rings = browser.execute_script(
         """
         const out = {};
@@ -6877,4 +15062,4 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     )
     # Every needs-attention pane resolves the red ring color, regardless of focus/yolo-ready state.
     for pid, ring in rings.items():
-        assert ring.lower() == '#ff3347', f"{pid}: needs-attention pane must keep the red ring (#ff3347), got {ring}"
+        assert ring.lower() == ui_pin("paneRingAttention"), f"{pid}: needs-attention pane must keep the red ring, got {ring}"

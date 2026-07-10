@@ -14,8 +14,9 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
     )
 
     names = {item["name"] for item in payload["skills"]}
+    by_name = {item["name"]: item for item in payload["skills"]}
     assert payload["ok"] is True
-    assert {"work-next", "notify-when-idle", "wait-then-run", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "sequential-dependent-asks", "manage-skills"} <= names
+    assert {"work-next", "notify-when-idle", "wait-then-run", "wait-roster-then-send", "loop-send", "research-to-session", "review-to-session", "verify-to-session", "ask-for-status", "all-idle-summary", "session-handoff", "handoff-after-done", "sequential-dependent-asks", "manage-skills"} <= names
     assert payload["user_dirs"]["skills"] == str(tmp_path / "skills.d")
     assert payload["user_dirs"]["context"] == str(tmp_path / "context.d")
     assert any("YO!agent skill `work-next`" in line for line in payload["context_lines"])
@@ -40,6 +41,12 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
         for line in payload["context_lines"]
     )
     assert any(
+        "YO!agent skill `wait-roster-then-send`" in line
+        and "stably calm" in line
+        and "Do not capture a result unless" in line
+        for line in payload["context_lines"]
+    )
+    assert any(
         "YO!agent skill `sequential-dependent-asks`" in line
         and "even when every step targets the same tmux session" in line
         and "never paste free text into a menu" in line
@@ -47,6 +54,8 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
     )
     assert any("YO!agent skill `manage-skills`" in line and "~/.config/yolomux/skills.d/" in line for line in payload["context_lines"])
     assert any("YO!agent context `recommendation-rubric`" in line for line in payload["context_lines"])
+    assert by_name["wait-roster-then-send"]["model_intent"]["handler"] == "wait-roster-then-send"
+    assert by_name["wait-roster-then-send"]["model_intent"]["output"]["tag"] == "yoagent-job-plan"
 
 
 def test_user_skills_override_disable_and_extend_builtins(tmp_path):
@@ -92,7 +101,7 @@ def test_invalid_user_skill_reports_errors_without_loading(tmp_path):
     assert not any(item["name"] == "bad skill" for item in payload["skills"])
     errors = " ".join(item["error"] for item in payload["errors"])
     assert "name must match" in errors
-    assert "unknown tools: not_a_tool" in errors
+    assert "Unknown tools: not_a_tool." in errors
 
 
 def test_parse_skill_text_validates_enabled_and_timeout():
@@ -105,8 +114,8 @@ def test_parse_skill_text_validates_enabled_and_timeout():
 
     assert skill is None
     assert [item["error"] for item in errors] == [
-        "enabled must be true or false",
-        "default_timeout_minutes must be between 1 and 1440",
+        "enabled must be true or false.",
+        "default_timeout_minutes must be between 1 and 1440.",
     ]
 
 
@@ -156,6 +165,6 @@ def test_user_skill_file_writes_reject_bad_paths_and_invalid_yaml(tmp_path):
     except ValueError as exc:
         message = str(exc)
         assert "name must match" in message
-        assert "unknown tools" in message
+        assert "Unknown tools" in message
     else:
         raise AssertionError("invalid skill YAML must be rejected")

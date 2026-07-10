@@ -526,12 +526,13 @@ _WORKING_LINE_RE = re.compile(
     rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+\S.*(?:…|\.{{3}}).*"
     r"(?:\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt|[↑↓]|\b\d+(?:\.\d+)?\s*[smh]\b)[^)]*\)|\b\d+(?:\.\d+)?\s*[smh]\b)"
     r"|^[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
-    # Claude Code auto-compact progress line: "Compacting conversation... (Nm Ns → Nk tokens) NN%"
+    # Claude Code auto-compact progress line: "Compacting conversation… (Nm Ns → Nk tokens) NN%"
     # Starts with a capital letter (no leading symbol), so the symbol-gated branch above misses it.
-    r"|^\s*Compacting\s+conversation\.{3}.*\([^)]*(?:tokens|→)[^)]*\)"
+    r"|^\s*Compacting\s+conversation(?:…|\.{3}).*\([^)]*(?:tokens|→)[^)]*\)"
     r")",
     re.IGNORECASE,
 )
+_CLAUDE_COMPACTION_PROGRESS_RE = re.compile(r"^\s*[▰▱]+\s*\d{1,3}%?\s*$")
 _CLAUDE_MULTI_AGENT_HEADER_RE = re.compile(
     rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+Running\s+\d+\s+agents?\s*(?:…|\.{{3}})\s*$",
     re.IGNORECASE,
@@ -541,16 +542,18 @@ _CLAUDE_AGENT_TOKEN_SUBLINE_RE = re.compile(
     re.IGNORECASE,
 )
 _STATUS_COUNTER_STALE_SECONDS = 75.0
-_STATUS_COUNTER_LEADING_MARKERS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*+·•◦∙⋅.☉○◯●"
-_STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>[{re.escape(_STATUS_COUNTER_LEADING_MARKERS)}])\s*(?P<body>\S.*)$")
+_STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>{_WORKING_LEADING_SYMBOL_RE})\s*(?P<body>\S.*)$")
 _STATUS_COUNTER_ELAPSED_RE = re.compile(r"\b(?:\d+(?:\.\d+)?[hms]\s*)+\b", re.IGNORECASE)
 _STATUS_COUNTER_DURATION_TOKEN_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>[hms])\b", re.IGNORECASE)
 _STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)\s*(?P<suffix>[kKmM])?\s+tokens?\b", re.IGNORECASE)
 _STATUS_COUNTER_TOOL_USE_RE = re.compile(r"\b(?P<count>\d+)\s+tool uses?\b", re.IGNORECASE)
 _STATUS_COUNTER_PAYLOAD_RE = re.compile(r"\b(?:thinking|effort|tokens?|tool uses?|esc\s+to\s+interrupt)\b|[↑↓]", re.IGNORECASE)
 _STATUS_COUNTER_BACKGROUND_RE = re.compile(r"^\s*[○◯]\s*\S.*\b\d+(?:\.\d+)?s\s*·\s*(?:[↑↓]\s*)?\d", re.IGNORECASE)
+_VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS = 512
+_VISIBLE_STATUS_COUNTER_CACHE_IDLE_SECONDS = 30.0
 _VISIBLE_STATUS_COUNTER_CACHE: dict[str, dict[str, object]] = {}
 _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├┤┬┴┼─━═╔╗╚╝╠╣╦╩╬]+$")
+_BOX_DRAWING_LABELLED_LINE_RE = re.compile(r"^\s*[─━═]{3,}\s+\S.*?\s+[─━═]+\s*$")
 _BOXED_EMPTY_INPUT_LINE_RE = re.compile(r"^\s*[│┃]\s*[❯›>]?\s*[█▉▊▋▌▍▎▏_ ]*[│┃]\s*$")
 _EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:[^\w\s]\s*)?\S+\s+/effort\b", re.IGNORECASE)
 _WORK_QUEUE_HINT_RE = re.compile(r"(?:↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)", re.IGNORECASE)
@@ -567,6 +570,15 @@ _CODEX_GOAL_ACHIEVED_STATUS_RE = re.compile(r"\bGoal\s+achieved\s*\((?P<duration
 _CODEX_GOAL_STATUS_RE = re.compile(r"\b(?:Pursuing\s+goal|Goal\s+achieved)\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
 _CLAUDE_GOAL_ACTIVE_RE = re.compile(
     r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
+    re.IGNORECASE,
+)
+_TIP_LINE_RE = re.compile(r"^\s*(?:[⎿└]\s*)?Tip:", re.IGNORECASE)
+_COMPLETED_TASKS_RE = re.compile(
+    r"\b(?:all\s+\d+\s+tasks?|both\s+goal\s+items)\s+(?:are\s+)?(?:complete|completed|done|finished)\b",
+    re.IGNORECASE,
+)
+_COMPLETED_FOLLOWUP_QUESTION_RE = re.compile(
+    r"\b(?P<question>(?:want|would|should|shall|can|could)\s+(?:me|i|we)\b[^?]{0,320}\?)",
     re.IGNORECASE,
 )
 _SHELL_PROMPT_RE = re.compile(r"[@:][^@\s]+[$#](?:\s+\S.*)?$")
@@ -846,13 +858,6 @@ def _parse_agent_goal_elapsed_seconds(line: str) -> float | None:
     return _parse_codex_goal_elapsed_seconds(line)
 
 
-def _parse_agent_active_goal_elapsed_seconds(line: str) -> float | None:
-    elapsed = _parse_claude_goal_elapsed_seconds(line)
-    if elapsed is not None:
-        return elapsed
-    return _parse_codex_pursuing_goal_elapsed_seconds(line)
-
-
 def _parse_status_token_count(line: str) -> int | None:
     matches = list(_STATUS_COUNTER_TOKEN_RE.finditer(line))
     if not matches:
@@ -875,7 +880,10 @@ def _parse_status_tool_uses(line: str) -> int | None:
 
 
 def _status_counter_identity(line: str) -> str:
-    identity = _STATUS_COUNTER_ELAPSED_RE.sub("<elapsed>", line.strip())
+    stripped = line.strip()
+    marker_match = _STATUS_COUNTER_MARKER_RE.match(stripped)
+    identity = marker_match.group("body") if marker_match else stripped
+    identity = _STATUS_COUNTER_ELAPSED_RE.sub("<elapsed>", identity)
     identity = _STATUS_COUNTER_TOKEN_RE.sub("<tokens>", identity)
     identity = _STATUS_COUNTER_TOOL_USE_RE.sub("<tool-uses>", identity)
     return re.sub(r"\s+", " ", identity).lower()
@@ -948,7 +956,7 @@ def _last_agent_goal_elapsed_seconds(lines: list[str]) -> float | None:
 def _status_counter_advanced(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
     if not previous:
         return False
-    if previous.get("status_identity") != current.get("status_identity"):
+    if not _status_counter_same_position(previous, current) and previous.get("status_identity") != current.get("status_identity"):
         return False
     for key in ("status_elapsed_seconds", "status_tokens", "status_tool_uses"):
         old = previous.get(key)
@@ -958,28 +966,80 @@ def _status_counter_advanced(previous: dict[str, object] | None, current: dict[s
     return False
 
 
+def _status_counter_same_position(previous: dict[str, object], current: dict[str, object]) -> bool:
+    previous_row = previous.get("status_row_from_bottom")
+    current_row = current.get("status_row_from_bottom")
+    previous_column = previous.get("status_column")
+    current_column = current.get("status_column")
+    return (
+        isinstance(previous_row, int)
+        and isinstance(current_row, int)
+        and isinstance(previous_column, int)
+        and isinstance(current_column, int)
+        and previous_row == current_row
+        and previous_column == current_column
+    )
+
+
+def _status_spinner_advanced(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
+    if not previous or not _status_counter_same_position(previous, current):
+        return False
+    previous_marker = str(previous.get("status_marker") or "")
+    current_marker = str(current.get("status_marker") or "")
+    return previous_marker in _WORKING_SPINNER_GLYPHS and current_marker in _WORKING_SPINNER_GLYPHS and previous_marker != current_marker
+
+
+def _prune_visible_status_counter_cache(now: float) -> None:
+    for target, record in tuple(_VISIBLE_STATUS_COUNTER_CACHE.items()):
+        last_seen_at = float(record.get("last_counter_seen_at") or record.get("first_seen_at") or now)
+        if 0 <= now - last_seen_at > _VISIBLE_STATUS_COUNTER_CACHE_IDLE_SECONDS:
+            _VISIBLE_STATUS_COUNTER_CACHE.pop(target, None)
+    while len(_VISIBLE_STATUS_COUNTER_CACHE) > _VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS:
+        oldest_target = next(iter(_VISIBLE_STATUS_COUNTER_CACHE), None)
+        if oldest_target is None:
+            break
+        _VISIBLE_STATUS_COUNTER_CACHE.pop(oldest_target, None)
+
+
+def _forget_visible_status_counter(pane_target: str | None, now: float) -> None:
+    _prune_visible_status_counter_cache(now)
+    if pane_target:
+        _VISIBLE_STATUS_COUNTER_CACHE.pop(pane_target, None)
+
+
+def _remember_visible_status_counter(pane_target: str, record: dict[str, object], now: float) -> None:
+    _VISIBLE_STATUS_COUNTER_CACHE.pop(pane_target, None)
+    _VISIBLE_STATUS_COUNTER_CACHE[pane_target] = record
+    _prune_visible_status_counter_cache(now)
+
+
 def _status_counter_screen_state(counter: dict[str, object], pane_target: str | None = None, now: float | None = None) -> dict[str, object]:
     now = time.monotonic() if now is None else now
     advanced = False
     stale = False
     last_counter_seen_at = now
     if pane_target:
+        _prune_visible_status_counter_cache(now)
         previous = _VISIBLE_STATUS_COUNTER_CACHE.get(pane_target)
         previous_counter = previous.get("counter") if previous else None
         advanced = _status_counter_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
+        spinner_advanced = _status_spinner_advanced(previous_counter if isinstance(previous_counter, dict) else None, counter)
         previous_liveness = _status_counter_liveness_snapshot(previous_counter if isinstance(previous_counter, dict) else None)
         current_liveness = _status_counter_liveness_snapshot(counter)
-        if previous and previous_liveness == current_liveness and not advanced:
-            last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now)
+        liveness_changed = bool(previous and previous_liveness != current_liveness)
+        last_advanced_at = float(previous.get("last_advanced_at") or previous.get("first_seen_at") or now) if previous else now
+        if advanced or spinner_advanced or liveness_changed:
+            last_advanced_at = now
+        elif previous:
             stale = now - last_advanced_at > _STATUS_COUNTER_STALE_SECONDS
-            last_counter_seen_at = float(previous.get("last_counter_seen_at") or now)
-        if not stale:
-            _VISIBLE_STATUS_COUNTER_CACHE[pane_target] = {
-                "counter": dict(counter),
-                "first_seen_at": previous.get("first_seen_at") if previous else now,
-                "last_advanced_at": now if advanced or not previous else previous.get("last_advanced_at", now),
-                "last_counter_seen_at": now,
-            }
+        _remember_visible_status_counter(pane_target, {
+            "counter": dict(counter),
+            "first_seen_at": previous.get("first_seen_at") if previous else now,
+            "last_advanced_at": last_advanced_at,
+            "last_counter_seen_at": now,
+        }, now)
+    else:
+        spinner_advanced = False
 
     state = {
         "key": "idle" if stale else "working",
@@ -987,6 +1047,7 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
         "negative_reason": "stale visible status counter" if stale else "agent is working",
         "activity_source": "visible-counter",
         "status_counter_advanced": advanced,
+        "status_spinner_advanced": spinner_advanced,
         "last_counter_seen_at": last_counter_seen_at,
     }
     state.update(counter)
@@ -994,7 +1055,7 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
 
 
 def _is_working_line(line: str) -> bool:
-    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line) or _parse_agent_active_goal_elapsed_seconds(line) is not None)
+    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
 
 
 def visible_agent_working(visible_text: str) -> bool:
@@ -1008,6 +1069,24 @@ def visible_agent_working(visible_text: str) -> bool:
     return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
 
 
+def completed_agent_followup_question(visible_text: str) -> str:
+    """Return a current agent follow-up after an explicit task-completion summary, if present."""
+    lines = normalize_capture_text(visible_text).splitlines()[-80:]
+    completion_index = max(
+        (index for index, line in enumerate(lines) if _COMPLETED_TASKS_RE.search(line)),
+        default=-1,
+    )
+    if completion_index < 0:
+        return ""
+    for line in lines[completion_index + 1:]:
+        if _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
+            continue
+        match = _COMPLETED_FOLLOWUP_QUESTION_RE.search(_clean_prompt_block_line(line))
+        if match:
+            return match.group("question").strip()
+    return ""
+
+
 def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
     """Return the newest current visible status counter, ignoring stale rows above real output."""
     visible_text = normalize_capture_text(visible_text)
@@ -1015,19 +1094,21 @@ def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
     counter_index, counter = _last_status_counter(lines)
     if counter_index < 0 or counter is None or _working_line_has_later_prompt(lines, counter_index):
         return None
+    counter = dict(counter)
+    counter["status_row_from_bottom"] = len(lines) - counter_index - 1
+    counter["status_column"] = len(lines[counter_index]) - len(lines[counter_index].lstrip())
     goal_elapsed_seconds = _last_agent_goal_elapsed_seconds(lines)
     if goal_elapsed_seconds is not None:
-        counter = dict(counter)
         counter["goal_elapsed_seconds"] = goal_elapsed_seconds
         counter["display_elapsed_seconds"] = goal_elapsed_seconds
     else:
-        counter = dict(counter)
         counter["display_elapsed_seconds"] = counter.get("status_elapsed_seconds")
     return counter
 
 
 def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
     in_codex_queued_followup = False
+    in_wrapped_tip = False
     for line in lines[working_index + 1:]:
         stripped = line.strip()
         # Same bounded-overlay rule as approval_prompt_has_later_activity: a Ctrl-T task list below a
@@ -1044,6 +1125,12 @@ def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool
             if stripped.startswith("↳") or _CODEX_QUEUED_FOLLOWUP_EDIT_HINT_RE.match(stripped) or line.startswith(("    ", "  ")):
                 continue
             in_codex_queued_followup = False
+        if _is_tip_line(line):
+            in_wrapped_tip = True
+            continue
+        if in_wrapped_tip and stripped and line[:1].isspace():
+            continue
+        in_wrapped_tip = False
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
             continue
         if re.match(r"^[❯›>]\s*$", stripped):
@@ -1149,8 +1236,21 @@ def _is_separator_or_footer(line: str) -> bool:
         not stripped
         or _is_footer_hint_line(stripped)
         or bool(re.fullmatch(r"[─\-]{10,}", stripped))
-        or bool(_BOX_DRAWING_ONLY_LINE_RE.fullmatch(stripped))
+        or _is_box_drawing_chrome_line(stripped)
     )
+
+
+def _is_box_drawing_chrome_line(line: str) -> bool:
+    """Return True for plain or labelled borders drawn around the live composer."""
+    stripped = line.strip()
+    return bool(
+        _BOX_DRAWING_ONLY_LINE_RE.fullmatch(stripped)
+        or _BOX_DRAWING_LABELLED_LINE_RE.fullmatch(stripped)
+    )
+
+
+def _is_tip_line(line: str) -> bool:
+    return bool(_TIP_LINE_RE.match(line))
 
 
 def _is_footer_hint_line(line: str) -> bool:
@@ -1175,7 +1275,9 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _is_working_line(line):
         return True
-    if _BOX_DRAWING_ONLY_LINE_RE.fullmatch(stripped):
+    if _parse_agent_goal_elapsed_seconds(stripped) is not None:
+        return True
+    if _is_box_drawing_chrome_line(stripped):
         return True
     if _BOXED_EMPTY_INPUT_LINE_RE.match(stripped):
         return True
@@ -1191,7 +1293,7 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True
-    if re.match(r"^(?:[⎿└]\s*)?Tip:", stripped, re.IGNORECASE):
+    if _is_tip_line(line):
         return True
     if re.match(r"^tmux\s+focus-events\s+off\b", stripped, re.IGNORECASE):
         return True
@@ -1221,6 +1323,10 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     # Claude Code auto-compact countdown footer: "Ns until auto-compact · /model sonnet[Nm"
     if re.search(r"\buntil\s+auto-compact\b", stripped, re.IGNORECASE):
+        return True
+    # Claude's compaction view inserts a block-character progress row between its live spinner
+    # and the otherwise normal empty composer. It is status chrome, not new assistant output.
+    if _CLAUDE_COMPACTION_PROGRESS_RE.fullmatch(stripped):
         return True
     return False
 
@@ -1387,6 +1493,10 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
     """
     visible_text = normalize_capture_text(visible_text)
+    observation_now = time.monotonic() if now is None else now
+    counter = visible_agent_status_counter(visible_text)
+    if counter is None:
+        _forget_visible_status_counter(pane_target, observation_now)
     prompt_state = approval_prompt_state(visible_text)
     prompt_type = prompt_state.get("type") or None
     if prompt_type is not None:
@@ -1419,9 +1529,23 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
             "evidence_lines": _matching_evidence_lines(visible_text, None, interrupted_question) or [interrupted_question],
             "prompt_hash": _hash_prompt_parts(interrupted_question),
         }
-    counter = visible_agent_status_counter(visible_text)
+    completed_followup = completed_agent_followup_question(visible_text)
+    if completed_followup:
+        return {
+            "key": "needs-input",
+            "text": completed_followup,
+            "agent": _infer_agent(visible_text),
+            "prompt_kind": "question",
+            "question_text": completed_followup,
+            "command": None,
+            "options": [],
+            "selected_option": 0,
+            "confidence": 0.9,
+            "evidence_lines": _matching_evidence_lines(visible_text, None, completed_followup) or [completed_followup],
+            "prompt_hash": _hash_prompt_parts(completed_followup),
+        }
     if counter is not None:
-        return _status_counter_screen_state(counter, pane_target=pane_target, now=now)
+        return _status_counter_screen_state(counter, pane_target=pane_target, now=observation_now)
     if visible_agent_working(visible_text):
         return {"key": "working", "text": "agent is working", "negative_reason": "agent is working"}
     question = visible_choice_prompt_text(visible_text)

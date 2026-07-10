@@ -22,7 +22,14 @@ from .common import auth_cookie_value
 from .common import auth_identity_for_credentials
 from .common import auth_setup_required
 from .common import current_auth_users
+from .common import error_payload
 from .common import test_auth_bypass_enabled
+from .locales import normalize_locale
+from .locales import resolve_locale_preference
+from .http_routes import route_for_request
+from .http_routes import SHARE_ACCESS_NONE
+from .http_routes import SHARE_ACCESS_READONLY
+from .http_routes import SHARE_ACCESS_SCOPED_FILE
 from .web import _LOGIN_LOCALE_VALUES
 from .web import current_language_pref
 from .web import login_html
@@ -32,25 +39,6 @@ from .web import setup_auth_html
 
 
 class AuthMixin:
-    SHARE_READONLY_GET_PATHS = {
-        "/api/activity",
-        "/api/fs/index-status",
-        "/api/fs/info",
-        "/api/fs/list",
-        "/api/fs/watch-diff",
-        "/api/share",
-        "/api/session-metadata",
-        "/api/session-files-batch",
-        "/api/session-files",
-        "/api/transcripts",
-    }
-    SHARE_SCOPED_FILE_GET_PATHS = {
-        "/api/fs/diff",
-        "/api/fs/raw",
-        "/api/fs/read",
-    }
-    SHARE_READONLY_POST_PATHS = {"/api/fs/batch", "/api/share/debug-profile"}
-
     def basic_auth_identity(self) -> AuthIdentity | None:
         header = self.headers.get("Authorization", "")
         scheme, separator, encoded = header.partition(" ")
@@ -168,35 +156,45 @@ class AuthMixin:
 
     def share_request_allowed(self) -> bool:
         parsed = urlparse(self.path)
-        if parsed.path in {"/", "/ws", "/ws/share-ui", "/ws/share-view", "/api/ping", "/api/share-stream", *self.SHARE_READONLY_GET_PATHS, *self.SHARE_SCOPED_FILE_GET_PATHS, *self.SHARE_READONLY_POST_PATHS}:
-            return True
-        if parsed.path.startswith("/share/"):
-            return True
-        return parsed.path.startswith("/static/")
+        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), parsed.path)
+        return bool(route and route.share_access != SHARE_ACCESS_NONE)
 
-    def share_readonly_api_allowed_path(self, path: str) -> bool:
-        return bool(self.share_token()) and path in (self.SHARE_READONLY_GET_PATHS | self.SHARE_READONLY_POST_PATHS)
-
-    def share_scoped_file_api_allowed(self, parsed: Any) -> bool:
-        if not self.share_token() or parsed.path not in self.SHARE_SCOPED_FILE_GET_PATHS:
+    def share_readonly_api_allowed(self, parsed: Any) -> bool:
+        if not self.share_token():
+            return False
+        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), parsed.path)
+        if route is None:
+            return False
+        if route.share_access == SHARE_ACCESS_READONLY:
+            return True
+        if route.share_access != SHARE_ACCESS_SCOPED_FILE:
             return False
         raw_path = parse_qs(parsed.query).get("path", [""])[0].strip()
         checker = getattr(self.server.app, "share_record_allows_file_path", None)
         return callable(checker) and checker(self.share_record(), raw_path)
 
-    def share_readonly_api_allowed(self, parsed: Any) -> bool:
-        return self.share_readonly_api_allowed_path(parsed.path) or self.share_scoped_file_api_allowed(parsed)
-
     def reject_share_forbidden(self) -> None:
         self.close_after_unread_body()
         self.write_json(
-            {"error": "share token is limited to the shared page and websocket", "role": "readonly"},
+            error_payload(
+                "share token is limited to the shared page and websocket",
+                message_key="share.error.pageScope",
+                role="readonly",
+            ),
             status=HTTPStatus.FORBIDDEN,
         )
 
     def reject_forbidden(self, identity: AuthIdentity, required_role: str) -> None:
         self.close_after_unread_body()
-        self.write_json({"error": f"{required_role} access required", "role": identity.role}, status=HTTPStatus.FORBIDDEN)
+        self.write_json(
+            error_payload(
+                f"{required_role} access required",
+                message_key="auth.error.accessRequired",
+                message_params={"role": required_role},
+                role=identity.role,
+            ),
+            status=HTTPStatus.FORBIDDEN,
+        )
 
     def safe_next_path(self, value: str | None) -> str:
         text = str(value or "/").strip()
@@ -234,7 +232,11 @@ class AuthMixin:
             self.write_redirect(self.login_url(), status=HTTPStatus.SEE_OTHER)
             return
         self.write_json(
-            {"error": "authentication required", "login_url": self.login_url("/")},
+            error_payload(
+                "authentication required",
+                message_key="auth.error.authenticationRequired",
+                login_url=self.login_url("/"),
+            ),
             status=HTTPStatus.UNAUTHORIZED,
         )
 
@@ -247,7 +249,7 @@ class AuthMixin:
         self._share_mode = "ro"
         bypass_auth = test_auth_bypass_enabled()
         if auth_setup_required() and not bypass_auth:
-            self.write_html(setup_auth_html(self.request_locale_pref()))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
             return False
         share_token = self.share_token_text()
         if share_token:
@@ -333,13 +335,6 @@ class AuthMixin:
     def share_mode(self) -> str:
         return str(getattr(self, "_share_mode", "ro") or "ro")
 
-    def require_auth_for_post(self, path: str) -> bool:
-        if path == "/api/event" or (path in self.SHARE_READONLY_POST_PATHS and self.share_token_text()):
-            return self.require_auth("readonly")
-        if path == "/api/yoagent/chat" and not self.share_token_text():
-            return self.require_auth("readonly")
-        return self.require_auth("admin")
-
     def handle_login_page(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         next_path = self.safe_next_path(qs.get("next", ["/"])[0])
@@ -347,12 +342,17 @@ class AuthMixin:
             self.write_redirect(self.login_success_path(next_path))
             return
         if auth_setup_required():
-            self.write_html(setup_auth_html(self.request_locale_pref()))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
             return
         if not self.has_logout_marker() and self.cookie_auth_identity() is not None:
             self.write_redirect(self.login_success_path(next_path))
             return
-        self.write_html(login_html(next_path=next_path, secure=self.request_is_https(), current_locale=self.request_locale_pref()))
+        self.write_html(login_html(
+            next_path=next_path,
+            secure=self.request_is_https(),
+            current_locale=self.request_locale_pref(),
+            accept_language=self.headers.get("Accept-Language", ""),
+        ))
 
     def handle_login_submit(self, parsed: Any) -> None:
         form = self.read_urlencoded_form()
@@ -361,20 +361,26 @@ class AuthMixin:
             self.write_redirect(self.login_success_path(next_path))
             return
         if auth_setup_required():
-            self.write_html(setup_auth_html(self.request_locale_pref()))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
             return
         username = form.get("username", [""])[0]
         password = form.get("password", [""])[0]
         identity = auth_identity_for_credentials(username, password)
         if identity is None:
             self.close_after_unread_body()
-            locale = self.request_locale_pref()
+            locale = normalize_locale(
+                form.get("locale", [""])[0],
+                default=self.request_locale_pref(),
+                allow_system=True,
+            )
+            display_locale = resolve_locale_preference(locale, self.headers.get("Accept-Language", ""))
             self.write_html(
                 login_html(
                     next_path=next_path,
-                    error=server_string(locale, "login.error.invalid"),
+                    error=server_string(display_locale, "login.error.invalid"),
                     secure=self.request_is_https(),
                     current_locale=locale,
+                    accept_language=self.headers.get("Accept-Language", ""),
                 ),
                 status=HTTPStatus.UNAUTHORIZED,
             )

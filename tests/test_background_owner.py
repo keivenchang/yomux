@@ -83,6 +83,35 @@ def test_background_owner_latest_generation_wins(monkeypatch, tmp_path):
     assert newer.is_latest_live_generation() is True
 
 
+def test_background_owner_prunes_dead_generation_records(monkeypatch, tmp_path):
+    registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, clock=lambda: 100.0)
+    registry.generations_dir.mkdir(parents=True)
+    dead_path = registry.generations_dir / "dead.json"
+    live_path = registry.generations_dir / "live.json"
+    dead_path.write_text(json.dumps({"generation_id": "dead", "pid": 99, "last_heartbeat": 100.0}), encoding="utf-8")
+    live_path.write_text(json.dumps({"generation_id": "live", "pid": 100, "last_heartbeat": 100.0}), encoding="utf-8")
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda pid: pid == 100)
+
+    records = registry.live_generation_records()
+
+    assert [record["generation_id"] for record in records] == ["live"]
+    assert dead_path.exists() is False
+    assert live_path.exists() is True
+
+
+def test_background_owner_generation_index_recovers_from_corruption_without_losing_live_record(monkeypatch, tmp_path):
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda pid: pid == 100)
+    registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, clock=lambda: 100.0)
+    registry.publish_generation()
+    registry.generation_index_path.write_text("{broken", encoding="utf-8")
+
+    records = registry.live_generation_records()
+
+    assert [record["generation_id"] for record in records] == [registry.generation_id]
+    recovered = json.loads(registry.generation_index_path.read_text(encoding="utf-8"))
+    assert recovered["records"][registry.generation_id]["pid"] == 100
+
+
 def test_background_owner_takeover_requests_release_then_acquires(monkeypatch, tmp_path):
     registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
     registry.started_at_ns = 20
@@ -275,7 +304,7 @@ def test_two_app_instances_same_state_dir_elect_newer_owner(monkeypatch, tmp_pat
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     try:
-        assert first.start_background_owner(port=8001) is True
+        assert first.start_background_owner(port=7771) is True
         assert second.start_background_owner(port=8003) is True
 
         assert first.background_owner.is_owner() is False
@@ -305,7 +334,7 @@ def test_background_refresh_done_fanout_reaches_follower_client_broker(monkeypat
     second = app_module.TmuxWebtermApp(["1"])
     subscriber_id, subscriber_queue = first.client_events.subscribe()
     try:
-        assert first.start_background_owner(port=8001) is True
+        assert first.start_background_owner(port=7771) is True
         assert second.start_background_owner(port=8003) is True
         assert first.background_owner.status == "follower"
         assert second.background_owner.status == "owner"
@@ -348,19 +377,19 @@ def test_background_owner_startup_order_latest_port_wins(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     apps = []
     try:
-        for port in (7777, 8001, 8002, 8003):
+        for port in (7770, 7771, 7772, 7773):
             app = app_module.TmuxWebtermApp(["1"])
             apps.append(app)
             assert app.start_background_owner(port=port) is True
         assert [app.background_owner.status for app in apps] == ["follower", "follower", "follower", "owner"]
-        assert apps[-1].background_owner.port == 8003
+        assert apps[-1].background_owner.port == 7773
 
-        restarted_8001 = app_module.TmuxWebtermApp(["1"])
-        apps.append(restarted_8001)
-        assert restarted_8001.start_background_owner(port=8001) is True
+        restarted_7771 = app_module.TmuxWebtermApp(["1"])
+        apps.append(restarted_7771)
+        assert restarted_7771.start_background_owner(port=7771) is True
 
         assert [app.background_owner.status for app in apps] == ["follower", "follower", "follower", "follower", "owner"]
-        assert restarted_8001.background_owner.port == 8001
+        assert restarted_7771.background_owner.port == 7771
     finally:
         for app in apps:
             app.background_owner.stop()
@@ -381,7 +410,7 @@ def test_follower_has_no_expensive_worker_threads_after_takeover(monkeypatch, tm
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     try:
-        assert first.start_background_owner(port=8001) is True
+        assert first.start_background_owner(port=7771) is True
         assert second.start_background_owner(port=8003) is True
         assert first.background_owner.status == "follower"
         assert first.start_tabber_activity_cache_warmer() is False
@@ -409,9 +438,9 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     owner.owner = True
     owner.status = "owner"
     webapp.background_owner = owner
-    webapp.tabber_activity_cache_warmer_running = True
-    webapp.tabber_activity_cache_refreshing = True
-    webapp.session_files_refreshing_cache_keys.add(("payload", "1"))
+    webapp.activity_transcript_service.tabber_warmer_record.running = True
+    webapp.activity_transcript_service.tabber_cache_record.refresh_worker = threading.Thread()
+    webapp.session_files_service.work_records[("payload", "1")] = app_module.SessionFilesWorkRecord()
     cleared_indexes = []
     monkeypatch.setattr(file_index, "clear_memory_indexes", lambda: cleared_indexes.append(True))
     try:
@@ -423,9 +452,9 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     assert response["ok"] is True
     assert owner.is_owner() is False
     assert owner.status == "follower"
-    assert webapp.tabber_activity_cache_warmer_running is False
-    assert webapp.tabber_activity_cache_refreshing is False
-    assert webapp.session_files_refreshing_cache_keys == set()
+    assert webapp.activity_transcript_service.tabber_warmer_record.running is False
+    assert webapp.activity_transcript_service.tabber_cache_record.refresh_worker is None
+    assert webapp.session_files_service.work_records == {}
     assert cleared_indexes == [True]
     assert "background_owner_released" in {event["type"] for event in events}
 
@@ -434,6 +463,9 @@ def test_background_owner_required_log_event_names_have_emitters():
     source = (REPO_ROOT / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
 
     assert "on_acquire=self.handle_background_owner_acquired" in source
+    assert "background_refresh_event_log_records" in source
+    assert "background_refresh_event_log_counts" not in source
+    assert "background_refresh_event_log_last_emit_counts" not in source
     for event_type in (
         "background_owner_acquired",
         "background_owner_released",
@@ -458,6 +490,14 @@ def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket
                 BACKGROUND_ROLE_SESSION_FILES,
                 "Session-files background refresh started",
                 webapp.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": "1"}, cache_key=raw_cache_key),
+                message_key="events.message.backgroundRefresh.started",
+                message_params={
+                    "target": {
+                        "key": "backgroundOwner.sessionFiles",
+                        "params": {},
+                        "fallback": "Session files",
+                    },
+                },
             )
             if event:
                 events.append(event)
@@ -470,10 +510,15 @@ def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket
     assert first_details["sample_count"] == 1
     assert second_details["sample_count"] == 3
     assert second_details["suppressed_since_last"] == 1
+    sample_record = webapp.background_refresh_event_log_records[("background_refresh_started", BACKGROUND_ROLE_SESSION_FILES)]
+    assert sample_record.count == 5
+    assert sample_record.last_emit_count == 3
     assert first_details["cache_key_kind"] == "payload"
     assert "cache_key_hash" in first_details
     assert "cache_key" not in first_details
     assert repr(raw_cache_key) not in json.dumps(events, sort_keys=True)
+    assert all(event["message_key"] == "events.message.backgroundRefresh.started" for event in events)
+    assert all(event["message_params"]["target"]["key"] == "backgroundOwner.sessionFiles" for event in events)
 
 
 def test_background_owner_status_reports_required_counters(tmp_path):
@@ -585,9 +630,77 @@ def test_follower_does_not_start_tabber_activity_warmer(no_control_socket):
     webapp.background_owner = owner
     try:
         assert webapp.start_tabber_activity_cache_warmer() is False
-        assert webapp.tabber_activity_cache_warmer_running is False
+        assert webapp.activity_transcript_service.tabber_warmer_record.running is False
         assert owner.refresh_requests == [BACKGROUND_ROLE_TABBER_ACTIVITY]
     finally:
+        webapp.control_server.stop()
+
+
+def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch, no_control_socket):
+    class MutableOwner(FollowerOwner):
+        def __init__(self):
+            super().__init__()
+            self.allowed = True
+
+        def can_run(self, role):
+            return self.allowed
+
+    webapp = app_module.TmuxWebtermApp([])
+    owner = MutableOwner()
+    webapp.background_owner = owner
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_started = threading.Event()
+    second_release = threading.Event()
+    calls = []
+
+    def metadata(info, _cache, allow_network=False):
+        assert allow_network is True
+        calls.append(info.session)
+        if info.session == "first":
+            first_started.set()
+            first_release.wait(timeout=2.0)
+        elif info.session == "second":
+            second_started.set()
+            second_release.wait(timeout=2.0)
+        return {}
+
+    monkeypatch.setattr(app_module, "session_project_metadata", metadata)
+    sessions = {
+        name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
+        for name in ("first", "second")
+    }
+    try:
+        webapp.warm_metadata_cache_async(sessions)
+        with webapp.metadata_warm_lock:
+            first_worker = webapp.metadata_warm_record.worker
+        assert first_worker is not None
+        assert first_started.wait(timeout=1.0)
+
+        owner.allowed = False
+        webapp.demote_background_owner()
+        with webapp.metadata_warm_lock:
+            assert webapp.metadata_warm_record.stop_event.is_set() is True
+        first_release.set()
+        first_worker.join(timeout=1.0)
+
+        assert calls == ["first"]
+        with webapp.metadata_warm_lock:
+            assert webapp.metadata_warm_record.worker is None
+        assert not hasattr(webapp, "metadata_warm_running")
+
+        owner.allowed = True
+        webapp.warm_metadata_cache_async({"second": sessions["second"]})
+        assert second_started.wait(timeout=1.0)
+        with webapp.metadata_warm_lock:
+            second_worker = webapp.metadata_warm_record.worker
+        assert second_worker is not None
+        second_release.set()
+        second_worker.join(timeout=1.0)
+        assert calls == ["first", "second"]
+    finally:
+        first_release.set()
+        second_release.set()
         webapp.control_server.stop()
 
 
@@ -595,6 +708,7 @@ def test_follower_activity_payload_without_cache_returns_empty_refreshing(monkey
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = FollowerOwner()
     webapp.background_owner = owner
+    monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(webapp, "build_activity_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not build activity payloads")))
     try:
         payload, status = webapp.activity_payload()
@@ -793,6 +907,7 @@ def test_follower_activity_payload_uses_bounded_fallback_when_owner_unresponsive
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = UnresponsiveFollowerOwner()
     webapp.background_owner = owner
+    monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: None)
     build_calls = []
 
     def build_payload(*_args, **_kwargs):
@@ -859,7 +974,9 @@ def test_search_index_follower_missing_index_timing_regression(monkeypatch, tmp_
 
     assert payload["index_state"] == "follower"
     assert slow_walk_calls == []
-    assert elapsed < 0.2
+    # The contract is that the follower does no filesystem work (asserted above). Keep a bounded
+    # scheduling allowance for the concurrent full gate; either deliberately slow helper takes 350ms.
+    assert elapsed < 0.3
 
 
 def test_watch_roots_follower_poll_skips_directory_signature_timing_regression(monkeypatch, tmp_path):
@@ -919,7 +1036,7 @@ def test_search_index_follower_uses_one_shot_fallback_when_owner_unresponsive(mo
         refresh_requests.append((role, payload))
         return {"ok": False, "accepted": False, "role": role, "fallback": True, "error": "timeout"}
 
-    def fallback_walk(root, _current, _tokens, results):
+    def fallback_walk(root, _current, _tokens, results, _skip_dirs=None):
         walk_calls.append(root)
         results.append({
             "name": "target.py",
@@ -970,6 +1087,155 @@ def test_search_index_build_publishes_background_refresh_done(monkeypatch, tmp_p
     assert payload["root"] == str(tmp_path)
     assert payload["state"] == "ready"
     assert payload["entries"] >= 1
+
+
+def test_directory_rename_invalidates_and_rebuilds_search_index(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    old_dir = root / "migration-tools"
+    old_dir.mkdir(parents=True)
+    (old_dir / "manifest.yaml").write_text("name: old\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+
+    def synchronous_start(index, skip_dirs, exclude_path=None, exclude_signature=""):
+        file_index._run_build(index, set(skip_dirs), exclude_path=exclude_path, exclude_signature=exclude_signature)
+
+    monkeypatch.setattr(file_index, "_start_build", synchronous_start)
+    file_index.set_background_owner_checker(lambda _role: True)
+    try:
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+        file_index.build_now(
+            root,
+            filesystem.SEARCH_SKIP_DIRS,
+            exclude_path=filesystem._path_is_secret,
+            exclude_signature=filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
+        before = filesystem.search_files(str(root), query="migration-tools", recursive=True)
+        renamed = filesystem.rename_path(str(old_dir), "home-manifest")
+        after_new = filesystem.search_files(str(root), query="home-manifest", recursive=True)
+        after_old = filesystem.search_files(str(root), query="migration-tools", recursive=True)
+    finally:
+        file_index.set_background_owner_checker(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+
+    assert [entry["relative_path"] for entry in before["files"]] == ["migration-tools/manifest.yaml"]
+    assert renamed["reindex_roots"] == [str(root)]
+    assert [entry["relative_path"] for entry in after_new["files"]] == ["home-manifest/manifest.yaml"]
+    assert after_old["files"] == []
+
+
+def test_directory_rename_follower_requests_owner_index_rebuild(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    old_dir = root / "migration-tools"
+    old_dir.mkdir(parents=True)
+    (old_dir / "manifest.yaml").write_text("name: old\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    requests = []
+    try:
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+        file_index.build_now(root, filesystem.SEARCH_SKIP_DIRS)
+        file_index.set_background_owner_checker(lambda _role: False)
+        file_index.set_background_owner_refresh_requester(lambda role, payload: requests.append((role, payload)) or {"ok": True, "accepted": True})
+        renamed = filesystem.rename_path(str(old_dir), "home-manifest")
+    finally:
+        file_index.set_background_owner_checker(None)
+        file_index.set_background_owner_refresh_requester(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+
+    assert renamed["reindex_roots"] == [str(root)]
+    assert requests == [(BACKGROUND_ROLE_SEARCH_INDEX, {
+        "root": str(root),
+        "paths": [str(root / "home-manifest"), str(old_dir)],
+        "path": str(root / "home-manifest"),
+        "reason": "fs-rename",
+    })]
+
+
+def test_local_owner_search_index_refresh_request_enqueues_persistent_indexer(no_control_socket, monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    enqueued = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(
+        webapp.search_indexer,
+        "enqueue",
+        lambda root, paths, reason: enqueued.append((root, paths, reason)) or {"ok": True, "accepted": True},
+    )
+    try:
+        result = webapp.request_background_refresh(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "reason": "fs-rename"})
+    finally:
+        webapp.control_server.stop()
+
+    assert enqueued == [(str(tmp_path), [], "fs-rename")]
+    assert result["indexer"] == {"ok": True, "accepted": True}
+
+
+def test_local_owner_search_index_unindex_uses_persistent_indexer(no_control_socket, monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    removed = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(webapp.search_indexer, "unindex", lambda root: removed.append(root) or {"ok": True, "accepted": True})
+    try:
+        result = webapp.request_background_refresh(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "operation": "unindex", "reason": "unindex"})
+    finally:
+        webapp.control_server.stop()
+
+    assert removed == [str(tmp_path)]
+    assert result["indexer"] == {"ok": True, "accepted": True}
+
+
+def test_local_owner_session_files_refresh_request_starts_requested_cache_key(no_control_socket, monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    owner_key = webapp.session_files_cache_key("payload", {"1": info}, "1", 24.0, "HEAD", "current", None)
+    requested_key = (*owner_key[:-1], (("1", ("follower-snapshot",)),))
+    starts = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
+    monkeypatch.setattr(webapp, "start_session_files_cache_refresh", lambda *args: starts.append(args) or True)
+    try:
+        result = webapp.request_background_refresh(
+            BACKGROUND_ROLE_SESSION_FILES,
+            {
+                "session": "1",
+                "hours": 24.0,
+                "from_ref": "HEAD",
+                "to_ref": "current",
+                "repo_refs": {},
+                "cache_key": repr(requested_key),
+                "cache_key_data": requested_key,
+            },
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert result["refreshing"] is True
+    assert len(starts) == 1
+    cache_key, target, session, infos, hours, from_ref, to_ref, repo_refs = starts[0]
+    assert cache_key == requested_key
+    assert target == webapp.refresh_session_files_payload_cache
+    assert session == "1"
+    assert infos == {"1": info}
+    assert hours == 24.0
+    assert from_ref == "HEAD"
+    assert to_ref == "current"
+    assert repo_refs == {}
+
+
+def test_local_owner_tabber_refresh_request_starts_worker(no_control_socket, monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    starts = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: starts.append(True) or True)
+    try:
+        result = webapp.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "follower-refresh"})
+    finally:
+        webapp.control_server.stop()
+
+    assert result["refreshing"] is True
+    assert starts == [True]
 
 
 def test_search_index_warm_takeover_loads_disk_without_rebuild_timing_regression(monkeypatch, tmp_path):
@@ -1178,7 +1444,7 @@ def test_only_owner_starts_search_index_walk_for_shared_root(monkeypatch, tmp_pa
             file_index._REGISTRY.clear()
 
 
-def test_search_index_stale_ready_results_return_while_owner_rebuilds(monkeypatch, tmp_path):
+def test_search_index_stale_ready_queries_do_not_start_rebuild_until_owner_scheduler_runs(monkeypatch, tmp_path):
     target = tmp_path / "target.py"
     target.write_text("print('x')\n", encoding="utf-8")
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
@@ -1195,10 +1461,52 @@ def test_search_index_stale_ready_results_return_while_owner_rebuilds(monkeypatc
     monkeypatch.setattr(file_index, "_start_build", lambda index, *_args, **_kwargs: build_calls.append(index.root))
     try:
         payload = filesystem.search_files(str(tmp_path), query="target", recursive=True)
+        repeated = filesystem.search_files(str(tmp_path), query="target", recursive=True)
+        assert build_calls == []
+        file_index.schedule_refreshes()
     finally:
         file_index.set_background_owner_checker(None)
         with file_index._REGISTRY_LOCK:
             file_index._REGISTRY.clear()
 
     assert [entry["relative_path"] for entry in payload["files"]] == ["target.py"]
+    assert [entry["relative_path"] for entry in repeated["files"]] == ["target.py"]
     assert build_calls == [tmp_path]
+
+
+def test_many_search_index_events_and_queries_schedule_one_refresh(monkeypatch, tmp_path):
+    target = tmp_path / "target.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    with file_index._REGISTRY_LOCK:
+        file_index._REGISTRY.clear()
+    index = file_index.build_now(
+        tmp_path,
+        filesystem.SEARCH_SKIP_DIRS,
+        exclude_path=filesystem.search.paths._path_is_secret,
+        exclude_signature=filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+    )
+    starts = []
+
+    def record_start(root_index, *_args, **_kwargs):
+        starts.append(root_index.root)
+        with root_index.lock:
+            root_index.building = True
+
+    monkeypatch.setattr(file_index, "_start_build", record_start)
+    file_index.set_background_owner_checker(lambda _role: True)
+    try:
+        for _ in range(20):
+            file_index.mark_path_dirty(target)
+            payload = filesystem.search_files(str(tmp_path), query="target", recursive=True)
+            assert [entry["relative_path"] for entry in payload["files"]] == ["target.py"]
+        assert starts == []
+        for _ in range(20):
+            file_index.schedule_refreshes()
+    finally:
+        file_index.set_background_owner_checker(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+
+    assert starts == [tmp_path]
+    assert len(index.dirty_paths) == 1

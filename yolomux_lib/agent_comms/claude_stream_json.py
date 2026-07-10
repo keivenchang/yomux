@@ -47,12 +47,15 @@ def claude_stream_json_argv(target: dict[str, Any]) -> list[str]:
     effort = str(target.get("agent_effort") or target.get("effort") or "").strip()
     if effort:
         args.extend(["--effort", effort])
-    tools = str(target.get("tools") or "").strip()
-    if tools:
+    if "tools" in target:
+        tools = str(target.get("tools") or "").strip()
         args.extend(["--tools", tools])
-    permission_mode = str(target.get("permission_mode") or target.get("permissionMode") or "").strip()
-    if permission_mode:
+    if "permission_mode" in target or "permissionMode" in target:
+        permission_mode = str(target.get("permission_mode") or target.get("permissionMode") or "").strip()
         args.extend(["--permission-mode", permission_mode])
+    json_schema = target.get("json_schema")
+    if isinstance(json_schema, dict):
+        args.extend(["--json-schema", json.dumps(json_schema, ensure_ascii=False, separators=(",", ":"))])
     return args
 
 

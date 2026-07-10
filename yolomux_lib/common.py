@@ -11,22 +11,27 @@ from __future__ import annotations
 
 import collections
 import logging
+import math
 import os
 import re
 import signal
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 from . import auth as _auth
 from .cache import MISS as cache_MISS
+from .locales import user_message_payload
+from .runtime_env import healed_runtime_path
 from .tmux_utils import list_tmux_session_names
 from .tmux_utils import run_cmd
 from .tmux_utils import unique_session_names
@@ -39,7 +44,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.5.11"
+YOLOMUX_VERSION = "0.5.27"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -56,6 +61,10 @@ EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 RUN_HISTORY_PATH = STATE_DIR / "run-history.json"
 ACTIVITY_PATH = STATE_DIR / "activity.json"
 TMUX_AI_STATUS_PATH = STATE_DIR / "tmux-AI-status.json"
+# Bucket layouts are not losslessly interchangeable during a rolling restart: an older process can
+# otherwise downsample a newer coarse bucket and make the next process count the same data again.
+STATS_CLIENT_HISTORY_VERSION = 4
+STATS_CLIENT_HISTORY_PATH = STATE_DIR / f"stats-client-history-v{STATS_CLIENT_HISTORY_VERSION}.json"
 LEGACY_ATTENTION_ACKS_PATH = STATE_DIR / "attention-acks.json"
 ACTIVITY_HEARTBEATS_PATH = STATE_DIR / "activity-heartbeats.jsonl"
 WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"
@@ -71,6 +80,15 @@ YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'
 SEMVER_RE = re.compile(r"^\s*v?(\d+)\.(\d+)\.(\d+)(?:\D.*)?$")
 
 
+def start_thread_with_rollback(worker: threading.Thread, rollback: Callable[[], None]) -> None:
+    """Start an installed worker, restoring its owning record if Thread.start fails."""
+    try:
+        worker.start()
+    except Exception:
+        rollback()
+        raise
+
+
 def file_revision(path: Path) -> str:
     try:
         stat = path.stat()
@@ -83,18 +101,43 @@ def yolomux_client_revision() -> str:
     return file_revision(STATIC_DIR / "yolomux.js")
 
 
+def yolomux_dev_bundle_revision() -> str:
+    """Identify both browser assets so a restarted dev server can refresh stale clients."""
+    return ".".join(file_revision(STATIC_DIR / asset) for asset in ("yolomux.js", "yolomux.css"))
+
+
 class ErrorPayload(TypedDict, total=False):
     error: str
+    user_message: dict[str, Any]
+    diagnostic: str
     path: str
     session: str
     status: int
 
 
-def error_payload(error: str, **fields: Any) -> ErrorPayload:
-    payload: ErrorPayload = {"error": str(error)}
-    for key, value in fields.items():
+def error_payload(
+    error: object,
+    *,
+    message_key: str = "",
+    message_params: dict[str, Any] | None = None,
+    diagnostic: object = "",
+    **fields: Any,
+) -> ErrorPayload:
+    """Return one structured user-message shape while preserving raw diagnostic context.
+
+    Typed request/filesystem errors pass their known fields explicitly through their own ``payload()``
+    methods. Plain-string callers retain their raw fallback until they are assigned a catalog key.
+    """
+    fallback = str(error)
+    key = str(message_key or "")
+    params = message_params or {}
+    raw_diagnostic = diagnostic
+    payload: ErrorPayload = user_message_payload(key, fallback, **dict(params or {}))
+    if raw_diagnostic:
+        payload["diagnostic"] = str(raw_diagnostic)
+    for field_name, value in fields.items():
         if value is not None:
-            payload[key] = int(value) if key == "status" else value
+            payload[field_name] = int(value) if field_name == "status" else value
     return payload
 MAIN_BRANCHES = {"main", "master"}
 METADATA_CACHE_TTL_SECONDS = 300
@@ -116,26 +159,10 @@ _YOLOMUX_COMMIT_COUNT: int | None = None
 _AGENT_PATH_WARNING_KEYS: set[str] = set()
 
 
-def _path_entries(value: str) -> list[str]:
-    return [entry for entry in str(value or "").split(os.pathsep) if entry]
-
-
 def heal_server_path() -> str:
     """Make agent CLIs installed under ~/.local/bin visible under stripped service environments."""
-    current_entries = _path_entries(os.environ.get("PATH", ""))
-    candidates: list[str] = []
-    for entry in _path_entries(os.environ.get("YOLOMUX_EXTRA_PATH", "")):
-        candidates.append(str(Path(entry).expanduser()))
-    local_bin = Path.home() / ".local" / "bin"
-    if local_bin.is_dir():
-        candidates.append(str(local_bin))
-    additions: list[str] = []
-    for candidate in candidates:
-        if candidate and candidate not in current_entries and candidate not in additions:
-            additions.append(candidate)
-    if additions:
-        os.environ["PATH"] = os.pathsep.join([*additions, *current_entries])
-    return os.environ.get("PATH", "")
+    os.environ["PATH"] = healed_runtime_path(os.environ, home=Path.home())
+    return os.environ["PATH"]
 
 
 def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
@@ -149,10 +176,9 @@ def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
     if base_env is not None:
         env.update(base_env)
-    heal_server_path()
     codex_home = codex_home_from_env(env)
     codex_home.mkdir(parents=True, exist_ok=True)
-    env["PATH"] = os.environ.get("PATH", env.get("PATH", ""))
+    env["PATH"] = healed_runtime_path(env, home=Path.home())
     env["CODEX_HOME"] = str(codex_home)
     env["TERM"] = "xterm-256color"
     env["NO_COLOR"] = "1"
@@ -176,6 +202,22 @@ heal_server_path()
 
 def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def positive_finite_number(value: Any) -> float:
+    """Normalize counters and rates that cannot be negative, infinite, or NaN."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
+
+
+def path_mtime_or_zero(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def project_git(project: Any) -> dict[str, Any]:
@@ -609,6 +651,11 @@ def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.Com
 
 
 def xterm_asset_path(asset: str) -> Path | None:
+    # VDI boxes have no compatible Node/npm. boot.sh downloads these pinned UMD assets into
+    # static/ there, so prefer that self-contained runtime package before node_modules/IDE roots.
+    packaged_path = STATIC_DIR / asset
+    if packaged_path.is_file():
+        return packaged_path
     relpaths = {
         "xterm.js": Path("lib") / "xterm.js",
         "xterm.css": Path("css") / "xterm.css",

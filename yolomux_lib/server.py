@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import html
 import json
+import logging
 import math
 import os
 import pty
@@ -21,6 +22,8 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -48,6 +51,7 @@ from .common import codex_exec_argv
 from .common import codex_runtime_env
 from .common import error_payload
 from .common import terminate_process_group
+from .common import yolomux_dev_bundle_revision
 from .filesystem import FilesystemError
 from .http_routes import dispatch_http_route
 from .http_routes import parse_query_float
@@ -56,6 +60,8 @@ from .http_routes import parse_repo_refs_param
 from .http_routes import query_bool
 from .http_routes import query_list
 from .http_routes import query_one
+from .http_routes import route_for_request
+from .http_routes import SHARE_ACCESS_NONE
 from .tmux_utils import tmux
 from .tmux_utils import tmux_command
 from .tmux_utils import tmux_session_client_rows
@@ -68,7 +74,11 @@ from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
 from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
 from .settings import SUMMARY_DEFAULT_LOOKBACK_SECONDS
+from .locales import resolve_locale_preference
+from .locales import user_message_payload
 from .web import html_page
+from .web import html_lang_dir_attrs
+from .web import server_string
 from .web import static_asset_path
 from .web import static_content_type
 from .websocket import make_ws_frame
@@ -78,6 +88,8 @@ from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import start_agent_auth_status_refresh
 
+
+logger = logging.getLogger(__name__)
 
 PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
@@ -212,7 +224,7 @@ TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
 STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
-STATIC_GZIP_MIN_BYTES = 1024
+RESPONSE_GZIP_MIN_BYTES = 1024
 STATIC_GZIP_CONTENT_TYPES = {
     "application/javascript",
     "application/json",
@@ -279,14 +291,18 @@ def static_asset_cache_control(request_path: str) -> str:
     return STATIC_CACHE_CONTROL_UNVERSIONED
 
 
-def static_asset_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
+def gzip_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
     if (
-        len(data) >= STATIC_GZIP_MIN_BYTES
+        len(data) >= RESPONSE_GZIP_MIN_BYTES
         and static_content_type_supports_gzip(content_type)
         and accept_encoding_allows_gzip(accept_encoding)
     ):
         return gzip.compress(data, compresslevel=6, mtime=0), "gzip"
     return data, None
+
+
+def static_asset_response_body(data: bytes, content_type: str, accept_encoding: str | None) -> tuple[bytes, str | None]:
+    return gzip_response_body(data, content_type, accept_encoding)
 
 
 def clamp_pty_dimension(value: int) -> int:
@@ -607,6 +623,19 @@ def share_replay_frame_int(value: Any) -> int | None:
     return int(value)
 
 
+@dataclass
+class ShareReplayRecord:
+    keyframe: dict[str, Any] | None = None
+    deltas_by_epoch: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+
+
+@dataclass
+class SharePointerRecord:
+    latest: dict[str, Any] | None = None
+    clicks: list[dict[str, Any]] = field(default_factory=list)
+    thread: threading.Thread | None = None
+
+
 class ShareViewerConnection:
     def __init__(self, connection: socket.socket, client_id: str = ""):
         self.connection = connection
@@ -731,7 +760,7 @@ class ShareViewerConnection:
                     if share_frame_is_dom_keyframe(frame):
                         self.queued_replay_keyframe = False
                 self.send_frame(frame)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             self.close("writer-closed")
@@ -869,7 +898,7 @@ class ShareTerminalUpstream:
                 if not data:
                     break
                 self.broadcast(data)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             if reader_fd is not None:
@@ -926,6 +955,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     server: "TmuxWebtermHTTPServer"
     protocol_version = "HTTP/1.1"
 
+    def handle_one_request(self) -> None:
+        # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive requests. Route
+        # handlers attach optional timing/details while building a response, so clear them at the
+        # request boundary instead of letting a homepage sample become a later API sample.
+        self._http_response_compute_ms = None
+        self._http_response_performance_details = None
+        self._http_request_started_at = time.perf_counter()
+        self._http_request_dispatch_started_at = None
+        super().handle_one_request()
+
     def setup(self) -> None:
         preparer = getattr(self.server, "prepare_request_socket", None)
         if callable(preparer):
@@ -945,7 +984,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
         return f"{method} {path}"[:120]
 
-    def record_http_response_bytes(self, status: HTTPStatus | int, body_bytes: int, content_type: str = "") -> None:
+    def record_http_response_bytes(
+        self,
+        status: HTTPStatus | int,
+        body_bytes: int,
+        content_type: str = "",
+        performance_details: dict[str, Any] | None = None,
+    ) -> None:
         app = getattr(getattr(self, "server", None), "app", None)
         recorder = getattr(app, "record_performance_sample", None)
         if not callable(recorder):
@@ -958,14 +1003,27 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
             "content_type": content_type_base(content_type),
         }
+        request_started = getattr(self, "_http_request_started_at", None)
+        dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
+        response_started = time.perf_counter()
+        if isinstance(request_started, (int, float)):
+            details["request_total_ms"] = round(max(0.0, (response_started - request_started) * 1000), 3)
+        if isinstance(request_started, (int, float)) and isinstance(dispatch_started, (int, float)):
+            # ThreadingHTTPServer accepts the socket before Handler.handle_one_request.  This is
+            # therefore the observable accept-to-route delay, rather than a made-up queue time.
+            details["accept_to_route_ms"] = round(max(0.0, (dispatch_started - request_started) * 1000), 3)
         extra_details = getattr(self, "_http_response_performance_details", None)
         if isinstance(extra_details, dict):
             details.update(extra_details)
+        if isinstance(performance_details, dict):
+            details.update(performance_details)
         recorder(
             "http-endpoint",
             endpoint,
             trigger=endpoint,
-            compute_ms=getattr(self, "_http_response_compute_ms", None),
+            compute_ms=getattr(self, "_http_response_compute_ms", None) if getattr(self, "_http_response_compute_ms", None) is not None else (
+                max(0.0, (response_started - dispatch_started) * 1000) if isinstance(dispatch_started, (int, float)) else None
+            ),
             payload_bytes=max(0, int(body_bytes or 0)),
             cache_key={"kind": endpoint},
             cache_status=str(status_code),
@@ -978,33 +1036,24 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not getattr(self.server, "tls_context", None) or self.request_is_https():
             return True
         path = str(parsed.path or "")
+        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), path)
+        if route is None or route.share_access == SHARE_ACCESS_NONE:
+            return False
+
         def http_share_token_allowed() -> bool:
             verifier = getattr(self.server.app, "verify_share_token", None)
             record = verifier(self.share_token_text()) if callable(verifier) else None
             return bool(record and record.get("http_allowed"))
 
-        if path.startswith("/share/"):
+        if route.path == "/share/*":
             short_id = path.removeprefix("/share/").strip("/")
             finder = getattr(self.server.app, "share_record_for_short_id", None)
             record = finder(short_id) if short_id and "/" not in short_id and callable(finder) else None
             return bool(record and record.get("http_allowed"))
-        if path.startswith("/static/"):
+        if route.path == "/static/*":
             checker = getattr(self.server.app, "http_allowed_share_is_active", None)
             return bool(checker()) if callable(checker) else False
-        share_api_paths = {
-            "/",
-            "/ws/share-ui",
-            "/ws/share-view",
-            "/api/ping",
-            "/api/share",
-            "/api/share-stream",
-            *self.SHARE_READONLY_GET_PATHS,
-            *self.SHARE_SCOPED_FILE_GET_PATHS,
-            *self.SHARE_READONLY_POST_PATHS,
-        }
-        if path in share_api_paths:
-            return http_share_token_allowed()
-        return False
+        return http_share_token_allowed()
 
     def redirect_plaintext_to_https_if_needed(self, parsed: Any) -> bool:
         if not getattr(self.server, "tls_context", None) or self.request_is_https() or self.plaintext_share_scope_allowed(parsed):
@@ -1013,7 +1062,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not host or "\r" in host or "\n" in host:
             host = self.server.server_name_with_port()
         location = f"https://{host}{self.path or '/'}"
-        body = f"Use HTTPS for this YOLOmux server: {location}\n".encode("utf-8")
+        body = https_redirect_body(location, resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
         self.send_response(HTTPStatus.PERMANENT_REDIRECT)
         self.send_header("Location", location)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1130,7 +1179,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not record:
             return False
         if self.share_record_at_viewer_cap(record):
-            self.write_text("share viewer limit reached\n", status=HTTPStatus.FORBIDDEN)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(server_string(locale, "share.error.viewerLimitReached") + "\n", status=HTTPStatus.FORBIDDEN)
             return True
         sessions = self.share_record_sessions_for_handler(record)
         if not sessions:
@@ -1141,6 +1191,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             dev=getattr(self.server, 'dev', False),
             dangerously_yolo=self.server.app.dangerously_yolo,
             share=self.share_bootstrap_payload(record),
+            accept_language=self.headers.get("Accept-Language", ""),
+            recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
         ))
         return True
 
@@ -1189,7 +1241,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             payload = build_payload()
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         self.write_json(payload)
 
@@ -1200,7 +1252,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             data, mime = filesystem.read_raw(raw_path, max_bytes=self.file_transfer_max_bytes())
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime)
@@ -1221,7 +1273,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             archive_file, archive_size = filesystem.zip_directory(raw_path, max_bytes=self.file_transfer_max_bytes())
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         mime = "application/zip"
         try:
@@ -1252,17 +1304,27 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
         if not raw_path.lower().endswith((".html", ".htm")):
-            self.write_json(error_payload("path must be an HTML file", path=raw_path, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "path must be an HTML file",
+                    message_key="fs.error.htmlFileRequired",
+                    message_params={"path": raw_path},
+                    path=raw_path,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         try:
             payload = filesystem.read_file(raw_path)
         except FilesystemError as exc:
-            self.write_json(error_payload(str(exc), path=raw_path, status=exc.status), status=HTTPStatus(exc.status))
+            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
             return
         source = html.escape(str(payload.get("content", "")), quote=True)
-        title = html.escape(Path(raw_path).name or "HTML preview")
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(Path(raw_path).name or server_string(locale, "preview.htmlTitle"))
         body = f"""<!doctype html>
-<html>
+<html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
   <title>{title}</title>
@@ -1280,9 +1342,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_preview_popout_placeholder(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
-        title = html.escape(f"{Path(raw_path).name or 'Preview'} preview")
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(server_string(locale, "preview.popout.title", name=Path(raw_path).name or server_string(locale, "common.preview")))
         body = f"""<!doctype html>
-<html>
+<html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1295,9 +1358,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_pane_popout_placeholder(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_item = qs.get("item", [""])[0]
-        title = html.escape(f"{raw_item or 'YOLOmux'} popout")
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(server_string(locale, "pane.popout.title", name=raw_item or server_string(locale, "app.documentTitle")))
         body = f"""<!doctype html>
-<html>
+<html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1329,13 +1393,28 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             length = int(length_text)
         except (TypeError, ValueError):
-            return None, error_payload(missing_message if not length_text else invalid_message, status=missing_status if not length_text else invalid_status), missing_status if not length_text else invalid_status
+            missing = not length_text
+            status = missing_status if missing else invalid_status
+            return None, error_payload(
+                missing_message if missing else invalid_message,
+                message_key="request.error.contentLengthRequired" if missing else "request.error.contentLengthInvalid",
+                status=status,
+            ), status
         if length < 0 or (length == 0 and not allow_empty):
-            return None, error_payload(empty_message, status=empty_status), empty_status
+            return None, error_payload(
+                empty_message,
+                message_key="request.error.contentLengthInvalid",
+                status=empty_status,
+            ), empty_status
         if length > max_length:
             if close_on_too_large:
                 self.close_connection = True
-            return None, error_payload(too_large_message, status=too_large_status), too_large_status
+            return None, error_payload(
+                too_large_message,
+                message_key="request.error.contentTooLarge",
+                message_params={"max": max_length},
+                status=too_large_status,
+            ), too_large_status
         return self.rfile.read(length), None, HTTPStatus.OK
 
     def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
@@ -1359,16 +1438,39 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return {}
         try:
             text = (body or b"").decode("utf-8")
-        except UnicodeDecodeError:
-            self.write_json(error_payload("request body must be utf-8 JSON", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+        except UnicodeDecodeError as exc:
+            self.write_json(
+                error_payload(
+                    "request body must be utf-8 JSON",
+                    message_key="request.error.jsonUtf8",
+                    diagnostic=exc,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return None
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
-            self.write_json(error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "invalid JSON",
+                    message_key="request.error.invalidJson",
+                    diagnostic=exc,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return None
         if not isinstance(payload, dict):
-            self.write_json(error_payload("request body must be a JSON object", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "request body must be a JSON object",
+                    message_key="request.error.jsonObject",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return None
         return payload
 
@@ -1383,13 +1485,30 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             try:
                 expected_mtime = int(expected_mtime)
             except (TypeError, ValueError):
-                self.write_json(error_payload("expected_mtime must be an integer", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+                self.write_json(
+                    error_payload(
+                        "expected_mtime must be an integer",
+                        message_key="request.error.integer",
+                        message_params={"field": "expected_mtime"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    ),
+                    status=HTTPStatus.BAD_REQUEST,
+                )
                 return
         if yolo_rules.is_rules_file_path(raw_path):
             try:
                 yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
             except (ValueError, yaml.YAMLError) as exc:
-                self.write_json(error_payload(f"YOLO rules invalid: {exc}", path=raw_path, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+                self.write_json(
+                    error_payload(
+                        "YOLO rules are invalid",
+                        message_key="yolo.error.invalidRules",
+                        diagnostic=exc,
+                        path=raw_path,
+                        status=HTTPStatus.BAD_REQUEST,
+                    ),
+                    status=HTTPStatus.BAD_REQUEST,
+                )
                 return
             self.write_filesystem_json(
                 raw_path,
@@ -1508,10 +1627,26 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         requests = payload.get("requests", [])
         if not isinstance(requests, list):
-            self.write_json(error_payload("requests must be a list", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    "requests must be a list",
+                    message_key="request.error.list",
+                    message_params={"field": "requests"},
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         if len(requests) > MAX_FS_BATCH_REQUESTS:
-            self.write_json(error_payload(f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items", status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(
+                error_payload(
+                    f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items",
+                    message_key="request.error.tooManyItems",
+                    message_params={"field": "requests", "max": MAX_FS_BATCH_REQUESTS},
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
             return
         responses = []
         op_counts: dict[str, int] = {}
@@ -1519,7 +1654,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         for index, item in enumerate(requests):
             request_id = item.get("id", index) if isinstance(item, dict) else index
             if not isinstance(item, dict):
-                responses.append({"id": request_id, "ok": False, "status": 400, "error": "request must be an object"})
+                responses.append(error_payload(
+                    "request must be an object",
+                    message_key="request.error.object",
+                    message_params={"field": "request"},
+                    id=request_id,
+                    ok=False,
+                    status=HTTPStatus.BAD_REQUEST,
+                ))
                 continue
             op = str(item.get("type", item.get("op", "")) or "")
             raw_path = str(item.get("path", "") or "")
@@ -1527,12 +1669,20 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if raw_path and len(path_samples) < 8:
                 path_samples.append(raw_path)
             if op not in {"list", "info"}:
-                responses.append({"id": request_id, "ok": False, "status": 400, "error": "unsupported fs batch operation", "path": raw_path})
+                responses.append(error_payload(
+                    "unsupported fs batch operation",
+                    message_key="request.error.unsupportedFsBatchOperation",
+                    message_params={"operation": op},
+                    id=request_id,
+                    ok=False,
+                    status=HTTPStatus.BAD_REQUEST,
+                    path=raw_path,
+                ))
                 continue
             try:
                 result = filesystem.list_directory(raw_path) if op == "list" else filesystem.path_info(raw_path)
             except FilesystemError as exc:
-                responses.append({"id": request_id, "ok": False, "status": exc.status, "error": str(exc), "path": raw_path})
+                responses.append(exc.payload(id=request_id, ok=False, path=raw_path))
                 continue
             responses.append({"id": request_id, "ok": True, "status": 200, "payload": result})
         response_payload = {"responses": responses}
@@ -1566,9 +1716,19 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             event = json.loads((body or b"").decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            return error_payload(f"invalid JSON: {exc}", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
+            return error_payload(
+                "invalid JSON",
+                message_key="request.error.invalidJson",
+                diagnostic=exc,
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
         if not isinstance(event, dict):
-            return error_payload("event must be an object", status=HTTPStatus.BAD_REQUEST), HTTPStatus.BAD_REQUEST
+            return error_payload(
+                "event must be an object",
+                message_key="request.error.object",
+                message_params={"field": "event"},
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
         return self.server.app.client_event(event)
 
     def file_transfer_max_bytes(self) -> int:
@@ -1584,11 +1744,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         upload_max_bytes = self.file_transfer_max_bytes()
         body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
         if error is not None:
-            return {"session": session, "error": str(error.get("error") or "")}, status
+            return {**error, "session": session}, status
         try:
             files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
         except ValueError as exc:
-            return {"session": session, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+            return error_payload(
+                "invalid upload data",
+                message_key="upload.error.invalidMultipart",
+                diagnostic=exc,
+                session=session,
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
         if editor_path or base_dir:
             return self.server.app.upload_editor_files(files, editor_path=editor_path, base_dir=base_dir)
         return self.server.app.upload_files(session, files)
@@ -1606,7 +1772,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         if parsed.path == "/":
-            data = html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo).encode("utf-8")
+            sessions = self.server.app.sessions
+            data = html_page(
+                sessions,
+                self.auth_identity().role,
+                dev=getattr(self.server, 'dev', False),
+                dangerously_yolo=self.server.app.dangerously_yolo,
+                accept_language=self.headers.get("Accept-Language", ""),
+                auth_username=self.auth_identity().username,
+                recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
+            ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -1620,19 +1795,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0)
 
     def dev_bundle_signature(self) -> str:
-        # mtime_ns of the served bundle + css; changes the instant static_build.py rewrites them.
-        from .web import static_asset_path
+        return yolomux_dev_bundle_revision()
 
-        parts = []
-        for asset in ("yolomux.js", "yolomux.css"):
-            path = static_asset_path(asset)
-            try:
-                parts.append(str(path.stat().st_mtime_ns) if path else "0")
-            except OSError:
-                parts.append("0")
-        return ".".join(parts)
-
-    def stream_dev_reload(self) -> None:
+    def stream_dev_reload(self, client_bundle_revision: str = "") -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1643,16 +1808,20 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         last = self.dev_bundle_signature()
         try:
             self.write_sse_json("ready", {"signature": last})
+            # Old clients did not identify their bundle. Treat that as stale once, so the reload
+            # listener already present in the old bundle repairs it after a server restart.
+            if str(client_bundle_revision or "") != last:
+                self.write_sse_json("reload", {"signature": last})
             while True:
                 time.sleep(0.5)
                 current = self.dev_bundle_signature()
                 if current != last:
                     last = current
                     self.write_sse_json("reload", {"signature": current})
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             return
 
-    def stream_client_events(self) -> None:
+    def stream_client_events(self, channels: str = "", client_id: str = "") -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1660,9 +1829,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.send_auth_cookie_if_needed()
         self.end_headers()
-        subscriber_id, subscriber_queue = self.server.app.client_events.subscribe()
+        subscriber_id, subscriber_queue = self.server.app.client_events.subscribe(
+            channels=channels or None,
+            client_id=client_id,
+        )
         if hasattr(self.server.app, "start_client_event_watcher"):
             self.server.app.start_client_event_watcher()
+        if hasattr(self.server.app, "wake_client_event_watcher"):
+            self.server.app.wake_client_event_watcher()
         try:
             self.write_sse_json("ready", {"time": time.time()})
             while True:
@@ -1672,10 +1846,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     self.write_sse_json("ping", {"time": time.time()})
                     continue
                 self.write_sse_json(str(event.get("type") or "event"), event)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             return
         finally:
             self.server.app.client_events.unsubscribe(subscriber_id)
+            if hasattr(self.server.app, "wake_client_event_watcher"):
+                self.server.app.wake_client_event_watcher()
             if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
                 self.server.app.stop_client_event_watcher_if_idle()
 
@@ -1684,7 +1860,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         session = str(query_one(qs, "session", "") or "")
         messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
         payload, status = self.server.app.transcript_tail(session, MAX_TRANSCRIPT_TAIL_LINES)
@@ -1694,7 +1870,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         path_text = payload.get("path")
         text = payload.get("text")
         if not isinstance(path_text, str) or not isinstance(text, str):
-            self.write_json(error_payload("missing transcript text", session=session, status=HTTPStatus.NOT_FOUND), status=HTTPStatus.NOT_FOUND)
+            diagnostic = "missing transcript text"
+            self.write_json(
+                {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)},
+                status=HTTPStatus.NOT_FOUND,
+            )
             return
 
         path = Path(path_text)
@@ -1718,7 +1898,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 },
             )
             self.follow_transcript_file(path)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             return
 
     def stream_codex_summary(self, parsed: Any) -> None:
@@ -1728,7 +1908,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         default_lookback = int(summary_settings.get("lookback_seconds") or SUMMARY_DEFAULT_LOOKBACK_SECONDS)
         lookback_seconds, error = parse_query_int(qs, "lookback", default_lookback, max_value=24 * 3600)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         availability_error = self.codex_summary_availability_error(summary_settings)
         if availability_error:
@@ -1741,7 +1921,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         prompt = payload.get("prompt")
         if not isinstance(prompt, str):
-            self.write_json({"session": session, "error": "missing Codex prompt"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            diagnostic = "missing Codex prompt"
+            self.write_json(
+                {"session": session, **user_message_payload("summary.error.missingPrompt", diagnostic)},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
             return
 
         self.send_response(HTTPStatus.OK)
@@ -1761,36 +1945,53 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "summary_started",
             "AI summary started",
             {"lookback_seconds": lookback_seconds, "model": summary_settings["codex_model"]},
+            message_key="events.message.summary.started",
         )
         try:
             self.write_sse_json("meta", meta)
             self.run_codex_summary(prompt, summary_settings)
-            self.server.app.log_event(session, "summary_finished", "AI summary finished", {"model": summary_settings["codex_model"]})
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
-            self.server.app.log_event(session, "summary_disconnected", "AI summary stream disconnected", {})
+            self.server.app.log_event(
+                session,
+                "summary_finished",
+                "AI summary finished",
+                {"model": summary_settings["codex_model"]},
+                message_key="events.message.summary.finished",
+            )
+        except OSError:
+            self.server.app.log_event(
+                session,
+                "summary_disconnected",
+                "AI summary stream disconnected",
+                {},
+                message_key="events.message.summary.disconnected",
+            )
             return
 
     def codex_summary_availability_error(self, summary_settings: dict[str, Any]) -> dict[str, Any] | None:
         provider = str(summary_settings.get("backend") or "").strip().lower()
         if provider != "codex":
+            diagnostic = "AI summary provider is disabled"
             return {
-                "error": "AI summary provider is disabled",
+                **user_message_payload("summary.error.providerDisabled", diagnostic),
                 "provider": provider or "disabled",
             }
         status = agent_auth_status()
         codex_status = status.get("codex") if isinstance(status, dict) else {}
         codex_status = codex_status if isinstance(codex_status, dict) else {}
         if not codex_status.get("installed"):
+            diagnostic = "Codex summary provider is unavailable because the codex CLI is not on PATH"
             return {
-                "error": "Codex summary provider is unavailable because the codex CLI is not on PATH",
+                **user_message_payload("summary.error.codexUnavailable", diagnostic),
                 "provider": "codex",
                 "login_command": AGENT_LOGIN_COMMANDS["codex"],
             }
         if not codex_status.get("logged_in"):
+            command = AGENT_LOGIN_COMMANDS["codex"]
+            diagnostic = f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{command}`."
             return {
-                "error": f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{AGENT_LOGIN_COMMANDS['codex']}`.",
+                **user_message_payload("summary.error.codexLoginRequired", diagnostic, command=command),
                 "provider": "codex",
-                "login_command": AGENT_LOGIN_COMMANDS["codex"],
+                "login_command": command,
             }
         return None
 
@@ -1815,20 +2016,23 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 start_new_session=True,
             )
             if process.stdin is None or process.stdout is None:
-                self.write_sse_json("summary_error", {"error": "failed to open Codex pipes"})
+                diagnostic = "failed to open Codex pipes"
+                self.write_sse_json("summary_error", user_message_payload("summary.error.openPipes", diagnostic))
                 return
             process.stdin.write(prompt.encode("utf-8"))
             process.stdin.close()
             self.stream_codex_process(process, timeout_seconds=summary_settings.get("timeout_seconds"))
         except OSError as exc:
-            self.write_sse_json("summary_error", {"error": str(exc)})
+            diagnostic = str(exc)
+            self.write_sse_json("summary_error", user_message_payload("summary.error.runtime", diagnostic, error=diagnostic))
         finally:
             if process is not None:
                 terminate_process_group(process)
 
     def stream_codex_process(self, process: subprocess.Popen[bytes], timeout_seconds: Any = SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS) -> None:
         if process.stdout is None:
-            self.write_sse_json("summary_error", {"error": "missing Codex stdout"})
+            diagnostic = "missing Codex stdout"
+            self.write_sse_json("summary_error", user_message_payload("summary.error.missingStdout", diagnostic))
             return
         fd = process.stdout.fileno()
         buffer = ""
@@ -1842,7 +2046,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         while True:
             now = time.monotonic()
             if now > deadline:
-                self.write_sse_json("summary_error", {"error": "Codex summary timed out"})
+                diagnostic = "Codex summary timed out"
+                self.write_sse_json("summary_error", user_message_payload("summary.error.timedOut", diagnostic))
                 return
             running = process.poll() is None
             timeout = 0.2 if running else 0.0
@@ -1887,7 +2092,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if event_kind == "completed":
             return
         if event_kind == "error":
-            self.write_sse_json("summary_error", {"error": json.dumps(event, ensure_ascii=False)})
+            diagnostic = json.dumps(event, ensure_ascii=False)
+            self.write_sse_json("summary_error", user_message_payload("summary.stream.failed", diagnostic))
             return
 
         text = codex_event_text(event)
@@ -1951,12 +2157,21 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def write_static_asset(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
         if path is None:
-            self.write_text(f"missing static asset: {asset}\n", status=HTTPStatus.NOT_FOUND)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetMissing", asset=asset) + "\n",
+                status=HTTPStatus.NOT_FOUND,
+            )
             return
         try:
             data = path.read_bytes()
         except OSError as exc:
-            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            logger.warning("failed to read static asset %s: %s", asset, exc)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
             return
         body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
@@ -1984,7 +2199,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             data = path.read_bytes()
         except OSError as exc:
-            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            logger.warning("failed to read static asset %s: %s", asset, exc)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
             return
         body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
         self.send_response(HTTPStatus.OK)
@@ -2000,17 +2220,45 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+        content_type = "application/json; charset=utf-8"
+        encode_started = time.perf_counter()
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        json_encode_ms = (time.perf_counter() - encode_started) * 1000
+        compression_started = time.perf_counter()
+        body, content_encoding = gzip_response_body(data, content_type, self.headers.get("Accept-Encoding"))
+        compression_ms = (time.perf_counter() - compression_started) * 1000 if content_encoding else 0.0
+        head_only = str(getattr(self, "command", "GET") or "GET").upper() == "HEAD"
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
-        self.record_http_response_bytes(status, len(data), "application/json; charset=utf-8")
+        write_started = time.perf_counter()
+        if not head_only:
+            self.wfile.write(body)
+        write_ms = (time.perf_counter() - write_started) * 1000
+        wire_bytes = 0 if head_only else len(body)
+        self.record_http_response_bytes(
+            status,
+            wire_bytes,
+            content_type,
+            {
+                "uncompressed_bytes": len(data),
+                "wire_bytes": wire_bytes,
+                "representation_bytes": len(body),
+                "content_encoding": content_encoding or "identity",
+                "json_encode_ms": round(json_encode_ms, 3),
+                "compression_ms": round(compression_ms, 3),
+                "write_ms": round(write_ms, 3),
+                "head_only": head_only,
+            },
+        )
 
     def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
         # Every app method returns a (payload, HTTPStatus) pair; the unpack-then-write_json dance was
@@ -2024,7 +2272,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         # app. Centralized so the bad-int response stays uniform; make_result(value) -> (payload, status).
         value, error = parse_query_int(qs, name, default, max_value=max_value)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         self.write_app_result(make_result(value))
 
@@ -2033,7 +2281,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         # response and cap in one path so the three handlers cannot drift.
         value, error = parse_query_float(qs, name, default, max_value=max_value)
         if error:
-            self.write_json(error_payload(error, status=HTTPStatus.BAD_REQUEST), status=HTTPStatus.BAD_REQUEST)
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         self.write_app_result(make_result(value))
 
@@ -2118,7 +2366,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.bridge_shared_tmux(token, session, viewer_id)
 
     def bridge_tmux(self, session: str, readonly: bool = False, resize_client_id: str = "") -> None:
-        initial_rows, initial_cols, saw_initial_resize, pending_payloads = self.read_initial_ws_payloads()
+        try:
+            initial_rows, initial_cols, saw_initial_resize, pending_payloads = self.read_initial_ws_payloads()
+        except OSError:
+            return
         if not saw_initial_resize:
             initial_rows, initial_cols = self.server.host_pty_dimensions_for_session(session)
         if not readonly and saw_initial_resize:
@@ -2209,7 +2460,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     process = attach_tmux()
                     continue
                 break
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             for fd in (master_fd, slave_fd):
@@ -2250,7 +2501,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     if self.request_is_https() and str(current_record.get("mode") or "ro") == "rw":
                         upstream.write_input(payload)
                     continue
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             viewer.close("viewer-closed")
@@ -2379,7 +2630,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if receive_only and not share_replay_viewer_control_frame_allowed(str(message.get("type") or "")):
                     continue
                 self.handle_share_ui_message(token, message, clean_client_id, accept_semantic_state=accept_semantic_state)
-        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+        except OSError:
             pass
         finally:
             client.close("ui-closed")
@@ -2506,6 +2757,10 @@ TLS_FIRST_BYTES = {0x16, 0x80}
 HTTP_METHOD_PREFIXES = (b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"TRACE ", b"CONNECT ")
 
 
+def https_redirect_body(location: str, locale: str = "en") -> bytes:
+    return (server_string(locale, "server.useHttps", location=location) + "\n").encode("utf-8")
+
+
 def parse_http_request_target(request_bytes: bytes) -> tuple[str, str]:
     text = request_bytes.decode("iso-8859-1", errors="replace")
     lines = text.splitlines()
@@ -2524,7 +2779,7 @@ def parse_http_request_target(request_bytes: bytes) -> tuple[str, str]:
 def https_redirect_response(request_bytes: bytes, fallback_host: str) -> bytes:
     host, target = parse_http_request_target(request_bytes)
     location = f"https://{host or fallback_host}{target}"
-    body = f"Use HTTPS for this YOLOmux server: {location}\n".encode("utf-8")
+    body = https_redirect_body(location)
     headers = [
         b"HTTP/1.1 308 Permanent Redirect",
         f"Location: {location}".encode("utf-8"),
@@ -2553,14 +2808,10 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_upstreams: dict[tuple[str, str], ShareTerminalUpstream] = {}
         self.share_ui_clients_lock = threading.Lock()
         self.share_ui_clients: dict[str, set[ShareViewerConnection]] = {}
-        self.share_replay_keyframes_lock = threading.Lock()
-        self.share_replay_keyframes: dict[str, dict[str, Any]] = {}
-        self.share_replay_deltas_lock = threading.Lock()
-        self.share_replay_deltas: dict[str, dict[int, list[dict[str, Any]]]] = {}
+        self.share_replay_lock = threading.Lock()
+        self.share_replay_records: dict[str, ShareReplayRecord] = {}
         self.share_pointer_lock = threading.Lock()
-        self.share_pointer_latest: dict[str, dict[str, Any]] = {}
-        self.share_pointer_clicks: dict[str, list[dict[str, Any]]] = {}
-        self.share_pointer_threads: dict[str, threading.Thread] = {}
+        self.share_pointer_records: dict[str, SharePointerRecord] = {}
         self.share_pointer_stop = threading.Event()
         if hasattr(self.app, "start_input_heartbeat_worker"):
             self.app.start_input_heartbeat_worker()
@@ -2573,12 +2824,13 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         start_agent_auth_status_refresh(force=True)
 
     def server_close(self) -> None:
-        self.share_pointer_stop.set()
-        if hasattr(self.app, "stop_stats_history_sampler"):
+        if hasattr(self, "share_pointer_stop"):
+            self.share_pointer_stop.set()
+        if hasattr(self, "app") and hasattr(self.app, "stop_stats_history_sampler"):
             self.app.stop_stats_history_sampler()
-        if hasattr(self.app, "stop_client_event_watcher"):
+        if hasattr(self, "app") and hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
-        if hasattr(self.app, "stop_input_heartbeat_worker"):
+        if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):
             self.app.stop_input_heartbeat_worker()
         super().server_close()
 
@@ -2670,18 +2922,14 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                 self.share_ui_clients.pop(token, None)
         for client in stale_clients:
             client.close("share-inactive")
-        self.prune_inactive_share_replay_keyframes()
-        self.prune_inactive_share_replay_deltas()
+        self.prune_inactive_share_replay_records()
 
     def record_share_replay_keyframe(self, token: str, message: dict[str, Any]) -> None:
         clean_token = str(token or "")
         if not clean_token:
             return
         if self.app.verify_share_token(clean_token) is None:
-            with self.share_replay_keyframes_lock:
-                self.share_replay_keyframes.pop(clean_token, None)
-            with self.share_replay_deltas_lock:
-                self.share_replay_deltas.pop(clean_token, None)
+            self.clear_share_replay_record(clean_token)
             return
         if str((message or {}).get("type") or "") != SHARE_MIRROR_FRAME_DOM_KEYFRAME:
             return
@@ -2700,35 +2948,30 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         reason = message.get("reason")
         if isinstance(reason, str) and reason.strip():
             stored["reason"] = reason.strip()[:120]
-        with self.share_replay_keyframes_lock:
-            self.share_replay_keyframes[clean_token] = stored
         epoch = share_replay_frame_int(stored.get("epoch"))
         sequence = share_replay_frame_int(stored.get("sequence"))
-        if epoch is not None and sequence is not None:
-            with self.share_replay_deltas_lock:
-                epoch_map = self.share_replay_deltas.get(clean_token)
-                if epoch_map is not None:
-                    for existing_epoch in list(epoch_map):
-                        if existing_epoch != epoch:
-                            epoch_map.pop(existing_epoch, None)
-                    epoch_deltas = epoch_map.get(epoch)
-                    if epoch_deltas is not None:
-                        epoch_map[epoch] = [
-                            delta for delta in epoch_deltas
-                            if (share_replay_frame_int(delta.get("sequence")) or -1) > sequence
-                        ]
-                        if not epoch_map[epoch]:
-                            epoch_map.pop(epoch, None)
-                    if not epoch_map:
-                        self.share_replay_deltas.pop(clean_token, None)
+        with self.share_replay_lock:
+            record = self.share_replay_records.setdefault(clean_token, ShareReplayRecord())
+            record.keyframe = stored
+            if epoch is not None and sequence is not None:
+                for existing_epoch in list(record.deltas_by_epoch):
+                    if existing_epoch != epoch:
+                        record.deltas_by_epoch.pop(existing_epoch, None)
+                epoch_deltas = record.deltas_by_epoch.get(epoch)
+                if epoch_deltas is not None:
+                    record.deltas_by_epoch[epoch] = [
+                        delta for delta in epoch_deltas
+                        if (share_replay_frame_int(delta.get("sequence")) or -1) > sequence
+                    ]
+                    if not record.deltas_by_epoch[epoch]:
+                        record.deltas_by_epoch.pop(epoch, None)
 
     def record_share_replay_delta(self, token: str, message: dict[str, Any]) -> bool:
         clean_token = str(token or "")
         if not clean_token:
             return False
         if self.app.verify_share_token(clean_token) is None:
-            with self.share_replay_deltas_lock:
-                self.share_replay_deltas.pop(clean_token, None)
+            self.clear_share_replay_record(clean_token)
             return False
         if str((message or {}).get("type") or "") != SHARE_MIRROR_FRAME_DOM_DELTA:
             return False
@@ -2754,9 +2997,9 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         reason = message.get("reason")
         if isinstance(reason, str) and reason.strip():
             stored["reason"] = reason.strip()[:120]
-        with self.share_replay_deltas_lock:
-            epoch_map = self.share_replay_deltas.setdefault(clean_token, {})
-            epoch_deltas = epoch_map.setdefault(epoch, [])
+        with self.share_replay_lock:
+            record = self.share_replay_records.setdefault(clean_token, ShareReplayRecord())
+            epoch_deltas = record.deltas_by_epoch.setdefault(epoch, [])
             epoch_deltas[:] = [
                 delta for delta in epoch_deltas
                 if share_replay_frame_int(delta.get("sequence")) != sequence
@@ -2764,35 +3007,36 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             epoch_deltas.append(stored)
             epoch_deltas.sort(key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0)
             del epoch_deltas[:-SHARE_REPLAY_DELTA_RING_LIMIT]
-            for existing_epoch in list(epoch_map):
-                if existing_epoch != epoch and not epoch_map[existing_epoch]:
-                    epoch_map.pop(existing_epoch, None)
+            for existing_epoch in list(record.deltas_by_epoch):
+                if existing_epoch != epoch and not record.deltas_by_epoch[existing_epoch]:
+                    record.deltas_by_epoch.pop(existing_epoch, None)
         return True
+
+    def clear_share_replay_record(self, token: str) -> None:
+        with self.share_replay_lock:
+            self.share_replay_records.pop(str(token or ""), None)
 
     def latest_share_replay_keyframe(self, token: str) -> dict[str, Any] | None:
         clean_token = str(token or "")
         if not clean_token:
             return None
         if self.app.verify_share_token(clean_token) is None:
-            with self.share_replay_keyframes_lock:
-                self.share_replay_keyframes.pop(clean_token, None)
-            with self.share_replay_deltas_lock:
-                self.share_replay_deltas.pop(clean_token, None)
+            self.clear_share_replay_record(clean_token)
             return None
-        with self.share_replay_keyframes_lock:
-            frame = self.share_replay_keyframes.get(clean_token)
+        with self.share_replay_lock:
+            frame = self.share_replay_records.get(clean_token, ShareReplayRecord()).keyframe
             return copy.deepcopy(frame) if frame else None
 
-    def share_replay_deltas_after_keyframe(self, token: str, keyframe: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
-        clean_token = str(token or "")
+    @staticmethod
+    def contiguous_share_replay_deltas(record: ShareReplayRecord, keyframe: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
         epoch = share_replay_frame_int((keyframe or {}).get("epoch"))
         cursor = share_replay_frame_int((keyframe or {}).get("sequence"))
-        if not clean_token or epoch is None or cursor is None:
+        if epoch is None or cursor is None:
             return [], True
-        with self.share_replay_deltas_lock:
-            epoch_map = self.share_replay_deltas.get(clean_token, {})
-            deltas = [copy.deepcopy(delta) for delta in epoch_map.get(epoch, [])]
-        deltas.sort(key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0)
+        deltas = sorted(
+            record.deltas_by_epoch.get(epoch, []),
+            key=lambda delta: share_replay_frame_int(delta.get("sequence")) or 0,
+        )
         contiguous: list[dict[str, Any]] = []
         for delta in deltas:
             sequence = share_replay_frame_int(delta.get("sequence"))
@@ -2803,9 +3047,23 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                 continue
             if base_sequence != cursor or sequence != cursor + 1:
                 return contiguous, False
-            contiguous.append(delta)
+            contiguous.append(copy.deepcopy(delta))
             cursor = sequence
         return contiguous, True
+
+    def share_replay_frames_snapshot(self, token: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool]:
+        clean_token = str(token or "")
+        if not clean_token or self.app.verify_share_token(clean_token) is None:
+            if clean_token:
+                self.clear_share_replay_record(clean_token)
+            return None, [], True
+        with self.share_replay_lock:
+            record = self.share_replay_records.get(clean_token)
+            if record is None or record.keyframe is None:
+                return None, [], True
+            frame = copy.deepcopy(record.keyframe)
+            deltas, contiguous = self.contiguous_share_replay_deltas(record, frame)
+            return frame, deltas, contiguous
 
     def enqueue_latest_share_replay_keyframe(self, token: str, client: ShareViewerConnection) -> bool:
         frame = self.latest_share_replay_keyframe(token)
@@ -2814,11 +3072,10 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         return client.enqueue_reset_frame(share_ui_frame(frame)) == "queued"
 
     def enqueue_share_replay_frames_for_viewer(self, token: str, client: ShareViewerConnection) -> bool:
-        frame = self.latest_share_replay_keyframe(token)
+        frame, deltas, contiguous = self.share_replay_frames_snapshot(token)
         if not frame:
             self.request_share_replay_keyframe(token, reason="join", skip_client_id=client.client_id, viewer_id=client.client_id)
             return False
-        deltas, contiguous = self.share_replay_deltas_after_keyframe(token, frame)
         if not contiguous:
             self.request_share_replay_keyframe(token, reason="join", skip_client_id=client.client_id, viewer_id=client.client_id)
             return False
@@ -2856,17 +3113,11 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             skip_client_id=skip_client_id,
         )
 
-    def prune_inactive_share_replay_keyframes(self) -> None:
-        with self.share_replay_keyframes_lock:
-            for token in list(self.share_replay_keyframes):
+    def prune_inactive_share_replay_records(self) -> None:
+        with self.share_replay_lock:
+            for token in list(self.share_replay_records):
                 if self.app.verify_share_token(token) is None:
-                    self.share_replay_keyframes.pop(token, None)
-
-    def prune_inactive_share_replay_deltas(self) -> None:
-        with self.share_replay_deltas_lock:
-            for token in list(self.share_replay_deltas):
-                if self.app.verify_share_token(token) is None:
-                    self.share_replay_deltas.pop(token, None)
+                    self.share_replay_records.pop(token, None)
 
     def share_viewer_count(self, token: str) -> int:
         count = 0
@@ -2889,32 +3140,40 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         clean_token = str(token or "")
         if not clean_token:
             return
+        if self.app.verify_share_token(clean_token) is None:
+            with self.share_pointer_lock:
+                self.share_pointer_records.pop(clean_token, None)
+            return
         clean_payload = dict(payload or {})
         clean_payload["sender"] = str(sender or clean_payload.get("sender") or "")
         click = clean_payload.get("click") is True
         with self.share_pointer_lock:
-            self.share_pointer_latest[clean_token] = {key: value for key, value in clean_payload.items() if key != "click"}
+            record = self.share_pointer_records.setdefault(clean_token, SharePointerRecord())
+            record.latest = {key: value for key, value in clean_payload.items() if key != "click"}
             if click:
-                clicks = self.share_pointer_clicks.setdefault(clean_token, [])
-                clicks.append(clean_payload | {"click": True})
-                del clicks[:-SHARE_POINTER_CLICK_QUEUE_LIMIT]
-            thread = self.share_pointer_threads.get(clean_token)
+                record.clicks.append(clean_payload | {"click": True})
+                del record.clicks[:-SHARE_POINTER_CLICK_QUEUE_LIMIT]
+            thread = record.thread
             if thread is None or not thread.is_alive():
-                thread = threading.Thread(target=self.share_pointer_loop, args=(clean_token,), name="share-pointer", daemon=True)
-                self.share_pointer_threads[clean_token] = thread
+                thread = threading.Thread(target=self.share_pointer_loop, args=(clean_token, record), name="share-pointer", daemon=True)
+                record.thread = thread
                 thread.start()
 
-    def share_pointer_loop(self, token: str) -> None:
+    def share_pointer_loop(self, token: str, record: SharePointerRecord) -> None:
         last_sent = ""
         while not self.share_pointer_stop.is_set():
             if self.app.verify_share_token(token) is None:
                 break
             hz = self.share_pointer_hz(token)
-            time.sleep(1.0 / max(1, hz))
+            if self.share_pointer_stop.wait(1.0 / max(1, hz)):
+                break
             messages: list[dict[str, Any]] = []
             with self.share_pointer_lock:
-                latest = self.share_pointer_latest.get(token)
-                clicks = self.share_pointer_clicks.pop(token, [])
+                if self.share_pointer_records.get(token) is not record:
+                    break
+                latest = record.latest
+                clicks = list(record.clicks)
+                record.clicks.clear()
                 if latest:
                     signature = json.dumps(latest, sort_keys=True, separators=(",", ":"))
                     if signature != last_sent:
@@ -2929,9 +3188,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
                     skip_client_id=sender,
                 )
         with self.share_pointer_lock:
-            self.share_pointer_latest.pop(token, None)
-            self.share_pointer_clicks.pop(token, None)
-            self.share_pointer_threads.pop(token, None)
+            if self.share_pointer_records.get(token) is record:
+                self.share_pointer_records.pop(token, None)
 
     def broadcast_share_ui(self, token: str, message: dict[str, Any], *, skip_client_id: str = "") -> None:
         clean_message = dict(message or {})
@@ -2982,16 +3240,21 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def prepare_request_socket(self, request: socket.socket) -> socket.socket:
         if not self.tls_context or isinstance(request, ssl.SSLSocket):
             return request
+        # Test and plain-HTTP share hosts may retain a context-shaped redirect sentinel so Handler can
+        # issue HTTP policy responses. Only a real SSLContext is authorized to transform a connection.
+        if not isinstance(self.tls_context, ssl.SSLContext):
+            return request
         previous_timeout = request.gettimeout()
         request.settimeout(self.tls_peek_timeout_seconds)
         try:
             first = request.recv(1, socket.MSG_PEEK)
         except (socket.timeout, BlockingIOError):
-            # Idle preconnect socket. This runs in the per-connection worker thread, so this longer
-            # wait does not block accept(); wrapping keeps browser TLS preconnects from surfacing as
-            # ERR_CONNECTION_CLOSED.
+            # No protocol byte means this is only an idle preconnect, not evidence of TLS. Wrapping it
+            # guessed wrong for plaintext share preconnects and killed later HTTP requests. Definite
+            # TLS records still take the branch below; a real client has sent its first byte by this
+            # deliberately generous classifier timeout.
             request.settimeout(previous_timeout)
-            return self.tls_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+            return request
         if first and first[0] in TLS_FIRST_BYTES:
             request.settimeout(previous_timeout)
             return self.tls_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)

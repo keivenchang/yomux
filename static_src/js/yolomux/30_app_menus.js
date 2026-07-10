@@ -1,9 +1,18 @@
 function menuCommand(label, action, options = {}) {
-  const command = {type: 'command', label, action, ...options};
-  if (command.keepOpen === undefined && Object.prototype.hasOwnProperty.call(options, 'checked')) {
-    command.keepOpen = true;
-  }
-  return command;
+  // Checked is presentation state, not a request to keep a menu mounted. Navigation commands such
+  // as File -> Finder may be checked yet must still dismiss the menu after they act; real repeated
+  // toggles opt into keepOpen explicitly at their definition.
+  return {type: 'command', label, action, ...options};
+}
+
+// A paired row keeps closely related choices on one compact line while preserving independent buttons,
+// keyboard navigation, disabled state, and accessibility for each action.
+function menuCommandPair(primary, secondary, options = {}) {
+  return {type: 'command-pair', primary, secondary, ...options};
+}
+
+function menuCommandRow(items, options = {}) {
+  return {type: 'command-row', items, ...options};
 }
 
 function menuSubmenu(label, items, options = {}) {
@@ -36,7 +45,7 @@ function layoutMenuCommand(mode) {
     : normalized === 'split'
       ? t('menu.view.layout.split.detail', {name: fileExplorerLabel()})
       : '';
-  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail});
+  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail, keepOpen: true});
 }
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
@@ -45,11 +54,9 @@ const aboutLicenseUrl = 'https://polyformproject.org/licenses/noncommercial/1.0.
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
-  try {
-    return new Date().toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
-  } catch (_) {
-    return new Date().toString();
-  }
+  return localizedDateTimeFormat(Date.now() / 1000, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
 }
 
 function openAboutLinkedIn() {
@@ -64,10 +71,10 @@ function topbarVersionTitle() {
   const sha = aboutCommitShaText();
   const commitCount = Number(bootstrap.versionCommitCount);
   const lines = [];
-  if (sha) lines.push(`SHA: ${sha}`);
-  if (bootstrap.versionCommitTime) lines.push(`Last commit: ${bootstrap.versionCommitTime}`);
-  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(`Commits: ${commitCount}`);
-  return lines.join('\n') || 'SHA unknown';
+  if (sha) lines.push(t('menu.help.about.sha', {sha}));
+  if (bootstrap.versionCommitTime) lines.push(t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}));
+  if (Number.isFinite(commitCount) && commitCount > 0) lines.push(t('menu.help.about.commits', {count: commitCount}));
+  return lines.join('\n') || t('menu.help.about.shaUnknown');
 }
 
 function topbarServerStartedAtMs() {
@@ -79,7 +86,7 @@ function topbarServerStartedAtMs() {
 
 function topbarDurationText(seconds) {
   const remaining = Math.max(0, Math.floor(Number(seconds) || 0));
-  if (remaining < 1) return 'under 1 second';
+  if (remaining < 1) return t('duration.underOneSecond');
   const units = [
     ['day', 86400],
     ['hour', 3600],
@@ -116,20 +123,16 @@ function updateBrandTitles() {
 }
 
 function aboutBrandHtml() {
-  return `<span class="about-brand-yo">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+  return `<span class="about-brand-yo">${esc(t('brand.marker'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
 }
 
 function showAboutModal() {
   const modal = document.getElementById('modal');
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
-  const close = document.getElementById('closeModal');
   if (!modal || !title || !body) return;
   title.textContent = t('menu.help.about');
-  if (close) {
-    close.title = t('common.close');
-    close.setAttribute('aria-label', t('common.close'));
-  }
+  relocalizeModalChrome({content: false});
   modal.classList.add('about-open');
   const version = bootstrap.version || '';
   const sha = aboutCommitShaText();
@@ -161,6 +164,12 @@ function currentSessionActionTarget() {
   return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
 }
 
+function currentTmuxMenuTarget() {
+  // All pane-aware surfaces share this explicit click/type state. Hover and auto-focus stay
+  // visual-only, so opening tmux cannot retarget an action to a pane merely under the cursor.
+  return explicitTmuxPaneFocusSession() || currentSessionActionTarget();
+}
+
 function orderedPaneItems(items = activePaneItems()) {
   const unique = [];
   for (const group of [
@@ -178,12 +187,12 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  return tabMenuDetailText(item, transcriptMetadataState.payload.sessions?.[item]);
 }
 
 function commandPaletteTabDetail(item) {
   const detail = menuTabDetail(item);
-  const pr = displayPullRequest(transcriptMeta.sessions?.[item]);
+  const pr = displayPullRequest(transcriptMetadataState.payload.sessions?.[item]);
   if (!pr?.number) return detail;
   const bareNumber = `#${pr.number}`;
   const visibleNumber = `PR ${bareNumber}`;
@@ -199,13 +208,13 @@ function commandPaletteTabDetail(item) {
 function menuTabRowHtml(item, options = {}) {
   const type = tabTypeForItem(item);
   if (type?.rowHtml) return type.rowHtml(item, options);
-  const info = transcriptMeta.sessions?.[item];
+  const info = transcriptMetadataState.payload.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
   const state = sessionState(item, info);
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${sessionTabLeadingActivityHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+  return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
 }
 
@@ -239,7 +248,7 @@ function tmuxSessionActionCommands(session, options = {}) {
   const yoloLabel = hasSession
     ? t(autoHere ? 'menu.tmux.yolo.disableFor' : 'menu.tmux.yolo.enableFor', {session})
     : t(autoHere ? 'menu.tmux.yolo.disable' : 'menu.tmux.yolo.enable');
-  const renameLabel = hasSession ? t('menu.tmux.rename.for', {session}) : t('menu.tmux.rename');
+  const renameLabel = hasSession ? t('menu.tmux.rename.for', {session}) : t('common.renameTmuxSession');
   const renameAction = options.renameAction || (() => renameTmuxSession(session));
   const commands = [];
   if (includeYolo) commands.push(menuCommand(yoloLabel, async () => {
@@ -304,10 +313,10 @@ function applyAndSaveGlobalTheme(next) {
   renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
-      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
+      statusEl.textContent = t('status.themeChanged', {theme: globalThemeLabel(next)});
     })
     .catch(error => {
-      statusErr(localizedHtml('status.themeSaveFailed', {error}));
+      statusErr(localizedHtml('status.themeSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
       refreshSettings({force: true});
     });
 }
@@ -322,12 +331,12 @@ function cycleGlobalThemeSetting() {
 }
 
 function yoloRuleStatusDetail() {
-  const source = yoloRulesPayload.source || 'unknown';
+  const source = structuredMessageText(yoloRulesPayload, 'source', t('common.unknown'));
   const count = Number(yoloRulesPayload.rule_count || 0);
   const countText = tPlural('menu.yolo.ruleCount', count);
   const dryRun = yoloRulesPayload.dry_run ? t('menu.yolo.dryRunSuffix') : '';
   return yoloRulesPayload.error
-    ? t('menu.yolo.errorDetail', {error: yoloRulesPayload.error})
+    ? t('common.errorDetail', {error: userMessageText(yoloRulesPayload, yoloRulesPayload.error)})
     : t('menu.yolo.statusDetail', {source, rules: countText, dryRun});
 }
 
@@ -353,10 +362,11 @@ async function reloadYoloRules() {
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
+    const errorText = userMessageText(payload, payload.error || '');
     statusEl.innerHTML = payload.error
-      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: payload.error})}</span>`
+      ? `<span class="err">${localizedHtml('status.yoloReloadFailed', {error: errorText})}</span>`
       : `<span class="ok">${localizedHtml('status.yoloReloaded')}</span>`;
-    showToast(t('status.yoloToastTitle'), payload.error || yoloRuleStatusDetail(), {level});
+    emitNotification('yoloRules', {title: t('brand.yoloRules'), lines: errorText || yoloRuleStatusDetail(), className: level ? 'attention-alert toast' : ''});
   } catch (error) {
     statusErr(localizedHtml('status.yoloReloadRequestFailed', {error}));
   }
@@ -391,7 +401,7 @@ function tmuxCurrentYoloCommand(session) {
   const payload = hasSession ? autoApproveStates.get(session) : null;
   const enabled = hasSession ? autoApproveEnabledHere(payload) : false;
   const elsewhere = hasSession ? autoApproveEnabledElsewhere(payload) : false;
-  const label = hasSession ? t(enabled ? 'menu.tmux.yo.on' : elsewhere ? 'menu.tmux.yo.elsewhere' : 'menu.tmux.yo.off') : t('menu.tmux.yo.none');
+  const label = t('menu.tmux.yo.on');
   return menuCommand(label, async () => {
     if (!hasSession) return;
     await toggleAutoApprove(session);
@@ -406,7 +416,7 @@ function tmuxCurrentYoloCommand(session) {
   });
 }
 
-function tmuxSessionViewCommands(session) {
+function tmuxSessionViewCommands(session, options = {}) {
   const hasSession = isTmuxSession(session);
   const active = hasSession && activeSessions.includes(session);
   const focusDetail = hasSession ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
@@ -415,6 +425,8 @@ function tmuxSessionViewCommands(session) {
   const transcriptName = t('menu.tmux.transcript', {session: viewLabel});
   const summaryName = t('menu.tmux.aiTranscript', {session: viewLabel});
   const eventLogName = t('menu.tmux.eventLog', {session: viewLabel});
+  const statusMode = hasSession ? tmuxStatusModeForSession(session) : 'none';
+  const statusName = t('pref.appearance.tmux_status_bar.label');
   return [
     menuCommand(transcriptName, () => {
       if (active) activateTab(session, 'transcript');
@@ -449,14 +461,28 @@ function tmuxSessionViewCommands(session) {
       detail: active ? '' : disabledDetail,
       ariaLabel: [t('menu.tmux.paneDetails'), focusDetail].filter(Boolean).join(' - '),
     }),
+    ...(options.includeStatus === false ? [] : [menuCommand(statusName, async () => {
+        if (hasSession) await cycleTmuxStatusMode(session);
+      }, {
+        checked: statusMode !== 'none',
+        disabled: readOnlyMode || !hasSession,
+        detail: hasSession ? t('menu.tmux.statusBarCycle') : disabledDetail,
+        keepOpen: true,
+        ariaLabel: [statusName, focusDetail].filter(Boolean).join(' - '),
+      })]),
   ];
 }
 
-// The flags/params YOLOmux launches an agent with, shown as the new-session item's detail (e.g.
-// "--dangerously-skip-permissions"). Strips the binary name from the launch command; for a plain Term
-// it's just the shell ("bash"). Empty when the command carries no extra flags.
-function agentLaunchParams(agent) {
-  const command = String(agentLaunchCommands[agent] || '').trim();
+// The server owns the two launch commands. The dangerous-auto-approve row exposes its exact
+// --dangerously-* flags so that choosing it is deliberate; normal rows remain clean one-click starts.
+function agentLaunchCommand(agent, dangerouslyYolo = false) {
+  const commands = agentLaunchCommands[agent];
+  if (commands && typeof commands === 'object') return String(commands[dangerouslyYolo ? 'full_access' : 'normal'] || '').trim();
+  return String(commands || '').trim(); // Compatibility with an older server during a rolling restart.
+}
+
+function agentLaunchParams(agent, dangerouslyYolo = false) {
+  const command = agentLaunchCommand(agent, dangerouslyYolo);
   if (!command) return '';
   const space = command.indexOf(' ');
   return space >= 0 ? command.slice(space + 1).trim() : command;
@@ -467,8 +493,26 @@ function agentUnavailableDetail(agent) {
   return t('menu.tmux.agentUnavailable', {name: agentName(agent)});
 }
 
-function newTmuxSessionLabel(agent) {
-  return t('menu.tmux.newSession', {name: agentName(agent)});
+function newTmuxSessionLabel(agent, dangerouslyYolo = false) {
+  return dangerouslyYolo
+    ? t('menu.tmux.newSession.fullAccess', {name: agentName(agent)})
+    : t('menu.tmux.newSession', {name: agentName(agent)});
+}
+
+function shellLaunchLabel(terminal) {
+  return `Shell: ${terminal}`;
+}
+
+function newTmuxSessionFullAccessFlags(agent) {
+  const flags = agentLaunchParams(agent, true);
+  return flags ? `+ ${flags}` : '';
+}
+
+function terminalLaunchNames() {
+  return Array.from(new Set(terminalCommands
+    .map(command => String(command || '').trim())
+    .filter(command => /^[A-Za-z0-9][A-Za-z0-9_.+-]*$/.test(command))))
+    .sort((left, right) => left.localeCompare(right, undefined, {numeric: true, sensitivity: 'base'}));
 }
 
 function newTmuxSessionIcon(agent) {
@@ -482,19 +526,42 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    // When launchable, the detail shows the params actually passed (the --dangerously-* flags in YOLO
-    // mode) so you can see what command will run.
-    return menuCommand(newTmuxSessionLabel(agent), () => createNextSession(agent), {
-      iconHtml: newTmuxSessionIcon(agent),
-      disabled: readOnlyMode || !available || loggedOut || capped,
-      detail: readOnlyMode
-        ? t('menu.common.adminOnly')
-        : (!available
-          ? agentUnavailableDetail(agent)
-          : (loggedOut
-            ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
-            : (capped ? t('menu.tmux.limitReached') : agentLaunchParams(agent)))),
-    });
+    const unavailableDetail = readOnlyMode
+      ? t('menu.common.adminOnly')
+      : (!available
+        ? agentUnavailableDetail(agent)
+        : (loggedOut
+          ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
+          : (capped ? t('menu.tmux.limitReached') : '')));
+    const launch = (dangerouslyYolo, terminal = '') => {
+      const fullAccessFlags = dangerouslyYolo ? newTmuxSessionFullAccessFlags(agent) : '';
+      return menuCommand(
+        terminal || (dangerouslyYolo ? newTmuxSessionLabel(agent, true) : newTmuxSessionLabel(agent)),
+        () => createNextSession(agent, {dangerouslyYolo, terminal}), {
+          iconHtml: dangerouslyYolo || terminal ? '' : newTmuxSessionIcon(agent),
+          disabled: readOnlyMode || !available || loggedOut || capped,
+          detail: unavailableDetail,
+          title: fullAccessFlags,
+          ariaLabel: dangerouslyYolo
+            ? [t('menu.tmux.newSession.fullAccess', {name: agentName(agent)}), agentLaunchParams(agent, true)].filter(Boolean).join(' - ')
+            : (terminal ? shellLaunchLabel(terminal) : newTmuxSessionLabel(agent)),
+        });
+    };
+    const terminals = terminalLaunchNames();
+    return agent === 'term'
+      ? (terminals.length
+        ? menuCommandRow(terminals.map(terminal => launch(false, terminal)), {
+          className: 'app-menu-command-row app-menu-command-row--shells',
+          label: 'Shell:',
+          iconHtml: newTmuxSessionIcon(agent),
+          separator: false,
+        })
+        // Do not guess a shell. A terminal launch is valid only when the server supplied an
+        // explicit, validated command for the user to choose.
+        : null)
+      : (fullAccessAgentLaunchesEnabled
+        ? menuCommandPair(launch(false), launch(true), {className: 'app-menu-command-pair'})
+        : launch(false));
   });
 }
 
@@ -534,12 +601,15 @@ function pullRequestSearchFields(pr) {
 }
 
 function finderSearchAliases(item) {
-  if (!isFileExplorerItem(item)) return [];
-  return ['Finder', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer')];
+  const isSurface = typeof isFileSurfaceItem === 'function'
+    ? isFileSurfaceItem(item)
+    : isFileExplorerItem(item);
+  if (!isSurface) return [];
+  return ['Finder', 'Differ', 'Tabber', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer'), t('brand.tab.changes'), t('tabber.title')];
 }
 
 function tabSearchFields(item) {
-  const info = transcriptMeta.sessions?.[item] || {};
+  const info = transcriptMetadataState.payload.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
   // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
   // session is findable by any related branch even when it is not the currently checked-out branch.
@@ -610,45 +680,29 @@ function inactiveTabMenuItems() {
   });
 }
 
-// P0 menu-bar: the Tabs navigator's order. 'attention' floats needs-* sessions to the top (the "Needs
-// me" view) using the shared state priority; 'name' sorts by label; 'default' keeps the
-// tmux/editors/other grouping. Stable (preserves the incoming order within equal keys).
-function tabMenuSortPriority(item) {
-  if (!isTmuxSession(item)) return 50;   // non-session tabs (editors/Finder/Prefs) sit after sessions
-  const priority = sessionState(item)?.priority;
-  return Number.isFinite(priority) ? priority : 50;
-}
-
 function sortTabItemsForMenu(items) {
-  if (tabsMenuSortMode === 'attention') {
-    return items
-      .map((item, index) => ({item, index}))
-      .sort((a, b) => tabMenuSortPriority(a.item) - tabMenuSortPriority(b.item) || a.index - b.index)
-      .map(entry => entry.item);
-  }
-  if (tabsMenuSortMode === 'name') {
-    return items
-      .map((item, index) => ({item, index}))
-      .sort((a, b) => String(itemLabel(a.item)).localeCompare(String(itemLabel(b.item))) || a.index - b.index)
-      .map(entry => entry.item);
-  }
-  return items;
-}
-
-function setTabsMenuSortMode(mode) {
-  tabsMenuSortMode = tabsMenuSortModes.includes(mode) ? mode : 'default';
-  storageSet('yolomux.tabsMenuSort.v1', tabsMenuSortMode);
-  renderSessionButtons({force: true});
+  const unique = Array.from(new Set(items.filter(isLayoutItem)));
+  const compare = (left, right) => String(itemLabel(left)).localeCompare(String(itemLabel(right)), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  }) || String(left).localeCompare(String(right));
+  // Tabs is a navigator, not a status dashboard: tmux sessions always form the first simple,
+  // naturally sorted group; every YOLOmux-owned/file tab follows in the same stable label order.
+  return [
+    ...unique.filter(isTmuxSession).sort(compare),
+    ...unique.filter(item => !isTmuxSession(item)).sort(compare),
+  ];
 }
 
 function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
-  const filteredOpenItems = sortTabItemsForMenu(filterTabItemsForSearch(openItems, query));
+  const allItems = Array.from(new Set([...openItems, ...paneItems(), ...allTabItems()]));
+  const sortedItems = sortTabItemsForMenu(filterTabItemsForSearch(allItems, query));
+  const tmuxItems = sortedItems.filter(isTmuxSession);
+  const yoloItems = sortedItems.filter(item => !isTmuxSession(item));
   const groupedItems = menuGroups(
-    newTmuxSessionItems(),
-    filteredOpenItems.map(item => menuTabCommand(item, {toggleYolo: true})),
-    backgroundTabMenuItems(),
-    inactiveTabMenuItems()
+    tmuxItems.map(item => menuTabCommand(item, {toggleYolo: true})),
+    yoloItems.map(item => menuTabCommand(item, {toggleYolo: true}))
   );
   const resultItems = groupedItems.length ? groupedItems : [menuCommand(t('menu.tabs.noMatch'), null, {disabled: true})];
   return resultItems;
@@ -663,40 +717,78 @@ function fileMenuVirtualCommand(item, detail) {
   });
 }
 
+function fileSurfaceMenuItems() {
+  // Placement belongs to the layout owner. This menu only asks it to activate an existing surface
+  // or insert the missing one, so menu actions cannot recreate a second placement algorithm.
+  const finder = typeof finderItemId !== 'undefined' ? finderItemId : fileExplorerItemId;
+  const differ = typeof differItemId !== 'undefined' ? differItemId : '';
+  const tabber = typeof tabberItemId !== 'undefined' ? tabberItemId : '';
+  const items = Array.isArray(fileSurfaceItems) ? fileSurfaceItems : [finder];
+  const detailFor = item => {
+    if (item === finder) return t('menu.file.browseFiles');
+    if (item === differ) return t('changes.show');
+    if (item === tabber) return t('tabber.description');
+    return tabTypeForItem(item)?.detail?.() || '';
+  };
+  return items.map(item => menuCommand(itemLabel(item), () => openFileSurfaceFromMenu(item), {
+    checked: itemInLayout(item),
+    disabled: typeof openFileSurfaceFromMenu !== 'function',
+    detail: item === finder ? `${detailFor(item)} · ${appShortcutText('B')}` : detailFor(item),
+    iconHtml: tabTypeIconHtml(item, {menu: true}),
+    targetItem: item,
+    className: 'app-menu-file-destination',
+  }));
+}
+
+function fileMenuPanelCommands() {
+  const virtualCommands = FILE_MENU_PANEL_DEFINITIONS
+    .filter(({itemId}) => itemId !== fileExplorerItemId)
+    .map(({itemId}) => fileMenuVirtualCommand(itemId, tabTypeForItem(itemId)?.detail?.() || ''));
+  const fileSurfaces = fileSurfaceMenuItems();
+  if (fileSurfaces.length) {
+    if (narrowSingleColumnMode()) {
+      // A narrow touch layout displays one chosen surface, so its three direct commands remain
+      // distinct instead of implying all three can be visible at once.
+      virtualCommands.unshift(...fileSurfaces);
+    } else {
+      virtualCommands.unshift(menuCommand(t('yoagent.capability.finderDifferTabber.name'), () => openFileSurfaceFromMenu(finderItemId), {
+        checked: fileSurfaceItems.every(item => itemInLayout(item)),
+        partial: fileSurfaceItems.some(item => itemInLayout(item)) && !fileSurfaceItems.every(item => itemInLayout(item)),
+        disabled: typeof openFileSurfaceFromMenu !== 'function',
+        detail: t('menu.file.browseFiles'),
+        iconHtml: tabTypeIconHtml(finderItemId, {menu: true}),
+        targetItem: finderItemId,
+        className: 'app-menu-file-destination',
+      }));
+    }
+  }
+  return virtualCommands;
+}
+
 function appMenuTree() {
-  const activeTmux = currentSessionActionTarget();
+  const activeTmux = currentTmuxMenuTarget();
   const shareSessions = shareSessionsFromLayout();
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
-  const yoloCount = yoloWorkingSessions().length;
-  const debugMenuItem = fileMenuVirtualCommand(debugPaneItemId, t('menu.file.debug.detail'));
   return [
     {
       id: 'file',
       label: t('menu.file'),
       items: menuGroups(
+        newTmuxSessionItems(),
         [
-          menuCommand(t('menu.file.openFile'), openFileQuickOpen, {
+          menuCommand(t('common.openFile'), openFileQuickOpen, {
             detail: appShortcutText('P'),
             iconHtml: appMenuUiIcon('document'),
           }),
-          menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
-            checked: itemInLayout(fileExplorerItemId),
-            detail: appShortcutText('B'),
-            iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
-            targetItem: fileExplorerItemId,
-          }),
-          fileMenuVirtualCommand(searchHistoryItemId, t('searchHistory.detail')),
-          fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
-          fileMenuVirtualCommand(yoagentItemId, t('menu.file.yoagent.detail')),
-          debugMenuItem,
+          ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
           menuCommand(t('menu.file.share'), () => showShareModal(), {
             disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
             detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
             iconHtml: appMenuUiIcon('share', shareMenuActive),
           }),
-          menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
+          menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
             checked: itemInLayout(prefsItemId),
             detail: compactHomePath(settingsConfigPath()),
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
@@ -717,29 +809,23 @@ function appMenuTree() {
       items: [
         menuCommand(tabMetaVisible ? t('menu.view.tabMeta.hide') : t('menu.view.tabMeta.show'), toggleTabMetadata, {
           checked: tabMetaVisible,
+          keepOpen: true,
           detail: t('menu.view.tabMeta.detail'),
           iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
         }),
-        menuCommand(t('menu.view.alert'), toggleNotifications, {
-          checked: notificationsEnabled,
-          disabled: readOnlyMode,
-          detail: readOnlyMode ? t('menu.view.alert.adminDetail') : '',
-          iconHtml: appMenuUiIcon('notify', notificationsEnabled),
+        menuSubmenu(t('menu.view.alert'), notificationDeliveryItems(), {
+          iconHtml: appMenuUiIcon('notify', notificationDeliveryEnabled()),
+          keepOpen: true,
         }),
-        menuCommand(t('menu.view.refresh'), refreshAll, {
+        menuCommand(t('common.refresh'), refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
         }),
         menuSubmenu(t('menu.view.theme'), [
-          menuCommand(t('menu.view.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: t('menu.view.theme.system.detail', {mode: t('menu.view.theme.' + resolvedGlobalThemeMode())})}),
-          menuCommand(t('menu.view.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
-          menuCommand(t('menu.view.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
+          menuCommand(t('common.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', keepOpen: true, detail: t('menu.view.theme.system.detail', {mode: t('common.theme.' + resolvedGlobalThemeMode())})}),
+          menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark', keepOpen: true}),
+          menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light', keepOpen: true}),
         ]),
-        menuSubmenu(t('menu.view.layout'), layoutModeValues.map(layoutMenuCommand)),
-        menuSubmenu(t('menu.view.sortTabs'), [
-          menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
-          menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
-          menuCommand(t('menu.view.sortTabs.name'), () => setTabsMenuSortMode('name'), {checked: tabsMenuSortMode === 'name'}),
-        ]),
+        ...(narrowSingleColumnMode() ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
       ],
     },
     {
@@ -747,7 +833,6 @@ function appMenuTree() {
       label: 'tmux',
       items: menuGroups(
         [tmuxCurrentYoloCommand(activeTmux)],
-        [fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail'))],
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),
@@ -757,30 +842,28 @@ function appMenuTree() {
           }),
         ],
         [
-          menuSubmenu(t('menu.tmux.yoloSubmenu'), tmuxYoloMenuItems()),
+          menuSubmenu(t('brand.yolo'), tmuxYoloMenuItems()),
         ]
       ),
     },
     {
       id: 'tabs',
-      label: t('menu.tabs'),
-      badgeText: String(yoloCount),
-      badgeTitle: tPlural('menu.tabs.yoloBadge', yoloCount),
+      label: t('common.tabsLabel'),
       items: tabMenuItems(openItems),
     },
     {
       id: 'help',
       label: t('menu.help'),
       items: menuGroups(
-        [menuCommand(t('menu.help.commandPalette'), openCommandPalette, {
+        [menuCommand(t('common.commandPalette'), openCommandPalette, {
           detail: appShortcutText('P', {shift: true}),
         })],
         [
-          menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
+          menuCommand(t('brand.version', {version: bootstrap.version || ''}).trim(), null, {
             disabled: true,
             detail: bootstrap.versionCommitTime ? t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}) : '',
           }),
-          menuCommand(t('menu.help.shortcuts'), openKeyboardShortcutsOverlay, {
+          menuCommand(t('common.keyboardShortcuts'), openKeyboardShortcutsOverlay, {
             detail: '?',
           }),
           menuCommand(t('menu.help.openReadme'), openProjectReadme, {
@@ -794,6 +877,236 @@ function appMenuTree() {
       ),
     },
   ];
+}
+
+let topbarNavigationCompact = null;
+let topbarPackingFrame = 0;
+let topbarPackingObserver = null;
+let topbarPackingStepsApplied = [];
+let topbarPackingIsApplying = false;
+
+// The sequence is user-facing priority, not a viewport policy. Start complete, reduce only on
+// actual overflow. Every pass restarts from this full representation so resize direction and prior
+// compact state cannot change which controls fit.
+const topbarPackingStepOrder = Object.freeze([
+  'hide-version',
+  'compact-brand',
+  'hide-owner',
+  'compact-search',
+  'compact-activity',
+  'hide-latency',
+  'hide-logout',
+  'hide-notify',
+  'hide-language',
+  'hide-nav',
+  'icon-search',
+  'compact-menu',
+]);
+const topbarPackingVisualItemSelectors = Object.freeze([
+  '.brand-cell',
+  '.app-menu-bar',
+  '.topbar-nav',
+  '.topbar-search',
+  '.topbar-language-menu',
+  '#topbarOwnerStatus',
+  '#topbarActivity',
+  '.actions > :not(#topbarActivity):not(#status)',
+]);
+const topbarPackingMinGapPx = 2;
+
+function topbarPackingTargets() {
+  return [document.body, appRootElement()].filter(Boolean);
+}
+
+function topbarPackingHasStep(step) {
+  return document.body?.classList?.contains(`topbar-pack-${step}`) === true;
+}
+
+function setTopbarPackingSteps(steps = []) {
+  const active = new Set(steps);
+  for (const target of topbarPackingTargets()) {
+    for (const step of topbarPackingStepOrder) {
+      target.classList?.toggle(`topbar-pack-${step}`, active.has(step));
+    }
+  }
+}
+
+// Packing changes that affect markup must be rendered before the next measurement. In particular,
+// compact activity moves into the actions rail and compact menus replace five roots with one. If we
+// measured the old markup, the packer could unnecessarily remove buttons or oscillate on resize.
+function applyTopbarPackingSteps(steps = []) {
+  const activityWasCompact = topbarPackingHasStep('compact-activity');
+  setTopbarPackingSteps(steps);
+  const navigationChanged = topbarPackingSyncNavigation(steps);
+  if (!navigationChanged && activityWasCompact !== topbarPackingHasStep('compact-activity')) {
+    updateTopbarActivityStatus();
+  }
+}
+
+function topbarPackingVisualItems() {
+  const seen = new Set();
+  return topbarPackingVisualItemSelectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))
+    .filter(node => {
+      if (seen.has(node)) return false;
+      seen.add(node);
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return !node.hidden && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    });
+}
+
+function topbarPackingLayoutState() {
+  const bar = document.querySelector('.topbar');
+  if (!bar) return {overflow: false, outside: [], collisions: [], clipped: []};
+  const barRect = bar.getBoundingClientRect();
+  const items = topbarPackingVisualItems()
+    .map(node => ({node, rect: node.getBoundingClientRect()}))
+    .sort((a, b) => a.rect.left - b.rect.left || a.rect.right - b.rect.right);
+  const outside = items.filter(item => item.rect.left < barRect.left - 1 || item.rect.right > barRect.right + 1);
+  const collisions = [];
+  for (let index = 1; index < items.length; index += 1) {
+    const previous = items[index - 1];
+    const current = items[index];
+    if (current.rect.left - previous.rect.right < topbarPackingMinGapPx) collisions.push([previous.node, current.node]);
+  }
+  const compactActivity = document.querySelector('#topbarActivity.topbar-activity--mobile-count-balls');
+  const compactActivityRect = compactActivity?.getBoundingClientRect();
+  const activityBalls = compactActivity
+    ? Array.from(compactActivity.querySelectorAll('.topbar-activity-count.active .topbar-activity-ball'))
+      .filter(node => getComputedStyle(node).display !== 'none')
+      .map(node => ({node, rect: node.getBoundingClientRect()}))
+      .sort((a, b) => a.rect.left - b.rect.left)
+    : [];
+  if (compactActivityRect) {
+    outside.push(...activityBalls.filter(item => item.rect.left < compactActivityRect.left - 1 || item.rect.right > compactActivityRect.right + 1));
+  }
+  for (let index = 1; index < activityBalls.length; index += 1) {
+    const previous = activityBalls[index - 1];
+    const current = activityBalls[index];
+    if (current.rect.left - previous.rect.right < topbarPackingMinGapPx) collisions.push([previous.node, current.node]);
+  }
+  const searchLabel = document.querySelector('.topbar-search-label');
+  const compactSearchLabel = document.querySelector('.topbar-search-label-short');
+  const searchLabelRect = searchLabel?.getBoundingClientRect();
+  const compactSearchLabelRect = compactSearchLabel?.getBoundingClientRect();
+  const compactSearchClipped = Boolean(searchLabel && compactSearchLabel && getComputedStyle(compactSearchLabel).display !== 'none' && (
+    searchLabel.scrollWidth > searchLabel.clientWidth + 1
+    || compactSearchLabelRect.left < searchLabelRect.left - 1
+    || compactSearchLabelRect.right > searchLabelRect.right + 1
+  ));
+  const clipped = compactSearchClipped
+    ? [searchLabel]
+    : [];
+  return {
+    // scrollWidth includes clipped/focused descendants and stale popover geometry, so it can stay
+    // wider after expansion even when every painted control fits. Visible control rectangles are
+    // the layout contract and make the result independent of resize direction.
+    overflow: outside.length > 0 || collisions.length > 0 || clipped.length > 0,
+    outside,
+    collisions,
+    clipped,
+  };
+}
+
+function topbarPackingOverflows() {
+  return topbarPackingLayoutState().overflow;
+}
+
+function topbarPackingSyncNavigation(steps) {
+  const compact = steps.includes('compact-menu');
+  setTopbarNavigationCompactClass(compact);
+  if (topbarNavigationCompact === compact) return false;
+  topbarNavigationCompact = compact;
+  renderSessionButtons({force: true});
+  return true;
+}
+
+function syncTopbarPacking() {
+  if (appMenuIsOpen()) return topbarPackingStepsApplied.slice();
+  if (topbarPackingIsApplying) return topbarPackingStepsApplied.slice();
+  topbarPackingIsApplying = true;
+  try {
+    // Every measurement starts from the same full presentation. Restoring one compact tier at a
+    // time made the result depend on the previous viewport: a menu subtree rebuilt while expanding
+    // could be measured before its next layout pass and leave most narrow-width steps stuck on.
+    const applied = [];
+    applyTopbarPackingSteps(applied);
+    while (topbarPackingOverflows() && applied.length < topbarPackingStepOrder.length) {
+      applied.push(topbarPackingStepOrder[applied.length]);
+      applyTopbarPackingSteps(applied);
+    }
+    topbarPackingStepsApplied = applied.slice();
+    return applied;
+  } finally {
+    topbarPackingIsApplying = false;
+  }
+}
+
+function scheduleTopbarPacking() {
+  if (topbarPackingIsApplying || topbarPackingFrame) return;
+  topbarPackingFrame = requestAnimationFrame(() => {
+    topbarPackingFrame = 0;
+    syncTopbarPacking();
+  });
+}
+
+// Pure geometry helper retained for responsive test coverage. It deliberately does not choose the
+// rendered menu state: that decision must not depend on the current compact/full DOM shape.
+function topbarFullMenuFitsAvailableSpace(areaWidth, fullMenuWidth, otherWidths = [], gap = 0) {
+  const reservedWidth = otherWidths.reduce((sum, width) => sum + Math.max(0, Number(width) || 0), 0)
+    + (Math.max(0, Number(gap) || 0) * otherWidths.length);
+  return fullMenuWidth > 0 && fullMenuWidth <= Math.max(0, areaWidth - reservedWidth);
+}
+
+function topbarFullNavigationFits() {
+  return null;
+}
+
+function setTopbarNavigationCompactClass(compact) {
+  for (const target of [document.body, appRootElement()].filter(Boolean)) {
+    target.classList?.toggle('app-topbar-menu-compact', compact);
+  }
+}
+
+function topbarNavigationShouldBeCompact() {
+  return topbarPackingHasStep('compact-menu');
+}
+
+function scheduleTopbarNavigationFitCheck() {
+  scheduleTopbarPacking();
+}
+
+function installTopbarNavigationFitObserver() {
+  const bar = document.querySelector('.topbar');
+  if (topbarPackingObserver || !bar || typeof ResizeObserver !== 'function') return;
+  topbarPackingObserver = new ResizeObserver(() => scheduleTopbarPacking());
+  topbarPackingObserver.observe(bar);
+}
+
+function topbarMenuTree() {
+  const menus = appMenuTree();
+  const compact = topbarNavigationShouldBeCompact();
+  topbarNavigationCompact = compact;
+  setTopbarNavigationCompactClass(compact);
+  if (!compact) return menus;
+  return [{
+    id: 'application-menu',
+    // Translator context: this is a compact application-navigation control (File/View/tmux/Tabs/Help),
+    // never a restaurant/food menu. Keep the local software-UI term short enough for the top bar.
+    label: t('menu.compact.label'),
+    nestedRoot: true,
+    items: menus.map(menu => menuSubmenu(menu.label, menu.items)),
+  }];
+}
+
+function syncTopbarNavigationPresentation() {
+  const compact = topbarNavigationShouldBeCompact();
+  setTopbarNavigationCompactClass(compact);
+  if (topbarNavigationCompact === null || topbarNavigationCompact === compact) return false;
+  topbarNavigationCompact = compact;
+  closeAppMenus();
+  renderSessionButtons({force: true});
+  return true;
 }
 
 function appMenuIsOpen() {
@@ -822,7 +1135,11 @@ function renderSessionButtons(options = {}) {
 
 function renderSessionButtonsMeasured(options = {}) {
   if (!sessionButtons) return;
-  if (!options.force && appMenuIsOpen()) {
+  // An SSE/locale/status repaint can otherwise detach a touch target after pointerdown but before
+  // the browser emits click. An open menu is an explicit interaction, so defer every repaint until
+  // it closes; the existing pending render path preserves the newest requested chrome state.
+  if (appMenuIsOpen()) {
+    if (options.force) pendingSessionButtonsRender = true;
     scheduleTopbarMetricsUpdate();
     return;
   }
@@ -840,6 +1157,10 @@ function renderSessionButtonsMeasured(options = {}) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
+  // In compact mode the activity control is temporarily reparented before the action rail. Remove that
+  // prior rendered instance before replacing the menu subtree, or each chrome refresh leaves a
+  // duplicate button in the actions rail.
+  document.querySelectorAll('.actions > #topbarActivity').forEach(activity => activity.remove());
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
     const payload = dragPayload(event);
@@ -862,17 +1183,16 @@ function renderSessionButtonsMeasured(options = {}) {
   };
   sessionButtons.classList.remove(CLS.dragOver);
   sessionButtons.appendChild(createAppMenuBar());
-  sessionButtons.appendChild(createTopbarNav());
-  sessionButtons.appendChild(createTopbarSearch());
+  sessionButtons.appendChild(createTopbarCenterTools());
   updateEditorNavButtons();   // sync ←/→ disabled state to the global editorNav stack after (re)assembly
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
-  sessionButtons.appendChild(createTopbarLanguageSwitcher());
-  sessionButtons.appendChild(createTopbarOwnerStatus());
-  sessionButtons.appendChild(createTopbarActivityStatus());
+  sessionButtons.appendChild(createTopbarRightTools());
   updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
+  installTopbarNavigationFitObserver();
+  scheduleTopbarNavigationFitCheck();
   if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
 }
 
@@ -880,17 +1200,31 @@ function renderSessionButtonsMeasured(options = {}) {
 // Chinese locale shows 優樂mux / 优乐mux (優/优 boxed-green, 樂/乐 green) and updates on a language switch
 // without a reload. The m/u/x colorful spans and the version are untouched.
 function renderBrandWordmark() {
-  for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
+  for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.marker');
   for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
+  for (const brand of document.querySelectorAll('.brand-title')) {
+    brand.setAttribute('aria-label', t('brand.version', {version: bootstrap.version || ''}));
+  }
   updateBrandTitles();
+}
+
+function renderTopbarStaticChrome() {
+  sessionButtons?.setAttribute('aria-label', t('app.menusAria'));
+  if (latencyMeter) latencyMeter.title = t('app.latencyTitle');
+  if (logoutButton) {
+    const label = t('menu.file.logout');
+    logoutButton.textContent = label;
+    logoutButton.title = label;
+    logoutButton.setAttribute('aria-label', label);
+  }
 }
 
 function createAppMenuBar() {
   const bar = document.createElement('nav');
   bar.className = 'app-menu-bar';
-  bar.setAttribute('aria-label', t('menu.bar.aria'));
+  bar.setAttribute('aria-label', t('app.menusAria'));
   bar.setAttribute('role', 'menubar');
-  for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
+  for (const menu of topbarMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
 }
 
@@ -942,7 +1276,14 @@ function createTopbarSearch() {
   icon.textContent = '⌕';
   const label = document.createElement('span');
   label.className = 'topbar-search-label';
-  label.textContent = t('topbar.search.label');
+  const longLabel = document.createElement('span');
+  longLabel.className = 'topbar-search-label-long';
+  longLabel.textContent = t('topbar.search.label');
+  const compactLabel = document.createElement('span');
+  compactLabel.className = 'topbar-search-label-short';
+  compactLabel.setAttribute('aria-hidden', 'true');
+  compactLabel.textContent = t('common.search');
+  label.append(longLabel, compactLabel);
   const hint = document.createElement('kbd');
   hint.className = 'topbar-search-hint';
   hint.textContent = isMac ? '⌘P' : 'Ctrl+P';
@@ -951,13 +1292,27 @@ function createTopbarSearch() {
   return button;
 }
 
+function createTopbarCenterTools() {
+  const group = document.createElement('div');
+  group.className = 'topbar-center-tools';
+  group.append(createTopbarNav(), createTopbarSearch());
+  return group;
+}
+
+function createTopbarRightTools() {
+  const group = document.createElement('div');
+  group.className = 'topbar-right-tools';
+  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
+  return group;
+}
+
 // Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
 // setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
 // A native <select> cannot be mirrored to YO!share viewers, so this uses the app-menu popup owner.
 function createTopbarLanguageSwitcher() {
   const pref = String(initialSetting('general.language', 'system'));
   const choices = i18nLocaleChoices();
-  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: 'Auto'};
+  const active = choices.find(choice => choice.value === pref) || choices[0] || {value: 'system', label: t('pref.general.language.system')};
   const wrapper = createAppMenu({
     id: 'language',
     label: active.label,
@@ -972,7 +1327,7 @@ function createTopbarLanguageSwitcher() {
         scheduleShareAppearancePublish();
         if (readOnlyMode) return;
         saveSettingsPatch(settingPatch('general.language', value))
-          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error})); refreshSettings({force: true}); });
+          .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
       },
     })),
   });
@@ -980,8 +1335,8 @@ function createTopbarLanguageSwitcher() {
   const button = wrapper.querySelector(':scope > .app-menu-button');
   if (button) {
     button.classList.add('topbar-language');
-    button.title = t('language.switcher');
-    button.setAttribute('aria-label', t('language.switcher'));
+    button.title = t('common.language');
+    button.setAttribute('aria-label', t('common.language'));
     button.addEventListener('blur', flushPendingSessionButtonsRender);
   }
   wrapper.querySelector(':scope > .app-menu-popover')?.classList.add('topbar-language-popover');
@@ -1079,34 +1434,53 @@ function fitAppMenuPopover(popover) {
 
 function createAppMenu(menu) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'app-menu';
+  wrapper.className = `app-menu${menu.nestedRoot ? ' app-menu--nested-root' : ''}`;
   wrapper.dataset.appMenu = menu.id;
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'app-menu-button';
-  button.setAttribute('aria-haspopup', 'true');
-  button.setAttribute('aria-expanded', openAppMenuId === menu.id ? 'true' : 'false');
-  button.setAttribute('role', 'menuitem');
-  button.innerHTML = `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`;
   const popover = document.createElement('div');
   popover.className = 'app-menu-popover';
   popover.setAttribute('role', 'menu');
   popover.setAttribute('aria-label', menu.label);
   for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
   fitAppMenuPopover(popover);
-  button.addEventListener('click', event => {
+  const activateMenu = event => {
     event.preventDefault();
     event.stopPropagation();
     if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
-      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+      // The phone's single Menus root is a disclosure: its next tap must collapse the currently
+      // open menu immediately. Full desktop roots keep the short grace period that prevents one
+      // physical pointer interaction from being interpreted as open then close.
+      if (wrapper.classList.contains('app-menu--nested-root') || (openAppMenuPinned && openMs >= menuClickCloseGraceMs)) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
       return;
     }
     openAppMenu(wrapper, {focusFirst: false, pinned: true});
+  };
+  const button = makeButton({
+    className: 'app-menu-button',
+    role: 'menuitem',
+    html: `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`,
+    attributes: {'aria-haspopup': 'true', 'aria-expanded': openAppMenuId === menu.id ? 'true' : 'false'},
+    onClick: event => {
+      if (button.dataset.pointerActionHandled === '1') {
+        delete button.dataset.pointerActionHandled;
+        return;
+      }
+      activateMenu(event);
+    },
+    events: {
+      keydown: event => handleAppMenuButtonKeydown(event, wrapper),
+      pointerdown: event => {
+        if (event.button !== 0) return;
+        // Open before a browser turns the tap into click, so an async chrome repaint cannot make
+        // the compact Menus target disappear under the user's finger.
+        button.dataset.pointerActionHandled = '1';
+        activateMenu(event);
+      },
+    },
   });
-  button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
   wrapper.append(button, popover);
+  button.addEventListener('blur', flushPendingSessionButtonsRender);
   if (openAppMenuId === menu.id) wrapper.classList.add(CLS.open);
   bindAppMenuHover(wrapper);
   return wrapper;
@@ -1126,8 +1500,47 @@ function createAppMenuItem(item) {
     return node;
   }
   if (item.type === 'number-setting') return createAppMenuNumberSetting(item);
+  if (item.type === 'command-pair') return createAppMenuCommandPair(item);
+  if (item.type === 'command-row') return createAppMenuCommandRow(item);
   if (item.type === 'submenu') return createAppSubmenu(item);
   return createAppMenuCommand(item);
+}
+
+function createAppMenuCommandPair(item) {
+  return createAppMenuCommandGroup([item.primary, item.secondary], item.className, [item.primary?.label, item.secondary?.ariaLabel || item.secondary?.label], {separator: true});
+}
+
+function createAppMenuCommandRow(item) {
+  return createAppMenuCommandGroup(item.items || [], item.className, [item.label, ...(item.items || []).map(command => command?.ariaLabel || command?.label)], {
+    separator: item.separator ?? Boolean(item.label),
+    prefixLabel: item.label,
+    prefixIconHtml: item.iconHtml,
+  });
+}
+
+function createAppMenuCommandGroup(items, className, labels, options = {}) {
+  const row = document.createElement('div');
+  row.className = ['app-menu-command-group', className || ''].filter(Boolean).join(' ');
+  row.setAttribute('role', 'group');
+  row.setAttribute('aria-label', labels.filter(Boolean).join(' / '));
+  for (const [index, command] of items.entries()) {
+    if (index === 0 && options.prefixLabel) {
+      const prefix = document.createElement('span');
+      prefix.className = 'app-menu-command-row-label';
+      const iconHtml = options.prefixIconHtml ? `<span class="app-menu-icon">${stripTitleAttrs(options.prefixIconHtml)}</span>` : '';
+      prefix.innerHTML = `${iconHtml}<span>${esc(options.prefixLabel)}</span>`;
+      row.appendChild(prefix);
+    }
+    if (options.separator === true && (index > 0 || options.prefixLabel)) {
+      const separator = document.createElement('span');
+      separator.className = 'app-menu-command-separator';
+      separator.setAttribute('aria-hidden', 'true');
+      separator.textContent = '|';
+      row.appendChild(separator);
+    }
+    row.appendChild(createAppMenuCommand(command));
+  }
+  return row;
 }
 
 function clampAppMenuNumberSetting(item, rawValue) {
@@ -1181,10 +1594,10 @@ function createAppMenuNumberSetting(item) {
     saveSettingsPatch(settingPatch(item.path, next))
       .then(() => {
         renderPreferencesPanels();
-        statusEl.textContent = `saved ${item.path}`;
+        statusEl.textContent = t('status.settingSaved', {path: item.path});
       })
       .catch(error => {
-        statusErr(localizedHtml('status.settingsSaveFailed', {error}));
+        statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))}));
         refreshSettings({force: true});
       });
   });
@@ -1201,12 +1614,12 @@ function createAppMenuNumberSetting(item) {
 
 function createAppSubmenu(item) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'app-menu-submenu-wrap open';
+  wrapper.className = ['app-menu-submenu-wrap', item.className || ''].filter(Boolean).join(' ');
   const button = createAppMenuCommand({
     label: item.label,
     disabled: item.disabled,
     detail: item.detail,
-    className: 'app-menu-submenu-button',
+    className: ['app-menu-submenu-button', item.className || ''].filter(Boolean).join(' '),
   }, {asSubmenu: true});
   const submenu = document.createElement('div');
   submenu.className = 'app-submenu-popover';
@@ -1214,23 +1627,62 @@ function createAppSubmenu(item) {
   submenu.setAttribute('aria-label', item.label);
   for (const child of item.items || []) submenu.appendChild(createAppMenuItem(child));
   fitAppMenuPopover(submenu);
+  const setOpen = open => {
+    wrapper.classList.toggle(CLS.open, open);
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  const compactRoot = () => {
+    const root = wrapper.closest('.app-menu--nested-root');
+    return root?.querySelector(':scope > .app-menu-popover') === wrapper.parentElement ? root : null;
+  };
+  const open = () => {
+    const root = compactRoot();
+    // File/View/tmux/Tabs/Help share one phone Menus layer: switch categories or collapse the
+    // current category without forcing the user to close and reopen the Menus root.
+    root?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap.open').forEach(sibling => {
+      if (sibling !== wrapper) {
+        sibling.classList.remove(CLS.open);
+        sibling.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'false');
+      }
+    });
+    setOpen(true);
+  };
+  const toggle = () => {
+    if (button.disabled) return false;
+    if (compactRoot() && wrapper.classList.contains(CLS.open)) {
+      setOpen(false);
+      return true;
+    }
+    open();
+    return true;
+  };
+  button.addEventListener('pointerdown', event => {
+    // Touch browsers can retain the synthetic click after the nested popover has reflowed. Toggle
+    // on the original physical press so File/View/tmux/Tabs/Help always collapse on their next tap.
+    if (event.button !== 0 || !compactRoot()) return;
+    button.dataset.pointerActionHandled = '1';
+    event.preventDefault();
+    event.stopPropagation();
+    toggle();
+  });
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (button.disabled) return;
-    wrapper.classList.add(CLS.open);
-    button.setAttribute('aria-expanded', 'true');
+    if (button.dataset.pointerActionHandled === '1') {
+      delete button.dataset.pointerActionHandled;
+      return;
+    }
+    toggle();
   });
   button.addEventListener('keydown', event => {
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      wrapper.classList.add(CLS.open);
-      button.setAttribute('aria-expanded', 'true');
+      open();
       focusFirstAppMenuCommand(submenu);
     }
   });
   button.setAttribute('aria-haspopup', 'true');
-  button.setAttribute('aria-expanded', 'true');
+  button.setAttribute('aria-expanded', 'false');
   wrapper.append(button, submenu);
   bindAppMenuCommandMirrorActive(button, wrapper);
   return wrapper;
@@ -1272,24 +1724,24 @@ function bindAppMenuCommandMirrorActive(button, owner = button) {
 }
 
 function createAppMenuCommand(item, options = {}) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' ');
-  button.setAttribute('role', item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem');
-  if (item.checked !== undefined) {
-    button.dataset.checked = item.checked ? 'true' : 'false';
-    button.setAttribute('aria-checked', item.checked ? 'true' : 'false');
-  }
-  if (item.disabled) button.disabled = true;
   const ariaLabel = item.ariaLabel || [item.label, item.detail].filter(Boolean).join(' - ');
-  if (ariaLabel) button.setAttribute('aria-label', ariaLabel);
   const richHtml = item.html ? stripTitleAttrs(item.html) : '';
   const iconHtml = item.iconHtml ? stripTitleAttrs(item.iconHtml) : '';
   const contentHtml = richHtml
     ? `<span class="app-menu-rich">${richHtml}</span>`
     : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
-  const detailHtml = item.detail ? `<span class="app-menu-detail" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
-  button.innerHTML = `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`;
+  const detailClass = ['app-menu-detail', item.className === 'app-menu-file-destination' ? 'app-menu-label' : ''].filter(Boolean).join(' ');
+  const detailHtml = item.detail ? `<span class="${detailClass}" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
+  const button = makeButton({
+    className: ['app-menu-command', item.className || '', item.partial === true ? 'partially-checked' : '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' '),
+    role: item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
+    checked: item.checked,
+    disabled: item.disabled,
+    ariaLabel,
+    title: item.title,
+    dataset: (item.checked !== undefined || item.partial === true) ? {checked: item.checked ? 'true' : 'false', partial: item.partial === true ? 'true' : 'false'} : undefined,
+    html: `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`,
+  });
   if (!options.asSubmenu) {
     button.addEventListener('click', event => {
       event.preventDefault();
@@ -1321,11 +1773,11 @@ function runAppMenuCommand(item) {
   try {
     Promise.resolve(item.action())
       .then(() => {
-        if (keepOpen) renderSessionButtons({force: true});
+        if (keepOpen && item.renderMenu !== false) renderSessionButtons({force: true});
       })
       .catch(error => {
         statusErr(localizedHtml('status.menuCommandFailed', {error}));
-        if (keepOpen) renderSessionButtons({force: true});
+        if (keepOpen && item.renderMenu !== false) renderSessionButtons({force: true});
       });
   } catch (error) {
     statusErr(localizedHtml('status.menuCommandFailed', {error}));
@@ -1420,7 +1872,7 @@ function bindAppMenuHover(wrapper) {
     anchor: wrapper,
     popover: () => wrapper.querySelector(':scope > .app-menu-popover'),
     stateClass: '',
-    canOpen: () => autoFocusEnabled || appMenuIsOpen(),
+    canOpen: event => autoFocusCanFollowCursor(event) || appMenuIsOpen(),
     showDelay: () => (appMenuIsOpen() ? 0 : menuHoverOpenDelayMs),
     hideDelay: () => menuHoverCloseDelayMs,
     stillActive: () => wrapper.matches?.(':hover'),
@@ -1445,10 +1897,12 @@ function openAppMenu(wrapper, options = {}) {
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add(CLS.open);
-  wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
-    submenu.classList.add(CLS.open);
-    submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
-  });
+  if (!wrapper.classList.contains('app-menu--nested-root')) {
+    wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
+      submenu.classList.add(CLS.open);
+      submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
+    });
+  }
   openAppMenuId = wrapper.dataset.appMenu || null;
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();
