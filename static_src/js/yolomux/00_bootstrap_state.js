@@ -987,6 +987,7 @@ const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze([
   PREFERENCE_SECTION_IDS.share,
 ]);
 const emptyPaneParam = '__empty_pane__';
+const intentionalEmptyPaneParam = '__empty_pane_v2__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';

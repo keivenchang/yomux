@@ -128,7 +128,7 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
         const timeout = setTimeout(() => done({timeout: true, tree: layoutSlots[layoutTreeKey]}), 4000);
         const waitForPlaceholders = () => {
           const panes = Array.from(document.querySelectorAll('.empty-pane-panel'));
-          const controls = Array.from(document.querySelectorAll('.empty-pane-close:not(:disabled)'));
+          const controls = Array.from(document.querySelectorAll('.empty-pane-panel [data-pane-close]:not(:disabled)'));
           if (panes.length !== 3 || controls.length !== 3) return requestAnimationFrame(waitForPlaceholders);
           const middle = panes.find(panel => panel.dataset.slot === 'rightMiddle');
           const terminal = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview');
@@ -136,11 +136,12 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
           const before = {
             middle: middle.getBoundingClientRect(),
             middleFill: middle.querySelector('.empty-pane-fill')?.getBoundingClientRect(),
-            middleClose: middle.querySelector('.empty-pane-close')?.getBoundingClientRect(),
+            middleClose: middle.querySelector('[data-pane-close]')?.getBoundingClientRect(),
+            middleCloseCount: middle.querySelectorAll('[data-pane-close]:not(:disabled)').length,
             terminal: terminal.getBoundingClientRect(),
             closeLabels: controls.map(button => button.getAttribute('aria-label')),
           };
-          middle.querySelector('.empty-pane-close')?.click();
+          middle.querySelector('[data-pane-close]')?.click();
             const waitForClose = () => {
               const remaining = Array.from(document.querySelectorAll('.empty-pane-panel'));
               const remainingSlots = remaining.map(panel => panel.dataset.slot).sort();
@@ -158,7 +159,7 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
                 remainingSlots,
                 finalSlots,
                 terminalAfter: terminalRect,
-                lastPaneHasClose: Boolean(lastPane?.querySelector('.empty-pane-close:not(:disabled)')),
+                lastPaneHasClose: Boolean(lastPane?.querySelector('[data-pane-close]:not(:disabled)')),
                 lastPaneCloseResult: closeEmptyPaneFromLayout('last'),
                 lastSlots: layoutLeafSlots(layoutSlots[layoutTreeKey]),
               });
@@ -173,12 +174,47 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
     assert result["remainingSlots"] == ["rightBottom", "rightTop"], result
     assert result["finalSlots"] == ["left", "rightTop", "rightBottom"], result
     assert result["before"]["closeLabels"] == ["Close pane"] * 3, result
+    assert result["before"]["middleCloseCount"] == 1, result
     assert result["before"]["middle"]["height"] > 80, result
-    assert result["before"]["middleClose"]["top"] >= result["before"]["middleFill"]["top"], result
-    assert result["before"]["middleClose"]["right"] <= result["before"]["middleFill"]["right"], result
+    assert result["before"]["middleClose"]["top"] >= result["before"]["middle"]["top"], result
+    assert result["before"]["middleClose"]["right"] <= result["before"]["middle"]["right"], result
     assert result["terminalAfter"]["width"] > 100 and result["terminalAfter"]["height"] > 100, result
     assert result["lastPaneHasClose"] is False and result["lastPaneCloseResult"] is False, result
-    assert len(result["lastSlots"]) == 1, result
+
+
+def test_dockview_empty_pane_add_tab_opens_command_palette_for_that_pane(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const slots = emptyLayoutSlots();
+        slots.left = paneStateWithTabs(['1'], '1');
+        slots.right = emptyPlaceholderPaneState();
+        slots[layoutTreeKey] = splitNode('row', leafNode('left'), leafNode('right'), 50);
+        applyLayoutSlots(slots, {preservePlaceholderSlots: true, prune: false});
+        const poll = () => {
+          const add = document.querySelector('.empty-pane-panel[data-slot="right"] .empty-pane-add');
+          if (!add) return requestAnimationFrame(poll);
+          add.click();
+          requestAnimationFrame(() => {
+            const palette = document.querySelector('.command-palette-dialog');
+            done({
+              mode: commandPaletteMode,
+              targetSlot: commandPaletteState.targetSlot,
+              open: Boolean(palette && !palette.closest('.command-palette')?.hidden),
+              title: add.title,
+              ariaLabel: add.getAttribute('aria-label'),
+              firstGroups: Array.from(palette?.querySelectorAll('.command-palette-group') || []).slice(0, 4).map(node => node.textContent.trim()),
+            });
+          });
+        };
+        poll();
+        """
+    )
+    assert result["mode"] == "command" and result["targetSlot"] == "right", result
+    assert result["open"] is True, result
+    assert "Shift" in result["title"] and result["ariaLabel"] == "Command palette", result
 
 
 def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp_path):
@@ -6024,6 +6060,155 @@ def test_dockview_real_yo_tab_drag_crosses_generic_and_vertical_side_roles(brows
     assert result["errors"] == [], result
     assert result["infoRole"] == "generic" and result["finderRole"] == "side", result
     assert result["policies"] == ["side-allowed"] * 4, result
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+@pytest.mark.parametrize(
+    ("side", "zone", "item"),
+    (("left", "top", "__info__"), ("left", "bottom", "__debug__"),
+     ("right", "top", "__yoagent__"), ("right", "bottom", "__chat__")),
+)
+def test_dockview_real_yo_tab_drag_from_generic_creates_vertical_side_leaf(
+    browser, tmp_path, side, zone, item
+):
+    if side == "left":
+        layout = "row@22(side,main)"
+        tabs = f"side:@side-left,finder;main:1,{item}"
+    else:
+        layout = "row@78(main,side)"
+        tabs = f"main:1,{item};side:@side-right,finder"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1&layout={layout}&tabs={tabs}",
+        sessions=["1"],
+        grid_width=1200,
+        grid_height=700,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{item}"]')
+    before = dockview_layout_metrics(browser)
+    side_before = next(group for group in before["groups"] if "__finder__" in group["tabs"])
+    generic_before = next(group for group in before["groups"] if item in group["tabs"])
+    start = dockview_point(browser, f'.dockview-pane-tab[data-pane-tab="{item}"]', 0.5, 0.5)
+    end = {
+        "x": round(side_before["rect"]["left"] + side_before["rect"]["width"] / 2),
+        "y": round(
+            side_before["rect"]["top"] + min(100, side_before["rect"]["height"] * 0.18)
+            if zone == "top"
+            else side_before["rect"]["bottom"] - min(100, side_before["rect"]["height"] * 0.18)
+        ),
+    }
+    cdp_drag(browser, start, end, steps=32)
+    side_constant = "paneSideLeft" if side == "left" else "paneSideRight"
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            f"return sidePaneSlotsForSide({side_constant}).length === 2"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const [item, side] = arguments;
+        const sideSlots = sidePaneSlotsForSide(side);
+        const groups = Array.from(document.querySelectorAll('.dv-groupview[data-pane-role="side"]')).map(group => {
+          const rect = group.getBoundingClientRect();
+          return {
+            tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+            rect: {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height},
+          };
+        }).sort((left, right) => left.rect.top - right.rect.top);
+        return {
+          sideSlots,
+          itemSlot: slotForItem(item),
+          terminalSlot: slotForItem('1'),
+          terminalRole: paneRoleForSlot(slotForItem('1')).kind,
+          groups,
+          errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+        };
+        """,
+        item,
+        "left" if side == "left" else "right",
+    )
+    assert result["errors"] == [], result
+    assert result["itemSlot"] == result["sideSlots"][0 if zone == "top" else -1], result
+    assert result["terminalRole"] == "generic" and result["terminalSlot"], result
+    assert len(result["groups"]) == 2, result
+    top_group, bottom_group = result["groups"]
+    assert top_group["rect"]["bottom"] <= bottom_group["rect"]["top"] + 3, result
+    assert all(group["rect"]["height"] < side_before["rect"]["height"] * 0.75 for group in result["groups"]), result
+    assert all(abs(group["rect"]["width"] - side_before["rect"]["width"]) <= 4 for group in result["groups"]), result
+    assert all(abs(group["rect"]["left"] - side_before["rect"]["left"]) <= 3 for group in result["groups"]), result
+    assert generic_before["tabs"] == ["1", item], before
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_close_lower_side_yochat_compacts_leaf_without_revealing_source_placeholder(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=row@22(side,row@45(chat,main))&tabs=side:@side-left,finder;chat:chat;main:1",
+        sessions=["1"],
+        grid_width=1400,
+        grid_height=760,
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    before = dockview_layout_metrics(browser)
+    side_before = next(group for group in before["groups"] if "__finder__" in group["tabs"])
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="__chat__"]', 0.5, 0.5)
+    end = {
+        "x": round(side_before["rect"]["left"] + side_before["rect"]["width"] / 2),
+        "y": round(side_before["rect"]["bottom"] - min(100, side_before["rect"]["height"] * 0.18)),
+    }
+    cdp_drag(browser, start, end, steps=32)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return sidePaneSlotsForSide(paneSideLeft).length === 2")
+    )
+    after_drag = browser.execute_script(
+        """
+        return {
+          chatSourceExists: layoutSlotKeys().includes('chat'),
+          placeholders: layoutSlotKeys().filter(slot => paneIsPlaceholder(slot)),
+          chatRole: paneRoleForSlot(slotForItem(chatItemId)).kind,
+        };
+        """
+    )
+    assert after_drag == {"chatSourceExists": False, "placeholders": [], "chatRole": "side"}, after_drag
+    browser.execute_script(
+        """
+        document.querySelector('.dockview-pane-tab[data-pane-tab="__chat__"] [data-pane-tab-close]')?.click();
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return !itemInLayout(chatItemId) && sidePaneSlotsForSide(paneSideLeft).length === 1"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const groups = Array.from(document.querySelectorAll('.dv-groupview')).map(group => {
+          const rect = group.getBoundingClientRect();
+          return {
+            role: group.dataset.paneRole || '',
+            tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+            rect: {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height},
+          };
+        });
+        return {
+          groups,
+          placeholders: layoutSlotKeys().filter(slot => paneIsPlaceholder(slot)),
+          emptyPanels: document.querySelectorAll('.empty-pane-panel').length,
+          sideSlots: sidePaneSlotsForSide(paneSideLeft),
+          errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+        };
+        """
+    )
+    assert result["errors"] == [], result
+    assert result["placeholders"] == [] and result["emptyPanels"] == 0, result
+    assert len(result["sideSlots"]) == 1, result
+    side_group = next(group for group in result["groups"] if group["role"] == "side")
+    terminal_group = next(group for group in result["groups"] if "1" in group["tabs"])
+    assert side_group["tabs"] == ["__finder__"], result
+    assert terminal_group["rect"]["width"] > side_group["rect"]["width"] * 2, result
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 

@@ -988,6 +988,7 @@ const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze([
   PREFERENCE_SECTION_IDS.share,
 ]);
 const emptyPaneParam = '__empty_pane__';
+const intentionalEmptyPaneParam = '__empty_pane_v2__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
@@ -6563,8 +6564,14 @@ function emptyPaneState(role = null) {
   return {active: null, tabs: [], ...paneRoleStateFields(role)};
 }
 
-function emptyPlaceholderPaneState(role = null) {
-  return {active: null, tabs: [], placeholder: true, ...paneRoleStateFields(role)};
+function emptyPlaceholderPaneState(role = null, options = {}) {
+  return {
+    active: null,
+    tabs: [],
+    placeholder: true,
+    ...(options.legacy === true ? {legacyPlaceholder: true} : {}),
+    ...paneRoleStateFields(role),
+  };
 }
 
 function emptyPlaceholderLayoutSlots(slot = 'left') {
@@ -6925,7 +6932,10 @@ function normalizePaneState(raw, seen, options = {}) {
   state.tabs = orderPaneTabs(state.tabs);
   const active = resolveLayoutItem(raw?.active);
   state.active = state.tabs.includes(active) ? active : state.tabs[0] || null;
-  if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) state.placeholder = true;
+  if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) {
+    state.placeholder = true;
+    if (raw?.legacyPlaceholder === true) state.legacyPlaceholder = true;
+  }
   if (!state.tabs.length && options.preserveRemovedSlots === true && hadPreservedRemovedItem) state.placeholder = true;
   return state;
 }
@@ -6936,6 +6946,24 @@ function normalizeLayoutSlots(value, options = {}) {
   else if (value[layoutTreeKey]) normalized = normalizeTreeLayout(value, options);
   else normalized = normalizeLegacyLayoutSlots(value, options);
   return normalized;
+}
+
+function repairRedundantLegacyPlaceholders(slots) {
+  if (!slots?.[layoutTreeKey] || !sidePaneSlots(slots).length) return slots;
+  const genericContentExists = layoutSlotKeys(slots).some(slot => (
+    !slotIsSidePane(slot, slots) && paneTabs(slot, slots).length > 0
+  ));
+  if (!genericContentExists) return slots;
+  const removed = new Set(layoutSlotKeys(slots).filter(slot => (
+    !slotIsSidePane(slot, slots)
+      && paneIsPlaceholder(slot, slots)
+      && slots[slot]?.legacyPlaceholder === true
+  )));
+  if (!removed.size) return slots;
+  const next = cloneLayoutSlots(slots);
+  for (const slot of removed) delete next[slot];
+  next[layoutTreeKey] = layoutTreeWithoutSlots(next[layoutTreeKey], removed);
+  return next;
 }
 
 function migrateLegacyUntypedSidePane(slots, options = {}) {
@@ -7357,7 +7385,7 @@ function namedSlotLayoutFromParam(raw, tabsRaw, options = {}) {
   }
   if (!leaves.length) return null;
   next[layoutTreeKey] = leaves.reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
-  const normalized = normalizeLayoutSlots(next, options);
+  const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
@@ -7377,7 +7405,7 @@ function treeLayoutFromParam(raw, options = {}) {
         ? emptyPlaceholderPaneState(rawState)
         : paneStateWithTabs(tabs.map(resolveLayoutItem), active, rawState);
     }
-    const normalized = normalizeLayoutSlots(next, options);
+    const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
     return layoutHasRestorableContent(normalized) ? normalized : null;
   } catch (_) {
     return null;
@@ -7399,7 +7427,7 @@ function compactTreeLayoutFromParam(raw, tabsRaw, options = {}) {
   for (const slot of layoutLeafSlots(tree)) {
     next[slot] = tabStates.get(slot) || emptyPlaceholderPaneState();
   }
-  const normalized = normalizeLayoutSlots(next, options);
+  const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
@@ -7479,7 +7507,7 @@ function layoutTabsParamValue(slots) {
     const role = paneRoleForSlot(slot, slots);
     const roleMarker = role.kind === paneRoleSide ? `${paneRoleParamPrefix}${role.side}` : '';
     if (paneIsPlaceholder(slot, slots)) {
-      slotValues.push(`${readableParamComponent(slot)}:${[roleMarker, emptyPaneParam].filter(Boolean).join(',')}`);
+      slotValues.push(`${readableParamComponent(slot)}:${[roleMarker, intentionalEmptyPaneParam].filter(Boolean).join(',')}`);
       continue;
     }
     const active = activeItemForSide(slot, slots);
@@ -7504,6 +7532,7 @@ function layoutTabStatesFromParam(raw) {
     const tabs = [];
     let active = null;
     let placeholder = false;
+    let legacyPlaceholder = false;
     let role = null;
     for (const rawItem of part.slice(separator + 1).split(',')) {
       let token = rawItem.trim();
@@ -7516,8 +7545,9 @@ function layoutTabStatesFromParam(raw) {
         role = paneRoleDefinition(paneRoleSide, side);
         continue;
       }
-      if (decoded === emptyPaneParam) {
+      if (decoded === emptyPaneParam || decoded === intentionalEmptyPaneParam) {
         placeholder = true;
+        if (decoded === emptyPaneParam) legacyPlaceholder = true;
         continue;
       }
       const item = resolveLayoutItem(decoded);
@@ -7526,7 +7556,9 @@ function layoutTabStatesFromParam(raw) {
         if (activeToken) active = item;
       }
     }
-    result.set(slot, placeholder && !tabs.length ? emptyPlaceholderPaneState(role) : paneStateWithTabs(tabs, active, role));
+    result.set(slot, placeholder && !tabs.length
+      ? emptyPlaceholderPaneState(role, {legacy: legacyPlaceholder})
+      : paneStateWithTabs(tabs, active, role));
   }
   return result;
 }
@@ -27612,10 +27644,14 @@ function hiddenFromLayoutStatusMessage(item) {
 function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
+  const sourceSlot = slotForItem(item);
   if (isFiles) rememberFileExplorerOpenIntent(false);
   if (typeof closePopoutsForLayoutItem === 'function') closePopoutsForLayoutItem(item);
   applyLayoutSlots(layoutWithoutItem(item, {
-    preserveRemovedSlot: !isFiles,
+    // Generic tab closure keeps the pane as an intentional drop target. A Vertical Side Pane leaf
+    // must instead compact when its final tab closes; preserving it creates a generic-looking empty
+    // region beside the surviving Side leaf after a YO!* cross-role move.
+    preserveRemovedSlot: !isFiles && !slotIsSidePane(sourceSlot),
     preservePlaceholders: !isFiles,
   }), {
     message: options.message || hiddenFromLayoutStatusMessage(item),
@@ -28185,8 +28221,17 @@ function rootBoundarySplitPercent(existingNode, zone, pct = null, slots = layout
   return splitPercent(zone === 'right' || zone === 'bottom' ? 100 - newPanePercent : newPanePercent);
 }
 
-function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) {
-  return Boolean(sourceSlot && sourceSlot !== targetSlot && slotIsSidePane(targetSlot));
+function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot, item, slots = layoutSlots) {
+  if (!sourceSlot || sourceSlot === targetSlot || !slotIsSidePane(targetSlot, slots)) return false;
+  if (slotIsSidePane(sourceSlot, slots) || paneTabs(sourceSlot, slots).some(tab => tab !== item)) return false;
+  // A Vertical Side Pane cannot become the only workspace content: retain the final Generic leaf as
+  // its protected filler. When another Generic pane already exists, retaining this emptied source
+  // creates an orphaned Drop-a-tab-here region after the moved YO!* tab is later closed.
+  return !layoutSlotKeys(slots).some(slot => (
+    slot !== sourceSlot
+      && !slotIsSidePane(slot, slots)
+      && paneHasLayoutContent(slot, slots)
+  ));
 }
 
 function layoutSidePaneRootSplit(node, slots = layoutSlots, requestedSide = null) {
@@ -28252,7 +28297,9 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
   const sourceSlots = options.forceSplitEmpty === true
     ? layoutSlotsWithoutUnrenderedPlaceholders()
     : layoutSlots;
-  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(liveSourceSlot, liveTargetSlot)
+  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(
+    liveSourceSlot, liveTargetSlot, item, sourceSlots,
+  )
     ? liveSourceSlot
     : null;
   const next = layoutWithoutItemFromSlots(item, sourceSlots, {
@@ -31044,6 +31091,13 @@ function dropIntentHasRoomForItem(item, intent) {
   const itemMinWidth = minWidthForLayoutItem(item);
   const targetMinHeight = minHeightForLayoutItem(targetItem);
   const itemMinHeight = minHeightForLayoutItem(item);
+  // A Vertical Side Pane intentionally uses a narrower role-specific width than these items use in
+  // Generic Panes. Top/bottom splitting preserves that width, so only the combined height can make
+  // the drop impossible; applying the Generic Pane item width here shows an overlay that can never
+  // commit for dual-role YO!* tabs.
+  if (slotIsSidePane(intent.targetSlot) && (zone === 'top' || zone === 'bottom')) {
+    return (Number(rect.height) || 0) >= targetMinHeight + itemMinHeight;
+  }
   if (zone === 'left' || zone === 'right') {
     return (Number(rect.width) || 0) >= targetMinWidth + itemMinWidth
       && (Number(rect.height) || 0) >= Math.max(targetMinHeight, itemMinHeight);
@@ -31483,7 +31537,7 @@ function dockviewPaneContentDropInfo(event) {
 }
 
 function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPointerDrag) {
-  if (!state?.item || !state.slot || !slotIsSidePane(state.slot)) return null;
+  if (!state?.item || !state.slot) return null;
   const nativeEvent = event?.nativeEvent || event;
   const pointerX = Number(nativeEvent?.clientX);
   const pointerY = Number(nativeEvent?.clientY);
@@ -31499,20 +31553,25 @@ function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPo
   const targetSlot = dockviewSlotForGroupElement(group);
   const targetRect = group?.getBoundingClientRect?.();
   if (!targetSlot || !targetRect || !slotIsSidePane(targetSlot)) return null;
+  const zone = explicitZone || dropZoneForRect(nativeEvent, targetRect);
+  const verticalEdgeZone = ['top', 'bottom'].includes(zone);
   const hitNode = document.elementFromPoint?.(pointerX, pointerY) || nativeEvent?.target;
   const targetHeader = group.querySelector?.('.dv-tabs-and-actions-container, .dv-tabs-container')?.getBoundingClientRect?.();
-  const overAnotherFileSurfaceBody = targetSlot !== state.slot
+  const overAnotherFileSurfaceBody = !verticalEdgeZone
+    && targetSlot !== state.slot
     && isFileExplorerItem(activeItemForSide(targetSlot))
     && (!targetHeader || pointerY > targetHeader.bottom);
   if (overAnotherFileSurfaceBody) return null;
-  if (targetSlot !== state.slot && hitNode?.closest?.(
+  if (!verticalEdgeZone && targetSlot !== state.slot && hitNode?.closest?.(
     '.file-explorer-tree-panel, .file-explorer-changes-panel, .file-tree-row',
   )) return null;
-  const sourceRole = paneRoleForSlot(state.slot);
   const targetRole = paneRoleForSlot(targetSlot);
-  if (sourceRole.side !== targetRole.side) return null;
-  const zone = explicitZone || dropZoneForRect(nativeEvent, targetRect);
-  if (!['top', 'bottom'].includes(zone)) return null;
+  if (targetRole.kind !== paneRoleSide) return null;
+  const sourceRole = paneRoleForSlot(state.slot);
+  // A Side-to-Side vertical split must stay on the same physical edge. Dual-role YO!* tabs may
+  // also enter from a Generic Pane; in that case the target edge alone owns the new leaf.
+  if (sourceRole.kind === paneRoleSide && sourceRole.side !== targetRole.side) return null;
+  if (!verticalEdgeZone) return null;
   const intent = {
     item: state.item,
     sourceSlot: state.slot,
@@ -33959,19 +34018,6 @@ function renderEmptyPane(slot) {
   }
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
-  const closeLabel = t('editor.closePane');
-  const close = makeButton({
-    className: 'empty-pane-close control-active-hover',
-    label: '×',
-    title: closeLabel,
-    ariaLabel: closeLabel,
-    disabled: !emptyPaneCanClose(slot),
-    onClick: event => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeEmptyPaneFromLayout(slot);
-    },
-  });
   const title = document.createElement('strong');
   title.textContent = t('pane.dropTab');
   const hint = document.createElement('span');
@@ -33980,11 +34026,11 @@ function renderEmptyPane(slot) {
   const add = makeButton({
     className: 'empty-pane-add control-active-hover',
     label: t('pane.addTab'),
-    title: t('topbar.search.title', {mod: isMacPlatform() ? 'Cmd' : 'Ctrl'}),
-    ariaLabel: t('topbar.search.aria'),
-    onClick: () => openCommandPalette({mode: 'files', targetSlot: slot}),
+    title: `${t('common.commandPalette')} (${appShortcutText('P', {shift: true})})`,
+    ariaLabel: t('common.commandPalette'),
+    onClick: () => openCommandPalette({mode: 'command', targetSlot: slot}),
   });
-  fill.append(close, title, hint, add);
+  fill.append(title, hint, add);
   panel.appendChild(fill);
   return panel;
 }

@@ -34,10 +34,14 @@ function hiddenFromLayoutStatusMessage(item) {
 function removeSessionFromLayout(item, options = {}) {
   if (!itemInLayout(item)) return;
   const isFiles = isFileExplorerItem(item);
+  const sourceSlot = slotForItem(item);
   if (isFiles) rememberFileExplorerOpenIntent(false);
   if (typeof closePopoutsForLayoutItem === 'function') closePopoutsForLayoutItem(item);
   applyLayoutSlots(layoutWithoutItem(item, {
-    preserveRemovedSlot: !isFiles,
+    // Generic tab closure keeps the pane as an intentional drop target. A Vertical Side Pane leaf
+    // must instead compact when its final tab closes; preserving it creates a generic-looking empty
+    // region beside the surviving Side leaf after a YO!* cross-role move.
+    preserveRemovedSlot: !isFiles && !slotIsSidePane(sourceSlot),
     preservePlaceholders: !isFiles,
   }), {
     message: options.message || hiddenFromLayoutStatusMessage(item),
@@ -607,8 +611,17 @@ function rootBoundarySplitPercent(existingNode, zone, pct = null, slots = layout
   return splitPercent(zone === 'right' || zone === 'bottom' ? 100 - newPanePercent : newPanePercent);
 }
 
-function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) {
-  return Boolean(sourceSlot && sourceSlot !== targetSlot && slotIsSidePane(targetSlot));
+function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot, item, slots = layoutSlots) {
+  if (!sourceSlot || sourceSlot === targetSlot || !slotIsSidePane(targetSlot, slots)) return false;
+  if (slotIsSidePane(sourceSlot, slots) || paneTabs(sourceSlot, slots).some(tab => tab !== item)) return false;
+  // A Vertical Side Pane cannot become the only workspace content: retain the final Generic leaf as
+  // its protected filler. When another Generic pane already exists, retaining this emptied source
+  // creates an orphaned Drop-a-tab-here region after the moved YO!* tab is later closed.
+  return !layoutSlotKeys(slots).some(slot => (
+    slot !== sourceSlot
+      && !slotIsSidePane(slot, slots)
+      && paneHasLayoutContent(slot, slots)
+  ));
 }
 
 function layoutSidePaneRootSplit(node, slots = layoutSlots, requestedSide = null) {
@@ -674,7 +687,9 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
   const sourceSlots = options.forceSplitEmpty === true
     ? layoutSlotsWithoutUnrenderedPlaceholders()
     : layoutSlots;
-  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(liveSourceSlot, liveTargetSlot)
+  const preserveEmptySlot = preserveRemovedSlot || shouldPreserveSourceSlotForSplit(
+    liveSourceSlot, liveTargetSlot, item, sourceSlots,
+  )
     ? liveSourceSlot
     : null;
   const next = layoutWithoutItemFromSlots(item, sourceSlots, {
@@ -3466,6 +3481,13 @@ function dropIntentHasRoomForItem(item, intent) {
   const itemMinWidth = minWidthForLayoutItem(item);
   const targetMinHeight = minHeightForLayoutItem(targetItem);
   const itemMinHeight = minHeightForLayoutItem(item);
+  // A Vertical Side Pane intentionally uses a narrower role-specific width than these items use in
+  // Generic Panes. Top/bottom splitting preserves that width, so only the combined height can make
+  // the drop impossible; applying the Generic Pane item width here shows an overlay that can never
+  // commit for dual-role YO!* tabs.
+  if (slotIsSidePane(intent.targetSlot) && (zone === 'top' || zone === 'bottom')) {
+    return (Number(rect.height) || 0) >= targetMinHeight + itemMinHeight;
+  }
   if (zone === 'left' || zone === 'right') {
     return (Number(rect.width) || 0) >= targetMinWidth + itemMinWidth
       && (Number(rect.height) || 0) >= Math.max(targetMinHeight, itemMinHeight);

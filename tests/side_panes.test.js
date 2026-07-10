@@ -88,6 +88,26 @@ async function runSidePaneSuite() {
     assert.deepStrictEqual(canonical(decoded.get('right')), {tabs: ['1'], active: '1'});
   });
 
+  test('legacy redundant empty panes are pruned while intentional and final fillers round-trip', () => {
+    const api = loadYolomux('', ['1']);
+    const stale = api.layoutFromParam(
+      'row@24.6(slot1,row@24.6(slot2,left))',
+      'slot1:@side-left,finder,differ,tabber;slot2:__empty_pane__;left:1,debug',
+    );
+    assert.equal(api.layoutSlotKeys(stale).includes('slot2'), false,
+      'a legacy placeholder beside real Generic content is repaired out of the URL layout');
+    assert.deepStrictEqual(canonical(api.layoutSlotKeys(stale)), ['slot1', 'left']);
+
+    const intentional = api.layoutFromParam(
+      'row@22(slot1,left)',
+      'slot1:@side-left,finder;left:__empty_pane_v2__',
+    );
+    assert.equal(api.paneIsPlaceholder('left', intentional), true,
+      'a versioned intentional placeholder remains as the final Generic filler');
+    assert.equal(api.layoutTabsParamValue(intentional),
+      'slot1:@side-left,finder;left:__empty_pane_v2__');
+  });
+
   test('untyped legacy triplet home migrates to explicit left Side Pane role', () => {
     const api = loadYolomux('?layout=row@22(slot1,right)&tabs=slot1:finder,differ,tabber;right:1', ['1']);
     const slot = api.currentSlots().slot1;
@@ -430,6 +450,23 @@ async function runSidePaneSuite() {
       'Side-to-Side transfer remains within the Side role');
     assert.equal(api.dropIntentAllowsSession(api.infoItemId, {...middle('sideRight'), zone: 'bottom'}), true,
       'Side Pane top/bottom edges create another leaf in the same fixed-width Side column');
+    for (const item of [api.infoItemId, api.debugPaneItemId, api.yoagentItemId, api.chatItemId]) {
+      for (const targetSlot of ['sideLeft', 'sideRight']) {
+        for (const zone of ['top', 'bottom']) {
+          assert.equal(api.dropIntentAllowsSession(item, {
+            targetSlot,
+            zone,
+            targetRect: {width: 240, height: 600},
+          }), true, `${item} may create a ${zone} leaf in narrow ${targetSlot}`);
+        }
+      }
+    }
+    assert.equal(api.dropIntentAllowsSession(api.debugPaneItemId, {
+      targetSlot: 'sideLeft', zone: 'bottom', targetRect: {width: 240, height: 200},
+    }), false, 'a Side Pane too short for two leaves rejects the split');
+    assert.equal(api.dropIntentAllowsSession(api.prefsItemId, {
+      targetSlot: 'sideLeft', zone: 'bottom', targetRect: {width: 240, height: 600},
+    }), false, 'generic-only tabs cannot use a Side Pane edge');
     assert.equal(api.dropIntentAllowsSession('1', {boundary: 'root', zone: 'right'}), true,
       'generic root-edge movement creates another generic pane');
     assert.equal(api.dropIntentAllowsSession(api.finderItemId, {boundary: 'root', zone: 'right'}), true,
@@ -528,6 +565,49 @@ async function runSidePaneSuite() {
     assert.deepStrictEqual(canonical(api.paneTabs(reopenedSide, api.currentSlots())), [api.finderItemId]);
     assert.equal(api.paneTabs(reopenedSide, api.currentSlots()).includes(api.finderItemId), true);
     assert.deepStrictEqual(canonical(itemsIn(api.currentSlots()).filter(item => item === '1')), ['1']);
+  });
+
+  await testAsync('Generic to Side split prunes an emptied source when another Generic pane exists', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = {
+      [api.layoutTreeKey]: api.splitNode(
+        'row',
+        api.splitNode('column', api.leafNode('sideTop'), api.leafNode('sideBottom'), 50),
+        api.splitNode('row', api.leafNode('chatSource'), api.leafNode('terminal'), 45),
+        22,
+      ),
+      sideTop: api.paneStateWithTabs([api.finderItemId], api.finderItemId,
+        api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft)),
+      sideBottom: api.paneStateWithTabs([api.differItemId], api.differItemId,
+        api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft)),
+      chatSource: api.paneStateWithTabs([api.chatItemId], api.chatItemId),
+      terminal: api.paneStateWithTabs(['1'], '1'),
+    };
+    api.setLayoutSlotsForTest(slots);
+    assert.equal(await api.splitSessionAtSlot(api.chatItemId, 'sideTop', 'bottom', 'chatSource'), true);
+    assert.equal(api.layoutSlotKeys(api.currentSlots()).includes('chatSource'), false,
+      'the empty Generic source is compacted because terminal remains as Generic content');
+    assert.equal(api.layoutSlotKeys(api.currentSlots()).some(slot => api.paneIsPlaceholder(slot)), false,
+      'the cross-role split does not leave an unrelated Generic placeholder');
+    api.removeSessionFromLayout(api.chatItemId);
+    assert.equal(api.layoutSlotKeys(api.currentSlots()).some(slot => api.paneIsPlaceholder(slot)), false,
+      'closing the lower YO!chat leaf cannot reveal the old Generic source');
+    assert.deepStrictEqual(canonical(api.layoutSlotKeys(api.currentSlots()).flatMap(slot => api.paneTabs(slot)).sort()),
+      [api.differItemId, api.finderItemId, '1'].sort());
+  });
+
+  await testAsync('Generic to Side split preserves the final Generic workspace filler', async () => {
+    const api = loadYolomux('', []);
+    const slots = {
+      [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('chatSource'), 22),
+      side: api.paneStateWithTabs([api.finderItemId], api.finderItemId,
+        api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft)),
+      chatSource: api.paneStateWithTabs([api.chatItemId], api.chatItemId),
+    };
+    api.setLayoutSlotsForTest(slots);
+    assert.equal(await api.splitSessionAtSlot(api.chatItemId, 'side', 'bottom', 'chatSource'), true);
+    assert.equal(api.paneIsPlaceholder('chatSource', api.currentSlots()), true,
+      'Side-only content retains one protected Generic filler');
   });
 
   test('empty Generic panes close independently while the final workspace filler remains', () => {

@@ -1717,6 +1717,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .search-history-row-title,
 .search-history-row-meta,
 .yoagent-recent-agent-paths,
+.yoagent-recent-agent-activity,
 .yoagent-transcript-value,
 .yoagent-compact-label,
 .yoagent-job-meta,

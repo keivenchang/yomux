@@ -182,7 +182,7 @@ function dockviewPaneContentDropInfo(event) {
 }
 
 function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPointerDrag) {
-  if (!state?.item || !state.slot || !slotIsSidePane(state.slot)) return null;
+  if (!state?.item || !state.slot) return null;
   const nativeEvent = event?.nativeEvent || event;
   const pointerX = Number(nativeEvent?.clientX);
   const pointerY = Number(nativeEvent?.clientY);
@@ -198,20 +198,25 @@ function dockviewSideVerticalDropIntent(event, state = dockviewLayoutState.tabPo
   const targetSlot = dockviewSlotForGroupElement(group);
   const targetRect = group?.getBoundingClientRect?.();
   if (!targetSlot || !targetRect || !slotIsSidePane(targetSlot)) return null;
+  const zone = explicitZone || dropZoneForRect(nativeEvent, targetRect);
+  const verticalEdgeZone = ['top', 'bottom'].includes(zone);
   const hitNode = document.elementFromPoint?.(pointerX, pointerY) || nativeEvent?.target;
   const targetHeader = group.querySelector?.('.dv-tabs-and-actions-container, .dv-tabs-container')?.getBoundingClientRect?.();
-  const overAnotherFileSurfaceBody = targetSlot !== state.slot
+  const overAnotherFileSurfaceBody = !verticalEdgeZone
+    && targetSlot !== state.slot
     && isFileExplorerItem(activeItemForSide(targetSlot))
     && (!targetHeader || pointerY > targetHeader.bottom);
   if (overAnotherFileSurfaceBody) return null;
-  if (targetSlot !== state.slot && hitNode?.closest?.(
+  if (!verticalEdgeZone && targetSlot !== state.slot && hitNode?.closest?.(
     '.file-explorer-tree-panel, .file-explorer-changes-panel, .file-tree-row',
   )) return null;
-  const sourceRole = paneRoleForSlot(state.slot);
   const targetRole = paneRoleForSlot(targetSlot);
-  if (sourceRole.side !== targetRole.side) return null;
-  const zone = explicitZone || dropZoneForRect(nativeEvent, targetRect);
-  if (!['top', 'bottom'].includes(zone)) return null;
+  if (targetRole.kind !== paneRoleSide) return null;
+  const sourceRole = paneRoleForSlot(state.slot);
+  // A Side-to-Side vertical split must stay on the same physical edge. Dual-role YO!* tabs may
+  // also enter from a Generic Pane; in that case the target edge alone owns the new leaf.
+  if (sourceRole.kind === paneRoleSide && sourceRole.side !== targetRole.side) return null;
+  if (!verticalEdgeZone) return null;
   const intent = {
     item: state.item,
     sourceSlot: state.slot,

@@ -19,8 +19,14 @@ function emptyPaneState(role = null) {
   return {active: null, tabs: [], ...paneRoleStateFields(role)};
 }
 
-function emptyPlaceholderPaneState(role = null) {
-  return {active: null, tabs: [], placeholder: true, ...paneRoleStateFields(role)};
+function emptyPlaceholderPaneState(role = null, options = {}) {
+  return {
+    active: null,
+    tabs: [],
+    placeholder: true,
+    ...(options.legacy === true ? {legacyPlaceholder: true} : {}),
+    ...paneRoleStateFields(role),
+  };
 }
 
 function emptyPlaceholderLayoutSlots(slot = 'left') {
@@ -381,7 +387,10 @@ function normalizePaneState(raw, seen, options = {}) {
   state.tabs = orderPaneTabs(state.tabs);
   const active = resolveLayoutItem(raw?.active);
   state.active = state.tabs.includes(active) ? active : state.tabs[0] || null;
-  if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) state.placeholder = true;
+  if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) {
+    state.placeholder = true;
+    if (raw?.legacyPlaceholder === true) state.legacyPlaceholder = true;
+  }
   if (!state.tabs.length && options.preserveRemovedSlots === true && hadPreservedRemovedItem) state.placeholder = true;
   return state;
 }
@@ -392,6 +401,24 @@ function normalizeLayoutSlots(value, options = {}) {
   else if (value[layoutTreeKey]) normalized = normalizeTreeLayout(value, options);
   else normalized = normalizeLegacyLayoutSlots(value, options);
   return normalized;
+}
+
+function repairRedundantLegacyPlaceholders(slots) {
+  if (!slots?.[layoutTreeKey] || !sidePaneSlots(slots).length) return slots;
+  const genericContentExists = layoutSlotKeys(slots).some(slot => (
+    !slotIsSidePane(slot, slots) && paneTabs(slot, slots).length > 0
+  ));
+  if (!genericContentExists) return slots;
+  const removed = new Set(layoutSlotKeys(slots).filter(slot => (
+    !slotIsSidePane(slot, slots)
+      && paneIsPlaceholder(slot, slots)
+      && slots[slot]?.legacyPlaceholder === true
+  )));
+  if (!removed.size) return slots;
+  const next = cloneLayoutSlots(slots);
+  for (const slot of removed) delete next[slot];
+  next[layoutTreeKey] = layoutTreeWithoutSlots(next[layoutTreeKey], removed);
+  return next;
 }
 
 function migrateLegacyUntypedSidePane(slots, options = {}) {
@@ -813,7 +840,7 @@ function namedSlotLayoutFromParam(raw, tabsRaw, options = {}) {
   }
   if (!leaves.length) return null;
   next[layoutTreeKey] = leaves.reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
-  const normalized = normalizeLayoutSlots(next, options);
+  const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
@@ -833,7 +860,7 @@ function treeLayoutFromParam(raw, options = {}) {
         ? emptyPlaceholderPaneState(rawState)
         : paneStateWithTabs(tabs.map(resolveLayoutItem), active, rawState);
     }
-    const normalized = normalizeLayoutSlots(next, options);
+    const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
     return layoutHasRestorableContent(normalized) ? normalized : null;
   } catch (_) {
     return null;
@@ -855,7 +882,7 @@ function compactTreeLayoutFromParam(raw, tabsRaw, options = {}) {
   for (const slot of layoutLeafSlots(tree)) {
     next[slot] = tabStates.get(slot) || emptyPlaceholderPaneState();
   }
-  const normalized = normalizeLayoutSlots(next, options);
+  const normalized = normalizeLayoutSlots(repairRedundantLegacyPlaceholders(next), options);
   return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
@@ -935,7 +962,7 @@ function layoutTabsParamValue(slots) {
     const role = paneRoleForSlot(slot, slots);
     const roleMarker = role.kind === paneRoleSide ? `${paneRoleParamPrefix}${role.side}` : '';
     if (paneIsPlaceholder(slot, slots)) {
-      slotValues.push(`${readableParamComponent(slot)}:${[roleMarker, emptyPaneParam].filter(Boolean).join(',')}`);
+      slotValues.push(`${readableParamComponent(slot)}:${[roleMarker, intentionalEmptyPaneParam].filter(Boolean).join(',')}`);
       continue;
     }
     const active = activeItemForSide(slot, slots);
@@ -960,6 +987,7 @@ function layoutTabStatesFromParam(raw) {
     const tabs = [];
     let active = null;
     let placeholder = false;
+    let legacyPlaceholder = false;
     let role = null;
     for (const rawItem of part.slice(separator + 1).split(',')) {
       let token = rawItem.trim();
@@ -972,8 +1000,9 @@ function layoutTabStatesFromParam(raw) {
         role = paneRoleDefinition(paneRoleSide, side);
         continue;
       }
-      if (decoded === emptyPaneParam) {
+      if (decoded === emptyPaneParam || decoded === intentionalEmptyPaneParam) {
         placeholder = true;
+        if (decoded === emptyPaneParam) legacyPlaceholder = true;
         continue;
       }
       const item = resolveLayoutItem(decoded);
@@ -982,7 +1011,9 @@ function layoutTabStatesFromParam(raw) {
         if (activeToken) active = item;
       }
     }
-    result.set(slot, placeholder && !tabs.length ? emptyPlaceholderPaneState(role) : paneStateWithTabs(tabs, active, role));
+    result.set(slot, placeholder && !tabs.length
+      ? emptyPlaceholderPaneState(role, {legacy: legacyPlaceholder})
+      : paneStateWithTabs(tabs, active, role));
   }
   return result;
 }

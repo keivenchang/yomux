@@ -328,7 +328,7 @@ async function runLayoutRestoreSuite() {
     const url = api.syncInitialLayoutUrlForTest();
     const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
     assert.equal(params.get('layout'), 'row@22(slot1,left)');
-    assert.equal(params.get('tabs'), 'slot1:@side-left,finder,differ,tabber;left:__empty_pane__');
+    assert.equal(params.get('tabs'), 'slot1:@side-left,finder,differ,tabber;left:__empty_pane_v2__');
   });
 
   test('session URL order restores the active pane layout', () => {

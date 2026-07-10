@@ -1718,6 +1718,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .search-history-row-title,
 .search-history-row-meta,
 .yoagent-recent-agent-paths,
+.yoagent-recent-agent-activity,
 .yoagent-transcript-value,
 .yoagent-compact-label,
 .yoagent-job-meta,
@@ -7136,26 +7137,6 @@ body.layout-resizing {
   border-radius: var(--radius-md);
   background: var(--empty-pane-bg);
 }
-.empty-pane-close {
-  position: absolute;
-  inset-block-start: var(--space-6);
-  inset-inline-end: var(--space-6);
-  display: grid;
-  place-items: center;
-  width: var(--touch-target-min-size);
-  min-width: var(--touch-target-min-size);
-  height: var(--touch-target-min-size);
-  padding: 0;
-  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
-  border-radius: var(--radius-control);
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
-  font: 700 var(--ui-font-size-xl)/1 var(--ui-font);
-  line-height: 1;
-}
-.empty-pane-close:disabled {
-  display: none;
-}
 .empty-pane-hint {
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
@@ -9752,12 +9733,18 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .yoagent-recent-agents-list {
   display: grid;
+  box-sizing: border-box;
   gap: var(--space-3);
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   margin: 0;
   padding-inline-start: 18px;
 }
 .yoagent-recent-agent {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 0;
   color: var(--text);
   font: 600 max(10px, calc(var(--terminal-font-size) - 1px))/1.25 var(--ui-font);
@@ -9766,11 +9753,16 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--muted);
 }
 .yoagent-recent-agent-line {
-  display: inline-flex;
+  display: flex;
+  box-sizing: border-box;
   align-items: baseline;
+  width: 100%;
   max-width: 100%;
   min-width: 0;
-  gap: var(--space-6);
+  overflow: hidden;
+  flex-flow: row wrap;
+  column-gap: var(--space-6);
+  row-gap: var(--space-6);
 }
 .yoagent-recent-agent .agent-icon {
   width: max(12px, calc(var(--terminal-font-size) + 1px));
@@ -9786,10 +9778,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   color: var(--muted);
 }
 .yoagent-recent-agent-paths {
+  flex: 1 1 96px;
   color: var(--text-muted-strong);
 }
 .yoagent-recent-agent-activity {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   color: var(--muted);
 }
 .yoagent-recent-agent.tmux-idle {

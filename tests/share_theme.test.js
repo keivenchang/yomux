@@ -6136,7 +6136,7 @@ async function runShareThemeSuite() {
     const placeholderUrl = api.setLayoutSlotsForTest(placeholderSlots);
     const placeholderParams = parseUrl(placeholderUrl);
     assert.equal(placeholderParams.get('layout'), 'row@22(left,slot1)');
-    assert.equal(placeholderParams.get('tabs'), 'left:@side-left,finder;slot1:__empty_pane__');
+    assert.equal(placeholderParams.get('tabs'), 'left:@side-left,finder;slot1:__empty_pane_v2__');
     const reloadedPlaceholder = loadYolomux(`?${placeholderUrl.split('?')[1] || ''}`, ['1']);
     assert.deepStrictEqual(canonical(reloadedPlaceholder.serialize(reloadedPlaceholder.currentSlots())), canonical(api.serialize(placeholderSlots)));
 

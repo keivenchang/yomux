@@ -5287,6 +5287,66 @@ def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tm
     assert metrics["terminalDropGeometry"]["scrollWidth"] > metrics["terminalDropGeometry"]["clientWidth"]
 
 
+def test_yoagent_recent_agents_stay_inside_narrow_vertical_side_pane(browser, tmp_path):
+    page = tmp_path / "yoagent-narrow-side-recent-agents.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            """
+      <div class="yolomux-dockview" style="width:320px; height:640px;">
+        <section id="side" class="dv-groupview" data-pane-role="side" style="width:320px; height:640px;">
+          <div id="history" class="yoagent-chat-history" style="width:100%; height:100%; overflow-y:auto;">
+            <article id="message" class="conversation-message assistant yoagent-message yoagent-recent-agents-message">
+              <div class="conversation-message-body">
+                <div class="yoagent-recent-agents">
+                  <ul class="yoagent-recent-agents-list">
+                    <li class="yoagent-recent-agent">
+                      <span id="row" class="yoagent-recent-agent-line">
+                        <span class="agent-icon">*</span>
+                        <span class="yoagent-recent-agent-session">session 7773</span>
+                        <span class="yoagent-recent-agent-window">1:claude</span>
+                        <span class="yoagent-recent-agent-paths">~/yolomux.dev7773/a/very/long/path/that/must/not/escape</span>
+                        <span class="yoagent-recent-agent-activity">tmux 123 min ago</span>
+                        <span class="yoagent-recent-agent-signals"><span class="yoagent-recent-agent-signal signal-presence">12 viewers</span></span>
+                      </span>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+            """,
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const ids = ['side', 'history', 'message', 'row'];
+        const rects = Object.fromEntries(ids.map(id => {
+          const rect = document.getElementById(id).getBoundingClientRect();
+          return [id, {left: rect.left, right: rect.right, width: rect.width}];
+        }));
+        const row = document.getElementById('row');
+        return {
+          rects,
+          rowScrollWidth: row.scrollWidth,
+          rowClientWidth: row.clientWidth,
+          childRightEdges: Array.from(row.children).map(child => child.getBoundingClientRect().right),
+          bodyScrollWidth: document.body.scrollWidth,
+          viewportWidth: innerWidth,
+        };
+        """
+    )
+    assert metrics["rects"]["message"]["right"] <= metrics["rects"]["history"]["right"] + 1, metrics
+    assert metrics["rects"]["row"]["right"] <= metrics["rects"]["message"]["right"] + 1, metrics
+    assert max(metrics["childRightEdges"]) <= metrics["rects"]["row"]["right"] + 1, metrics
+    assert metrics["rowScrollWidth"] <= metrics["rowClientWidth"] + 1, metrics
+    assert metrics["bodyScrollWidth"] <= metrics["viewportWidth"], metrics
+
+
 def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners(browser, tmp_path):
     page = tmp_path / "danger-status-light-panel-paint.html"
     load_static_html_fixture(

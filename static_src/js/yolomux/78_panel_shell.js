@@ -416,19 +416,6 @@ function renderEmptyPane(slot) {
   }
   const fill = document.createElement('div');
   fill.className = 'empty-pane-fill';
-  const closeLabel = t('editor.closePane');
-  const close = makeButton({
-    className: 'empty-pane-close control-active-hover',
-    label: '×',
-    title: closeLabel,
-    ariaLabel: closeLabel,
-    disabled: !emptyPaneCanClose(slot),
-    onClick: event => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeEmptyPaneFromLayout(slot);
-    },
-  });
   const title = document.createElement('strong');
   title.textContent = t('pane.dropTab');
   const hint = document.createElement('span');
@@ -437,11 +424,11 @@ function renderEmptyPane(slot) {
   const add = makeButton({
     className: 'empty-pane-add control-active-hover',
     label: t('pane.addTab'),
-    title: t('topbar.search.title', {mod: isMacPlatform() ? 'Cmd' : 'Ctrl'}),
-    ariaLabel: t('topbar.search.aria'),
-    onClick: () => openCommandPalette({mode: 'files', targetSlot: slot}),
+    title: `${t('common.commandPalette')} (${appShortcutText('P', {shift: true})})`,
+    ariaLabel: t('common.commandPalette'),
+    onClick: () => openCommandPalette({mode: 'command', targetSlot: slot}),
   });
-  fill.append(close, title, hint, add);
+  fill.append(title, hint, add);
   panel.appendChild(fill);
   return panel;
 }
