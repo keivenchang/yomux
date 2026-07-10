@@ -253,7 +253,6 @@ const fileExplorerPathCopy = document.getElementById('fileExplorerPathCopy');
 const fileExplorerClose = document.getElementById('fileExplorerClose');
 const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
-const fileExplorerQuickAccess = document.getElementById('fileExplorerQuickAccess');
 const fileExplorerExpanded = new Set();
 const fileExplorerPendingExpansions = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
@@ -1696,6 +1695,7 @@ const sessionStatusRecords = new Map();
 const watchedPrNotificationLastSent = new Map();
 const toastRecords = new Map();
 const browserNotificationsByTarget = new Map();
+const browserNotificationLifecycleKeys = new WeakMap();
 const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {

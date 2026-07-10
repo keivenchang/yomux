@@ -544,7 +544,6 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
               <button id="fileExplorerPathCopy" type="button"></button>
               <button id="fileExplorerHiddenToggle" type="button"></button>
               <button id="fileExplorerRootMode" type="button"></button>
-              <div id="fileExplorerQuickAccess"></div>
               <div id="fileExplorerTree" class="file-explorer-tree-panel" role="tree"></div>
             </div>
             <div id="mount"></div>
@@ -854,7 +853,6 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
               <button id="fileExplorerPathCopy" type="button"></button>
               <button id="fileExplorerHiddenToggle" type="button"></button>
               <button id="fileExplorerRootMode" type="button"></button>
-              <div id="fileExplorerQuickAccess"></div>
               <div id="fileExplorerTree" class="file-explorer-tree-panel" role="tree"></div>
             </div>
             <div id="mount"></div>

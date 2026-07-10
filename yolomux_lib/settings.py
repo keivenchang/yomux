@@ -244,7 +244,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "root_mode": "sync",
         "image_open_mode": "same-tab",
         "image_preview_max_px": 320,
-        "quick_access_paths": ["~", "/", "/tmp"],
         "indexed_dirs": [],
         "index_refresh_seconds": 1800,
         "index_max_files": 100000,
@@ -575,7 +574,6 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "root_mode"): "fixed | sync. Default sync. fixed stays put; sync follows the focused tmux cwd.",
     ("file_explorer", "image_open_mode"): "same-tab | new-tab. same-tab reuses one image viewer while browsing; new-tab keeps one image tab per file.",
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",
-    ("file_explorer", "quick_access_paths"): "List of paths for File Explorer shortcuts.",
     ("file_explorer", "dir_cache_ms"): "Milliseconds, 0-10000. Reuse a directory listing for this long so a busy live diff/tree does not re-list every directory on every render. 0 disables the cache.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
@@ -656,7 +654,6 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("file_explorer", "root_mode"): "Finder",
     ("file_explorer", "image_open_mode"): "Finder",
     ("file_explorer", "image_preview_max_px"): "Finder",
-    ("file_explorer", "quick_access_paths"): "Finder",
     ("file_explorer", "indexed_dirs"): "Finder",
     ("file_explorer", "index_exclude_dir_names"): "Finder",
     ("file_explorer", "index_exclude_paths"): "Finder",
@@ -724,7 +721,6 @@ SETTING_GUI_SECTION_LOCALE_KEYS = {
 
 SETTING_LOCALE_KEY_OVERRIDES: dict[tuple[str, str], dict[str, str]] = {
     ("appearance", "preview_font_size"): {"label": "common.previewFontSize"},
-    ("file_explorer", "quick_access_paths"): {"label": "common.quickPaths"},
     ("general", "language"): {"label": "common.language"},
     ("github", "watched_prs"): {"label": "common.watchedPrs"},
 }
@@ -737,7 +733,6 @@ SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
     ("file_explorer", "indexed_dirs"),
     ("file_explorer", "index_exclude_dir_names"),
     ("file_explorer", "companion_dirs"),
-    ("file_explorer", "quick_access_paths"),
     ("file_explorer", "index_exclude_paths"),
     ("uploads", "subdir"),
     ("share", "read_only"),
@@ -752,7 +747,6 @@ SETTING_SENSITIVITY: dict[tuple[str, str], str] = {
     ("file_explorer", "indexed_dirs"): "path-list",
     ("file_explorer", "index_exclude_dir_names"): "directory-name-list",
     ("file_explorer", "companion_dirs"): "path-list",
-    ("file_explorer", "quick_access_paths"): "path-list",
     ("file_explorer", "index_exclude_paths"): "path-list",
     ("uploads", "subdir"): "path",
     ("github", "watched_prs"): "external-reference-list",

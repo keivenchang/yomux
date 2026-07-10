@@ -2015,6 +2015,7 @@ function recordAttentionAcknowledgementKey(key) {
 function applyAttentionAcknowledgementResponse(payload = {}) {
   const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged.map(key => String(key || '')).filter(Boolean) : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
+  dismissNotificationsForLifecycleKeys(keys.map(attentionNotificationLifecycleKey));
   const changedSessions = new Set();
   for (const [session, current] of autoApproveStates) {
     if (!current || typeof current !== 'object') continue;
@@ -4727,14 +4728,62 @@ function shouldNotifyState(state) {
   return shouldNotifyTransitionKey(state.key);
 }
 
+function notificationLifecycleKeys(values) {
+  const source = Array.isArray(values) ? values : [values];
+  return new Set(source.map(value => String(value || '').trim()).filter(Boolean));
+}
+
+function attentionNotificationLifecycleKey(key) {
+  const value = String(key || '').trim();
+  return value ? `attention:${value}` : '';
+}
+
+function agentTransitionNotificationLifecycleKey(session, key) {
+  const target = String(session || '').trim();
+  const value = String(key || '').trim();
+  return target && value ? `agent-transition:${target}:${value}` : '';
+}
+
+function workingAgentTransitionNotificationCoalesceKey(session) {
+  const target = String(session || '').trim();
+  return target ? `agent-transition:${target}` : '';
+}
+
+function notificationLifecycleKeysIntersect(left, right) {
+  for (const key of left || []) {
+    if (right.has(key)) return true;
+  }
+  return false;
+}
+
+function dismissNotificationsForLifecycleKeys(keys) {
+  const requested = notificationLifecycleKeys(keys);
+  if (!requested.size) return 0;
+  let dismissed = 0;
+  for (const [id, record] of [...toastRecords.entries()]) {
+    if (!notificationLifecycleKeysIntersect(record.lifecycleKeys, requested)) continue;
+    removeAttentionAlert(id);
+    dismissed += 1;
+  }
+  for (const notifications of browserNotificationsByTarget.values()) {
+    for (const notification of [...notifications]) {
+      if (!notificationLifecycleKeysIntersect(browserNotificationLifecycleKeys.get(notification), requested)) continue;
+      notification.close?.();
+      dismissed += 1;
+    }
+  }
+  return dismissed;
+}
+
 function sendBrowserNotification(title, options = {}) {
   const targetItem = String(options.targetItem || options.session || '').trim();
   if (targetItem && notificationTargetIsFocused(targetItem)) return null;
-  const {onClick, session, targetItem: _targetItem, url, ...notificationOptions} = options;
+  const {onClick, session, targetItem: _targetItem, url, lifecycleKeys, ...notificationOptions} = options;
   const icon = notificationOptions.icon === undefined
     ? renderBrowserAppIconDataUrl({size: 192, showBadge: false})
     : '';
   const notification = new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions);
+  browserNotificationLifecycleKeys.set(notification, notificationLifecycleKeys(lifecycleKeys));
   if (targetItem) {
     if (!browserNotificationsByTarget.has(targetItem)) browserNotificationsByTarget.set(targetItem, new Set());
     browserNotificationsByTarget.get(targetItem).add(notification);
@@ -4842,6 +4891,7 @@ function emitNotification(type, payload = {}) {
       className: payload.className,
       countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
       persistent: definition.dismissOnly === true || payload.persistent === true,
+      lifecycleKeys: payload.lifecycleKeys,
     });
     if (inApp) {
       inApp.dataset.toastEvent = type;
@@ -4860,6 +4910,7 @@ function emitNotification(type, payload = {}) {
       session: payload.session,
       onClick: payload.onClick,
       url: payload.url,
+      lifecycleKeys: payload.lifecycleKeys,
     });
   }
   return {inApp, system, suppressed: false};
@@ -5009,6 +5060,7 @@ function showToast(title, lines, options = {}) {
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
+  toastRecords.set(id, {node, timer: null, lifecycleKeys: notificationLifecycleKeys(options.lifecycleKeys)});
   if (options.persistent === true) {
     node.dataset.toastPersistent = 'true';
     node.classList.add('kept');
@@ -5519,6 +5571,7 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
     ? agentWindowActivityTransitionKey(agentKey, {...target, session: ''})
     : `${target.window_index ?? target.window ?? ''}:${agentKey}`;
   const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
+  const coalesceKey = workingAgentTransitionNotificationCoalesceKey(session);
   const now = Date.now();
   if (notificationTargetIsFocused(session)) {
     recordSessionNotificationSent(session, key, now);
@@ -5535,10 +5588,15 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   const title = t(`notify.working.${descriptor.copyKey}.title`);
   const body = t(`notify.working.${descriptor.copyKey}.body`, {agent, session: sessionLabel(session)});
   if (notificationDeliveryEnabled('inApp')) {
+    const lifecycleKeys = [
+      attentionNotificationLifecycleKey(options.acknowledgementKey),
+      agentTransitionNotificationLifecycleKey(session, options.transitionKey),
+    ];
     const node = emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {
       session, title, lines: agentToastTargetLine(session, target, {reason: body}), body,
-      systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true,
-      coalesceKey: `agent-${tone}:${session}:${targetKey}`,
+      systemTitle: title, systemTag: `yolomux:${coalesceKey}`, renotify: true,
+      coalesceKey,
+      lifecycleKeys,
       onClick: () => {
         dismissSessionToasts(session);
         void focusAgentToastTarget(session, target);
@@ -5553,7 +5611,13 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
   try {
-    emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {session, title, body, systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true, inApp: false});
+    emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {
+      session, title, body, systemTitle: title, systemTag: `yolomux:${coalesceKey}`, renotify: true, inApp: false,
+      lifecycleKeys: [
+        attentionNotificationLifecycleKey(options.acknowledgementKey),
+        agentTransitionNotificationLifecycleKey(session, options.transitionKey),
+      ],
+    });
     postEvent(session, 'notification_sent', body, {agent: kind, tone});
   } catch (error) {
     postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
@@ -5611,18 +5675,28 @@ function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
     if (!transition) continue;
     const {kind, options, key, tone, previousTone} = transition;
     nextKeys.add(key);
+    if (tone === STATE_KEY.working) {
+      dismissNotificationsForLifecycleKeys([agentTransitionNotificationLifecycleKey(session, key)]);
+    }
     const shouldNotify = (previousTone === STATE_KEY.working && (tone === 'attention' || tone === 'cooldown'))
       // `working_stopped_ts` is written by the server only after it observes working->idle. Use that
       // durable transition proof when a browser refresh missed its transient green snapshot.
       || (tone === 'cooldown' && previousTone === '' && workingAgentFinishedRecently(agent));
     if (shouldNotify) {
-      const attentionKey = tone === 'attention' && typeof agentWindowActivityAcknowledgementKey === 'function'
-        ? agentWindowActivityAcknowledgementKey(kind, agent.state, options, options.attention_signature || options.screen_text)
+      const acknowledgementKey = typeof agentWindowActivityAcknowledgementKey === 'function'
+        ? agentWindowActivityAcknowledgementKey(
+            kind,
+            tone === 'attention' ? agent.state : 'cooldown',
+            options,
+            tone === 'attention' ? (options.attention_signature || options.screen_text) : Number(options.working_stopped_ts || 0),
+          )
         : '';
       notified += Number(scheduleWorkingAgentTransitionNotification(session, kind, key, tone, {
         ...agent,
         ...options,
-        attentionKey,
+        acknowledgementKey,
+        attentionKey: acknowledgementKey,
+        transitionKey: key,
         attentionSignature: options.attention_signature || options.screen_text,
         stoppedAt: Number(options.working_stopped_ts || 0),
       }));

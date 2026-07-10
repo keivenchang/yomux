@@ -5759,7 +5759,6 @@ def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser
         <select id="sort-action" class="file-explorer-sort-select"><option>A-Z</option></select>
         <button id="hidden-action" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">hidden</button>
         <button id="header-action" class="file-explorer-header-action">header</button>
-        <button id="quick-action" class="file-explorer-quick-access-button">quick</button>
       </div>
       <button id="compact-action" class="yoagent-compact-action">compact</button>
       <button id="confirm-action" class="yoagent-job-confirm">confirm</button>
@@ -5818,7 +5817,7 @@ def test_shared_link_drag_and_action_css_families_compute_from_one_owner(browser
             weight: style.fontWeight,
           };
         };
-        const finderShellIds = ['sort-action', 'hidden-action', 'header-action', 'quick-action'];
+        const finderShellIds = ['sort-action', 'hidden-action', 'header-action'];
         const finderShells = {};
         for (const [theme, light] of [['dark', false], ['light', true]]) {
           document.body.classList.toggle('theme-light', light);
@@ -9953,7 +9952,7 @@ def test_yochat_follows_new_messages_only_from_the_tail_and_resets_initial_chrom
     assert reset == {"searchHidden": True, "introductionCount": 1, "messageCount": 29}
 
 
-def test_twelve_hour_setting_repaints_yostats_and_tab_navigation_dismisses_addressed_toasts(browser, tmp_path):
+def test_twelve_hour_setting_repaints_yostats_and_notification_lifecycle_dismisses_addressed_toasts(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -9981,13 +9980,60 @@ def test_twelve_hour_setting_repaints_yostats_and_tab_navigation_dismisses_addre
         selectSession('1', {userInitiated: true});
         const afterNavigate = document.querySelectorAll('[data-toast-target-item="1"]').length;
         const suppressed = showToast('Working AI finished', 'fixture', {container: displayToastContainer('1'), targetItem: '1'});
-        return {before, after, beforeNavigate, afterNavigate, suppressed: suppressed === null};
+        setFocusedPanelItem(prefsItemId);
+        const acknowledgedKey = 'fixture-attention-key';
+        const newerKey = 'fixture-newer-attention-key';
+        showToast('Old attention', 'fixture', {
+          container: displayToastContainer('1'),
+          targetItem: '1',
+          lifecycleKeys: [attentionNotificationLifecycleKey(acknowledgedKey)],
+        });
+        showToast('New attention', 'fixture', {
+          container: displayToastContainer('1'),
+          targetItem: '1',
+          lifecycleKeys: [attentionNotificationLifecycleKey(newerKey)],
+        });
+        applyAttentionAcknowledgementResponse({acknowledged: [acknowledgedKey]});
+        const acknowledgementTitles = Array.from(document.querySelectorAll('[data-toast-target-item="1"] .toast-title')).map(item => item.textContent);
+
+        const workingAgent = {
+          kind: 'claude', state: 'working', session: '1', window: '3', window_index: 3,
+          window_label: '3:claude', pane_target: '%3', current: true,
+        };
+        const transition = workingAgentTransitionSnapshot('1', workingAgent);
+        showToast('Stopped attention', 'fixture', {
+          container: displayToastContainer('1'),
+          targetItem: '1',
+          lifecycleKeys: [agentTransitionNotificationLifecycleKey('1', transition.key)],
+        });
+        showToast('Other window attention', 'fixture', {
+          container: displayToastContainer('1'),
+          targetItem: '1',
+          lifecycleKeys: [agentTransitionNotificationLifecycleKey('1', `${transition.key}:other`)],
+        });
+        sessionStatusRecord('1', true).workingAgentNotificationTones.set(transition.key, 'attention');
+        reconcileWorkingAgentTransitionNotifications('1', {agent_windows: [workingAgent]});
+        const restartTitles = Array.from(document.querySelectorAll('[data-toast-target-item="1"] .toast-title')).map(item => item.textContent);
+        const coalesceKey = workingAgentTransitionNotificationCoalesceKey('1');
+        emitNotification('agentAttention', {
+          session: '1', title: 'Earlier session alert', body: 'fixture', coalesceKey, system: false,
+        });
+        emitNotification('agentDone', {
+          session: '1', title: 'Latest session alert', body: 'fixture', coalesceKey, system: false,
+        });
+        const coalescedTitles = Array.from(document.querySelectorAll('[data-toast-coalesce-key="agent-transition:1"] .toast-title')).map(item => item.textContent);
+        return {before, after, beforeNavigate, afterNavigate, suppressed: suppressed === null, acknowledgementTitles, restartTitles, coalescedTitles};
         """
     )
     assert not re.search(r"\b(?:AM|PM)\b", result["before"])
     assert re.search(r"\b(?:AM|PM)\b", result["after"]), result
     assert result["beforeNavigate"] == 1 and result["afterNavigate"] == 0
     assert result["suppressed"] is True
+    assert "Old attention" not in result["acknowledgementTitles"]
+    assert "New attention" in result["acknowledgementTitles"]
+    assert "Stopped attention" not in result["restartTitles"]
+    assert "Other window attention" in result["restartTitles"]
+    assert result["coalescedTitles"] == ["Latest session alert"]
 
 
 def test_terminal_visible_selection_cleanup_clears_browser_and_xterm_state(browser, tmp_path):
@@ -10732,6 +10778,62 @@ def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):
     assert metrics["passiveKeptScroller"], metrics
     assert metrics["forcedReplacedScroller"], metrics
     assert "preferences-sections" in metrics["bodyHtml"]
+
+
+def test_preferences_exclusion_textarea_keeps_its_scroll_and_grows_through_twenty_lines(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof selectSession === 'function' && window.__terminalOpened >= 1")
+    )
+    opened = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        selectSession('__prefs__').then(
+          () => requestAnimationFrame(() => done({ok: true})),
+          error => done({ok: false, error: String(error)})
+        );
+        """
+    )
+    assert opened["ok"], opened
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const control = document.createElement('textarea');
+          control.dataset.settingPath = 'file_explorer.index_exclude_dir_names';
+          control.dataset.settingType = 'list';
+          control.dataset.settingAutosize = 'true';
+          control.rows = 20;
+          control.style.cssText = 'display:block; box-sizing:border-box; width:480px; padding:4px; border:1px solid black; line-height:20px; font-size:16px;';
+          document.body.appendChild(control);
+          control.value = Array.from({length: 24}, (_item, index) => `excluded-dir-${index + 1}`).join('\\n');
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const styleBefore = getComputedStyle(control);
+          const lineHeight = Number.parseFloat(styleBefore.lineHeight);
+          conversationAutosizeTextarea(control, (lineHeight * 20) + 10);
+          const scrollTarget = Math.max(1, Math.floor(control.scrollHeight - control.clientHeight));
+          control.scrollTop = scrollTarget;
+          const before = control.scrollTop;
+          conversationAutosizeTextarea(control, (lineHeight * 20) + 10);
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const styleAfter = getComputedStyle(control);
+          return {
+            before,
+            after: control.scrollTop,
+            scrollHeight: control.scrollHeight,
+            clientHeight: control.clientHeight,
+            lineHeight,
+            overflowY: styleAfter?.overflowY || '',
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["before"] > 0, result
+    assert abs(result["after"] - result["before"]) < 2, result
+    assert result["overflowY"] == "auto", result
+    assert result["scrollHeight"] > result["clientHeight"], result
+    assert result["clientHeight"] <= (result["lineHeight"] * 20) + 24, result
 
 
 def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers(browser, tmp_path):

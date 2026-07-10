@@ -4011,8 +4011,7 @@ body.app-vw-lte-980 .tabs {
 .file-explorer-hidden-toggle,
 .file-explorer-root-mode-toggle,
 .file-explorer-header-action,
-.file-explorer-sort-select,
-.file-explorer-quick-access-button {
+.file-explorer-sort-select {
   height: 20px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
@@ -4058,18 +4057,6 @@ body.app-vw-lte-980 .tabs {
   text-decoration-line: line-through;
   text-decoration-thickness: 2px;
   text-decoration-color: currentColor;
-}
-.file-explorer-quick-access-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  padding: 0 var(--space-7);
-  cursor: pointer;
-}
-.file-explorer-quick-access-button:hover {
-  color: var(--text);
-  border-color: var(--active-control-soft-border);
 }
 .file-editor {
   display: flex;

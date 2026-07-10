@@ -1224,7 +1224,6 @@ function relocalizeFileExplorerPanels() {
   const remounted = typeof dockviewRemountPanel === 'function' && mounted.every(item => dockviewRemountPanel(item));
   if (!remounted) renderPanels(activePaneItems());
   if (mounted.includes(finderItemId)) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-  renderFileExplorerQuickAccessControls();
 }
 
 function setOpenFileOwner(path, item, options = {}) {

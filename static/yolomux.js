@@ -254,7 +254,6 @@ const fileExplorerPathCopy = document.getElementById('fileExplorerPathCopy');
 const fileExplorerClose = document.getElementById('fileExplorerClose');
 const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
-const fileExplorerQuickAccess = document.getElementById('fileExplorerQuickAccess');
 const fileExplorerExpanded = new Set();
 const fileExplorerPendingExpansions = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
@@ -1697,6 +1696,7 @@ const sessionStatusRecords = new Map();
 const watchedPrNotificationLastSent = new Map();
 const toastRecords = new Map();
 const browserNotificationsByTarget = new Map();
+const browserNotificationLifecycleKeys = new WeakMap();
 const sessionRepoDisplayRoot = new Map();
 
 function setLimitedMapEntry(map, key, value, limit) {
@@ -8560,6 +8560,7 @@ function recordAttentionAcknowledgementKey(key) {
 function applyAttentionAcknowledgementResponse(payload = {}) {
   const keys = Array.isArray(payload?.acknowledged) ? payload.acknowledged.map(key => String(key || '')).filter(Boolean) : [];
   for (const key of keys) recordAttentionAcknowledgementKey(key);
+  dismissNotificationsForLifecycleKeys(keys.map(attentionNotificationLifecycleKey));
   const changedSessions = new Set();
   for (const [session, current] of autoApproveStates) {
     if (!current || typeof current !== 'object') continue;
@@ -11272,14 +11273,62 @@ function shouldNotifyState(state) {
   return shouldNotifyTransitionKey(state.key);
 }
 
+function notificationLifecycleKeys(values) {
+  const source = Array.isArray(values) ? values : [values];
+  return new Set(source.map(value => String(value || '').trim()).filter(Boolean));
+}
+
+function attentionNotificationLifecycleKey(key) {
+  const value = String(key || '').trim();
+  return value ? `attention:${value}` : '';
+}
+
+function agentTransitionNotificationLifecycleKey(session, key) {
+  const target = String(session || '').trim();
+  const value = String(key || '').trim();
+  return target && value ? `agent-transition:${target}:${value}` : '';
+}
+
+function workingAgentTransitionNotificationCoalesceKey(session) {
+  const target = String(session || '').trim();
+  return target ? `agent-transition:${target}` : '';
+}
+
+function notificationLifecycleKeysIntersect(left, right) {
+  for (const key of left || []) {
+    if (right.has(key)) return true;
+  }
+  return false;
+}
+
+function dismissNotificationsForLifecycleKeys(keys) {
+  const requested = notificationLifecycleKeys(keys);
+  if (!requested.size) return 0;
+  let dismissed = 0;
+  for (const [id, record] of [...toastRecords.entries()]) {
+    if (!notificationLifecycleKeysIntersect(record.lifecycleKeys, requested)) continue;
+    removeAttentionAlert(id);
+    dismissed += 1;
+  }
+  for (const notifications of browserNotificationsByTarget.values()) {
+    for (const notification of [...notifications]) {
+      if (!notificationLifecycleKeysIntersect(browserNotificationLifecycleKeys.get(notification), requested)) continue;
+      notification.close?.();
+      dismissed += 1;
+    }
+  }
+  return dismissed;
+}
+
 function sendBrowserNotification(title, options = {}) {
   const targetItem = String(options.targetItem || options.session || '').trim();
   if (targetItem && notificationTargetIsFocused(targetItem)) return null;
-  const {onClick, session, targetItem: _targetItem, url, ...notificationOptions} = options;
+  const {onClick, session, targetItem: _targetItem, url, lifecycleKeys, ...notificationOptions} = options;
   const icon = notificationOptions.icon === undefined
     ? renderBrowserAppIconDataUrl({size: 192, showBadge: false})
     : '';
   const notification = new Notification(title, icon ? {icon, ...notificationOptions} : notificationOptions);
+  browserNotificationLifecycleKeys.set(notification, notificationLifecycleKeys(lifecycleKeys));
   if (targetItem) {
     if (!browserNotificationsByTarget.has(targetItem)) browserNotificationsByTarget.set(targetItem, new Set());
     browserNotificationsByTarget.get(targetItem).add(notification);
@@ -11387,6 +11436,7 @@ function emitNotification(type, payload = {}) {
       className: payload.className,
       countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
       persistent: definition.dismissOnly === true || payload.persistent === true,
+      lifecycleKeys: payload.lifecycleKeys,
     });
     if (inApp) {
       inApp.dataset.toastEvent = type;
@@ -11405,6 +11455,7 @@ function emitNotification(type, payload = {}) {
       session: payload.session,
       onClick: payload.onClick,
       url: payload.url,
+      lifecycleKeys: payload.lifecycleKeys,
     });
   }
   return {inApp, system, suppressed: false};
@@ -11554,6 +11605,7 @@ function showToast(title, lines, options = {}) {
   const node = document.createElement('div');
   node.className = options.className || 'attention-alert toast';
   node.dataset.alertId = String(id);
+  toastRecords.set(id, {node, timer: null, lifecycleKeys: notificationLifecycleKeys(options.lifecycleKeys)});
   if (options.persistent === true) {
     node.dataset.toastPersistent = 'true';
     node.classList.add('kept');
@@ -12064,6 +12116,7 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
     ? agentWindowActivityTransitionKey(agentKey, {...target, session: ''})
     : `${target.window_index ?? target.window ?? ''}:${agentKey}`;
   const key = `agent-window-transition:${targetKey}:${tone}:${marker}`;
+  const coalesceKey = workingAgentTransitionNotificationCoalesceKey(session);
   const now = Date.now();
   if (notificationTargetIsFocused(session)) {
     recordSessionNotificationSent(session, key, now);
@@ -12080,10 +12133,15 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   const title = t(`notify.working.${descriptor.copyKey}.title`);
   const body = t(`notify.working.${descriptor.copyKey}.body`, {agent, session: sessionLabel(session)});
   if (notificationDeliveryEnabled('inApp')) {
+    const lifecycleKeys = [
+      attentionNotificationLifecycleKey(options.acknowledgementKey),
+      agentTransitionNotificationLifecycleKey(session, options.transitionKey),
+    ];
     const node = emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {
       session, title, lines: agentToastTargetLine(session, target, {reason: body}), body,
-      systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true,
-      coalesceKey: `agent-${tone}:${session}:${targetKey}`,
+      systemTitle: title, systemTag: `yolomux:${coalesceKey}`, renotify: true,
+      coalesceKey,
+      lifecycleKeys,
       onClick: () => {
         dismissSessionToasts(session);
         void focusAgentToastTarget(session, target);
@@ -12098,7 +12156,13 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   postEvent(session, 'agent_window_transition_notification', body, {agent: kind, tone});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return true;
   try {
-    emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {session, title, body, systemTitle: title, systemTag: `yolomux:session:${session}:${key}`, renotify: true, inApp: false});
+    emitNotification(tone === 'attention' ? 'agentAttention' : 'agentDone', {
+      session, title, body, systemTitle: title, systemTag: `yolomux:${coalesceKey}`, renotify: true, inApp: false,
+      lifecycleKeys: [
+        attentionNotificationLifecycleKey(options.acknowledgementKey),
+        agentTransitionNotificationLifecycleKey(session, options.transitionKey),
+      ],
+    });
     postEvent(session, 'notification_sent', body, {agent: kind, tone});
   } catch (error) {
     postEvent(session, 'notification_error', `notification failed: ${error}`, {agent: kind, tone});
@@ -12156,18 +12220,28 @@ function reconcileWorkingAgentTransitionNotifications(session, payload = {}) {
     if (!transition) continue;
     const {kind, options, key, tone, previousTone} = transition;
     nextKeys.add(key);
+    if (tone === STATE_KEY.working) {
+      dismissNotificationsForLifecycleKeys([agentTransitionNotificationLifecycleKey(session, key)]);
+    }
     const shouldNotify = (previousTone === STATE_KEY.working && (tone === 'attention' || tone === 'cooldown'))
       // `working_stopped_ts` is written by the server only after it observes working->idle. Use that
       // durable transition proof when a browser refresh missed its transient green snapshot.
       || (tone === 'cooldown' && previousTone === '' && workingAgentFinishedRecently(agent));
     if (shouldNotify) {
-      const attentionKey = tone === 'attention' && typeof agentWindowActivityAcknowledgementKey === 'function'
-        ? agentWindowActivityAcknowledgementKey(kind, agent.state, options, options.attention_signature || options.screen_text)
+      const acknowledgementKey = typeof agentWindowActivityAcknowledgementKey === 'function'
+        ? agentWindowActivityAcknowledgementKey(
+            kind,
+            tone === 'attention' ? agent.state : 'cooldown',
+            options,
+            tone === 'attention' ? (options.attention_signature || options.screen_text) : Number(options.working_stopped_ts || 0),
+          )
         : '';
       notified += Number(scheduleWorkingAgentTransitionNotification(session, kind, key, tone, {
         ...agent,
         ...options,
-        attentionKey,
+        acknowledgementKey,
+        attentionKey: acknowledgementKey,
+        transitionKey: key,
         attentionSignature: options.attention_signature || options.screen_text,
         stoppedAt: Number(options.working_stopped_ts || 0),
       }));
@@ -15123,57 +15197,6 @@ function renderFileExplorerRootModeControls() {
   for (const button of fileExplorerRootModeButtons()) {
     syncFileExplorerRootModeButton(button);
   }
-  renderFileExplorerQuickAccessControls();
-}
-
-function fileExplorerQuickAccessPaths() {
-  const paths = initialSetting('file_explorer.quick_access_paths', ['~', '/', '/tmp']);
-  return Array.isArray(paths) ? paths.filter(path => typeof path === 'string' && path.trim()) : ['~', '/', '/tmp'];
-}
-
-function displayQuickAccessPath(path) {
-  const value = String(path || '').trim();
-  if (value === '~') return '~';
-  if (value === '/' || value === '/*') return '/*';
-  if (value.startsWith('/')) return normalizeDirectoryPath(value);
-  return value;
-}
-
-function expandQuickAccessPath(path) {
-  const value = String(path || '').trim();
-  if (value === '~') return homePath || '/';
-  if (value === '/' || value === '/*') return '/';
-  if (value.startsWith('~/')) return normalizeDirectoryPath(`${homePath || ''}/${value.slice(2)}`);
-  return value;
-}
-
-function renderQuickAccessInto(container) {
-  if (!container) return;
-  const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
-  const sync = fileExplorerRootMode === 'sync';
-  container.replaceChildren(...fileExplorerQuickAccessPaths().map(path => {
-    const expanded = normalizeDirectoryPath(expandQuickAccessPath(path));
-    const active = !sync && expanded === currentRoot;
-    const title = t('finder.quickAccess.openPath', {path});
-    const button = makeButton({
-      className: 'file-explorer-quick-access-button',
-      label: displayQuickAccessPath(path),
-      title,
-      dataset: {quickPath: path},
-      onClick: event => {
-        event.preventDefault();
-        event.stopPropagation();
-        openFileExplorerQuickAccessPath(path);
-      },
-    });
-    syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
-    return button;
-  }));
-}
-
-function renderFileExplorerQuickAccessControls() {
-  fileExplorerQuickAccess?.replaceChildren?.();
-  document.querySelectorAll('.file-explorer-quick-access-panel').forEach(container => container.replaceChildren());
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
@@ -15210,10 +15233,6 @@ function setFileExplorerManualRootMode() {
 function openFileExplorerManualRoot(path) {
   setFileExplorerManualRootMode();
   return openFileExplorerAt(path, {manualSelection: true});
-}
-
-function openFileExplorerQuickAccessPath(path) {
-  openFileExplorerManualRoot(expandQuickAccessPath(path));
 }
 
 function tmuxDirectoryForItem(item) {
@@ -21603,7 +21622,6 @@ function relocalizeFileExplorerPanels() {
   const remounted = typeof dockviewRemountPanel === 'function' && mounted.every(item => dockviewRemountPanel(item));
   if (!remounted) renderPanels(activePaneItems());
   if (mounted.includes(finderItemId)) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-  renderFileExplorerQuickAccessControls();
 }
 
 function setOpenFileOwner(path, item, options = {}) {
@@ -36228,11 +36246,15 @@ function conversationAutosizeTextarea(textarea, maxHeight = Number.POSITIVE_INFI
   if (!textarea) return 0;
   // Measure content from a collapsed baseline. `auto` can preserve a grid/flex-stretched height
   // after its pane shrinks, feeding that stale height back into scrollHeight on every resize.
+  // Collapsing a scrollable textarea also clamps its scrollTop to zero in browsers. Restore its
+  // own scroll position so a passive parent refresh cannot pull a user out of a long list.
+  const scrollTop = textarea.scrollTop;
   textarea.style.height = '0px';
   const limit = Number.isFinite(Number(maxHeight)) ? Math.max(0, Number(maxHeight)) : Number.POSITIVE_INFINITY;
   const height = Math.min(textarea.scrollHeight, limit);
   textarea.style.height = `${height}px`;
   textarea.style.overflowY = textarea.scrollHeight > limit ? 'auto' : 'hidden';
+  textarea.scrollTop = scrollTop;
   return height;
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -39937,9 +39959,8 @@ function preferenceSections() {
         {value: 'new-tab', label: t('pref.file_explorer.image_open_mode.newTab')},
       ]}),
       preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
-      preferenceSettingItem('file_explorer.quick_access_paths', {type: 'list'}),
       preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
-      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true}),
+      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true, rows: 20, autosize: true}),
       preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 4, autosize: true}),
       preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
       preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
@@ -40123,7 +40144,6 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
   if (path.startsWith('share.')) add(['share', 'sharing', 'viewer', 'viewers', 'url', 'http', 'https', 'read-only', 'write']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
-  if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
   if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);
   if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
@@ -40261,7 +40281,7 @@ function preferenceControlHtml(item, query = '') {
     control = `<div class="preferences-radio-group${groupHasSwatches ? ' has-swatches' : ''}" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
-    const rows = Number.isFinite(Number(item.rows)) ? Math.max(1, Math.min(9, Math.floor(Number(item.rows)))) : 3;
+    const rows = Number.isFinite(Number(item.rows)) ? Math.max(1, Math.min(20, Math.floor(Number(item.rows)))) : 3;
     const maxItems = Number.isFinite(Number(item.maxItems)) ? Math.max(1, Math.floor(Number(item.maxItems))) : 0;
     const autosize = item.autosize ? ' data-setting-autosize="true"' : '';
     const maxItemsAttr = maxItems ? ` data-setting-max-items="${esc(maxItems)}"` : '';

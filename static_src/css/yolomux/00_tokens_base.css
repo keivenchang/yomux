@@ -1566,9 +1566,7 @@ body.theme-light {
   left: 50%;
   transform: translate(-50%, -50%);
 }
-.app-menu-bar,
-.file-explorer-quick-access,
-.file-explorer-quick-access-panel {
+.app-menu-bar {
   flex: 0 0 auto;
   min-width: 0;
   display: inline-flex;
@@ -1685,7 +1683,6 @@ body.theme-light {
 .info-tree-preset:focus-visible,
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
-.file-explorer-quick-access-button.active,
 .file-explorer-date-toggle.active,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
