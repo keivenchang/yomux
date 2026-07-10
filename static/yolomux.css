@@ -474,6 +474,7 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
+  --file-selection-badge-text: #061207;
   --file-selection-outline: var(--active-control-focus-ring);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
@@ -1143,6 +1144,7 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
+  --file-selection-badge-text: #061207;
   --file-selection-outline: rgba(63, 143, 45, 0.5);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
@@ -12285,7 +12287,7 @@ body.app-vw-lte-980 .tabs {
   padding-inline: var(--space-4);
 }
 .file-tree-row:is(.indexed-directory, .index-excluded-entry).selected > .file-tree-git-status {
-  color: var(--file-selection-text);
+  color: var(--file-selection-badge-text);
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
   color: var(--50-terminal-file-tree-file-tree-row-fg-94);
@@ -12387,7 +12389,7 @@ body.app-vw-lte-980 .tabs {
   height: var(--file-tree-row-control-size);
   padding: 0;
   border-radius: var(--radius-sm);
-  color: #061207;
+  color: var(--file-selection-badge-text);
   font-family: var(--mono-font);
   font-size: max(6px, calc(var(--file-explorer-font-size) - 2px));
   font-weight: 700;

@@ -3820,7 +3820,7 @@ body.app-vw-lte-980 .tabs {
   padding-inline: var(--space-4);
 }
 .file-tree-row:is(.indexed-directory, .index-excluded-entry).selected > .file-tree-git-status {
-  color: var(--file-selection-text);
+  color: var(--file-selection-badge-text);
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
   color: var(--50-terminal-file-tree-file-tree-row-fg-94);
@@ -3922,7 +3922,7 @@ body.app-vw-lte-980 .tabs {
   height: var(--file-tree-row-control-size);
   padding: 0;
   border-radius: var(--radius-sm);
-  color: #061207;
+  color: var(--file-selection-badge-text);
   font-family: var(--mono-font);
   font-size: max(6px, calc(var(--file-explorer-font-size) - 2px));
   font-weight: 700;

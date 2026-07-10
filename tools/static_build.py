@@ -71,7 +71,7 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
     ),
     "static_src/css/yolomux/50_terminal_file_tree.css": (
         frozenset({
-            "#061207", "#14171d", "#1d0307", "#2a1e00", "#314154", "#394354",
+            "#14171d", "#1d0307", "#2a1e00", "#314154", "#394354",
             "#3a2b00", "#3b82f6", "#6f7b8d", "#6fce8a", "#b98c24",
             "#c8941e", "#d28b00", "#e8b04b", "#ffd6dc", "#ffe7a3", "#fff3c6",
             "#fff4c2", "rgb(0 0 0 / 0.35)", "rgb(112 167 255 / 0.65)",

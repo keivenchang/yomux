@@ -473,6 +473,7 @@
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
+  --file-selection-badge-text: #061207;
   --file-selection-outline: var(--active-control-focus-ring);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
@@ -1142,6 +1143,7 @@ body.theme-light {
   --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
   --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
+  --file-selection-badge-text: #061207;
   --file-selection-outline: rgba(63, 143, 45, 0.5);
   --file-tree-recency-max-contrast: var(--text);
   --file-tree-recency-hot: var(--file-tree-recency-max-contrast);
