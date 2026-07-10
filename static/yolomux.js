@@ -11382,6 +11382,7 @@ function emitNotification(type, payload = {}) {
       container: notificationEventContainer(definition, target),
       targetItem,
       onClick: payload.onClick,
+      onClose: payload.onClose,
       actions: payload.actions,
       className: payload.className,
       countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
@@ -11909,6 +11910,14 @@ function dismissNotificationsForTarget(item, options = {}) {
   if (notifications) {
     for (const notification of [...notifications]) notification.close?.();
     browserNotificationsByTarget.delete(target);
+  }
+}
+
+// Opening a notification's target is an acknowledgement, not merely a visual dismissal.  Producers
+// own their durable cursor/state update; this shared hook keeps every route into that target aligned.
+function acknowledgeNotificationTarget(item) {
+  if (String(item || '').trim() === chatItemId && typeof chatAcknowledge === 'function') {
+    void chatAcknowledge();
   }
 }
 
@@ -28676,7 +28685,10 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
-  if (options.userInitiated === true) dismissSessionToasts(session);
+  if (options.userInitiated === true) {
+    dismissSessionToasts(session);
+    acknowledgeNotificationTarget(session);
+  }
   if (options.userInitiated === true && isTmuxSession(session)) {
     noteFileExplorerChangesSessionInteraction(session);
   }
@@ -29812,7 +29824,10 @@ async function killTmuxSession(session) {
 function focusPanel(session, options = {}) {
   const panel = document.getElementById(panelDomId(session));
   if (!panel) return;
-  if (options.userInitiated === true) dismissSessionToasts(session);
+  if (options.userInitiated === true) {
+    dismissSessionToasts(session);
+    acknowledgeNotificationTarget(session);
+  }
   if (options.scrollIntoView === true) {
     panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
   }
@@ -38999,6 +39014,7 @@ function chatNotificationLines(message, nowSeconds = Date.now() / 1000) {
 }
 
 function openChatNotification(messageId) {
+  chatAcknowledgeUpTo(messageId);
   selectSession(chatItemId, {userInitiated: true}).then(() => openChatMessageContext(messageId));
 }
 
@@ -39011,6 +39027,7 @@ function maybeNotifyChatMessage(message) {
   const onClick = () => openChatNotification(id);
   emitNotification('chatMessage', {
     title: chatTabLabel(), lines, body, systemBody: body, onClick,
+    onClose: () => chatAcknowledgeUpTo(id),
     coalesceKey: `chat:${id}`, systemTag: `yolomux:chat:${id}`,
   });
   return true;
@@ -39032,11 +39049,12 @@ async function chatAdvanceReadCursor(messageId) {
   }
 }
 
-async function chatAcknowledge() {
-  if (!chatState.unread.size) return false;
-  const newest = Math.max(...chatState.unread.keys());
-  const tone = [...chatState.unread.values()].some(message => message.is_question) ? 'attention' : 'cooldown';
-  chatState.unread.clear();
+async function chatAcknowledgeUpTo(messageId) {
+  const newest = Number(messageId) || 0;
+  const acknowledged = [...chatState.unread.entries()].filter(([id]) => id <= newest);
+  if (!newest || !acknowledged.length) return false;
+  const tone = acknowledged.some(([, message]) => message.is_question) ? 'attention' : 'cooldown';
+  for (const [id] of acknowledged) chatState.unread.delete(id);
   chatState.acknowledgedTone = tone;
   chatState.acknowledgementStartedAt = Date.now();
   if (chatState.acknowledgementTimer) clearTimeout(chatState.acknowledgementTimer);
@@ -39047,6 +39065,11 @@ async function chatAcknowledge() {
   }, agentStatusPulsePeriodMs);
   renderChatStatus();
   return chatAdvanceReadCursor(newest);
+}
+
+function chatAcknowledge() {
+  if (!chatState.unread.size) return false;
+  return chatAcknowledgeUpTo(Math.max(...chatState.unread.keys()));
 }
 
 function setChatTyping(active, options = {}) {

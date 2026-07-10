@@ -755,6 +755,7 @@ function chatNotificationLines(message, nowSeconds = Date.now() / 1000) {
 }
 
 function openChatNotification(messageId) {
+  chatAcknowledgeUpTo(messageId);
   selectSession(chatItemId, {userInitiated: true}).then(() => openChatMessageContext(messageId));
 }
 
@@ -767,6 +768,7 @@ function maybeNotifyChatMessage(message) {
   const onClick = () => openChatNotification(id);
   emitNotification('chatMessage', {
     title: chatTabLabel(), lines, body, systemBody: body, onClick,
+    onClose: () => chatAcknowledgeUpTo(id),
     coalesceKey: `chat:${id}`, systemTag: `yolomux:chat:${id}`,
   });
   return true;
@@ -788,11 +790,12 @@ async function chatAdvanceReadCursor(messageId) {
   }
 }
 
-async function chatAcknowledge() {
-  if (!chatState.unread.size) return false;
-  const newest = Math.max(...chatState.unread.keys());
-  const tone = [...chatState.unread.values()].some(message => message.is_question) ? 'attention' : 'cooldown';
-  chatState.unread.clear();
+async function chatAcknowledgeUpTo(messageId) {
+  const newest = Number(messageId) || 0;
+  const acknowledged = [...chatState.unread.entries()].filter(([id]) => id <= newest);
+  if (!newest || !acknowledged.length) return false;
+  const tone = acknowledged.some(([, message]) => message.is_question) ? 'attention' : 'cooldown';
+  for (const [id] of acknowledged) chatState.unread.delete(id);
   chatState.acknowledgedTone = tone;
   chatState.acknowledgementStartedAt = Date.now();
   if (chatState.acknowledgementTimer) clearTimeout(chatState.acknowledgementTimer);
@@ -803,6 +806,11 @@ async function chatAcknowledge() {
   }, agentStatusPulsePeriodMs);
   renderChatStatus();
   return chatAdvanceReadCursor(newest);
+}
+
+function chatAcknowledge() {
+  if (!chatState.unread.size) return false;
+  return chatAcknowledgeUpTo(Math.max(...chatState.unread.keys()));
 }
 
 function setChatTyping(active, options = {}) {

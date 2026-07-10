@@ -9169,6 +9169,94 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
     assert browser.execute_script(
         "return [...document.querySelectorAll('.toast')].filter(node => node.textContent.includes('unfocused pane notification')).length"
     ) == 1, "active-but-unfocused YO!chat delivers one deduplicated in-app notification"
+    browser.execute_script(
+        "document.querySelector('.toast:not(.toast-update) [data-toast-close]').click()"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__bootFetches.filter(item => item.path === '/api/chat/read').length === 1"
+        )
+    )
+    dismissal_reload = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const previous = {
+          messages: new Map(chatState.messages),
+          pending: new Map(chatState.pending),
+          loaded: chatState.loaded,
+          readUpToId: chatState.readUpToId,
+          newerCursor: chatState.newerCursor,
+          olderCursor: chatState.olderCursor,
+          notifiedIds: new Set(chatState.notifiedIds),
+        };
+        clearChatLifecycle({destroy: true});
+        chatState.messages.clear();
+        chatState.pending.clear();
+        chatState.unread.clear();
+        chatState.loaded = false;
+        chatState.readUpToId = 0;
+        chatState.newerCursor = '';
+        chatState.olderCursor = '';
+        chatState.notifiedIds.clear();
+        renderChatPanel();
+        loadChatDelta().then(() => {
+          const result = {
+            bootstrapMessages: window.__fixtureLastChatBootstrapMessages.map(message => message.body),
+            staleToast: [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('unfocused pane notification')),
+            unread: [...chatState.unread.keys()],
+          };
+          chatState.messages = previous.messages;
+          chatState.pending = previous.pending;
+          chatState.loaded = previous.loaded;
+          chatState.readUpToId = previous.readUpToId;
+          chatState.newerCursor = previous.newerCursor;
+          chatState.olderCursor = previous.olderCursor;
+          chatState.notifiedIds = previous.notifiedIds;
+          chatState.unread.clear();
+          renderChatPanel();
+          done(result);
+        });
+        """
+    )
+    assert dismissal_reload == {"bootstrapMessages": [], "staleToast": False, "unread": []}, (
+        "dismissing a YO!chat toast advances its durable read cursor, so bootstrap/reload cannot replay it"
+    )
+    browser.execute_script(
+        """
+        setFocusedPanelItem('1', {userInitiated: true});
+        window.__fixtureChatSendAs('erin', 'browser-e', 'opening chat acknowledges notification', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('opening chat acknowledges notification'))"
+        )
+    )
+    browser.execute_script("focusPanel(chatItemId, {userInitiated: true})")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__bootFetches.filter(item => item.path === '/api/chat/read').length === 2"
+        )
+    )
+    browser.execute_script(
+        """
+        setFocusedPanelItem('1', {userInitiated: true});
+        window.__fixtureChatSendAs('frank', 'browser-f', 'clicking chat tab acknowledges notification', false);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return [...document.querySelectorAll('.toast')].some(node => node.textContent.includes('clicking chat tab acknowledges notification'))"
+        )
+    )
+    browser.execute_script(
+        "activatePaneTab(layoutSlotKeys().find(side => activeItemForSide(side) === chatItemId), chatItemId, {userInitiated: true})"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__bootFetches.filter(item => item.path === '/api/chat/read').length === 3"
+        )
+    )
     browser.execute_script("setFocusedPanelItem(chatItemId, {userInitiated: true})")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -9220,7 +9308,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
         };
         """
     )
-    assert acknowledgement == {"gray": True, "greenRemains": True, "readPosts": 1}
+    assert acknowledgement == {"gray": True, "greenRemains": True, "readPosts": 4}
 
     browser.execute_script(
         """

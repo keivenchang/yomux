@@ -4837,6 +4837,7 @@ function emitNotification(type, payload = {}) {
       container: notificationEventContainer(definition, target),
       targetItem,
       onClick: payload.onClick,
+      onClose: payload.onClose,
       actions: payload.actions,
       className: payload.className,
       countdownMs: definition.persistent === true ? (payload.countdownMs || 4 * 60 * 60 * 1000) : payload.countdownMs,
@@ -5364,6 +5365,14 @@ function dismissNotificationsForTarget(item, options = {}) {
   if (notifications) {
     for (const notification of [...notifications]) notification.close?.();
     browserNotificationsByTarget.delete(target);
+  }
+}
+
+// Opening a notification's target is an acknowledgement, not merely a visual dismissal.  Producers
+// own their durable cursor/state update; this shared hook keeps every route into that target aligned.
+function acknowledgeNotificationTarget(item) {
+  if (String(item || '').trim() === chatItemId && typeof chatAcknowledge === 'function') {
+    void chatAcknowledge();
   }
 }
 
