@@ -1538,3 +1538,8 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 - Completed and removed `DOIT.editor_autosave_cursor.md`. Ordinary autosave, filesystem-watch, metadata, and chrome rerenders now treat a connected focused CodeMirror view as the cursor/selection/scroll authority instead of replaying an older cached tab snapshot. Explicit disk replacement remains the only path that restores the focused pre-reload snapshot it captured.
 - A real CodeMirror browser regression reproduced a live `180→420` selection at scroll `5200` snapping to stale `12→48` at `1600` before the fix and now proves the live values survive deferred measure/animation frames. The recreated-editor scroll test, 63 Node layout tests, generated-asset check, and full canonical gate passed; port 7773 restarted from the changed worktree and serves the rebuilt guard.
+
+## 2026-07-09 YO!agent timeline ordering
+
+- YO!agent now routes persisted messages, streaming messages, and the synthetic current-activity/Recent-agents snapshot through one timestamp-ordered timeline. A newer answer can no longer render above an older activity snapshot merely because the snapshot was appended as special chrome after the transcript.
+- The regression reproduces an older persisted answer, a 7:02:38 PM activity snapshot, and a 7:11:52 PM answer, then proves the visible order is chronological with the newest answer last.

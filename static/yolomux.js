@@ -36994,37 +36994,54 @@ function yoagentMessageBodyHtml(message, roleClass, agentResult, streaming) {
   return `<div class="${bodyClass}"${markdownAttr}>${esc(content)}</div>`;
 }
 
-function yoagentChatMessagesHtml() {
+function yoagentTimelineTimestamp(value) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function yoagentTimelineItems() {
   const messages = [...(Array.isArray(yoagentConversationState.messages) ? yoagentConversationState.messages : []), ...yoagentStreamingMessagesList()];
-  const startupInfo = yoagentStartupState.infoVisible ? yoagentStartupInfoHtml() : '';
-  if (!messages.length) {
-    if (startupInfo) return startupInfo;
+  const items = messages.map((message, index) => ({kind: 'message', message, index, timestamp: yoagentTimelineTimestamp(message?.createdAt)}));
+  if (yoagentStartupState.infoVisible) {
+    const payload = yoagentStartupActivityPayload();
+    items.push({kind: 'startup', index: items.length, timestamp: yoagentTimelineTimestamp(payload?.generated_at)});
+  }
+  return items.sort((left, right) => {
+    if (left.timestamp === null || right.timestamp === null || left.timestamp === right.timestamp) return left.index - right.index;
+    return left.timestamp - right.timestamp;
+  });
+}
+
+function yoagentTimelineMessageHtml(message, index) {
+  const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
+  const roleClass = message.role === 'user' ? 'user' : 'assistant';
+  const agentResult = roleClass === 'assistant' && message?.kind === 'agent_result';
+  const streaming = roleClass === 'assistant' && message?.streaming;
+  const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}${streaming ? ' streaming' : ''}${message?.aborted ? ' stopped' : ''}`;
+  const detailsKey = yoagentMessageDetailsKey(message, index);
+  const streamItemsHtml = roleClass === 'assistant' ? yoagentMessageStreamItemsHtml(message, detailsKey) : '';
+  const stoppedState = roleClass === 'assistant' && message?.aborted && String(message?.content || '').trim()
+    ? `<div class="yoagent-message-state">${esc(t('yoagent.stopped'))}</div>`
+    : '';
+  return conversationMessageShellHtml({
+    self: roleClass === 'user',
+    className: messageClass,
+    author: role,
+    timestampHtml: yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null),
+    bodyHtml: streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming),
+    extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
+  });
+}
+
+function yoagentChatMessagesHtml() {
+  const timeline = yoagentTimelineItems();
+  if (!timeline.length) {
     if (!yoagentChatEnabled()) {
       return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatDisabled'))}</div>`;
     }
     return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel()}))}</div>`;
   }
-  const messageHtml = messages.map((message, index) => {
-    const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
-    const roleClass = message.role === 'user' ? 'user' : 'assistant';
-    const agentResult = roleClass === 'assistant' && message?.kind === 'agent_result';
-    const streaming = roleClass === 'assistant' && message?.streaming;
-    const messageClass = `yoagent-message ${roleClass}${agentResult ? ' yoagent-agent-result' : ''}${streaming ? ' streaming' : ''}${message?.aborted ? ' stopped' : ''}`;
-    const detailsKey = yoagentMessageDetailsKey(message, index);
-    const streamItemsHtml = roleClass === 'assistant' ? yoagentMessageStreamItemsHtml(message, detailsKey) : '';
-    const stoppedState = roleClass === 'assistant' && message?.aborted && String(message?.content || '').trim()
-      ? `<div class="yoagent-message-state">${esc(t('yoagent.stopped'))}</div>`
-      : '';
-    return conversationMessageShellHtml({
-      self: roleClass === 'user',
-      className: messageClass,
-      author: role,
-      timestampHtml: yoagentMessageTimestampHtml(message.createdAt, roleClass === 'assistant' ? message : null),
-      bodyHtml: streamItemsHtml || yoagentMessageBodyHtml(message, roleClass, agentResult, streaming),
-      extrasHtml: `${stoppedState}${roleClass === 'assistant' && !streamItemsHtml ? yoagentMessageDetailsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentMessageDetailRowsHtml(message, detailsKey) : ''}${roleClass === 'assistant' ? yoagentActionCardsHtml(message.actions) : ''}`,
-    });
-  }).join('');
-  return `${messageHtml}${startupInfo}`;
+  return timeline.map(item => item.kind === 'startup' ? yoagentStartupInfoHtml() : yoagentTimelineMessageHtml(item.message, item.index)).join('');
 }
 
 function yoagentActionCardsHtml(actions) {

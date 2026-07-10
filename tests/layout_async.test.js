@@ -719,6 +719,25 @@ async function runLayoutAsyncSuite() {
     assert.equal(startup.prewarmStarted, true, 'completion preserves one-shot ownership until Clear explicitly resets it');
   });
 
+  test('YO!agent timeline orders the activity snapshot with persisted answers by timestamp', () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+    api.setActivitySummaryPayloadForTest({
+      generated_at: '2026-07-10T02:02:38Z',
+      global: {headline: 'activity snapshot'},
+      sessions: {},
+      session_order: [],
+    });
+    api.showYoagentStartupInfoOnceForTest();
+    api.setYoagentMessagesForTest([
+      {role: 'assistant', content: 'older answer', createdAt: '2026-07-10T01:50:00Z'},
+      {role: 'assistant', content: 'latest answer', createdAt: '2026-07-10T02:11:52Z'},
+    ]);
+
+    const html = api.yoagentChatHtml();
+    assert.ok(html.indexOf('older answer') < html.indexOf('activity snapshot'), 'older persisted answers remain before the activity snapshot');
+    assert.ok(html.indexOf('activity snapshot') < html.indexOf('latest answer'), 'a newer persisted answer renders after the older activity snapshot');
+  });
+
   test('UI transaction records keep retired parallel globals absent', () => {
     const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     for (const name of [

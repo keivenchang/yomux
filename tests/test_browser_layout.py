@@ -7562,6 +7562,51 @@ def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser,
     assert readonly["inputDisabled"] is False
 
 
+def test_yoagent_activity_snapshot_stays_before_newer_answer(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        settings={"yoagent": {"backend": "auto"}},
+        available_agents=["term", "codex"],
+        agent_auth={"codex": {"installed": True, "logged_in": True}},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof openInfoSubTab === 'function' && typeof applyYoagentConversationPayload === 'function'"
+        )
+    )
+    order = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          await openInfoSubTab('yoagent');
+          applyActivitySummaryPayloadFromPush({
+            generated_at: '2026-07-10T02:02:38Z',
+            global: {headline: 'activity snapshot'},
+            sessions: {},
+            session_order: [],
+          }, {refreshStartupSnapshot: true});
+          showYoagentStartupInfoForLatestActivity();
+          applyYoagentConversationPayload({messages: [
+            {role: 'assistant', content: 'older answer', createdAt: '2026-07-10T01:50:00Z'},
+            {role: 'assistant', content: 'latest answer', createdAt: '2026-07-10T02:11:52Z'},
+          ], pending_waits: []});
+          renderYoagentPanel({preserveDraft: true, scrollBottom: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const rows = [...document.querySelectorAll('#yoagent-content .yoagent-chat-history > .yoagent-message')];
+          done(rows.map(row => row.textContent).map(text => (
+            text.includes('older answer') ? 'older'
+              : text.includes('activity snapshot') ? 'snapshot'
+                : text.includes('latest answer') ? 'latest'
+                  : 'other'
+          )).filter(item => item !== 'other'));
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert order == ["older", "snapshot", "latest"]
+
+
 @pytest.mark.parametrize(
     ("label", "grid_width", "window_width"),
     (("desktop", 1000, 1120), ("narrow", 520, 640)),
