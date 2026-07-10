@@ -1975,8 +1975,6 @@ globalThis.__layoutTestApi = {
   previewFileActionLinksForTest: previewFileActionLinks,
   zipFileDownloadUrl,
   downloadFilenameFromContentDisposition,
-  displayQuickAccessPath,
-  expandQuickAccessPath,
   markOpenFileDiffUnavailable,
   openChangedFileInDiffForTest: openChangedFileInDiff,
   openFileInEditorForTest: openFileInEditor,

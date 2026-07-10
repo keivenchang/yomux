@@ -297,10 +297,10 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert path.exists()
     assert "YOLOmux user preferences" in path.read_text()
 
-    updated = save_settings({"appearance": {"terminal_font_size": 17, "date_time_hour_cycle": "12"}, "file_explorer": {"quick_access_paths": ["/tmp", ""]}}, path)
+    updated = save_settings({"appearance": {"terminal_font_size": 17, "date_time_hour_cycle": "12"}, "file_explorer": {"indexed_dirs": ["/tmp", ""]}}, path)
     assert updated["settings"]["appearance"]["terminal_font_size"] == 17
     assert updated["settings"]["appearance"]["date_time_hour_cycle"] == "12"
-    assert updated["settings"]["file_explorer"]["quick_access_paths"] == ["/tmp"]
+    assert updated["settings"]["file_explorer"]["indexed_dirs"] == ["/tmp"]
 
     loaded, error = read_settings_file(path)
     assert error == ""
@@ -442,7 +442,7 @@ def test_preferences_source_paths_are_in_backend_catalog():
             assert locale_key in english, (path, locale_key)
     assert catalog["general.language"]["locale_keys"]["label"] == "common.language"
     assert catalog["appearance.preview_font_size"]["locale_keys"]["label"] == "common.previewFontSize"
-    assert catalog["file_explorer.quick_access_paths"]["locale_keys"]["label"] == "common.quickPaths"
+    assert "file_explorer.quick_access_paths" not in catalog
     assert catalog["github.watched_prs"]["locale_keys"]["label"] == "common.watchedPrs"
 
 
@@ -506,7 +506,7 @@ def test_save_settings_can_reset_all_values_to_defaults(tmp_path):
             "appearance": {"terminal_font_size": 17, "editor_color_scheme": "github-light"},
             "terminal_editor": {"word_wrap": True, "line_numbers": True},
             "editor": {"autosave": False, "autosave_delay_seconds": 7},
-            "file_explorer": {"quick_access_paths": ["/tmp"]},
+            "file_explorer": {"indexed_dirs": ["/tmp"]},
         },
         path,
     )
@@ -523,7 +523,7 @@ def test_save_settings_preserves_concurrent_section_updates(tmp_path):
     patches = [
         {"appearance": {"terminal_font_size": 18}},
         {"appearance": {"editor_font_size": 19}},
-        {"file_explorer": {"quick_access_paths": ["/tmp", "/var"]}},
+        {"file_explorer": {"indexed_dirs": ["/tmp", "/var"]}},
         {"terminal_editor": {"word_wrap": True}},
         {"notifications": {"throttle_seconds": 17}},
     ]
@@ -538,7 +538,7 @@ def test_save_settings_preserves_concurrent_section_updates(tmp_path):
     assert error == ""
     assert settings["appearance"]["terminal_font_size"] == 18
     assert settings["appearance"]["editor_font_size"] == 19
-    assert settings["file_explorer"]["quick_access_paths"] == ["/tmp", "/var"]
+    assert settings["file_explorer"]["indexed_dirs"] == ["/tmp", "/var"]
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["notifications"]["throttle_seconds"] == 17
     assert not (tmp_path / "settings.yaml.tmp").exists()

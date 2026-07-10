@@ -26,6 +26,7 @@ from .common import unique_session_names
 from .common import warn_unavailable_agent_commands_once
 from .control import send_yolomux_control_request
 from .server import TmuxWebtermHTTPServer
+from .server_lease import acquire_server_port_lease
 
 
 def parse_args() -> argparse.Namespace:
@@ -279,50 +280,63 @@ def main() -> int:
         print(f"TLS setup failed: {error}", file=sys.stderr)
         return 2
 
-    app = TmuxWebtermApp(sessions, dangerously_yolo=args.dangerously_yolo)
+    lease = acquire_server_port_lease(args.port)
+    if lease is None:
+        print(f"YOLOmux port {args.port} is already owned by another server launch; refusing a duplicate.", file=sys.stderr)
+        return 1
 
-    if args.print_transcripts:
-        try:
+    app: TmuxWebtermApp | None = None
+    server: TmuxWebtermHTTPServer | None = None
+    try:
+        app = TmuxWebtermApp(sessions, dangerously_yolo=args.dangerously_yolo)
+
+        if args.print_transcripts:
             if auth_setup_required():
                 print_auth_setup_error()
                 return 2
             return print_transcripts(app)
-        finally:
-            app.stop_auto_approve_all()
 
-    app.start_background_owner(port=args.port)
-    server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
-    if hasattr(app, "start_yoagent_backend_prewarm"):
-        app.start_yoagent_backend_prewarm(reason="server_start")
-    scheme = "https" if tls_context else "http"
-    if args.dev:
-        print("[dev] dev mode ON: backend re-execs on yolomux_lib/*.py change; page auto-reloads on bundle change")
-        start_dev_backend_watcher()
-    url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
-    session_text = ", ".join(sessions) if sessions else "no tmux sessions"
-    print(f"Serving YOLOmux on {scheme}://{url_host}:{args.port}/ for {session_text}")
-    if tls_message:
-        print(tls_message)
-    if args.dangerously_yolo:
-        print("DANGEROUS YOLO mode is enabled: new Claude/Codex sessions bypass approval and sandbox protections.")
-    if auth_setup_required():
-        print("=" * 78)
-        print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
-        print("YOLOmux created an inactive starter YAML file.")
-        print("Leave users: as-is, then uncomment and edit one or more account entries before logging in.")
-        if not tls_context:
-            print(f"Highly recommend that you restart with HTTPS: python3 yolomux.py --port {args.port} --self-signed")
-        print(f"YOLOmux is listening on {scheme}://{url_host}:{args.port}/ and will show this setup message in the browser.")
-        print("After saving auth.yaml, refresh the browser. No restart is required.")
-        print("=" * 78)
-    restored_auto = app.restore_auto_approve()
-    if restored_auto:
-        print(f"Restored YOLO for {', '.join(restored_auto)}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping.")
+        app.start_background_owner(port=args.port)
+        server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
+        if hasattr(app, "start_yoagent_backend_prewarm"):
+            app.start_yoagent_backend_prewarm(reason="server_start")
+        scheme = "https" if tls_context else "http"
+        if args.dev:
+            print("[dev] dev mode ON: backend re-execs on yolomux_lib/*.py change; page auto-reloads on bundle change")
+            start_dev_backend_watcher()
+        url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
+        session_text = ", ".join(sessions) if sessions else "no tmux sessions"
+        print(f"Serving YOLOmux on {scheme}://{url_host}:{args.port}/ for {session_text}")
+        if tls_message:
+            print(tls_message)
+        if args.dangerously_yolo:
+            print("DANGEROUS YOLO mode is enabled: new Claude/Codex sessions bypass approval and sandbox protections.")
+        if auth_setup_required():
+            print("=" * 78)
+            print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
+            print("YOLOmux created an inactive starter YAML file.")
+            print("Leave users: as-is, then uncomment and edit one or more account entries before logging in.")
+            if not tls_context:
+                print(f"Highly recommend that you restart with HTTPS: python3 yolomux.py --port {args.port} --self-signed")
+            print(f"YOLOmux is listening on {scheme}://{url_host}:{args.port}/ and will show this setup message in the browser.")
+            print("After saving auth.yaml, refresh the browser. No restart is required.")
+            print("=" * 78)
+        restored_auto = app.restore_auto_approve()
+        if restored_auto:
+            print(f"Restored YOLO for {', '.join(restored_auto)}")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopping.")
+        return 0
     finally:
-        app.stop_auto_approve_all()
-        server.server_close()
-    return 0
+        if app is not None:
+            app.stop_auto_approve_all()
+        if server is not None:
+            server.server_close()
+        elif app is not None:
+            if hasattr(app, "background_owner"):
+                app.background_owner.stop()
+            if hasattr(app, "control_server"):
+                app.control_server.stop()
+        lease.release()

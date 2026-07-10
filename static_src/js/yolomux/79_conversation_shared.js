@@ -60,10 +60,14 @@ function conversationAutosizeTextarea(textarea, maxHeight = Number.POSITIVE_INFI
   if (!textarea) return 0;
   // Measure content from a collapsed baseline. `auto` can preserve a grid/flex-stretched height
   // after its pane shrinks, feeding that stale height back into scrollHeight on every resize.
+  // Collapsing a scrollable textarea also clamps its scrollTop to zero in browsers. Restore its
+  // own scroll position so a passive parent refresh cannot pull a user out of a long list.
+  const scrollTop = textarea.scrollTop;
   textarea.style.height = '0px';
   const limit = Number.isFinite(Number(maxHeight)) ? Math.max(0, Number(maxHeight)) : Number.POSITIVE_INFINITY;
   const height = Math.min(textarea.scrollHeight, limit);
   textarea.style.height = `${height}px`;
   textarea.style.overflowY = textarea.scrollHeight > limit ? 'auto' : 'hidden';
+  textarea.scrollTop = scrollTop;
   return height;
 }

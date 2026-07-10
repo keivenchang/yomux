@@ -2466,7 +2466,6 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
               <button type="button" class="file-explorer-header-action" data-file-explorer-collapse>▤</button>
               <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle">.*</button>
               <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" aria-pressed="true">Sync</button>
-              <div id="fileExplorerQuickAccess" class="file-explorer-quick-access"></div>
               <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/">
               <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy"></button>
               <button type="button" id="fileExplorerClose" class="file-explorer-close"></button>

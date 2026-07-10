@@ -185,6 +185,29 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert "DANGEROUS YOLO mode is enabled" in output
 
 
+def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, capsys):
+    args = argparse.Namespace(
+        host="0.0.0.0",
+        port=19002,
+        sessions=None,
+        dangerously_yolo=False,
+        self_signed=False,
+        cert=None,
+        key=None,
+        print_transcripts=False,
+        print_background_owner=False,
+        print_runtime_report=False,
+        dev=False,
+    )
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
+    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
+    monkeypatch.setattr(cli, "acquire_server_port_lease", lambda _port: None)
+    monkeypatch.setattr(cli, "TmuxWebtermApp", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("duplicate launch must not initialize app state")))
+
+    assert cli.main() == 1
+    assert "refusing a duplicate" in capsys.readouterr().err
+
+
 def test_self_signed_cert_generation_is_persistent(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/openssl")

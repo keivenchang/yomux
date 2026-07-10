@@ -1567,9 +1567,7 @@ body.theme-light {
   left: 50%;
   transform: translate(-50%, -50%);
 }
-.app-menu-bar,
-.file-explorer-quick-access,
-.file-explorer-quick-access-panel {
+.app-menu-bar {
   flex: 0 0 auto;
   min-width: 0;
   display: inline-flex;
@@ -1686,7 +1684,6 @@ body.theme-light {
 .info-tree-preset:focus-visible,
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
-.file-explorer-quick-access-button.active,
 .file-explorer-date-toggle.active,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
@@ -12472,8 +12469,7 @@ body.app-vw-lte-980 .tabs {
 .file-explorer-hidden-toggle,
 .file-explorer-root-mode-toggle,
 .file-explorer-header-action,
-.file-explorer-sort-select,
-.file-explorer-quick-access-button {
+.file-explorer-sort-select {
   height: 20px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
@@ -12519,18 +12515,6 @@ body.app-vw-lte-980 .tabs {
   text-decoration-line: line-through;
   text-decoration-thickness: 2px;
   text-decoration-color: currentColor;
-}
-.file-explorer-quick-access-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  padding: 0 var(--space-7);
-  cursor: pointer;
-}
-.file-explorer-quick-access-button:hover {
-  color: var(--text);
-  border-color: var(--active-control-soft-border);
 }
 .file-editor {
   display: flex;

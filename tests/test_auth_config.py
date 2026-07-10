@@ -387,7 +387,6 @@ def test_main_page_bootstrap_defers_preferences_metadata():
     assert "choices" not in settings_payload
     assert settings_payload["localeKeyOverrides"] == {
         "appearance.preview_font_size": {"label": "common.previewFontSize"},
-        "file_explorer.quick_access_paths": {"label": "common.quickPaths"},
         "general.language": {"label": "common.language"},
         "github.watched_prs": {"label": "common.watchedPrs"},
     }

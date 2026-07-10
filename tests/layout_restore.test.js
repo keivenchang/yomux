@@ -1575,7 +1575,7 @@ async function runLayoutRestoreSuite() {
     const autoStatusRenderFn = source.slice(source.indexOf('function renderAutoApproveStatusSurfaces'), source.indexOf('function applyAutoApprovePayload'));
     assert.ok(loadAutoStatusesFn.includes('renderAutoApproveStatusSurfaces(result)') && autoStatusRenderFn.includes('updateDocumentTitle();') && autoStatusRenderFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll routes through the shared status renderer, which re-syncs the title and YO markers together so a done pane stops spinning on the same poll');
     assert.ok(/preferenceSettingItem\('file_explorer\.indexed_dirs', \{type: 'list'\}\)/.test(source), '#32: Preferences exposes indexed directories through the shared setting builder');
-    assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_dir_names', \{type: 'list', wide: true\}\)/.test(source), 'Preferences exposes pre-populated Quick Open directory-name skips');
+    assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_dir_names', \{type: 'list', wide: true, rows: 20, autosize: true\}\)/.test(source), 'Preferences exposes 20-line autosizing Quick Open directory-name skips');
     assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_paths', \{type: 'list', wide: true, rows: 4, autosize: true\}\)/.test(source), 'Preferences exposes machine-specific Quick Open exclusions');
     assert.ok(/preferenceSettingItem\('file_explorer\.index_max_files', \{type: 'number'/.test(source), 'Preferences exposes the Quick Open file cap');
     assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*setFileExplorerDirectoryIndexed\(dir, true\)[\s\S]*setFileExplorerDirectoryIndexed\(dir, false\)/.test(source), '#32: editing the indexed-dirs setting adds/removes indexed dirs (bi-directional sync)');
@@ -3087,6 +3087,17 @@ async function runLayoutRestoreSuite() {
     api.selectSession('1', {userInitiated: true});
     assert.equal(api.focusedPanelItemForTest(), '1');
     assert.equal(focusCount, 2, 'selecting an already visible tmux tab is an explicit user focus action');
+  });
+
+  test('shared textarea autosizing preserves a long list scroll position', () => {
+    const api = loadYolomux();
+    const textarea = new TestElement('excluded-directory-names', 'textarea');
+    textarea.scrollTop = 184;
+    textarea.scrollHeight = 960;
+    const height = api.conversationAutosizeTextareaForTest(textarea, 410);
+    assert.equal(height, 410, 'shared autosize honors the multiline display limit');
+    assert.equal(textarea.scrollTop, 184, 'collapsing for measurement restores the textarea’s own scroll position');
+    assert.equal(textarea.style.overflowY, 'auto', 'content beyond the display limit stays internally scrollable');
   });
 
   test('terminal blur keeps visual active pane state', () => {

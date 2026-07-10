@@ -711,57 +711,6 @@ function renderFileExplorerRootModeControls() {
   for (const button of fileExplorerRootModeButtons()) {
     syncFileExplorerRootModeButton(button);
   }
-  renderFileExplorerQuickAccessControls();
-}
-
-function fileExplorerQuickAccessPaths() {
-  const paths = initialSetting('file_explorer.quick_access_paths', ['~', '/', '/tmp']);
-  return Array.isArray(paths) ? paths.filter(path => typeof path === 'string' && path.trim()) : ['~', '/', '/tmp'];
-}
-
-function displayQuickAccessPath(path) {
-  const value = String(path || '').trim();
-  if (value === '~') return '~';
-  if (value === '/' || value === '/*') return '/*';
-  if (value.startsWith('/')) return normalizeDirectoryPath(value);
-  return value;
-}
-
-function expandQuickAccessPath(path) {
-  const value = String(path || '').trim();
-  if (value === '~') return homePath || '/';
-  if (value === '/' || value === '/*') return '/';
-  if (value.startsWith('~/')) return normalizeDirectoryPath(`${homePath || ''}/${value.slice(2)}`);
-  return value;
-}
-
-function renderQuickAccessInto(container) {
-  if (!container) return;
-  const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
-  const sync = fileExplorerRootMode === 'sync';
-  container.replaceChildren(...fileExplorerQuickAccessPaths().map(path => {
-    const expanded = normalizeDirectoryPath(expandQuickAccessPath(path));
-    const active = !sync && expanded === currentRoot;
-    const title = t('finder.quickAccess.openPath', {path});
-    const button = makeButton({
-      className: 'file-explorer-quick-access-button',
-      label: displayQuickAccessPath(path),
-      title,
-      dataset: {quickPath: path},
-      onClick: event => {
-        event.preventDefault();
-        event.stopPropagation();
-        openFileExplorerQuickAccessPath(path);
-      },
-    });
-    syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
-    return button;
-  }));
-}
-
-function renderFileExplorerQuickAccessControls() {
-  fileExplorerQuickAccess?.replaceChildren?.();
-  document.querySelectorAll('.file-explorer-quick-access-panel').forEach(container => container.replaceChildren());
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
@@ -798,10 +747,6 @@ function setFileExplorerManualRootMode() {
 function openFileExplorerManualRoot(path) {
   setFileExplorerManualRootMode();
   return openFileExplorerAt(path, {manualSelection: true});
-}
-
-function openFileExplorerQuickAccessPath(path) {
-  openFileExplorerManualRoot(expandQuickAccessPath(path));
 }
 
 function tmuxDirectoryForItem(item) {

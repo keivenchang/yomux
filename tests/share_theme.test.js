@@ -1943,12 +1943,7 @@ async function runShareThemeSuite() {
     assert.equal(finderPanelSource.includes('file-explorer-quick-access-panel'), false, 'Finder pane chrome no longer renders visible quick-root buttons');
     assert.ok(finderPanelBundle.includes("t('finder.toolbar.syncTitle')"), 'Finder Sync button has a dedicated tooltip/aria label string');
     assert.ok(finderPanelSource.includes('title="${esc(t(\'finder.toolbar.syncTitle\'))}"') && finderPanelSource.includes('${esc(t(\'finder.toolbar.syncLabel\'))}</button>'), 'Finder Sync panel button uses the full tooltip while keeping the compact visible label');
-    assert.equal(api.displayQuickAccessPath('/'), '/*', 'Finder root quick-access button labels root as /*');
-    assert.equal(api.displayQuickAccessPath('/*'), '/*', 'Finder accepts /* as the root quick-access label');
-    assert.equal(api.expandQuickAccessPath('/'), '/', 'Finder / quick-access opens the root directory');
-    assert.equal(api.expandQuickAccessPath('/*'), '/', 'Finder /* quick-access opens the root directory, not a literal glob path');
-    assert.equal(api.displayQuickAccessPath('/tmp'), '/tmp', 'Finder quick-access labels absolute paths such as /tmp with their leading slash');
-    assert.equal(finderPanelBundle.includes('renderQuickAccessInto(fileExplorerQuickAccess)'), false, 'legacy Finder quick-root container is not populated in visible UI');
+    assert.equal(finderPanelBundle.includes('fileExplorerQuickAccess'), false, 'legacy Finder quick-root code is removed instead of left inactive');
     assert.ok(/const fileExplorerTripletRegistry = Object\.freeze\([\s\S]*\[finderItemId\][\s\S]*\[differItemId\][\s\S]*\[tabberItemId\]/.test(finderPanelBundle) && /function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(finderPanelBundle), 'Finder, Differ, and Tabber use the fixed-identity registry with no duplicate in-panel mode switcher');
     assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
     assert.ok(/fileExplorerTreeSortSelectHtml\(\)[\s\S]*file-explorer-date-controls[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)/.test(finderPanelSource), 'Finder Date, Expand all, and Collapse all form a trailing action-row cluster while Reload stays in the primary row');
@@ -2305,7 +2300,9 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-reset="yoagent\.system_prompt"(?! disabled)/.test(preferencesHtml), 'YO!agent system prompt row Reset is visible and enabled at defaults');
     assert.ok(/data-setting-reset="yoagent\.intro"(?! disabled)/.test(preferencesHtml), 'YO!agent intro row Reset is visible and enabled at defaults');
     assert.ok(/data-setting-reset="yoagent\.format"(?! disabled)/.test(preferencesHtml), 'YO!agent answer format row Reset is visible and enabled at defaults');
-    assert.ok(/data-setting-path="file_explorer\.quick_access_paths"[\s\S]*data-setting-type="list"[\s\S]*rows="3"/.test(preferencesHtml), 'list settings keep compact textarea rows');
+    assert.equal(preferencesHtml.includes('file_explorer.quick_access_paths'), false, 'unused Quick paths is absent from Preferences');
+    assert.ok(/data-setting-path="file_explorer\.index_exclude_dir_names"[\s\S]*data-setting-autosize="true"[\s\S]*rows="20"/.test(preferencesHtml), 'directory-name exclusions grow through 20 lines before using their own scrollbar');
+    assert.ok(/const rows = Number\.isFinite\(Number\(item\.rows\)\) \? Math\.max\(1, Math\.min\(20, Math\.floor\(Number\(item\.rows\)\)\)\) : 3;/.test(diffBundle), 'shared list controls permit a 20-line display ceiling without changing their item validation limit');
     assert.ok(/data-setting-path="uploads\.image_action_order"[\s\S]*data-setting-autosize="true"[\s\S]*data-setting-max-items="9"[\s\S]*rows="7"/.test(preferencesHtml), 'image paste action order autosizes from its readable list and caps shortcut-backed items at 9');
     api.setClientSettingsPatchForTest({uploads: {image_action_order: ['Extract the text (OCR): ; do OCR on this image and extract all of the text.']}});
     assert.ok(api.preferencesPanelHtmlForTest('image paste', []).includes('Extract the text (OCR): ; do OCR on this image and extract all of the text.'), 'image paste action order shows popup label plus the exact inserted prompt text');
@@ -2621,8 +2618,6 @@ async function runShareThemeSuite() {
     assert.equal(api.preferenceItemMatches(hugeItem, 'huge'), true, 'size aliases match font settings');
     const popupItem = {path: 'performance.tab_popover_show_delay_ms', label: 'Tab detail hover delay', help: 'Initial delay before details open.', suffix: 'ms'};
     assert.equal(api.preferenceItemMatches(popupItem, 'tooltip'), true, 'tooltip aliases match popover settings');
-    const explorerItem = {path: 'file_explorer.quick_access_paths', label: 'Quick paths', help: 'Pinned roots.', suffix: ''};
-    assert.equal(api.preferenceItemMatches(explorerItem, 'bookmarks'), true, 'bookmark aliases match quick paths');
     assert.equal(api.preferenceSectionMatches({title: 'Notifications', items: []}, 'alerts'), true, 'section search uses aliases');
 
     const panelForPopover = {
@@ -4411,7 +4406,6 @@ async function runShareThemeSuite() {
     assert.equal(finderCandidatesBody.includes('lastFocusedTmuxSession'), false, 'Finder candidates do not read passive lastFocusedTmuxSession');
     assert.ok(/function setFileExplorerManualRootMode\(\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*setFileExplorerRootMode\('fixed', \{sync: false, persist: true\}\)/.test(source), 'manual Finder scope buttons cancel pending Sync and leave Sync mode explicitly');
     assert.ok(/function cancelPendingFileExplorerActiveSync\(options = \{\}\) \{[\s\S]*fileExplorerInteractionGeneration \+= 1;[\s\S]*if \(options\.invalidateOpen !== false\) fileExplorerOpenGeneration \+= 1;[\s\S]*fileExplorerSyncState.generation \+= 1;/.test(source), 'manual Finder actions invalidate stale root opens and stale tree expansion work');
-    assert.ok(source.includes('openFileExplorerManualRoot(expandQuickAccessPath(path));'), 'Finder quick-access opens are manual and disable Sync');
     assert.ok(source.includes('const opened = await openFileExplorerManualRoot(target);'), 'Finder typed path opens are manual and disable Sync');
     assert.ok(source.includes("if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);"), 'Finder root navigation by double-click is manual and disables Sync');
     assert.ok(source.includes('fileExplorerSyncManualCollapsedPaths'), 'Finder Sync tracks manually collapsed auto-expanded paths');

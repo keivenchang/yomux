@@ -75,7 +75,6 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "file_explorer.root_mode": ("finder root mode", "file explorer root mode", "sync root"),
     "file_explorer.image_open_mode": ("image open mode", "image tab mode"),
     "file_explorer.image_preview_max_px": ("image preview size", "image hover preview size"),
-    "file_explorer.quick_access_paths": ("quick access paths", "finder shortcuts", "favorite paths"),
     "file_explorer.indexed_dirs": ("indexed dirs", "indexed directories", "quick search directories"),
     "file_explorer.index_refresh_seconds": ("index refresh", "quick search refresh"),
     "file_explorer.companion_dirs": ("companion dirs", "companion repos", "extra repos"),
@@ -789,7 +788,7 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "auth": "admin for writes",
             "locale_keys": {"auth": "yoagent.capability.auth.adminForWrites"},
             "backing": "/api/session-files, /api/activity-summary, filesystem helpers",
-            "setting_keys": ["file_explorer.root_mode", "file_explorer.indexed_dirs", "file_explorer.quick_access_paths"],
+            "setting_keys": ["file_explorer.root_mode", "file_explorer.indexed_dirs"],
             "examples": ["where is README.md?", "show recent agents", "open changed files"],
         },
         {

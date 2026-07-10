@@ -787,9 +787,9 @@ def test_compact_overflow_strips_have_one_shared_layout_owner():
     tokens_css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
     topbar_css = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
     file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
-    assert re.search(r"\.app-menu-bar,\s*\.file-explorer-quick-access,\s*\.file-explorer-quick-access-panel\s*\{[^}]*flex:\s*0 0 auto[^}]*overflow:\s*visible", tokens_css)
+    assert re.search(r"\.app-menu-bar\s*\{[^}]*flex:\s*0 0 auto[^}]*overflow:\s*visible", tokens_css)
     assert not re.search(r"\.app-menu-bar\s*\{", topbar_css)
-    assert not re.search(r"\.file-explorer-quick-access,\s*\.file-explorer-quick-access-panel\s*\{", file_tree_css)
+    assert "file-explorer-quick-access" not in file_tree_css
 
 
 def test_audited_css_families_have_one_grouped_owner():

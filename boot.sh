@@ -337,6 +337,40 @@ stop_port_listener() {
   fi
 }
 
+port_restart_lock_dir() {
+  local port="$1"
+  printf '%s/yolomux-restart-%s.lock' "${TMPDIR:-/tmp}" "$port"
+}
+
+acquire_port_restart_lock() {
+  local port="$1"
+  local lock_dir
+  local owner_pid
+  lock_dir="$(port_restart_lock_dir "$port")"
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$lock_dir/pid"
+    return 0
+  fi
+  owner_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
+    rm -f "$lock_dir/pid"
+    rmdir "$lock_dir" 2>/dev/null || true
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$lock_dir/pid"
+      return 0
+    fi
+  fi
+  die "a YOLOmux restart for port $port is already in progress"
+}
+
+release_port_restart_lock() {
+  local port="$1"
+  local lock_dir
+  lock_dir="$(port_restart_lock_dir "$port")"
+  rm -f "$lock_dir/pid"
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
 wait_for_port() {
   local port="$1"
   local code
@@ -385,6 +419,7 @@ launch_server() {
 restart_port() {
   local port="$1"
   local log_path
+  acquire_port_restart_lock "$port"
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
 
@@ -398,6 +433,7 @@ restart_port() {
   printf 'restarted port %s from %s; log: %s\n' "$port" "$repo_root" "$log_path"
   wait_for_port "$port"
   verify_port_stable "$port"
+  release_port_restart_lock "$port"
 }
 
 ensure_xterm_assets() {

@@ -80,3 +80,5 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert " >> %q 2>&1 < /dev/null" in source
     assert 'env.pop("TMUX", None)' in source
     assert 'env.pop("TMUX_PANE", None)' in source
+    assert "acquire_port_restart_lock \"$port\"" in source
+    assert "a YOLOmux restart for port $port is already in progress" in source

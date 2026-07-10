@@ -1295,16 +1295,12 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
         return {
           mode: fileExplorerRootModeValue(),
           syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
-          quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
-          quickPanelCount: document.querySelectorAll('.file-explorer-quick-access-panel').length,
         };
         """
     )
     assert sync_root_metrics == {
         "mode": "sync",
         "syncPressed": "true",
-        "quickButtonCount": 0,
-        "quickPanelCount": 0,
     }, sync_root_metrics
     click_visible_panel(browser, "panel-5")
     WebDriverWait(browser, 5).until(
@@ -1329,8 +1325,6 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
               explicitSession: fileExplorerExplicitSyncSessionTarget(),
               planRoot: fileExplorerSyncPlan('5').root,
               syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
-              quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
-              quickPanelCount: document.querySelectorAll('.file-explorer-quick-access-panel').length,
             });
           }));
         }).catch(error => done({error: String(error)}));
@@ -1343,8 +1337,6 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
     assert manual_metrics["explicitSession"] == "5", manual_metrics
     assert manual_metrics["planRoot"] == "/home/test/yolomux.dev", manual_metrics
     assert manual_metrics["syncPressed"] == "false", manual_metrics
-    assert manual_metrics["quickButtonCount"] == 0, manual_metrics
-    assert manual_metrics["quickPanelCount"] == 0, manual_metrics
     browser.execute_script(
         """
         setFocusedTerminal('5', {userInitiated: true});
@@ -1360,7 +1352,6 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
               root: document.querySelector('.file-explorer-path-inline')?.value || '',
               mode: fileExplorerRootModeValue(),
               syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
-              quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
             });
           }));
         """
@@ -1369,7 +1360,6 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
         "root": "/home/test",
         "mode": "fixed",
         "syncPressed": "false",
-        "quickButtonCount": 0,
     }, unchanged_metrics
     browser.execute_script(
         "document.querySelector('.file-explorer-root-mode-toggle-panel')?.click();"
@@ -1380,57 +1370,10 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
             return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
               && fileExplorerRootModeValue() === 'sync'
               && fileExplorerManualSelectionActive === false
-              && document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') === 'true'
-              && document.querySelectorAll('.file-explorer-quick-access-button').length === 0;
+              && document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') === 'true';
             """
         )
     )
-
-
-def test_quick_access_roots_are_not_visible_in_finder_toolbar(browser, tmp_path):
-    load_live_runtime_boot_fixture(
-        browser,
-        tmp_path,
-        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
-        settings={"file_explorer": {"root_mode": "fixed", "quick_access_paths": ["~", "/*", "/tmp"]}},
-        fs_entries={
-            "/home/test": [{"name": "project", "kind": "dir"}],
-            "/": [{"name": "tmp", "kind": "dir"}],
-            "/tmp": [{"name": "scratch.txt", "kind": "file"}],
-        },
-    )
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return document.querySelector('.file-explorer-panel .file-explorer-toolbar') !== null
-              && document.querySelector('.file-explorer-path-inline')?.value === '/home/test';
-            """
-        )
-    )
-    metrics = browser.execute_script(
-        """
-        return {
-          root: document.querySelector('.file-explorer-path-inline')?.value || '',
-          mode: fileExplorerRootModeValue(),
-          quickPanelCount: document.querySelectorAll('.file-explorer-quick-access-panel').length,
-          quickButtonCount: document.querySelectorAll('.file-explorer-quick-access-button').length,
-          rootLabel: displayQuickAccessPath('/'),
-          starLabel: displayQuickAccessPath('/*'),
-          starPath: expandQuickAccessPath('/*'),
-          tmpLabel: displayQuickAccessPath('/tmp'),
-        };
-        """
-    )
-    assert metrics == {
-        "root": "/home/test",
-        "mode": "fixed",
-        "quickPanelCount": 0,
-        "quickButtonCount": 0,
-        "rootLabel": "/*",
-        "starLabel": "/*",
-        "starPath": "/",
-        "tmpLabel": "/tmp",
-    }, metrics
 
 
 def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
