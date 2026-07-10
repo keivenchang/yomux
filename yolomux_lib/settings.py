@@ -476,7 +476,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "reload_on_update"): "true/false. Default true. When true, an open client asks whether to reload the browser once the running server reports a YOLOMUX_VERSION or client bundle revision that differs from the page boot values. This does not check origin/main.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing the browser reload prompt — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
-    ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
+    ("file_explorer", "indexed_dirs"): "Directories with a pre-built Quick Open index, one path per line. In Finder/File Explorer, right-click a directory and choose Allow index to add it or Disallow index to remove it. You can also add or remove paths here.",
     ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
     ("file_explorer", "index_max_files"): "Files, 1000-1000000. Maximum in-memory Quick Open entries per root; larger roots report partial coverage instead of silently growing an unbounded index.",
     ("file_explorer", "index_persist"): "true/false. Persist bounded Quick Open indexes for restart and cross-process handoff; active in-memory search remains available when false.",

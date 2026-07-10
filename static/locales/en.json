@@ -1032,7 +1032,7 @@
   "pref.file_explorer.index_max_files.label": "Maximum indexed files",
   "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
   "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
-  "pref.file_explorer.indexed_dirs.help": "Directories with a pre-built quick-open index, one path per line. Add a path to index it (same as the Finder right-click); remove a line to un-index it.",
+  "pref.file_explorer.indexed_dirs.help": "Directories with a pre-built Quick Open index, one path per line. In Finder/File Explorer, right-click a directory and choose Allow index to add it or Disallow index to remove it. You can also add or remove paths here.",
   "pref.file_explorer.indexed_dirs.label": "Indexed directories",
   "pref.file_explorer.new_entry_highlight_ms.help": "How long newly detected files or directories stay colored in Finder/File Explorer.",
   "pref.file_explorer.new_entry_highlight_ms.label": "New file highlight duration",

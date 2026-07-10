@@ -187,6 +187,10 @@ def test_oversized_index_is_partial_in_memory_and_not_persisted_across_restart(t
     assert built.persisted is False
     assert not file_index._index_disk_path(tmp_path).exists()
     _clear_registry()
+    # A restart begins an asynchronous cold build. Hold that build here so this
+    # persistence contract cannot race a three-file tree and turn ready before
+    # the assertion observes the new RootIndex.
+    monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: None)
     reloaded = file_index.ensure_index(tmp_path, SEARCH_SKIP_DIRS)
     assert reloaded.ready is False
 
