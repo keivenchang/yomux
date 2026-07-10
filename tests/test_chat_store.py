@@ -205,26 +205,29 @@ def test_chat_store_rejects_oversized_body_without_slicing_unicode(tmp_path):
     assert [item.client_message_uuid for item in store.page_before(limit=10).messages] == ["accepted"]
 
 
-def test_chat_store_first_reader_starts_at_tail_and_cursor_is_monotonic(tmp_path):
+def test_chat_store_person_cursor_starts_at_tail_and_is_shared_across_browsers(tmp_path):
     now = [100_000.0]
     store = ChatStore(tmp_path / "chat.sqlite3", clock=lambda: now[0])
     first_id = _insert(store, 1, timestamp=now[0] - 1)
-    bootstrap = store.bootstrap(username="alice", reader_id="reader-a")
+    bootstrap = store.bootstrap(username="alice")
     assert bootstrap.first_registration is True
     assert bootstrap.latest_message_id == first_id
     assert bootstrap.read_cursor.read_up_to_id == first_id
     assert bootstrap.unread_messages == ()
     assert bootstrap.has_more_older is True
 
+    bob_baseline = store.bootstrap(username="bob")
+    assert bob_baseline.unread_messages == ()
     second_id = _insert(store, 2, username="bob", timestamp=now[0])
-    unread = store.bootstrap(username="alice", reader_id="reader-a")
+    unread = store.bootstrap(username="alice")
     assert [item.id for item in unread.unread_messages] == [second_id]
     assert unread.has_more_older is True
-    assert store.bootstrap(username="alice", reader_id="reader-b").unread_messages == ()
-    assert store.read_up_to(username="alice", reader_id="reader-a", message_id=second_id).read_up_to_id == second_id
-    assert store.read_up_to(username="alice", reader_id="reader-a", message_id=first_id).read_up_to_id == second_id
+    assert store.read_up_to(username="alice", message_id=second_id).read_up_to_id == second_id
+    assert store.bootstrap(username="alice").unread_messages == ()
+    assert [item.id for item in store.bootstrap(username="bob").unread_messages] == [second_id]
+    assert store.read_up_to(username="alice", message_id=first_id).read_up_to_id == second_id
     with pytest.raises(ChatStoreValidationError, match="tail"):
-        store.read_up_to(username="alice", reader_id="reader-a", message_id=second_id + 1)
+        store.read_up_to(username="alice", message_id=second_id + 1)
 
 
 def test_chat_store_typing_leases_refresh_stop_expire_and_send_clears(tmp_path):
@@ -372,9 +375,45 @@ def test_chat_store_migrates_v1_messages_with_empty_sender_ip(tmp_path):
     check.close()
 
 
+def test_chat_store_migrates_v2_browser_cursors_to_each_persons_furthest_acknowledgement(tmp_path):
+    path = tmp_path / "v2.sqlite3"
+    connection = sqlite3.connect(path)
+    ChatStore._create_schema(connection)
+    connection.execute("DROP TABLE chat_read_cursors")
+    connection.execute(
+        """CREATE TABLE chat_read_cursors (
+            room_id TEXT NOT NULL, username TEXT NOT NULL, reader_id TEXT NOT NULL,
+            read_up_to_id INTEGER NOT NULL DEFAULT 0, updated_at_utc REAL NOT NULL,
+            PRIMARY KEY (room_id, username, reader_id)
+        )"""
+    )
+    connection.executemany(
+        "INSERT INTO chat_read_cursors(room_id, username, reader_id, read_up_to_id, updated_at_utc) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("global", "alice", "browser-a", 4, 10.0),
+            ("global", "alice", "browser-b", 9, 20.0),
+            ("global", "bob", "browser-c", 3, 30.0),
+        ],
+    )
+    connection.execute("PRAGMA user_version = 2")
+    connection.commit()
+    connection.close()
+
+    store = ChatStore(path)
+    assert store.fts_mode in {CHAT_FTS_MODE, CHAT_LIKE_FALLBACK_MODE}
+    check = sqlite3.connect(path)
+    rows = check.execute(
+        "SELECT username, read_up_to_id FROM chat_read_cursors ORDER BY username"
+    ).fetchall()
+    assert rows == [("alice", 9), ("bob", 3)]
+    assert check.execute("PRAGMA user_version").fetchone()[0] == CHAT_SCHEMA_VERSION
+    assert "reader_id" not in {row[1] for row in check.execute("PRAGMA table_info(chat_read_cursors)")}
+    check.close()
+
+
 def test_chat_store_empty_bootstrap_has_no_older_history(tmp_path):
     store = ChatStore(tmp_path / "empty.sqlite3")
-    assert store.bootstrap(username="guest", reader_id="reader").has_more_older is False
+    assert store.bootstrap(username="guest").has_more_older is False
 
 
 def test_chat_store_two_processes_write_concurrently_without_loss(tmp_path):
@@ -432,7 +471,7 @@ def test_chat_store_hard_ceiling_acceptance_payload_and_latency_budgets(tmp_path
     timings_ms = []
 
     started = time.perf_counter()
-    bootstrap = store.bootstrap(username="new-reader", reader_id="fixture-reader", retention_days=7)
+    bootstrap = store.bootstrap(username="new-reader", retention_days=7)
     timings_ms.append((time.perf_counter() - started) * 1000)
     assert bootstrap.first_registration is True
     assert bootstrap.unread_messages == ()

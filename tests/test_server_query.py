@@ -116,7 +116,7 @@ def test_chat_bootstrap_includes_server_observed_client_ip():
     writes = []
     calls = []
     app = SimpleNamespace(
-        chat_bootstrap=lambda username, reader_id, browser_instance_id: calls.append((username, reader_id, browser_instance_id)) or {
+        chat_bootstrap=lambda username, browser_instance_id: calls.append((username, browser_instance_id)) or {
             "revision": 0, "messages": [], "typing": [],
         }
     )
@@ -130,11 +130,11 @@ def test_chat_bootstrap_includes_server_observed_client_ip():
 
     http_routes.get_chat_bootstrap(
         request,
-        SimpleNamespace(query="reader_id=reader-a&browser_instance_id=browser-a"),
+        SimpleNamespace(query="reader_id=ignored-reader&browser_instance_id=browser-a"),
         route_by_path("GET", "/api/chat/bootstrap"),
     )
 
-    assert calls == [("alice", "reader-a", "browser-a")]
+    assert calls == [("alice", "browser-a")]
     assert writes == [(HTTPStatus.OK, {"revision": 0, "messages": [], "typing": [], "client_ip": "10.1.123.12"})]
 
 

@@ -3802,7 +3802,7 @@ def test_two_webapps_reconcile_chat_from_shared_database_and_fanout_once(monkeyp
 
         app1.chat_typing("alice", "browser-a", True)
         assert subscriber_queue.get_nowait()["type"] == "chat_typing_changed"
-        bootstrap = app2.chat_bootstrap("bob", "reader-b", "browser-b")
+        bootstrap = app2.chat_bootstrap("bob", "browser-b")
         assert [lease["username"] for lease in bootstrap["typing"]] == ["alice"]
     finally:
         app2.client_events.unsubscribe(subscriber_id)

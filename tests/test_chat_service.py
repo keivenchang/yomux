@@ -68,30 +68,31 @@ def test_chat_service_authoritative_identity_exact_text_and_idempotent_retry(tmp
     assert payload["body"] not in str(send_metrics)
 
 
-def test_chat_service_two_users_and_same_username_instances_keep_private_read_state(tmp_path):
+def test_chat_service_two_users_keep_private_read_state_while_same_person_browsers_share_it(tmp_path):
     service = _service(tmp_path)
-    assert service.bootstrap(username="alice", reader_id="reader-a1", browser_instance_id="browser-a1")["messages"] == []
+    assert service.bootstrap(username="alice", browser_instance_id="browser-a1")["messages"] == []
     service.send(username="alice", payload={"browser_instance_id": "browser-a2", "client_message_uuid": "m-a2", "body": "hello from another browser"}, locale="en")
     service.send(username="bob", payload={"browser_instance_id": "browser-b", "client_message_uuid": "m-b", "body": "question?"}, locale="en")
-    alice = service.bootstrap(username="alice", reader_id="reader-a1", browser_instance_id="browser-a1")
-    other_alice = service.bootstrap(username="alice", reader_id="reader-a2", browser_instance_id="browser-a2")
-    bob = service.bootstrap(username="bob", reader_id="reader-b", browser_instance_id="browser-b")
+    alice = service.bootstrap(username="alice", browser_instance_id="browser-a1")
+    other_alice = service.bootstrap(username="alice", browser_instance_id="browser-a2")
+    bob = service.bootstrap(username="bob", browser_instance_id="browser-b")
 
     assert [message["username"] for message in alice["messages"]] == ["alice", "bob"]
-    assert other_alice["first_registration"] is True and other_alice["messages"] == []
+    assert other_alice["first_registration"] is False
+    assert [message["username"] for message in other_alice["messages"]] == ["alice", "bob"]
     assert bob["first_registration"] is True and bob["messages"] == []
 
 
 def test_chat_service_bootstrap_exposes_only_real_older_history(tmp_path):
     service = _service(tmp_path)
-    empty = service.bootstrap(username="alice", reader_id="reader", browser_instance_id="browser")
+    empty = service.bootstrap(username="alice", browser_instance_id="browser")
     assert empty["has_more_older"] is False and empty["older_cursor"] is None
     service.send(username="bob", payload={"browser_instance_id": "bob-browser", "client_message_uuid": "m-1", "body": "new"}, locale="en")
-    unread = service.bootstrap(username="alice", reader_id="reader", browser_instance_id="browser")
+    unread = service.bootstrap(username="alice", browser_instance_id="browser")
     assert unread["has_more_older"] is False and unread["older_cursor"] is None
     service.send(username="bob", payload={"browser_instance_id": "bob-browser", "client_message_uuid": "m-2", "body": "newer"}, locale="en")
-    service.read(username="alice", reader_id="reader", message_id=2)
-    history = service.bootstrap(username="alice", reader_id="reader", browser_instance_id="browser")
+    service.read(username="alice", message_id=2)
+    history = service.bootstrap(username="alice", browser_instance_id="browser")
     assert history["has_more_older"] is True and history["older_cursor"]
 
 
