@@ -140,9 +140,6 @@
   --auto-surface-active: #25400f;
   --auto-muted-text: #dff5c2;
   --auto-active-text: #f4ffe8;
-  --auto-border: #9be33d;
-  --auto-border-muted: #5d9419;
-  --auto-border-disabled: #4b7518;
   --auto-glow: rgba(118, 185, 0, 0.24);
   --bad: #ff6673;
   --danger-text: #fff3f4;
@@ -1114,9 +1111,6 @@ body.theme-light {
   --auto-surface-active: #d5efbf;
   --auto-muted-text: #2d4f0b;
   --auto-active-text: #112200;
-  --auto-border: #4f8f10;
-  --auto-border-muted: #7baa42;
-  --auto-border-disabled: #b3c99b;
   --auto-glow: rgba(95, 152, 0, 0.22);
   --bad: var(--danger-strong-hover);
   --pane-ring-attention: #d11a2a;  /* darker attention red that reads on the light pane bg */

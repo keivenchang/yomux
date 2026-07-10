@@ -63,6 +63,25 @@ def test_generated_static_assets_are_current():
         assert (repo_path("static") / asset).read_text(encoding="utf-8") == build_asset(asset)
 
 
+def test_markdown_source_change_invalidates_derived_preview_artifacts():
+    markdown = repo_path("static_src/js/yolomux/93_markdown_preview.js").read_text(encoding="utf-8")
+    renderers = repo_path("static_src/js/yolomux/94_preview_renderers.js").read_text(encoding="utf-8")
+
+    assert "function invalidateMarkdownPreviewArtifacts" in markdown
+    assert "container._markdownPreviewGeneration" in markdown
+    assert "isCurrent: () => container._markdownPreviewGeneration === generation" in markdown
+    assert "const isCurrent = typeof options.isCurrent === 'function'" in renderers
+    assert "if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;" in renderers
+
+
+def test_session_rename_border_uses_the_selected_active_color():
+    css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    rule = re.search(r"\.session-rename-input\s*\{(?P<body>.*?)\n\}", css, re.DOTALL)
+    assert rule is not None
+    assert "border: 1px solid var(--active-control-border);" in rule.group("body")
+    assert "var(--auto-border)" not in rule.group("body")
+
+
 def test_i18n_runtime_partial_is_registered_before_core():
     js = ASSETS["yolomux.js"]
     assert "static_src/js/yolomux/05_i18n.js" in js

@@ -38,6 +38,11 @@ from urllib.parse import unquote
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
+try:
+    from watchfiles import watch as watchfiles_watch
+except ImportError:  # pragma: no cover - direct-source fallback before setup
+    watchfiles_watch = None
+
 from . import common
 from . import file_index
 from . import filesystem
@@ -106,6 +111,7 @@ from .common import truncate_text
 from .common import yolomux_client_revision
 from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
+from .search_indexer import SearchIndexerClient
 from .drop_actions import run_drop_action
 from .events import EventLog
 from .events import RunHistoryStore
@@ -891,6 +897,14 @@ CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
     "working_elapsed_seconds",
 })
 DIRECTORY_WATCH_ENTRY_LIMIT = 512
+NATIVE_FILESYSTEM_WATCH_DEBOUNCE_MS = 250
+NATIVE_FILESYSTEM_WATCH_STEP_MS = 50
+NATIVE_FILESYSTEM_WATCH_RUST_TIMEOUT_MS = 1_000
+NATIVE_FILESYSTEM_RECONCILE_SECONDS = 300.0
+NATIVE_FILESYSTEM_RETRY_SECONDS = 10.0
+# Native watching is preferred; when unavailable, only visible Finder/Differ
+# roots are polled at this bounded cadence.
+VISIBLE_FILESYSTEM_FALLBACK_POLL_SECONDS = 2.0
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
 DEFAULT_APP_SETTINGS = default_settings()
@@ -1714,7 +1728,10 @@ class TmuxWebtermApp:
         self.control_server = YolomuxControlServer(self.handle_control_request)
         self.control_server.start()
         self.background_owner: BackgroundOwnerRegistry | DisabledBackgroundOwner = DisabledBackgroundOwner()
-        file_index.set_background_owner_checker(self.background_can_run)
+        self.search_indexer = SearchIndexerClient()
+        # A persistent child owns all Quick Open builds and SQLite writes.
+        # HTTP/WebSocket processes remain read-only index consumers.
+        file_index.set_background_owner_checker(self.search_index_can_build)
         file_index.set_background_owner_refresh_requester(self.request_background_refresh)
         file_index.set_background_owner_bytes_recorder(self.record_background_search_index_bytes_written)
         file_index.set_background_owner_done_notifier(self.publish_background_refresh_done)
@@ -4144,7 +4161,7 @@ class TmuxWebtermApp:
             on_demote=self.demote_background_owner,
             on_acquire=self.handle_background_owner_acquired,
         )
-        file_index.set_background_owner_checker(self.background_can_run)
+        file_index.set_background_owner_checker(self.search_index_can_build)
         acquired = self.background_owner.start()
         self.merge_shared_stats_history(max_age_seconds=None)
         if not acquired and self.background_owner.status == "blocked_by_unreachable_owner":
@@ -4182,6 +4199,10 @@ class TmuxWebtermApp:
 
     def background_can_run(self, role: str) -> bool:
         return self.background_owner.can_run(role)
+
+    def search_index_can_build(self, role: str) -> bool:
+        """Only the persistent indexer child may mutate Quick Open indexes."""
+        return False if role == BACKGROUND_ROLE_SEARCH_INDEX else self.background_can_run(role)
 
     def background_owner_status_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         # This path is polled by the topbar.  Diagnostics have a bounded, explicit admin
@@ -4312,13 +4333,24 @@ class TmuxWebtermApp:
             root = str(request_payload.get("root") or "").strip()
             if root:
                 try:
-                    changed_paths = request_payload.get("paths")
-                    if not isinstance(changed_paths, list):
-                        changed_paths = [request_payload.get("path")] if request_payload.get("path") else []
-                    normalized_changed_paths = [str(path) for path in changed_paths if isinstance(path, str) and path]
-                    if normalized_changed_paths:
-                        filesystem.reindex_roots_for_paths(normalized_changed_paths, reason=str(request_payload.get("reason") or "owner-refresh"))
-                    result["refresh"] = filesystem.index_status(root)
+                    if request_payload.get("operation") == "unindex":
+                        result["indexer"] = self.search_indexer.unindex(root)
+                    else:
+                        changed_paths = request_payload.get("paths")
+                        if not isinstance(changed_paths, list):
+                            changed_paths = [request_payload.get("path")] if request_payload.get("path") else []
+                        normalized_changed_paths = [str(path) for path in changed_paths if isinstance(path, str) and path]
+                        result["indexer"] = self.search_indexer.enqueue(
+                            root,
+                            normalized_changed_paths,
+                            reason=str(request_payload.get("reason") or "owner-refresh"),
+                        )
+                    if not result["indexer"].get("accepted"):
+                        result.update({
+                            "ok": False,
+                            "accepted": False,
+                            "error": str(result["indexer"].get("error") or "persistent indexer unavailable"),
+                        })
                 except filesystem.FilesystemError as exc:
                     result.update({"ok": False, "accepted": False, "error": str(exc)})
         cache_status = "coalesced" if result.get("coalesced") else ("fallback" if self.background_refresh_should_fallback(result) else ("accepted" if result.get("accepted") else "rejected"))
@@ -6139,6 +6171,8 @@ class TmuxWebtermApp:
         deadlines: list[float] = []
         if not channels.isdisjoint({"files", "transcripts", "activity"}):
             deadlines.extend((current.next_signature_poll_at, current.next_file_poll_at, current.next_background_file_poll_at))
+            if not current.filesystem_healthy:
+                deadlines.append(current.next_filesystem_retry_at)
         if not channels.isdisjoint({"status", "attention"}):
             deadlines.extend((current.next_auto_poll_at, current.next_attention_ack_poll_at, current.next_tmux_signal_poll_at))
         if not channels.isdisjoint({"core", "attention"}):
@@ -6204,6 +6238,7 @@ class TmuxWebtermApp:
             self.client_watch_service.session_files = session_files_requests
             self.client_watch_service.activity_summary = activity_summary
         self.wake_client_event_watcher()
+        self.request_native_filesystem_watch_reconfigure()
         with self.client_events.lock:
             has_client_event_subscribers = bool(self.client_events.subscribers)
         if has_client_event_subscribers:
@@ -6325,15 +6360,12 @@ class TmuxWebtermApp:
         return tuple(rows)
 
     def filesystem_roots_for_watch(self, sessions: dict[str, SessionInfo]) -> list[str]:
+        # Keep active-session discovery for its metadata consumers, but do not
+        # turn every session cwd or configured companion into a hot filesystem
+        # watch. High-frequency observation belongs only to roots the browser
+        # currently displays in Finder or Differ.
         self.watch_root_index.update_active_roots(self.active_directory_watch_roots(sessions))
         roots = set(self.client_watch_roots_snapshot())
-        settings = settings_payload().get("settings", {})
-        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
-        if isinstance(file_explorer, dict):
-            for item in file_explorer.get("companion_dirs", []) or []:
-                path = str(item or "").strip()
-                if path.startswith("/"):
-                    roots.add(path)
         return sorted(str(Path(root).expanduser()) for root in roots if str(root or "").startswith("/"))[:CLIENT_WATCH_ROOT_LIMIT]
 
     def active_directory_watch_roots(self, sessions: dict[str, SessionInfo]) -> dict[str, str]:
@@ -6400,6 +6432,310 @@ class TmuxWebtermApp:
 
     def background_files_watch_signature(self) -> tuple[Any, ...]:
         return tuple((path, file_watch_signature(path)) for path in self.background_files_for_watch())
+
+    def native_filesystem_watching_supported(self) -> bool:
+        return watchfiles_watch is not None
+
+    @staticmethod
+    def compact_native_filesystem_watch_paths(paths: list[str]) -> tuple[str, ...]:
+        """Watch the smallest non-overlapping set of roots."""
+        candidates = sorted(
+            {str(Path(path).expanduser().resolve(strict=False)) for path in paths if str(path or "").startswith("/")},
+            key=lambda item: (len(Path(item).parts), item),
+        )
+        compacted: list[str] = []
+        for candidate in candidates:
+            candidate_path = Path(candidate)
+            if any(filesystem._path_is_within(candidate_path, Path(parent)) for parent in compacted):
+                continue
+            compacted.append(candidate)
+        return tuple(compacted)
+
+    def native_filesystem_watch_configuration(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], frozenset[str]]:
+        """Return demanded filesystem roots plus exact settings/transcript/file parents."""
+        sessions, _errors = discover_sessions(self.sessions)
+        # watchfiles reports canonical paths on macOS (for example `/private/tmp`
+        # for a `/tmp` root), so keep the index/event roots canonical too.
+        roots = tuple(sorted({
+            str(Path(root).expanduser().resolve(strict=False))
+            for root in self.filesystem_roots_for_watch(sessions)
+        }))
+        transcripts = tuple(sorted({
+            str(Path(agent.transcript).expanduser().resolve(strict=False))
+            for info in sessions.values()
+            for agent in info.agents
+            if agent.transcript
+        }))
+        files = [*self.files_for_watch(), *self.background_files_for_watch()]
+        watch_paths = [*roots, str(SETTINGS_PATH.parent), *(str(Path(path).expanduser().parent) for path in files), *(str(Path(path).parent) for path in transcripts)]
+        settings = settings_payload().get("settings", {})
+        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
+        skip_dirs = filesystem.search._configured_search_skip_dirs(file_explorer if isinstance(file_explorer, dict) else {})
+        return roots, self.compact_native_filesystem_watch_paths(watch_paths), transcripts, frozenset(skip_dirs)
+
+    def request_native_filesystem_watch_reconfigure(self) -> None:
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
+            if record.filesystem_worker is None:
+                return
+            record.filesystem_reconfigure_event.set()
+            record.filesystem_stop_event.set()
+            record.wake_event.set()
+
+    def native_filesystem_event_allowed(self, path: Path, record: ClientEventWatcherRecord) -> bool:
+        if any(part in record.filesystem_skip_dirs for part in path.parts):
+            return False
+        # Native backends report every change under an ancestor watch root,
+        # including credentials we deliberately never allow filesystem APIs to
+        # inspect.  Apply that same policy before a batch can reach indexing.
+        try:
+            filesystem._ensure_path_allowed(path)
+        except filesystem.FilesystemError:
+            return False
+        return any(
+            path == Path(root) or filesystem._path_is_within(path, Path(root))
+            for root in record.filesystem_watch_paths
+        )
+
+    @staticmethod
+    def native_filesystem_paths_intersect(left: Path, right: Path) -> bool:
+        return (
+            left == right
+            or filesystem._path_is_within(left, right)
+            or filesystem._path_is_within(right, left)
+        )
+
+    @staticmethod
+    def native_filesystem_path_requires_reindex(change: Any, path: Path, roots: tuple[str, ...] = ()) -> bool:
+        """Ignore directory-metadata notifications when invalidating Quick Open.
+
+        Native backends commonly report a modified watch root in addition to the
+        actual file that changed below it.  Reindexing that root would turn one
+        edit into a full subtree walk.  A file event, or an added/deleted
+        directory, still needs normal incremental handling.
+        """
+        try:
+            change_code = int(change)
+        except (TypeError, ValueError):
+            change_code = 0
+        if change_code == 2 and path.is_dir():  # watchfiles.Change.modified
+            return False
+        # A watch root is already present when registration succeeds. Native
+        # backends can report that root as added, deleted, or modified while
+        # reconciling their own cursor; treating any of those as a dirty
+        # subtree rewalks the entire index. Real descendant events are still
+        # delivered, and the periodic reconciliation remains the backstop.
+        return not any(path == Path(root) for root in roots)
+
+    def publish_native_files_changed(self, changed_paths: list[Path]) -> list[str]:
+        watched_files = [*self.files_for_watch(), *self.background_files_for_watch()]
+        changed: list[dict[str, Any]] = []
+        for raw_path in sorted(set(watched_files)):
+            path = Path(raw_path).expanduser().resolve(strict=False)
+            if not any(self.native_filesystem_paths_intersect(path, changed_path) for changed_path in changed_paths):
+                continue
+            changed.append({"path": str(path), "signature": file_watch_signature(path)})
+        if not changed:
+            return []
+        self.publish_client_event(
+            "files_changed",
+            {"files": changed, "count": len(changed)},
+            trigger="native-watch",
+            cache="ready",
+        )
+        return ["files_changed"]
+
+    def handle_native_filesystem_changes(
+        self,
+        record: ClientEventWatcherRecord,
+        changes: set[tuple[Any, str]],
+    ) -> list[str]:
+        """Route one debounced native event batch through existing event owners."""
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return []
+            roots = tuple(record.filesystem_roots)
+            transcripts = tuple(record.filesystem_transcripts)
+        native_changes: list[tuple[Any, Path]] = []
+        for change, raw_path in changes:
+            if not isinstance(raw_path, str) or not raw_path.startswith("/"):
+                continue
+            path = Path(raw_path).expanduser().resolve(strict=False)
+            if self.native_filesystem_event_allowed(path, record):
+                native_changes.append((change, path))
+        changed_paths = sorted({path for _change, path in native_changes}, key=str)
+        if not changed_paths:
+            return []
+        events = self.publish_native_files_changed(changed_paths)
+        settings_path = SETTINGS_PATH.expanduser().resolve(strict=False)
+        if any(self.native_filesystem_paths_intersect(settings_path, path) for path in changed_paths):
+            settings_signature = self.settings_watch_signature()
+            with self.client_watch_service.lock:
+                previous = self.client_watch_service.settings_signature
+                self.client_watch_service.settings_signature = settings_signature
+            if previous and previous != settings_signature:
+                self.publish_client_event(
+                    "settings_changed",
+                    {"signature": settings_signature, "data": self.settings_payload()},
+                    trigger="native-watch",
+                    cache="ready",
+                )
+                events.append("settings_changed")
+        transcript_paths = [Path(path) for path in transcripts]
+        if transcript_paths and any(
+            self.native_filesystem_paths_intersect(transcript, path)
+            for transcript in transcript_paths
+            for path in changed_paths
+        ):
+            self.clear_transcript_caches()
+            self.publish_client_event(
+                "transcripts_changed",
+                {"refresh": True},
+                trigger="native-watch",
+                cache="refresh",
+            )
+            events.append("transcripts_changed")
+            events.extend(self.publish_context_items_ready_events(trigger="native-watch"))
+            events.extend(self.publish_activity_summary_ready_events(trigger="native-watch"))
+            events.extend(self.publish_session_files_ready_events(trigger="native-watch"))
+        filesystem_event_paths = [
+            path
+            for path in changed_paths
+            if any(path == Path(root) or filesystem._path_is_within(path, Path(root)) for root in roots)
+        ]
+        if not filesystem_event_paths:
+            return events
+        filesystem_paths = sorted({
+            path
+            for change, path in native_changes
+            if self.native_filesystem_path_requires_reindex(change, path, roots)
+            and any(
+                path == Path(root)
+                or filesystem._path_is_within(path, Path(root))
+                for root in roots
+            )
+        }, key=str)
+        if filesystem_paths:
+            filesystem.reindex_roots_for_paths([str(path) for path in filesystem_paths], reason="native-watch")
+        current_signature = self.filesystem_watch_signature_for_roots(list(roots))
+        with self.client_watch_service.lock:
+            previous_signature = self.client_watch_service.filesystem_signature
+            self.client_watch_service.filesystem_signature = current_signature
+        touched_roots = sorted({
+            root
+            for root in roots
+            if any(path == Path(root) or filesystem._path_is_within(path, Path(root)) for path in filesystem_event_paths)
+        })
+        change_summary = {
+            "roots_changed": len(touched_roots),
+            "roots_added": 0,
+            "roots_removed": 0,
+            "event_paths": len(filesystem_event_paths),
+            "indexed_paths": len(filesystem_paths),
+        }
+        if previous_signature != current_signature or touched_roots:
+            events.extend(self.publish_filesystem_ready_event(
+                list(roots),
+                trigger="native-watch",
+                change_summary=change_summary,
+                current_signature=current_signature,
+            ))
+        events.extend(self.publish_session_files_ready_events(trigger="native-watch"))
+        return events
+
+    def start_native_filesystem_watcher(self, record: ClientEventWatcherRecord | None = None) -> bool:
+        if not self.native_filesystem_watching_supported() or not self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
+            return False
+        with self.client_watch_service.lock:
+            current = record or self.client_watch_service.event_watcher_record
+            if self.client_watch_service.event_watcher_record is not current or current.stop_event.is_set():
+                return False
+            worker = current.filesystem_worker
+            if worker is not None and worker.is_alive():
+                return False
+            worker = threading.Thread(target=self.native_filesystem_watch_loop, args=(current,), name="native-filesystem-watch", daemon=True)
+            current.filesystem_worker = worker
+
+        def rollback() -> None:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is current and current.filesystem_worker is worker:
+                    current.filesystem_worker = None
+                    current.filesystem_healthy = False
+
+        common.start_thread_with_rollback(worker, rollback)
+        return True
+
+    def native_filesystem_watch_loop(self, record: ClientEventWatcherRecord) -> None:
+        worker = threading.current_thread()
+        try:
+            while not record.stop_event.is_set():
+                roots, watch_paths, transcripts, skip_dirs = self.native_filesystem_watch_configuration()
+                with self.client_watch_service.lock:
+                    if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                        return
+                    record.filesystem_roots = roots
+                    record.filesystem_watch_paths = watch_paths
+                    record.filesystem_transcripts = transcripts
+                    record.filesystem_skip_dirs = skip_dirs
+                    record.filesystem_stop_event = threading.Event()
+                    record.filesystem_reconfigure_event.clear()
+                    stop_event = record.filesystem_stop_event
+                if not watch_paths:
+                    record.wake_event.wait(timeout=1.0)
+                    record.wake_event.clear()
+                    continue
+                try:
+                    with self.client_watch_service.lock:
+                        record.filesystem_healthy = True
+                    assert watchfiles_watch is not None
+                    for changes in watchfiles_watch(
+                        *watch_paths,
+                        watch_filter=lambda _change, raw_path: self.native_filesystem_event_allowed(Path(raw_path).expanduser().resolve(strict=False), record),
+                        debounce=NATIVE_FILESYSTEM_WATCH_DEBOUNCE_MS,
+                        step=NATIVE_FILESYSTEM_WATCH_STEP_MS,
+                        rust_timeout=NATIVE_FILESYSTEM_WATCH_RUST_TIMEOUT_MS,
+                        stop_event=stop_event,
+                        raise_interrupt=False,
+                    ):
+                        if record.stop_event.is_set() or stop_event.is_set():
+                            break
+                        if changes:
+                            try:
+                                self.handle_native_filesystem_changes(record, changes)
+                            except Exception as exc:  # Keep one bad OS event from killing the watcher.
+                                self.log_event(
+                                    None,
+                                    "native_filesystem_watch_event_error",
+                                    f"native filesystem watch event failed: {exc}",
+                                    {"diagnostic": str(exc)},
+                                    message_key="events.message.clientEvent.directoryWatchFailed",
+                                )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    with self.client_watch_service.lock:
+                        record.filesystem_healthy = False
+                        record.next_filesystem_retry_at = time.monotonic() + NATIVE_FILESYSTEM_RETRY_SECONDS
+                    self.log_event(
+                        None,
+                        "native_filesystem_watch_error",
+                        f"native filesystem watch failed: {exc}",
+                        {"diagnostic": str(exc)},
+                        message_key="events.message.clientEvent.directoryWatchFailed",
+                    )
+                    if record.stop_event.wait(NATIVE_FILESYSTEM_RETRY_SECONDS):
+                        return
+                if not record.filesystem_reconfigure_event.is_set() and not record.stop_event.is_set():
+                    # A backend that returns without an error is treated like a transient
+                    # watch loss; retry after the same bounded backoff.
+                    with self.client_watch_service.lock:
+                        record.filesystem_healthy = False
+                        record.next_filesystem_retry_at = time.monotonic() + NATIVE_FILESYSTEM_RETRY_SECONDS
+                    if record.stop_event.wait(NATIVE_FILESYSTEM_RETRY_SECONDS):
+                        return
+        finally:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record and record.filesystem_worker is worker:
+                    record.filesystem_worker = None
+                    record.filesystem_healthy = False
 
     def publish_files_changed_event(self, previous: tuple[Any, ...] | None, current: tuple[Any, ...], compute_ms: float = 0.0) -> list[str]:
         if previous == current:
@@ -6537,7 +6873,7 @@ class TmuxWebtermApp:
             self.client_watch_service.filesystem_payload_signature = token
         if previous_signature == token:
             return []
-        full = force_full or trigger != "watch" or self.filesystem_watch_full_due()
+        full = force_full or trigger not in {"watch", "native-watch"} or self.filesystem_watch_full_due()
         if full:
             payload = self.filesystem_push_payload(roots)
             payload["mode"] = "full"
@@ -7014,6 +7350,8 @@ class TmuxWebtermApp:
             with self.client_watch_service.lock:
                 if self.client_watch_service.event_watcher_record is record and record.worker is worker:
                     record.stop_event.set()
+                    record.filesystem_stop_event.set()
+                    record.filesystem_reconfigure_event.set()
                     record.wake_event.set()
                     self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
                     owned = True
@@ -7026,14 +7364,29 @@ class TmuxWebtermApp:
             rollback()
             raise
         common.start_thread_with_rollback(worker, rollback)
+        try:
+            self.start_native_filesystem_watcher(record)
+        except RuntimeError as exc:
+            # Native watching is an accelerator. Keep the established polling
+            # fallback alive when a backend thread cannot start.
+            self.log_event(
+                None,
+                "native_filesystem_watch_error",
+                f"native filesystem watch failed to start: {exc}",
+                {"diagnostic": str(exc)},
+                message_key="events.message.clientEvent.directoryWatchFailed",
+            )
 
     def stop_client_event_watcher(self) -> None:
         self.stop_tmux_signal_event_watcher()
         with self.client_watch_service.lock:
             record = self.client_watch_service.event_watcher_record
             record.stop_event.set()
+            record.filesystem_stop_event.set()
+            record.filesystem_reconfigure_event.set()
             record.wake_event.set()
             thread = record.worker
+            filesystem_worker = record.filesystem_worker
             snapshot_worker = record.snapshot_worker
             record.snapshot_worker = None
         if snapshot_worker is not None:
@@ -7044,6 +7397,8 @@ class TmuxWebtermApp:
                 self.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
+        if filesystem_worker is not None and filesystem_worker is not threading.current_thread():
+            filesystem_worker.join(timeout=2.0)
         with self.client_watch_service.lock:
             if self.client_watch_service.event_watcher_record is record:
                 self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
@@ -7108,8 +7463,15 @@ class TmuxWebtermApp:
                     if file_demand and now >= current.next_background_file_poll_at:
                         self.poll_client_background_file_events_once()
                         current.next_background_file_poll_at = now + self.server_background_file_event_poll_seconds()
+                    if file_demand and not current.filesystem_healthy and now >= current.next_filesystem_retry_at:
+                        self.start_native_filesystem_watcher(current)
+                        current.next_filesystem_retry_at = now + NATIVE_FILESYSTEM_RETRY_SECONDS
                     if file_demand and now >= current.next_signature_poll_at:
-                        current.next_signature_poll_at = now + self.server_directory_event_poll_seconds()
+                        current.next_signature_poll_at = now + (
+                            NATIVE_FILESYSTEM_RECONCILE_SECONDS
+                            if current.filesystem_healthy
+                            else VISIBLE_FILESYSTEM_FALLBACK_POLL_SECONDS
+                        )
                         self.start_client_directory_poll(current)
                     if status_demand and now >= current.next_auto_poll_at:
                         self.poll_auto_approve_client_event_once()

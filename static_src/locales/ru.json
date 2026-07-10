@@ -1074,6 +1074,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Та же вкладка",
   "pref.file_explorer.image_preview_max_px.help": "Максимальная ширина и высота для превью при наведении в Finder/Файловом менеджере.",
   "pref.file_explorer.image_preview_max_px.label": "Максимальный размер превью изображения",
+  "pref.file_explorer.index_exclude_dir_names.help": "Имена каталогов, исключённые из индекса Quick Open в любом месте, по одному имени на строку. Предварительно заполнено типовыми каталогами VCS, секретов, зависимостей, кэша и сборки.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Имена каталогов, исключённые из индекса",
   "pref.file_explorer.index_exclude_paths.help": "Поддеревья каталогов, исключённые из индекса Quick Open: один абсолютный или относительный к домашнему каталогу путь на строку.",
   "pref.file_explorer.index_exclude_paths.label": "Пути, исключённые из индекса",
   "pref.file_explorer.index_max_files.help": "Максимальное число записей Quick Open для каждого индексируемого корня. При достижении лимита показывается предупреждение о частичном индексе.",

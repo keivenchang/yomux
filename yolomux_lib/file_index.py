@@ -43,14 +43,16 @@ def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
 MAX_INDEX_FILES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_MAX_FILES", 100_000, 1_000, 1_000_000)
 MAX_PERSISTED_INDEX_FILES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_PERSIST_MAX_FILES", 100_000, 1_000, 1_000_000)
 MAX_PERSISTED_INDEX_BYTES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_PERSIST_MAX_MB", 64, 1, 1_024) * 1024 * 1024
-PERSIST_DEBOUNCE_SECONDS = 60.0
+# The persistent indexer batches dirty paths for two seconds. Its writes are
+# row deltas, so this can stay responsive without rewriting an entire index.
+PERSIST_DEBOUNCE_SECONDS = 2.0
 # Serve from the index immediately; rebuild in the background once it is older
 # than this (stale-while-revalidate), which also prunes deleted files.
 # A stale index remains immediately searchable while the owner refreshes it.  A
 # short TTL turns ordinary Quick Open use into a recurring whole-tree walk.
 INDEX_TTL_SECONDS = 30.0 * 60.0
 # C11: bump when the on-disk storage shape changes so old/incompatible indexes rebuild for a clear reason.
-INDEX_FORMAT_VERSION = 3
+INDEX_FORMAT_VERSION = 4
 _BACKGROUND_OWNER_CHECKER: Callable[[str], bool] | None = None
 _BACKGROUND_OWNER_REFRESH_REQUESTER: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
 _BACKGROUND_OWNER_BYTES_RECORDER: Callable[[int], None] | None = None
@@ -70,7 +72,9 @@ def _resolved_index_dir() -> Path:
 
 
 def _path_is_index_storage(path: Path) -> bool:
-    candidate = path.expanduser().resolve(strict=False)
+    # Index walks never follow symlinks, so a lexical comparison avoids an
+    # expensive realpath syscall for every candidate in a large tree.
+    candidate = path.expanduser()
     index_dir = _resolved_index_dir()
     return candidate == index_dir or _path_is_within(candidate, index_dir)
 
@@ -100,6 +104,15 @@ class RootIndex:
     def __init__(self, root: Path):
         self.root = root
         self.entries: list[IndexEntry] = []
+        # The list is the in-memory search snapshot.  The map makes a normal
+        # file save O(log n) list maintenance instead of a full filter/sort of
+        # every indexed row.
+        self.entry_by_path: dict[str, IndexEntry] = {}
+        self.entries_signature = ""
+        self.pending_exact_deletes: set[str] = set()
+        self.pending_subtree_deletes: set[str] = set()
+        self.pending_upserts: dict[str, IndexEntry] = {}
+        self.pending_full_replace = False
         self.built_at = 0.0
         self.last_full_build_at = 0.0
         self.ready = False
@@ -355,11 +368,14 @@ def _connect_sqlite_index(root: Path) -> sqlite3.Connection:
 
 
 def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
+    current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current_version != INDEX_FORMAT_VERSION:
+        conn.execute("DROP TABLE IF EXISTS entries")
+        conn.execute("DROP TABLE IF EXISTS metadata")
     conn.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS entries ("
-        "ord INTEGER PRIMARY KEY, "
-        "path TEXT NOT NULL, "
+        "path TEXT PRIMARY KEY, "
         "name TEXT NOT NULL, "
         "relative_path TEXT NOT NULL, "
         "size INTEGER NOT NULL, "
@@ -380,11 +396,8 @@ def _replace_sqlite_metadata(conn: sqlite3.Connection, metadata: dict[str, str])
 def _replace_sqlite_entries(conn: sqlite3.Connection, entries: list[IndexEntry]) -> None:
     conn.execute("DELETE FROM entries")
     conn.executemany(
-        "INSERT INTO entries(ord, path, name, relative_path, size, mtime) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            (ordinal, str(path_str), str(name), str(rel), int(size), int(mtime))
-            for ordinal, (path_str, name, rel, size, mtime) in enumerate(entries)
-        ),
+        "INSERT INTO entries(path, name, relative_path, size, mtime) VALUES (?, ?, ?, ?, ?)",
+        ((str(path_str), str(name), str(rel), int(size), int(mtime)) for path_str, name, rel, size, mtime in entries),
     )
 
 
@@ -404,12 +417,91 @@ def _write_manifest(root: Path, metadata: dict[str, str]) -> None:
     manifest_tmp.replace(_index_manifest_path(root))
 
 
+def _pending_delta_is_empty(ri: RootIndex) -> bool:
+    return not ri.pending_full_replace and not ri.pending_exact_deletes and not ri.pending_subtree_deletes and not ri.pending_upserts
+
+
+def _clear_pending_delta(ri: RootIndex) -> None:
+    ri.pending_full_replace = False
+    ri.pending_exact_deletes.clear()
+    ri.pending_subtree_deletes.clear()
+    ri.pending_upserts.clear()
+
+
+def _apply_sqlite_delta(conn: sqlite3.Connection, ri: RootIndex) -> None:
+    """Apply one coalesced set of path/subtree mutations without table rewrite."""
+    for path in sorted(ri.pending_exact_deletes):
+        conn.execute("DELETE FROM entries WHERE path = ?", (path,))
+    for subtree in sorted(ri.pending_subtree_deletes, key=lambda value: (len(value), value)):
+        conn.execute("DELETE FROM entries WHERE path = ? OR path LIKE ?", (subtree, f"{subtree}/%"))
+    if ri.pending_upserts:
+        conn.executemany(
+            "INSERT INTO entries(path, name, relative_path, size, mtime) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET name=excluded.name, relative_path=excluded.relative_path, size=excluded.size, mtime=excluded.mtime",
+            (
+                (str(path_str), str(name), str(rel), int(size), int(mtime))
+                for path_str, name, rel, size, mtime in ri.pending_upserts.values()
+            ),
+        )
+
+
+def _record_pending_delta(ri: RootIndex, dirty_paths: list[Path], build_kind: str) -> None:
+    """Record the SQLite mutations represented by the already-built snapshot.
+
+    This runs only in the indexer process.  A full build is allowed to replace
+    the table; ordinary native file notifications become primary-key upserts or
+    deletes, and a directory notification affects only that subtree.
+    """
+    if build_kind == "full":
+        ri.pending_full_replace = True
+        ri.pending_exact_deletes.clear()
+        ri.pending_subtree_deletes.clear()
+        ri.pending_upserts.clear()
+        ri.entries_signature = _entries_signature(ri.entries)
+        return
+
+    for dirty in dirty_paths:
+        path = str(dirty)
+        if dirty.is_dir():
+            ri.pending_subtree_deletes.add(path)
+            # A later directory event subsumes queued child mutations from an
+            # earlier batch that is still inside the persistence debounce.
+            for pending_path in tuple(ri.pending_exact_deletes):
+                if _path_is_within(Path(pending_path), dirty):
+                    ri.pending_exact_deletes.discard(pending_path)
+            for pending_path in tuple(ri.pending_upserts):
+                if _path_is_within(Path(pending_path), dirty):
+                    ri.pending_upserts.pop(pending_path, None)
+            for entry_path, entry in ri.entry_by_path.items():
+                if _path_is_within(Path(entry_path), dirty):
+                    ri.pending_upserts[entry_path] = entry
+            continue
+
+        entry = ri.entry_by_path.get(path)
+        if entry is None:
+            ri.pending_upserts.pop(path, None)
+            ri.pending_exact_deletes.add(path)
+        else:
+            ri.pending_exact_deletes.discard(path)
+            ri.pending_upserts[path] = entry
+
+    # This is a revision token, not a content checksum.  The delta transaction
+    # itself is authoritative; avoiding an O(n) hash here is important for a
+    # large root receiving one-file saves every few seconds.
+    ri.entries_signature = f"delta:{time.time_ns()}:{len(ri.entries)}"
+
+
 def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *, force: bool = False) -> None:
-    estimated_bytes = _estimated_sqlite_bytes(ri.entries)
+    with ri.lock:
+        entries = list(ri.entries)
+        entries_signature = ri.entries_signature or _entries_signature(entries)
+        estimated_bytes = _estimated_sqlite_bytes(entries)
+        full_replace = ri.pending_full_replace
+        has_delta = not _pending_delta_is_empty(ri)
     persistence_allowed = (
         ri.persist_enabled
         and not ri.too_large
-        and len(ri.entries) <= ri.persist_max_files
+        and len(entries) <= ri.persist_max_files
         and estimated_bytes <= ri.persist_max_bytes
     )
     if not persistence_allowed:
@@ -421,13 +513,12 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
         ri.cache_bytes = 0
         return
     now = time.monotonic()
-    if ri.persisted and not force and now - ri.last_persisted_at < PERSIST_DEBOUNCE_SECONDS:
+    if ri.persisted and has_delta and not force and now - ri.last_persisted_at < PERSIST_DEBOUNCE_SECONDS:
         ri.persist_pending = True
         return
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         signature = _disk_skip_signature(ri.root, skip_dirs, exclude_signature)
-        entries_signature = _entries_signature(ri.entries)
         metadata = {
             "version": str(INDEX_FORMAT_VERSION),
             "storage": "sqlite",
@@ -435,28 +526,36 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
             "root": str(ri.root),
             "built_at": repr(float(ri.built_at)),
             "truncated": "1" if ri.truncated else "0",
-            "entry_count": str(len(ri.entries)),
+            "entry_count": str(len(entries)),
             "entries_signature": entries_signature,
         }
-        previous = _load_disk_metadata(ri.root, skip_dirs, exclude_signature)
         before_size = _sqlite_storage_size(ri.root)
         with _connect_sqlite_index(ri.root) as conn:
             _ensure_sqlite_schema(conn)
             db_metadata = dict(conn.execute("SELECT key, value FROM metadata"))
-            entries_unchanged = (
-                previous is not None
-                and db_metadata.get("version") == str(INDEX_FORMAT_VERSION)
+            schema_matches = (
+                db_metadata.get("version") == str(INDEX_FORMAT_VERSION)
                 and db_metadata.get("storage") == "sqlite"
                 and db_metadata.get("skip_signature") == signature
                 and db_metadata.get("root") == str(ri.root)
-                and db_metadata.get("entries_signature") == entries_signature
             )
             _replace_sqlite_metadata(conn, metadata)
-            if not entries_unchanged:
-                _replace_sqlite_entries(conn, ri.entries)
+            if full_replace or not schema_matches:
+                _replace_sqlite_entries(conn, entries)
+            elif has_delta:
+                _apply_sqlite_delta(conn, ri)
+            elif db_metadata.get("entries_signature") != entries_signature:
+                # A legacy/incomplete in-memory state with no recorded delta
+                # cannot safely be reconciled row-by-row.
+                _replace_sqlite_entries(conn, entries)
         _write_manifest(ri.root, metadata)
         after_size = _sqlite_storage_size(ri.root)
-        bytes_written = max(0, after_size - before_size) if entries_unchanged else after_size
+        bytes_written = max(0, after_size - before_size) if schema_matches else after_size
+        if has_delta:
+            # SQLite can reuse already-allocated WAL pages, making a real row
+            # transaction appear as zero growth. Keep diagnostics honest about
+            # mutation activity without representing it as a full rewrite.
+            bytes_written = max(1, bytes_written)
         ri.write_bytes += bytes_written
         record_search_index_bytes_written(bytes_written)
         if after_size > ri.persist_max_bytes:
@@ -469,6 +568,7 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
         ri.persist_pending = False
         ri.last_persisted_at = now
         ri.cache_bytes = after_size
+        _clear_pending_delta(ri)
     except (OSError, sqlite3.DatabaseError):
         pass
 
@@ -487,14 +587,17 @@ def _load_disk_metadata(root: Path, skip_dirs: set[str], exclude_signature: str 
     return raw
 
 
-def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> tuple[list[IndexEntry], float, bool] | None:
+def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> tuple[list[IndexEntry], float, bool, str] | None:
     try:
         with sqlite3.connect(_index_disk_path(root), timeout=30.0) as conn:
             _ensure_sqlite_schema(conn)
             metadata = dict(conn.execute("SELECT key, value FROM metadata"))
             if not _sqlite_metadata_matches(metadata, root, skip_dirs, exclude_signature):
                 return None
-            rows = conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY ord").fetchall()
+            rows = conn.execute(
+                "SELECT path, name, relative_path, size, mtime FROM entries "
+                "ORDER BY lower(relative_path), path"
+            ).fetchall()
     except (OSError, sqlite3.DatabaseError):
         return None
     entries = [(str(path), str(name), str(rel), int(size), int(mtime)) for path, name, rel, size, mtime in rows]
@@ -502,7 +605,7 @@ def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> 
         built_at = float(metadata.get("built_at") or 0.0)
     except ValueError:
         built_at = 0.0
-    return entries, built_at, metadata.get("truncated") == "1"
+    return entries, built_at, metadata.get("truncated") == "1", str(metadata.get("entries_signature") or "")
 
 
 def _sqlite_metadata_matches(metadata: dict[str, Any], root: Path, skip_dirs: set[str], exclude_signature: str = "") -> bool:
@@ -546,7 +649,7 @@ def _sqlite_search_candidates(
 ) -> sqlite3.Cursor:
     terms = [term for term in (literal_terms or []) if term]
     if not terms:
-        return conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY ord")
+        return conn.execute("SELECT path, name, relative_path, size, mtime FROM entries ORDER BY lower(relative_path), path")
     clauses = []
     params = []
     for term in terms:
@@ -554,7 +657,7 @@ def _sqlite_search_candidates(
         clauses.append("(lower(name) LIKE ? ESCAPE '\\' OR lower(relative_path) LIKE ? ESCAPE '\\' OR lower(path) LIKE ? ESCAPE '\\')")
         params.extend([pattern, pattern, pattern])
     where = " AND ".join(clauses)
-    return conn.execute(f"SELECT path, name, relative_path, size, mtime FROM entries WHERE {where} ORDER BY ord", params)
+    return conn.execute(f"SELECT path, name, relative_path, size, mtime FROM entries WHERE {where} ORDER BY lower(relative_path), path", params)
 
 
 def search_disk_index(
@@ -640,6 +743,15 @@ def _coalesced_paths(paths: set[Path]) -> list[Path]:
     return result
 
 
+def _path_is_below_skipped_directory(path: Path, root: Path, skip_dirs: set[str]) -> bool:
+    """Return whether a dirty path is inside a skipped directory below ``root``."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(part in skip_dirs for part in relative.parts)
+
+
 def _refresh_dirty_subtrees(
     ri: RootIndex,
     dirty_paths: list[Path],
@@ -648,26 +760,74 @@ def _refresh_dirty_subtrees(
 ) -> tuple[list[IndexEntry], bool, int, int]:
     with ri.lock:
         previous = list(ri.entries)
+        previous_by_path = dict(ri.entry_by_path)
         previously_truncated = ri.truncated
+    usable_dirty_paths: list[Path] = []
+    ignored = 0
+    for dirty in dirty_paths:
+        if _path_is_below_skipped_directory(dirty, ri.root, skip_dirs):
+            ignored += 1
+            continue
+        if exclude_path is not None and exclude_path(dirty):
+            ignored += 1
+            continue
+        usable_dirty_paths.append(dirty)
+    if not usable_dirty_paths:
+        # Excluded work must be a true no-op. In particular, do not filter and
+        # re-sort every retained row merely to ignore a .git/cache event.
+        return previous, previously_truncated, 0, ignored
+
+    # Native backends overwhelmingly report a regular file rather than its
+    # parent directory.  Do not turn that into an 80k-row comprehension and
+    # sort: update the one list slot and preserve the existing sorted snapshot.
+    if all(
+        not dirty.is_dir() and (dirty.exists() or str(dirty) in previous_by_path)
+        for dirty in usable_dirty_paths
+    ):
+        entries = previous
+        entry_by_path = previous_by_path
+        refreshed = 0
+        for dirty in usable_dirty_paths:
+            path = str(dirty)
+            old = entry_by_path.pop(path, None)
+            if old is not None:
+                try:
+                    entries.remove(old)
+                except ValueError:
+                    pass
+            try:
+                st = dirty.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                ignored += 1
+                continue
+            entry = (path, dirty.name, dirty.relative_to(ri.root).as_posix(), int(st.st_size), int(st.st_mtime))
+            key = entry[2].lower()
+            left, right = 0, len(entries)
+            while left < right:
+                midpoint = (left + right) // 2
+                if entries[midpoint][2].lower() < key:
+                    left = midpoint + 1
+                else:
+                    right = midpoint
+            entries.insert(left, entry)
+            entry_by_path[path] = entry
+            refreshed += 1
+        return entries, previously_truncated, refreshed, ignored
+
     retained = [
         entry
         for entry in previous
-        if not any(_path_is_within(Path(entry[0]), dirty) for dirty in dirty_paths)
+        if not any(_path_is_within(Path(entry[0]), dirty) for dirty in usable_dirty_paths)
     ]
     refreshed: list[IndexEntry] = []
-    ignored = 0
     truncated = previously_truncated
-    for dirty in dirty_paths:
+    for dirty in usable_dirty_paths:
         remaining = ri.max_files - len(retained) - len(refreshed)
         if remaining <= 0:
             truncated = True
             break
-        if exclude_path is not None and exclude_path(dirty):
-            ignored += 1
-            continue
-        if dirty.name in skip_dirs:
-            ignored += 1
-            continue
         if dirty.is_dir():
             entries, subtree_truncated, subtree_ignored = _walk_root_with_metrics(
                 dirty,
@@ -696,7 +856,10 @@ def _refresh_dirty_subtrees(
     return entries, truncated, len(refreshed), ignored
 
 
-def mark_path_dirty(path: Path) -> list[Path]:
+def mark_path_dirty(
+    path: Path,
+    include_root: Callable[[Path, Path], bool] | None = None,
+) -> list[Path]:
     """Coalesce one filesystem invalidation into every containing active index."""
     target = path.expanduser().resolve(strict=False)
     roots = indexed_ancestor_roots(target)
@@ -705,10 +868,22 @@ def mark_path_dirty(path: Path) -> list[Path]:
     for ri in indexes:
         if ri is None:
             continue
+        # A root-level filesystem notification has no bounded incremental
+        # subtree. Native backends can emit it while merely registering or
+        # reconciling a watch, so let the normal safety refresh handle it
+        # rather than immediately rewalking the entire index.
+        if target == ri.root:
+            continue
+        if include_root is not None and not include_root(ri.root, target):
+            continue
         with ri.lock:
             ri.dirty_paths.add(target)
             ri.dirty_paths = set(_coalesced_paths(ri.dirty_paths))
-    return roots
+    return [
+        root
+        for root in roots
+        if root != target and (include_root is None or include_root(root, target))
+    ]
 
 
 def schedule_refreshes(now: float | None = None) -> int:
@@ -808,7 +983,8 @@ def _run_build(
         disk = _load_disk(ri.root, skip_dirs, exclude_signature)
         if not dirty_paths and not ri.ready and disk is not None:
             with ri.lock:
-                ri.entries, ri.built_at, ri.truncated = disk
+                ri.entries, ri.built_at, ri.truncated, ri.entries_signature = disk
+                ri.entry_by_path = {entry[0]: entry for entry in ri.entries}
                 ri.last_full_build_at = ri.built_at
                 ri.too_large = ri.truncated
                 ri.persisted = True
@@ -831,6 +1007,7 @@ def _run_build(
                 effective_exclude_path,
                 max_files=ri.max_files,
             )
+            entries.sort(key=lambda entry: (entry[2].lower(), entry[0]))
             scanned_entries = len(entries)
             build_kind = "full"
         if ri.stop_event.is_set():
@@ -839,6 +1016,7 @@ def _run_build(
             return
         with ri.lock:
             ri.entries = entries
+            ri.entry_by_path = {entry[0]: entry for entry in entries}
             ri.truncated = truncated
             ri.too_large = truncated
             ri.built_at = time.time()
@@ -856,6 +1034,7 @@ def _run_build(
             ri.signature = expected_signature
             ri.disk_entry_count = len(ri.entries)
             ri.ready = True
+            _record_pending_delta(ri, dirty_paths, build_kind)
         _persist(ri, skip_dirs, exclude_signature)
         with ri.lock:
             ri.disk_metadata_ready = ri.persisted
@@ -944,7 +1123,8 @@ def ensure_index(
             if background_owner_can_build() and ri.persist_enabled:
                 disk = _load_disk(root, skip_dirs, exclude_signature)
                 if disk is not None:
-                    ri.entries, ri.built_at, ri.truncated = disk
+                    ri.entries, ri.built_at, ri.truncated, ri.entries_signature = disk
+                    ri.entry_by_path = {entry[0]: entry for entry in ri.entries}
                     ri.last_full_build_at = ri.built_at
                     ri.too_large = ri.truncated
                     ri.persisted = True

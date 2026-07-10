@@ -11,7 +11,7 @@ make setup        # pip install -e ".[yoagent]"  +  npm install (xterm.js)  +  p
 make dev          # same, plus dev/test deps (pytest-xdist) — see `make help`
 ```
 
-`pyproject.toml` is the source of truth for Python deps and the floor (`requires-python = ">=3.9"`), so pip checks the Python version and resolves the `yoagent` / `dev` extras. The `requirements*.txt` files are kept for `pip install -r` workflows and are referenced by `boot.sh`/provisioning, but mirror the same packages. Plain pip equivalents:
+`pyproject.toml` is the source of truth for Python deps and the floor (`requires-python = ">=3.10"`), so pip checks the Python version and resolves the runtime dependencies plus the `yoagent` / `dev` extras. `make setup` and `make dev` run the same Python-floor preflight before invoking pip. The `requirements*.txt` files are kept for `pip install -r` workflows and are referenced by `boot.sh`/provisioning, but mirror the same packages, including `watchfiles`. Plain pip equivalents:
 
 ```bash
 pip install -e ".[yoagent,dev]"      # deps + the `yolomux` command + agent SDKs + pytest-xdist

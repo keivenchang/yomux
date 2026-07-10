@@ -1074,6 +1074,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Ta sama karta",
   "pref.file_explorer.image_preview_max_px.help": "Maksymalna szerokość i wysokość podglądów w Finderze/File Explorerze.",
   "pref.file_explorer.image_preview_max_px.label": "Podgląd obrazu maksymalny rozmiar",
+  "pref.file_explorer.index_exclude_dir_names.help": "Nazwy katalogów wykluczone z indeksowania Quick Open wszędzie, gdzie wystąpią, po jednej nazwie w wierszu. Wstępnie uzupełnione typowymi katalogami VCS, sekretów, zależności, pamięci podręcznej i buildów.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Nazwy katalogów wykluczone z indeksu",
   "pref.file_explorer.index_exclude_paths.help": "Poddrzewa katalogów wykluczone z indeksowania Quick Open, jedna ścieżka bezwzględna lub względem katalogu domowego w wierszu.",
   "pref.file_explorer.index_exclude_paths.label": "Ścieżki wykluczone z indeksu",
   "pref.file_explorer.index_max_files.help": "Maksymalna liczba wpisów Quick Open na indeksowany katalog główny. Osiągnięcie limitu wyświetla ostrzeżenie o częściowym indeksie.",

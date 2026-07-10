@@ -327,6 +327,7 @@ function preferenceSections() {
       preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
       preferenceSettingItem('file_explorer.quick_access_paths', {type: 'list'}),
       preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
+      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true}),
       preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 4, autosize: true}),
       preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
       preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
@@ -512,6 +513,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
+  if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);
   if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
   if (path === 'file_explorer.index_max_files') add(['index', 'limit', 'cap', 'maximum', 'partial', 'quick-open']);
   if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);

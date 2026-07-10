@@ -11,12 +11,13 @@ build-backend = "setuptools.build_meta"
 name = "yolomux"
 description = "Browser tools for watching, driving, and summarizing tmux sessions."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "PolyForm-Noncommercial-1.0.0" }
 authors = [{ name = "Keiven Chang" }]
 dynamic = ["version"]
 dependencies = [
   "pyyaml",
+  "watchfiles>=1.2.0",
 ]
 
 [project.optional-dependencies]

@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "同一标签页",
   "pref.file_explorer.image_preview_max_px.help": "文件浏览器中悬停预览的最大宽度和高度。",
   "pref.file_explorer.image_preview_max_px.label": "图像预览最大尺寸",
+  "pref.file_explorer.index_exclude_dir_names.help": "从 Quick Open 索引中排除的目录名称，无论出现在哪里都适用，每行一个名称。已预填常见 VCS、密钥、依赖、缓存和构建目录。",
+  "pref.file_explorer.index_exclude_dir_names.label": "索引排除目录名",
   "pref.file_explorer.index_exclude_paths.help": "从 Quick Open 索引中排除的目录子树，每行一个绝对路径或相对于主目录的路径。",
   "pref.file_explorer.index_exclude_paths.label": "索引排除路径",
   "pref.file_explorer.index_max_files.help": "每个索引根目录的 Quick Open 条目上限。达到上限时会显示索引不完整警告。",

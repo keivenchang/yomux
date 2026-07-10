@@ -39,6 +39,13 @@ from .workdir import session_workdir
 
 
 _METADATA_BUILD_LOCAL = threading.local()
+# Indexed directories can be very large. Discovery is intentionally slower
+# than per-repository Git metadata, so share one bounded scan across every
+# request/thread rather than letting concurrent metadata readers each os.walk
+# the same tree. Changing the configured directory list changes the cache key.
+INDEXED_REPO_ROOTS_CACHE_SECONDS = 30.0
+_INDEXED_REPO_ROOTS_CACHE_LOCK = threading.Lock()
+_INDEXED_REPO_ROOTS_CACHE: dict[tuple[str, ...], tuple[float, list[str]]] = {}
 
 
 @contextmanager
@@ -700,6 +707,26 @@ def indexed_repo_roots(indexed_dirs: list[str] | None = None) -> list[str]:
         raw_dirs = settings_payload().get("settings", {}).get("file_explorer", {}).get("indexed_dirs", [])
     if not isinstance(raw_dirs, list):
         return []
+    cache_key = tuple(str(item).strip() for item in raw_dirs if isinstance(item, str) and str(item).strip())
+    now = time.monotonic()
+    with _INDEXED_REPO_ROOTS_CACHE_LOCK:
+        cached = _INDEXED_REPO_ROOTS_CACHE.get(cache_key)
+        if cached is not None and now - cached[0] < INDEXED_REPO_ROOTS_CACHE_SECONDS:
+            return list(cached[1])
+
+        # Keep the lock through the walk: one slow first reader is acceptable;
+        # N simultaneous readers recursively walking the same configured root is
+        # not.  The result is small (repository paths only), and callers receive
+        # their own list copy below.
+        roots = _discover_indexed_repo_roots(raw_dirs)
+        _INDEXED_REPO_ROOTS_CACHE[cache_key] = (time.monotonic(), roots)
+        if len(_INDEXED_REPO_ROOTS_CACHE) > 64:
+            oldest_key = min(_INDEXED_REPO_ROOTS_CACHE, key=lambda key: _INDEXED_REPO_ROOTS_CACHE[key][0])
+            _INDEXED_REPO_ROOTS_CACHE.pop(oldest_key, None)
+        return list(roots)
+
+
+def _discover_indexed_repo_roots(raw_dirs: list[str]) -> list[str]:
     roots: list[str] = []
     seen: set[str] = set()
 

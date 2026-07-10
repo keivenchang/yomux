@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Same tab",
   "pref.file_explorer.image_preview_max_px.help": "Maximum width and height for hover previews in Finder/File Explorer.",
   "pref.file_explorer.image_preview_max_px.label": "Image preview max size",
+  "pref.file_explorer.index_exclude_dir_names.help": "Directory names excluded from Quick Open indexing wherever they appear, one name per line. Pre-populated with common VCS, secret, dependency, cache, and build directories.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Excluded index directory names",
   "pref.file_explorer.index_exclude_paths.help": "Quick Open exclusions, one rule per line. A plain absolute or home-relative path excludes that subtree only when an indexed root contains it. `glob:<root-relative glob>` matches paths below every indexed root, for example `glob:**/.uploads/**`. `regex:<regular expression>` matches each root-relative POSIX path, for example `regex:(^|/)target(?:/|$)`. Invalid regex rules are ignored.",
   "pref.file_explorer.index_exclude_paths.label": "Quick Open exclusions",
   "pref.file_explorer.index_max_files.help": "Maximum Quick Open entries per indexed root. Reaching this limit produces a partial index warning.",

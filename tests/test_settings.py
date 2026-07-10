@@ -249,6 +249,8 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
     assert payload["choices"]["share.view_fit"] == ["cover", "contain"]
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
+    assert {".git", ".ssh", ".uploads", "__pycache__", "node_modules"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
+    assert {"~/.config/gh", "~/.config/git", "~/.cache/huggingface"} <= set(payload["settings"]["file_explorer"]["index_exclude_paths"])
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["catalog"]["general.default_sessions"]["gui"]["visible"] is False
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES

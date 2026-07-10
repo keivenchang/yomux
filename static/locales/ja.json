@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "同じタブ",
   "pref.file_explorer.image_preview_max_px.help": "Finder / ファイルエクスプローラーのホバープレビューの最大の幅と高さ。",
   "pref.file_explorer.image_preview_max_px.label": "画像プレビューの最大サイズ",
+  "pref.file_explorer.index_exclude_dir_names.help": "Quick Open のインデックスから除外するディレクトリ名です。出現場所を問わず適用され、1 行に 1 つ指定します。一般的な VCS、秘密情報、依存関係、キャッシュ、ビルド用ディレクトリが事前入力されています。",
+  "pref.file_explorer.index_exclude_dir_names.label": "インデックス除外ディレクトリ名",
   "pref.file_explorer.index_exclude_paths.help": "クイックオープンの除外です。1 行に 1 ルールを指定します。通常の絶対パスまたはホーム相対パスは、インデックス化されたルートに含まれる場合だけそのサブツリーを除外します。`glob:<root-relative glob>` は各インデックス化ルート配下のパスに一致します。例: `glob:**/.uploads/**`。`regex:<regular expression>` はルート相対 POSIX パスに一致します。例: `regex:(^|/)target(?:/|$)`。無効な regex ルールは無視されます。",
   "pref.file_explorer.index_exclude_paths.label": "クイックオープンの除外",
   "pref.file_explorer.index_max_files.help": "インデックス対象ルートごとの Quick Open エントリの最大数。上限に達すると部分インデックス警告が表示されます。",

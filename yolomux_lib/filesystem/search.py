@@ -14,23 +14,35 @@ from typing import Any
 
 from .. import file_index
 from ..common import is_generated_upload_name
+from ..settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from ..settings import settings_payload
 from . import paths
 from .errors import raise_os_error
 from .git_ops import git_root_for_path
 from .listing import _directory_is_repo
 
-SEARCH_SKIP_DIRS = {
-    ".git", ".hg", ".svn", ".jj", ".cache", ".mypy_cache", ".pytest_cache",
-    ".ruff_cache", ".tox", ".venv", "venv", "node_modules", "__pycache__",
-    "dist", "build", "target",
-}
+SEARCH_SKIP_DIRS = set(DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
 SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v2"
 INDEX_EXCLUDE_GLOB_PREFIX = "glob:"
 INDEX_EXCLUDE_REGEX_PREFIX = "regex:"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
+
+
+def _configured_search_skip_dirs(settings: dict[str, Any] | None = None) -> set[str]:
+    raw_names = (settings or {}).get("index_exclude_dir_names", list(DEFAULT_INDEX_EXCLUDE_DIR_NAMES))
+    if not isinstance(raw_names, list):
+        raw_names = list(DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
+    names: set[str] = set()
+    for raw_name in raw_names:
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name or name in {".", ".."} or "/" in name or "\\" in name:
+            continue
+        names.add(name)
+    return names
 
 
 def _index_exclude_rule(raw_rule: str, root: Path) -> tuple[str, str, Path | re.Pattern[str]] | None:
@@ -79,13 +91,30 @@ def _index_exclude_rule_matches(rule: tuple[str, str, Path | re.Pattern[str]], p
     return matcher.search(relative_path) is not None
 
 
+def _index_path_is_excluded(
+    root: Path,
+    path: Path,
+    skip_dirs: set[str],
+    exclude_path: Any,
+) -> bool:
+    """Apply one index root's complete exclusion policy to an event path."""
+    try:
+        relative = path.expanduser().resolve(strict=False).relative_to(root)
+    except ValueError:
+        return True
+    return any(part in skip_dirs for part in relative.parts) or bool(exclude_path(path))
+
+
 def _search_index_policy(root: Path) -> dict[str, Any]:
     settings = settings_payload().get("settings", {}).get("file_explorer", {})
+    skip_dirs = _configured_search_skip_dirs(settings)
     configured_rules = [rule for raw_path in settings.get("index_exclude_paths", []) if isinstance(raw_path, str) if (rule := _index_exclude_rule(raw_path, root)) is not None]
     configured_rules.sort(key=lambda rule: (rule[0], rule[1]))
 
     def exclude_path(path: Path) -> bool:
-        if paths._path_is_secret(path):
+        # The index walk does not follow symlinks, so retain the lexical secret
+        # policy without resolving every candidate in a large repository.
+        if paths._path_is_secret(path, resolve=False):
             return True
         return any(_index_exclude_rule_matches(rule, path, root) for rule in configured_rules)
 
@@ -96,13 +125,15 @@ def _search_index_policy(root: Path) -> dict[str, Any]:
     rule_values = [f"{kind}:{value}" for kind, value, _matcher in configured_rules]
     coverage_policy = {
         "excludes": rule_values,
+        "skip_dirs": sorted(skip_dirs),
         "max_files": max_files,
     }
     policy_signature = SEARCH_SECRET_EXCLUDE_SIGNATURE
-    if coverage_policy != {"excludes": [], "max_files": file_index.MAX_INDEX_FILES}:
+    if coverage_policy != {"excludes": [], "skip_dirs": sorted(DEFAULT_INDEX_EXCLUDE_DIR_NAMES), "max_files": file_index.MAX_INDEX_FILES}:
         digest = hashlib.sha256(json.dumps(coverage_policy, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         policy_signature = f"{SEARCH_SECRET_EXCLUDE_SIGNATURE}:{digest}"
     return {
+        "skip_dirs": skip_dirs,
         "exclude_path": exclude_path,
         "exclude_signature": policy_signature,
         "max_files": max_files,
@@ -118,7 +149,7 @@ def _ensure_search_index(root: Path) -> tuple[file_index.RootIndex, dict[str, An
     policy = _search_index_policy(root)
     index = file_index.ensure_index(
         root,
-        SEARCH_SKIP_DIRS,
+        policy["skip_dirs"],
         exclude_path=policy["exclude_path"],
         exclude_signature=policy["exclude_signature"],
         max_files=policy["max_files"],
@@ -274,7 +305,14 @@ def _annotate_search_dedupe_fields(entry: dict[str, Any]) -> None:
     entry.update({key: value for key, value in paths._physical_file_identity(Path(path_str)).items() if key not in entry})
 
 
-def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results: list[dict[str, Any]]) -> tuple[int, int, bool]:
+def _search_full_tree(
+    root: Path,
+    search_root: Path,
+    tokens: list[str],
+    results: list[dict[str, Any]],
+    skip_dirs: set[str] | None = None,
+) -> tuple[int, int, bool]:
+    effective_skip_dirs = SEARCH_SKIP_DIRS if skip_dirs is None else skip_dirs
     visited_dirs = 0
     visited_files = 0
     truncated = False
@@ -286,7 +324,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
             dirs[:] = []
             break
         dirs[:] = sorted(
-            [name for name in dirs if name not in SEARCH_SKIP_DIRS and not paths._path_is_secret(Path(current) / name)],
+            [name for name in dirs if name not in effective_skip_dirs and not paths._path_is_secret(Path(current) / name)],
             key=str.lower,
         )
         for name in sorted(files, key=str.lower):
@@ -314,6 +352,8 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         raise paths.FilesystemError.not_directory(root)
     max_results = _search_limit(limit)
     tokens = [token for token in str(query or "").split() if token]
+    index_policy = _search_index_policy(root)
+    skip_dirs = index_policy["skip_dirs"]
     full_tree = bool(recursive) or bool(git_root_for_path(root))
     if full_tree:
         # Accelerate full-tree quick-open with the persistent index: it covers the
@@ -321,6 +361,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         # it in the background; until it is ready we fall back to the live walk below
         # (stale-while-revalidate), so search never blocks on indexing.
         index, index_policy = _ensure_search_index(root)
+        skip_dirs = index_policy["skip_dirs"]
         can_build_index = file_index.background_owner_can_build()
         if tokens:
             def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
@@ -343,7 +384,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             elif not can_build_index and index.disk_metadata_ready:
                 indexed = file_index.search_disk_index(
                     root,
-                    SEARCH_SKIP_DIRS,
+                    skip_dirs,
                     index_policy["exclude_signature"],
                     _match,
                     max_results,
@@ -402,7 +443,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             if index.ready:
                 recent = file_index.recent_entries(index, max_results, _recent)
             elif not can_build_index and index.disk_metadata_ready:
-                recent = file_index.recent_disk_entries(root, SEARCH_SKIP_DIRS, index_policy["exclude_signature"], max_results, _recent)
+                recent = file_index.recent_disk_entries(root, skip_dirs, index_policy["exclude_signature"], max_results, _recent)
                 recent_payload_state = "follower-ready"
             if recent is not None:
                 recent_results, recent_truncated = recent
@@ -443,16 +484,16 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
     visited_files = 0
     truncated = False
     if full_tree:
-        visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results)
+        visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results, skip_dirs)
     else:
         visited_dirs = 1
         direct_names = sorted(os.listdir(root), key=str.lower)
         for name in direct_names:
             path = root / name
-            if name in SEARCH_SKIP_DIRS or paths._path_is_secret(path):
+            if name in skip_dirs or paths._path_is_secret(path):
                 continue
             if path.is_dir() and _directory_is_repo(path):
-                child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results)
+                child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results, skip_dirs)
                 visited_dirs += child_dirs
                 visited_files += child_files
                 truncated = truncated or child_truncated
@@ -490,6 +531,11 @@ def index_status(raw_root: str) -> dict[str, Any]:
     if not root.is_dir():
         raise paths.FilesystemError.not_directory(root)
     index, policy = _ensure_search_index(root)
+    # HTTP servers are read-only consumers. Asking for index status is still an
+    # explicit Quick Open demand, so queue the persistent indexer when no
+    # committed snapshot exists yet.
+    if not index.ready and not index.disk_metadata_ready:
+        file_index.request_background_owner_refresh({"root": str(root), "reason": "index-status"})
     with index.lock:
         ready = bool(index.ready)
         building = bool(index.building)
@@ -548,8 +594,19 @@ def index_status(raw_root: str) -> dict[str, Any]:
 def unindex_root(raw_root: str) -> dict[str, Any]:
     """Drop the persistent quick-open index for a root (cancel any build, free memory + on-disk)."""
     root = paths._canonical_root(paths._validated_path(raw_root))
-    file_index.unindex(root)
-    return {"root": str(root), "ok": True}
+    if file_index.background_owner_can_build():
+        file_index.unindex(root)
+        return {"root": str(root), "ok": True}
+    result = file_index.request_background_owner_refresh({
+        "root": str(root),
+        "operation": "unindex",
+        "reason": "unindex",
+    })
+    return {
+        "root": str(root),
+        "ok": bool(result.get("accepted")),
+        "refreshing_elsewhere": bool(result.get("accepted")),
+    }
 
 
 def reindex_roots_for_path(raw_path: str, reason: str = "filesystem-change") -> list[str]:
@@ -560,8 +617,14 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
     """Coalesce changed subtrees and hand one incremental refresh to the owner."""
     normalized_paths = [paths._normalized_scope_path(paths._validated_path(raw_path)) for raw_path in raw_paths]
     roots_by_path: dict[Path, set[Path]] = {}
+    policies: dict[Path, dict[str, Any]] = {}
+
+    def include_root(root: Path, path: Path) -> bool:
+        policy = policies.setdefault(root, _search_index_policy(root))
+        return not _index_path_is_excluded(root, path, policy["skip_dirs"], policy["exclude_path"])
+
     for path in normalized_paths:
-        for root in file_index.mark_path_dirty(path):
+        for root in file_index.mark_path_dirty(path, include_root=include_root):
             roots_by_path.setdefault(root, set()).add(path)
     if file_index.background_owner_can_build():
         for root, changed_paths in roots_by_path.items():
@@ -569,7 +632,7 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
                 continue
             _ensure_search_index(root)
             for path in changed_paths:
-                file_index.mark_path_dirty(path)
+                file_index.mark_path_dirty(path, include_root=include_root)
         file_index.schedule_refreshes()
     else:
         for root, changed_paths in roots_by_path.items():

@@ -163,6 +163,29 @@ def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
         stop_server(server, thread)
 
 
+def test_login_page_uses_saved_theme_and_active_color(monkeypatch):
+    payload = {
+        "settings": {
+            "appearance": {
+                "theme": "light",
+                "active_color": "purple",
+            },
+        },
+    }
+    monkeypatch.setattr(web, "settings_payload", lambda: payload)
+
+    page = web.login_html()
+
+    assert '<body class="login-theme-light login-accent-purple">' in page
+    css = (Path(__file__).resolve().parents[1] / "static" / "login.css").read_text(encoding="utf-8")
+    assert "body.login-theme-light" in css
+    assert "body.login-theme-system" in css
+    assert "body.login-accent-purple" in css
+    assert "--brand-green: var(--accent)" in css
+    assert "--brand-primary-green: var(--accent)" in css
+    assert "--brand-yolo-bg: var(--accent)" in css
+
+
 def test_login_page_localizes_via_locale_cookie(monkeypatch, tmp_path):
     # C2: a yolomux_locale cookie localizes the pre-auth login screen regardless of the saved/forced
     # default locale — proves the localization path works (request_locale_pref's cookie branch wins) and

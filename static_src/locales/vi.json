@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Cùng thẻ",
   "pref.file_explorer.image_preview_max_px.help": "Chiều rộng và chiều cao tối đa để xem trước di chuột trong Finder/File Explorer.",
   "pref.file_explorer.image_preview_max_px.label": "Kích thước tối đa xem trước hình ảnh",
+  "pref.file_explorer.index_exclude_dir_names.help": "Tên thư mục bị loại khỏi chỉ mục Quick Open ở mọi nơi chúng xuất hiện, mỗi dòng một tên. Được điền sẵn bằng các thư mục VCS, bí mật, phụ thuộc, bộ nhớ đệm và bản dựng thường gặp.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Tên thư mục bị loại khỏi chỉ mục",
   "pref.file_explorer.index_exclude_paths.help": "Các cây thư mục con bị loại khỏi chỉ mục Quick Open, mỗi dòng một đường dẫn tuyệt đối hoặc tương đối với thư mục nhà.",
   "pref.file_explorer.index_exclude_paths.label": "Đường dẫn bị loại khỏi chỉ mục",
   "pref.file_explorer.index_max_files.help": "Số mục Quick Open tối đa cho mỗi gốc được lập chỉ mục. Khi đạt giới hạn, cảnh báo chỉ mục một phần sẽ xuất hiện.",

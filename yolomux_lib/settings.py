@@ -76,6 +76,37 @@ def env_choice_default(name: str, default: str, choices: tuple[str, ...]) -> str
 SUMMARY_DEFAULT_CODEX_MODEL = env_choice_default("YOLOMUX_SUMMARY_MODEL", YOAGENT_DEFAULT_CODEX_MODEL, YOAGENT_CODEX_MODEL_CHOICES)
 SUMMARY_DEFAULT_CODEX_EFFORT = env_choice_default("YOLOMUX_SUMMARY_EFFORT", "low", YOAGENT_CODEX_EFFORT_CHOICES)
 SUMMARY_DEFAULT_CODEX_SERVICE_TIER = env_choice_default("YOLOMUX_SUMMARY_SERVICE_TIER", "fast", SUMMARY_CODEX_SERVICE_TIER_CHOICES)
+DEFAULT_INDEX_EXCLUDE_DIR_NAMES: tuple[str, ...] = (
+    ".git",
+    ".hg",
+    ".svn",
+    ".jj",
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".docker",
+    ".ngc",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".uploads",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    "dist",
+    "build",
+    "target",
+)
+DEFAULT_INDEX_EXCLUDE_PATHS: tuple[str, ...] = (
+    "~/.config/gh",
+    "~/.config/git",
+    "~/.cache/huggingface",
+)
 IMAGE_DROP_ACTION_ORDER_SPECS: tuple[dict[str, Any], ...] = (
     {
         "id": "img-ocr",
@@ -220,7 +251,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "index_persist": True,
         "index_persist_max_files": 100000,
         "index_persist_max_mb": 64,
-        "index_exclude_paths": [],
+        "index_exclude_dir_names": list(DEFAULT_INDEX_EXCLUDE_DIR_NAMES),
+        "index_exclude_paths": list(DEFAULT_INDEX_EXCLUDE_PATHS),
         "companion_dirs": [],
         "dir_cache_ms": 5000,
         "new_entry_highlight_ms": 60000,
@@ -383,6 +415,7 @@ STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
 
 SETTING_LIST_LIMITS: dict[tuple[str, str], int] = {
     ("uploads", "image_action_order"): 9,
+    ("file_explorer", "index_exclude_dir_names"): 256,
     ("file_explorer", "index_exclude_paths"): 256,
 }
 
@@ -482,6 +515,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "index_persist"): "true/false. Persist bounded Quick Open indexes for restart and cross-process handoff; active in-memory search remains available when false.",
     ("file_explorer", "index_persist_max_files"): "Files, 1000-1000000. Maximum entry count eligible for recoverable Quick Open cache persistence.",
     ("file_explorer", "index_persist_max_mb"): "MiB, 1-1024. Maximum estimated SQLite payload eligible for Quick Open cache persistence.",
+    ("file_explorer", "index_exclude_dir_names"): "Directory names excluded from Quick Open indexing wherever they appear, one name per line. Pre-populated with common VCS, secret, dependency, cache, and build directories such as .git, .ssh, __pycache__, node_modules, and target.",
     ("file_explorer", "index_exclude_paths"): "Quick Open exclusions, one rule per line. A plain absolute or home-relative path excludes that subtree only when an indexed root contains it. glob:<relative glob> matches paths below every indexed root (for example glob:**/.uploads/**). regex:<regular expression> matches each root-relative POSIX path (for example regex:(^|/)target(?:/|$)). Invalid regex rules are ignored.",
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
@@ -624,6 +658,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("file_explorer", "image_preview_max_px"): "Finder",
     ("file_explorer", "quick_access_paths"): "Finder",
     ("file_explorer", "indexed_dirs"): "Finder",
+    ("file_explorer", "index_exclude_dir_names"): "Finder",
     ("file_explorer", "index_exclude_paths"): "Finder",
     ("file_explorer", "index_max_files"): "Finder",
     ("file_explorer", "index_refresh_seconds"): "Finder",
@@ -700,6 +735,7 @@ SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
     ("yoagent", "format"),
     ("yolo", "rule_file_path"),
     ("file_explorer", "indexed_dirs"),
+    ("file_explorer", "index_exclude_dir_names"),
     ("file_explorer", "companion_dirs"),
     ("file_explorer", "quick_access_paths"),
     ("file_explorer", "index_exclude_paths"),
@@ -714,6 +750,7 @@ SETTING_SENSITIVITY: dict[tuple[str, str], str] = {
     ("yoagent", "format"): "prompt",
     ("yolo", "rule_file_path"): "path",
     ("file_explorer", "indexed_dirs"): "path-list",
+    ("file_explorer", "index_exclude_dir_names"): "directory-name-list",
     ("file_explorer", "companion_dirs"): "path-list",
     ("file_explorer", "quick_access_paths"): "path-list",
     ("file_explorer", "index_exclude_paths"): "path-list",

@@ -1050,6 +1050,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Stessa scheda",
   "pref.file_explorer.image_preview_max_px.help": "Larghezza e altezza massime per anteprime di hover in Finder/File Explorer.",
   "pref.file_explorer.image_preview_max_px.label": "Dimensione massima dell'anteprima dell'immagine",
+  "pref.file_explorer.index_exclude_dir_names.help": "Nomi di directory esclusi dall'indicizzazione Quick Open ovunque compaiano, un nome per riga. Precompilato con directory comuni VCS, segreti, dipendenze, cache e build.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Nomi directory esclusi dall'indice",
   "pref.file_explorer.index_exclude_paths.help": "Sottoalberi di directory esclusi dall'indice Quick Open, un percorso assoluto o relativo alla home per riga.",
   "pref.file_explorer.index_exclude_paths.label": "Percorsi esclusi dall'indice",
   "pref.file_explorer.index_max_files.help": "Numero massimo di voci Quick Open per radice indicizzata. Al raggiungimento del limite viene mostrato un avviso di indice parziale.",

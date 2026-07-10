@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Gleicher Tab",
   "pref.file_explorer.image_preview_max_px.help": "Maximale Breite und Höhe für Hover-Vorschauen im Finder/Datei-Explorer.",
   "pref.file_explorer.image_preview_max_px.label": "Maximale Größe der Bildvorschau",
+  "pref.file_explorer.index_exclude_dir_names.help": "Verzeichnisnamen, die überall von der Quick-Open-Indizierung ausgeschlossen werden, ein Name pro Zeile. Vorbelegt mit gängigen VCS-, Geheimnis-, Abhängigkeits-, Cache- und Build-Verzeichnissen.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Ausgeschlossene Index-Verzeichnisnamen",
   "pref.file_explorer.index_exclude_paths.help": "Vom Quick-Open-Index ausgeschlossene Verzeichnisbäume, ein absoluter oder home-relativer Pfad pro Zeile.",
   "pref.file_explorer.index_exclude_paths.label": "Ausgeschlossene Indexpfade",
   "pref.file_explorer.index_max_files.help": "Maximale Quick-Open-Einträge pro indiziertem Stamm. Beim Erreichen dieses Limits erscheint eine Teilindexwarnung.",

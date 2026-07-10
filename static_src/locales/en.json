@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Same tab",
   "pref.file_explorer.image_preview_max_px.help": "Maximum width and height for hover previews in Finder/File Explorer.",
   "pref.file_explorer.image_preview_max_px.label": "Image preview max size",
+  "pref.file_explorer.index_exclude_dir_names.help": "Directory names excluded from Quick Open indexing wherever they appear, one name per line. Pre-populated with common VCS, secret, dependency, cache, and build directories.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Excluded index directory names",
   "pref.file_explorer.index_exclude_paths.help": "Directory subtrees excluded from Quick Open indexing, one absolute or home-relative path per line.",
   "pref.file_explorer.index_exclude_paths.label": "Excluded index paths",
   "pref.file_explorer.index_max_files.help": "Maximum Quick Open entries per indexed root. Reaching this limit produces a partial index warning.",

@@ -451,7 +451,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   padding: var(--space-4) var(--space-7);
   color: var(--pane-tab-panel-head-text);
   background: var(--input-bg);
-  border: 1px solid var(--auto-border);
+  /* A rename is ordinary UI work, not auto-approval: its border follows the selected app accent. */
+  border: 1px solid var(--active-control-border);
   border-radius: var(--radius-control);
   font: 600 var(--ui-font-size)/1.2 var(--mono-font);
   outline: 0;

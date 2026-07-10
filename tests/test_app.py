@@ -2283,6 +2283,13 @@ class FakeCodexAppServerProcess:
     def poll(self):
         return self._returncode
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.wait()
+        return False
+
     def terminate(self):
         self.terminated = True
         self._returncode = 0
@@ -2290,6 +2297,10 @@ class FakeCodexAppServerProcess:
     def wait(self, timeout=None):
         self._returncode = 0
         return 0
+
+    def communicate(self, input=None, timeout=None):
+        self._returncode = 0
+        return self.stdout.read(), self.stderr.read()
 
     def kill(self):
         self._returncode = -9
@@ -4005,6 +4016,7 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     monkeypatch.setattr(webapp, "server_attention_ack_event_poll_seconds", lambda: 12.0)
     monkeypatch.setattr(webapp, "server_tmux_signal_event_poll_seconds", lambda: 15.0)
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
+    monkeypatch.setattr(webapp, "start_native_filesystem_watcher", lambda record=None: False)
     try:
         webapp.start_client_event_watcher()
         assert started == ["client-event-watch"]
@@ -7198,6 +7210,184 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     assert webapp.session_files_service.cache != {}
     assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload is None
     assert webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at is None
+
+
+def test_native_filesystem_changes_ignore_excluded_descendants(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    git_file = root / ".git" / "FETCH_HEAD"
+    git_file.parent.mkdir(parents=True)
+    git_file.write_text("origin\n", encoding="utf-8")
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(root),)
+    record.filesystem_watch_paths = (str(root),)
+    record.filesystem_skip_dirs = frozenset({".git"})
+    reindex_calls = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("excluded event must not publish fs_changed")))
+    try:
+        assert webapp.handle_native_filesystem_changes(record, {(1, str(git_file))}) == []
+    finally:
+        webapp.control_server.stop()
+
+    assert reindex_calls == []
+
+
+def test_native_filesystem_watch_configuration_canonicalizes_roots(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    monkeypatch.setattr(webapp, "filesystem_roots_for_watch", lambda sessions: [str(root)])
+    monkeypatch.setattr(webapp, "files_for_watch", lambda: [])
+    monkeypatch.setattr(webapp, "background_files_for_watch", lambda: [])
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"file_explorer": {}}})
+    try:
+        roots, watch_paths, transcripts, skip_dirs = webapp.native_filesystem_watch_configuration()
+    finally:
+        webapp.control_server.stop()
+
+    assert roots == (str(root.resolve()),)
+    assert str(root.resolve()) in watch_paths
+    assert transcripts == ()
+    assert app_module.filesystem.SEARCH_SKIP_DIRS <= skip_dirs
+
+
+def test_native_filesystem_changes_ignore_blocked_credentials(monkeypatch):
+    secret = Path(app_module.filesystem.AUTH_CONFIG_PATH)
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(secret.parent.parent),)
+    record.filesystem_watch_paths = (str(secret.parent.parent),)
+    reindex_calls = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    try:
+        assert webapp.handle_native_filesystem_changes(record, {(1, str(secret))}) == []
+    finally:
+        webapp.control_server.stop()
+
+    assert reindex_calls == []
+
+
+def test_native_filesystem_changes_reindex_and_publish_one_batch(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    changed = root / "src" / "main.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("print('ok')\n", encoding="utf-8")
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(root),)
+    record.filesystem_watch_paths = (str(root),)
+    reindex_calls = []
+    published = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
+    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: published.append((roots, kwargs)) or ["fs_changed"])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [f"session-files:{trigger}"])
+    try:
+        events = webapp.handle_native_filesystem_changes(record, {(1, str(changed))})
+    finally:
+        webapp.control_server.stop()
+
+    assert reindex_calls == [([str(changed.resolve())], "native-watch")]
+    assert events == ["fs_changed", "session-files:native-watch"]
+    assert published[0][0] == [str(root)]
+    assert published[0][1]["trigger"] == "native-watch"
+    assert published[0][1]["change_summary"]["event_paths"] == 1
+
+
+def test_native_filesystem_changes_do_not_reindex_modified_directory_metadata(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    changed = root / "src"
+    changed.mkdir(parents=True)
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(root),)
+    record.filesystem_watch_paths = (str(root),)
+    reindex_calls = []
+    published = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
+    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: published.append((roots, kwargs)) or ["fs_changed"])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
+    try:
+        events = webapp.handle_native_filesystem_changes(record, {(2, str(changed))})
+    finally:
+        webapp.control_server.stop()
+
+    assert events == ["fs_changed"]
+    assert reindex_calls == []
+    assert published[0][1]["change_summary"] == {
+        "roots_changed": 1,
+        "roots_added": 0,
+        "roots_removed": 0,
+        "event_paths": 1,
+        "indexed_paths": 0,
+    }
+
+
+def test_native_filesystem_changes_ignore_synthetic_watched_root_added_event(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(root),)
+    record.filesystem_watch_paths = (str(root),)
+    reindex_calls = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
+    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: ["fs_changed"])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
+    try:
+        events = webapp.handle_native_filesystem_changes(record, {(1, str(root))})
+    finally:
+        webapp.control_server.stop()
+
+    assert events == ["fs_changed"]
+    assert reindex_calls == []
+
+
+def test_native_filesystem_watcher_uses_one_record_owned_watch_thread(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    changed = root / "src" / "main.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("print('ok')\n", encoding="utf-8")
+    entered = threading.Event()
+    delivered = threading.Event()
+    watch_calls = []
+
+    def fake_watch(*paths, **kwargs):
+        watch_calls.append((paths, kwargs))
+        entered.set()
+        yield {(1, str(changed))}
+        while not kwargs["stop_event"].wait(0.01):
+            pass
+
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    monkeypatch.setattr(webapp, "background_can_run", lambda role: role == app_module.BACKGROUND_ROLE_WATCH_ROOTS)
+    monkeypatch.setattr(webapp, "native_filesystem_watch_configuration", lambda: ((str(root),), (str(root),), (), frozenset()))
+    monkeypatch.setattr(app_module, "watchfiles_watch", fake_watch)
+    monkeypatch.setattr(webapp, "handle_native_filesystem_changes", lambda current, changes: delivered.set() or [])
+    try:
+        assert webapp.start_native_filesystem_watcher(record) is True
+        assert entered.wait(timeout=1.0)
+        assert delivered.wait(timeout=1.0)
+        record.stop_event.set()
+        record.filesystem_stop_event.set()
+        worker = record.filesystem_worker
+        assert worker is not None
+        worker.join(timeout=1.0)
+        assert worker.is_alive() is False
+    finally:
+        record.stop_event.set()
+        record.filesystem_stop_event.set()
+        webapp.control_server.stop()
+
+    paths, kwargs = watch_calls[0]
+    assert paths == (str(root),)
+    assert kwargs["debounce"] == app_module.NATIVE_FILESYSTEM_WATCH_DEBOUNCE_MS
+    assert kwargs["stop_event"] is not record.stop_event
 
 
 def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):

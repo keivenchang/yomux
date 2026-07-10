@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "वही टैब",
   "pref.file_explorer.image_preview_max_px.help": "Finder/File Explorer में hover previews की अधिकतम चौड़ाई और ऊंचाई।",
   "pref.file_explorer.image_preview_max_px.label": "Image preview अधिकतम साइज़",
+  "pref.file_explorer.index_exclude_dir_names.help": "Quick Open इंडेक्सिंग से हर स्थान पर बाहर रखे गए डायरेक्टरी नाम, प्रति पंक्ति एक नाम। सामान्य VCS, secret, dependency, cache और build डायरेक्टरी से पहले से भरा हुआ।",
+  "pref.file_explorer.index_exclude_dir_names.label": "इंडेक्स से बाहर डायरेक्टरी नाम",
   "pref.file_explorer.index_exclude_paths.help": "क्विक ओपन बहिष्करण, हर पंक्ति में एक नियम। सामान्य पूर्ण या होम-रिलेटिव पथ उस उपवृक्ष को केवल तब बाहर करता है जब कोई इंडेक्स किया हुआ रूट उसे रखता हो। `glob:<root-relative glob>` हर इंडेक्स किए रूट के नीचे के पथों से मेल खाता है, जैसे `glob:**/.uploads/**`। `regex:<regular expression>` हर रूट-सापेक्ष POSIX पथ से मेल खाता है, जैसे `regex:(^|/)target(?:/|$)`। अमान्य regex नियम अनदेखे किए जाते हैं।",
   "pref.file_explorer.index_exclude_paths.label": "क्विक ओपन बहिष्करण",
   "pref.file_explorer.index_max_files.help": "हर इंडेक्स किए गए रूट के लिए अधिकतम Quick Open प्रविष्टियाँ। सीमा पूरी होने पर आंशिक इंडेक्स चेतावनी दिखाई जाती है।",

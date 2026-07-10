@@ -815,7 +815,26 @@ function markdownPreviewHtml(text) {
   return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
 }
 
+function invalidateMarkdownPreviewArtifacts(container) {
+  // A Markdown source replacement invalidates every derived artifact below it:
+  // Mermaid's async SVG/blob image, rewritten local images, syntax highlighting,
+  // and zoom observers. Mark old Mermaid hosts stale before replacing the DOM so
+  // a slow prior render cannot install its SVG after newer Markdown wins.
+  const generation = Number(container?._markdownPreviewGeneration || 0) + 1;
+  if (container) container._markdownPreviewGeneration = generation;
+  for (const host of Array.from(container?.querySelectorAll?.('.mermaid-preview-host') || [])) {
+    host.dataset.mermaidRenderSeq = `stale-${generation}`;
+    if (typeof disconnectPreviewZoomSurface === 'function') {
+      disconnectPreviewZoomSurface(host, {resetClasses: true});
+    }
+    const source = host.querySelector?.('img.mermaid-preview-image')?.getAttribute?.('src') || '';
+    if (source.startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(source);
+  }
+  return generation;
+}
+
 function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
+  const generation = invalidateMarkdownPreviewArtifacts(container);
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
@@ -826,7 +845,10 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
-  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {context: options.context || ''});
+  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {
+    context: options.context || '',
+    isCurrent: () => container._markdownPreviewGeneration === generation,
+  });
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),

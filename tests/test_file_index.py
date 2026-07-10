@@ -70,6 +70,35 @@ def test_configured_excluded_subtree_is_absent_from_memory_and_sqlite(tmp_path, 
         assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"source.py"}
 
 
+def test_configured_excluded_directory_names_are_absent_from_memory_and_sqlite(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    skipped = root / "skipme"
+    skipped.mkdir()
+    (skipped / "generated.py").write_text("generated\n", encoding="utf-8")
+    (root / "source.py").write_text("source\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(filesystem.search, "settings_payload", lambda: {"settings": {"file_explorer": {"index_exclude_dir_names": ["skipme"]}}})
+    policy = filesystem.search._search_index_policy(root)
+
+    built = file_index.build_now(
+        root,
+        policy["skip_dirs"],
+        exclude_path=policy["exclude_path"],
+        exclude_signature=policy["exclude_signature"],
+        max_files=policy["max_files"],
+        persist_enabled=policy["persist_enabled"],
+        persist_max_files=policy["persist_max_files"],
+        persist_max_bytes=policy["persist_max_bytes"],
+    )
+
+    assert policy["skip_dirs"] == {"skipme"}
+    assert {entry[2] for entry in built.entries} == {"source.py"}
+    with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+        assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"source.py"}
+
+
 def test_index_storage_inside_root_is_never_indexed(tmp_path, monkeypatch):
     _clear_registry()
     root = tmp_path / "root"
@@ -254,6 +283,74 @@ def test_incremental_refresh_replaces_only_dirty_subtree_and_debounces_persisten
         assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"left/new.txt", "right/keep.txt"}
 
 
+def test_single_file_save_is_a_row_delta_not_a_full_index_rewrite(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    changed = root / "changed.txt"
+    changed.write_text("before", encoding="utf-8")
+    (root / "other.txt").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.build_now(root, SEARCH_SKIP_DIRS)
+
+    def fail_full_rewrite(*_args, **_kwargs):
+        raise AssertionError("a normal file save must not replace every SQLite row")
+
+    def fail_full_hash(*_args, **_kwargs):
+        raise AssertionError("a normal file save must not hash every indexed row")
+
+    monkeypatch.setattr(file_index, "_replace_sqlite_entries", fail_full_rewrite)
+    monkeypatch.setattr(file_index, "_entries_signature", fail_full_hash)
+    changed.write_text("after-with-a-different-size", encoding="utf-8")
+    file_index.mark_path_dirty(changed)
+    file_index._run_build(index, SEARCH_SKIP_DIRS)
+
+    assert index.persist_pending is True
+    index.last_persisted_at = time.monotonic() - file_index.PERSIST_DEBOUNCE_SECONDS - 1
+    assert file_index.schedule_refreshes() == 0
+    with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+        assert conn.execute("SELECT size FROM entries WHERE path = ?", (str(changed),)).fetchone() == (len("after-with-a-different-size"),)
+
+
+def test_root_notification_does_not_schedule_an_unbounded_incremental_rewalk(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "source.py").write_text("source\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_enabled=False)
+
+    assert file_index.mark_path_dirty(root) == []
+    assert index.dirty_paths == set()
+
+
+def test_incremental_refresh_ignores_skipped_descendant_without_scanning_retained_entries(tmp_path, monkeypatch):
+    _clear_registry()
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    (root / "source.py").write_text("source\n", encoding="utf-8")
+    git_dir = root / ".git"
+    git_dir.mkdir()
+    fetch_head = git_dir / "FETCH_HEAD"
+    fetch_head.write_text("first\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.build_now(root, SEARCH_SKIP_DIRS, persist_enabled=False)
+
+    fetch_head.write_text("second\n", encoding="utf-8")
+    file_index.mark_path_dirty(fetch_head)
+    monkeypatch.setattr(
+        file_index,
+        "_path_is_within",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("excluded descendants must not filter retained entries")),
+    )
+    file_index._run_build(index, SEARCH_SKIP_DIRS)
+
+    assert [entry[2] for entry in index.entries] == ["source.py"]
+    assert index.incremental_build_count == 1
+    assert index.scanned_entries == 0
+    assert index.ignored_entries == 1
+
+
 def test_disk_index_candidate_prefilter_preserves_punctuation_free_fuzzy_filename_queries(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
@@ -346,12 +443,13 @@ def test_inmemory_index_rebuilds_when_exclude_signature_changes(tmp_path, monkey
     secret = tmp_path / ".ssh" / "id_rsa"
     secret.parent.mkdir()
     secret.write_text("secret", encoding="utf-8")
-    initial = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    skip_dirs = SEARCH_SKIP_DIRS - {".ssh"}
+    initial = file_index.build_now(tmp_path, skip_dirs)
     assert any(name == "id_rsa" for _p, name, _r, _s, _m in initial.entries)
 
     filtered = file_index.build_now(
         tmp_path,
-        SEARCH_SKIP_DIRS,
+        skip_dirs,
         exclude_path=lambda path: ".ssh" in path.parts,
         exclude_signature="test-secret-filter",
     )
@@ -368,14 +466,15 @@ def test_ensure_index_drops_ready_cache_when_exclude_signature_changes(tmp_path,
     secret = tmp_path / ".ssh" / "id_rsa"
     secret.parent.mkdir()
     secret.write_text("secret", encoding="utf-8")
-    initial = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    skip_dirs = SEARCH_SKIP_DIRS - {".ssh"}
+    initial = file_index.build_now(tmp_path, skip_dirs)
     assert initial.ready is True
     assert any(name == "id_rsa" for _p, name, _r, _s, _m in initial.entries)
     monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: None)
 
     filtered = file_index.ensure_index(
         tmp_path,
-        SEARCH_SKIP_DIRS,
+        skip_dirs,
         exclude_path=lambda path: ".ssh" in path.parts,
         exclude_signature="test-secret-filter",
     )

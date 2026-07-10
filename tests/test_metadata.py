@@ -125,6 +125,27 @@ def test_indexed_repo_summaries_discovers_repos_under_indexed_root_without_branc
     assert by_root[repo_a_root]["indexed"] is True
 
 
+def test_indexed_repo_root_discovery_is_shared_across_metadata_requests(tmp_path, monkeypatch):
+    indexed = tmp_path / "indexed"
+    indexed.mkdir()
+    calls = []
+    metadata._INDEXED_REPO_ROOTS_CACHE.clear()
+    monkeypatch.setattr(metadata, "git_root_for_cwd", lambda _path: None)
+
+    def fake_walk(path, **_kwargs):
+        calls.append(Path(path))
+        return iter(())
+
+    monkeypatch.setattr(metadata.os, "walk", fake_walk)
+    try:
+        assert metadata.indexed_repo_roots([str(indexed)]) == []
+        assert metadata.indexed_repo_roots([str(indexed)]) == []
+    finally:
+        metadata._INDEXED_REPO_ROOTS_CACHE.clear()
+
+    assert calls == [indexed.resolve()]
+
+
 def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):
     indexed = tmp_path / "indexed"
     indexed.mkdir()

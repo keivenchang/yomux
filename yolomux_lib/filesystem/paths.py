@@ -138,30 +138,40 @@ def invalidate_path_policy_caches() -> None:
     _secret_directories_for_home.cache_clear()
 
 
-def _path_is_secret(path: Path, *, resolved: Path | None = None) -> bool:
+def _path_is_secret(path: Path, *, resolved: Path | None = None, resolve: bool = True) -> bool:
     """Return whether ``path`` is secret, reusing a caller's canonical path when available."""
-    resolved = resolved if resolved is not None else _normalized_scope_path(path)
     exact_paths = _secret_exact_paths()
     secret_directories = _secret_directories()
-    if any(resolved == secret for secret in exact_paths):
-        return True
-    if any(resolved == secret or _path_is_within(resolved, secret) for secret in secret_directories):
-        return True
-    parts = resolved.parts
-    if any(part in SECRET_DIR_COMPONENTS for part in parts):
-        return True
-    if resolved.name in SECRET_FILE_NAMES:
-        return True
-    for suffix in SECRET_DIR_SUFFIXES:
-        size = len(suffix)
-        for index in range(0, len(parts) - size + 1):
-            if parts[index:index + size] == suffix:
-                return True
-    for suffix in SECRET_FILE_SUFFIXES:
-        size = len(suffix)
-        if size <= len(parts) and parts[-size:] == suffix:
+
+    def matches(candidate: Path) -> bool:
+        if any(candidate == secret for secret in exact_paths):
             return True
-    return False
+        if any(candidate == secret or _path_is_within(candidate, secret) for secret in secret_directories):
+            return True
+        parts = candidate.parts
+        if any(part in SECRET_DIR_COMPONENTS for part in parts):
+            return True
+        if candidate.name in SECRET_FILE_NAMES:
+            return True
+        for suffix in SECRET_DIR_SUFFIXES:
+            size = len(suffix)
+            for index in range(0, len(parts) - size + 1):
+                if parts[index:index + size] == suffix:
+                    return True
+        return any(
+            size <= len(parts) and parts[-size:] == suffix
+            for suffix in SECRET_FILE_SUFFIXES
+            for size in (len(suffix),)
+        )
+
+    lexical = path.expanduser()
+    if matches(lexical):
+        return True
+    if resolved is None:
+        if not resolve:
+            return False
+        resolved = _normalized_scope_path(path)
+    return resolved != lexical and matches(resolved)
 
 
 def _ensure_path_allowed(path: Path, *, resolved: Path | None = None) -> None:

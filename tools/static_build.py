@@ -109,7 +109,7 @@ UNUSED_CSS_TOKEN_ALLOWLIST: dict[str, str] = {
     for token in (
         "--active-ring", "--agent-window-activity-block-size",
         "--agent-window-activity-inline-size", "--attention-ring-border", "--auto-active-text",
-        "--auto-border-disabled", "--auto-border-muted", "--auto-glow", "--auto-muted-text",
+        "--auto-glow", "--auto-muted-text",
         "--auto-surface", "--auto-surface-active", "--bottom", "--changes-folder-bg",
         "--changes-folder-text", "--changes-icon-text", "--changes-indent-line",
         "--changes-pane-min-inline-size", "--changes-path-text", "--changes-row-hover-bg",

@@ -1050,6 +1050,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Stessa scheda",
   "pref.file_explorer.image_preview_max_px.help": "Larghezza e altezza massime per anteprime di hover in Finder/File Explorer.",
   "pref.file_explorer.image_preview_max_px.label": "Dimensione massima dell'anteprima dell'immagine",
+  "pref.file_explorer.index_exclude_dir_names.help": "Nomi di directory esclusi dall'indicizzazione Quick Open ovunque compaiano, un nome per riga. Precompilato con directory comuni VCS, segreti, dipendenze, cache e build.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Nomi directory esclusi dall'indice",
   "pref.file_explorer.index_exclude_paths.help": "Esclusioni Apertura rapida, una regola per riga. Un percorso semplice assoluto o relativo alla home esclude quella sotto-struttura solo quando una radice indicizzata la contiene. `glob:<root-relative glob>` corrisponde ai percorsi sotto ogni radice indicizzata, ad esempio `glob:**/.uploads/**`. `regex:<regular expression>` corrisponde a ogni percorso POSIX relativo alla radice, ad esempio `regex:(^|/)target(?:/|$)`. Le regole regex non valide vengono ignorate.",
   "pref.file_explorer.index_exclude_paths.label": "Esclusioni Apertura rapida",
   "pref.file_explorer.index_max_files.help": "Numero massimo di voci Quick Open per radice indicizzata. Al raggiungimento del limite viene mostrato un avviso di indice parziale.",

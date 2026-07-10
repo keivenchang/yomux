@@ -1036,7 +1036,7 @@ def test_search_index_follower_uses_one_shot_fallback_when_owner_unresponsive(mo
         refresh_requests.append((role, payload))
         return {"ok": False, "accepted": False, "role": role, "fallback": True, "error": "timeout"}
 
-    def fallback_walk(root, _current, _tokens, results):
+    def fallback_walk(root, _current, _tokens, results, _skip_dirs=None):
         walk_calls.append(root)
         results.append({
             "name": "target.py",
@@ -1154,18 +1154,36 @@ def test_directory_rename_follower_requests_owner_index_rebuild(monkeypatch, tmp
     })]
 
 
-def test_local_owner_search_index_refresh_request_starts_root_build(no_control_socket, monkeypatch, tmp_path):
+def test_local_owner_search_index_refresh_request_enqueues_persistent_indexer(no_control_socket, monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp(["1"])
-    refreshed = []
+    enqueued = []
     monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
-    monkeypatch.setattr(filesystem, "index_status", lambda root: refreshed.append(root) or {"root": root, "state": "building"})
+    monkeypatch.setattr(
+        webapp.search_indexer,
+        "enqueue",
+        lambda root, paths, reason: enqueued.append((root, paths, reason)) or {"ok": True, "accepted": True},
+    )
     try:
         result = webapp.request_background_refresh(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "reason": "fs-rename"})
     finally:
         webapp.control_server.stop()
 
-    assert refreshed == [str(tmp_path)]
-    assert result["refresh"] == {"root": str(tmp_path), "state": "building"}
+    assert enqueued == [(str(tmp_path), [], "fs-rename")]
+    assert result["indexer"] == {"ok": True, "accepted": True}
+
+
+def test_local_owner_search_index_unindex_uses_persistent_indexer(no_control_socket, monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    removed = []
+    monkeypatch.setattr(webapp.background_owner, "request_owner_refresh", lambda role, payload: {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False})
+    monkeypatch.setattr(webapp.search_indexer, "unindex", lambda root: removed.append(root) or {"ok": True, "accepted": True})
+    try:
+        result = webapp.request_background_refresh(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "operation": "unindex", "reason": "unindex"})
+    finally:
+        webapp.control_server.stop()
+
+    assert removed == [str(tmp_path)]
+    assert result["indexer"] == {"ok": True, "accepted": True}
 
 
 def test_local_owner_session_files_refresh_request_starts_requested_cache_key(no_control_socket, monkeypatch):

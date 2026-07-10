@@ -407,6 +407,29 @@ def current_language_pref() -> str:
     return normalize_locale(language, default=SYSTEM_LOCALE_PREFERENCE, allow_system=True)
 
 
+def login_appearance_class() -> str:
+    """Return the saved, non-sensitive appearance choices for the pre-auth login shell.
+
+    The login page intentionally does not load the authenticated application bundle, but its
+    first paint should still look like the application the user just left.  These two settings
+    are presentation-only and are already validated by ``settings_payload``; keep a defensive
+    allow-list here because this class is rendered into HTML before authentication.
+    """
+    try:
+        settings = settings_payload().get("settings") or {}
+    except (OSError, ValueError):
+        settings = {}
+    appearance = settings.get("appearance") if isinstance(settings, dict) else {}
+    appearance = appearance if isinstance(appearance, dict) else {}
+    theme = str(appearance.get("theme") or "dark")
+    accent = str(appearance.get("active_color") or "green")
+    if theme not in {"dark", "light", "system"}:
+        theme = "dark"
+    if accent not in {"green", "blue", "orange", "yellow", "purple", "white"}:
+        accent = "green"
+    return f"login-theme-{theme} login-accent-{accent}"
+
+
 def locale_field_html(current: str = SYSTEM_LOCALE_PREFERENCE, css_class: str = "login-locale", display_locale: str | None = None) -> str:
     """The endonym-labeled language picker, shared by the login and setup screens."""
     locale = display_locale or current
@@ -479,7 +502,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("login.css")}">
 </head>
-<body>
+<body class="{login_appearance_class()}">
 <main class="login-shell">
   <section class="login-panel">
     <div class="login-brand">{brand_html("brand-title login-brand-title", "div", locale=locale)}</div>

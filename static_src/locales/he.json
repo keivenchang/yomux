@@ -1050,6 +1050,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "אותה כרטיסייה",
   "pref.file_explorer.image_preview_max_px.help": "הרוחב והגובה המקסימליים לתצוגות מקדימות בריחוף ב-Finder/סייר הקבצים.",
   "pref.file_explorer.image_preview_max_px.label": "גודל מקסימלי לתצוגה מקדימה של תמונה",
+  "pref.file_explorer.index_exclude_dir_names.help": "שמות תיקיות שאינם נכללים באינדקס Quick Open בכל מקום שבו הם מופיעים, שם אחד בכל שורה. מאוכלס מראש בתיקיות נפוצות של VCS, סודות, תלויות, מטמון ובנייה.",
+  "pref.file_explorer.index_exclude_dir_names.label": "שמות תיקיות שאינם נכללים באינדקס",
   "pref.file_explorer.index_exclude_paths.help": "תתי-עצים של תיקיות שאינם נכללים באינדקס Quick Open, נתיב מוחלט או יחסי לתיקיית הבית בכל שורה.",
   "pref.file_explorer.index_exclude_paths.label": "נתיבים שאינם נכללים באינדקס",
   "pref.file_explorer.index_max_files.help": "המספר המרבי של רשומות Quick Open לכל שורש מאונדקס. בהגעה למגבלה תוצג אזהרת אינדקס חלקי.",

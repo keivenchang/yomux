@@ -24,9 +24,18 @@ class ClientWatchFileRecord:
 class ClientEventWatcherRecord:
     worker: threading.Thread | None = None
     directory_poll_worker: threading.Thread | None = None
+    filesystem_worker: threading.Thread | None = None
     snapshot_worker: threading.Thread | None = None
     wake_event: threading.Event = field(default_factory=threading.Event)
     stop_event: threading.Event = field(default_factory=threading.Event)
+    filesystem_stop_event: threading.Event = field(default_factory=threading.Event)
+    filesystem_reconfigure_event: threading.Event = field(default_factory=threading.Event)
+    filesystem_healthy: bool = False
+    filesystem_roots: tuple[str, ...] = ()
+    filesystem_watch_paths: tuple[str, ...] = ()
+    filesystem_transcripts: tuple[str, ...] = ()
+    filesystem_skip_dirs: frozenset[str] = field(default_factory=frozenset)
+    next_filesystem_retry_at: float = 0.0
     next_signature_poll_at: float = 0.0
     next_file_poll_at: float = 0.0
     next_background_file_poll_at: float = 0.0

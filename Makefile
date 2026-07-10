@@ -3,17 +3,20 @@
 # activate a virtualenv first (python3 -m venv .venv && . .venv/bin/activate), then `make setup`.
 PYTHON ?= python3
 .DEFAULT_GOAL := help
-.PHONY: help setup dev xterm build check run clean
+.PHONY: help check-python setup dev xterm build check run clean
 
 help: ## List targets
 	@grep -E '^[a-z][a-zA-Z0-9_-]*:.*## ' $(MAKEFILE_LIST) | sort | awk -F':.*## ' '{printf "  \033[36m%-8s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Install runtime deps (+ yoagent), xterm.js assets, and build the static bundle
+check-python: ## Verify the interpreter meets YOLOmux's Python floor
+	@$(PYTHON) tools/check_python.py
+
+setup: check-python ## Install runtime deps (+ yoagent), xterm.js assets, and build the static bundle
 	$(PYTHON) -m pip install -e ".[yoagent]"
 	$(MAKE) xterm
 	$(PYTHON) tools/static_build.py
 
-dev: ## Like setup, plus dev/test deps (pytest-xdist)
+dev: check-python ## Like setup, plus dev/test deps (pytest-xdist)
 	$(PYTHON) -m pip install -e ".[yoagent,dev]"
 	$(MAKE) xterm
 	$(PYTHON) tools/static_build.py

@@ -1050,6 +1050,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Misma pestaña",
   "pref.file_explorer.image_preview_max_px.help": "Ancho y alto máximos para las vistas previas al pasar el cursor en Finder/Explorador de archivos.",
   "pref.file_explorer.image_preview_max_px.label": "Tamaño máximo de vista previa de imagen",
+  "pref.file_explorer.index_exclude_dir_names.help": "Nombres de directorios excluidos de la indexación de Quick Open donde aparezcan, un nombre por línea. Prellenado con directorios comunes de VCS, secretos, dependencias, caché y compilación.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Nombres de directorio excluidos del índice",
   "pref.file_explorer.index_exclude_paths.help": "Exclusiones de Apertura rápida, una regla por línea. Una ruta normal absoluta o relativa al inicio excluye ese subárbol solo cuando una raíz indexada lo contiene. `glob:<root-relative glob>` coincide con rutas bajo cada raíz indexada, por ejemplo `glob:**/.uploads/**`. `regex:<regular expression>` coincide con cada ruta POSIX relativa a la raíz, por ejemplo `regex:(^|/)target(?:/|$)`. Las reglas regex no válidas se ignoran.",
   "pref.file_explorer.index_exclude_paths.label": "Exclusiones de Apertura rápida",
   "pref.file_explorer.index_max_files.help": "Máximo de entradas de Quick Open por raíz indexada. Al alcanzar el límite se muestra una advertencia de índice parcial.",

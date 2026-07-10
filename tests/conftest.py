@@ -113,7 +113,11 @@ def local_socket_capability() -> tuple[bool, str]:
 
 
 @pytest.fixture(autouse=True)
-def isolated_file_index_background_hooks():
+def isolated_file_index_background_hooks(monkeypatch):
+    # The real indexer is intentionally detached and persistent. Test cases
+    # use a temporary state directory that pytest removes at process exit, so
+    # never leave a detached child pointed at that vanished state behind.
+    monkeypatch.setattr(app_module.SearchIndexerClient, "ensure_started", lambda self: False)
     file_index.set_background_owner_checker(None)
     file_index.set_background_owner_refresh_requester(None)
     file_index.set_background_owner_bytes_recorder(None)

@@ -469,6 +469,8 @@ function mermaidLoadingNode() {
 }
 
 async function renderMermaidSourceInto(container, source, options = {}) {
+  const isCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
+  if (!isCurrent()) return false;
   const text = String(source || '').trim();
   disconnectPreviewZoomSurface(container, {resetClasses: true});
   if (!text) {
@@ -481,10 +483,10 @@ async function renderMermaidSourceInto(container, source, options = {}) {
   container.replaceChildren(mermaidLoadingNode());
   try {
     const api = await loadMermaidApi();
-    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
     const id = `yolomux-mermaid-${Date.now()}-${seq}`;
     const result = await api.render(id, text);
-    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
     const rawSvg = typeof result === 'string' ? result : result?.svg;
     const svg = sanitizeStandaloneSvg(rawSvg);
     if (!svg) throw new Error(t('preview.mermaid.noSvg'));
@@ -503,7 +505,7 @@ async function renderMermaidSourceInto(container, source, options = {}) {
     return true;
   } catch (error) {
     disconnectPreviewZoomSurface(container, {resetClasses: true});
-    if (container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
+    if (isCurrent() && container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
     return false;
   }
 }
@@ -524,6 +526,7 @@ function renderMarkdownMermaidBlocks(container, markdownPath = '', options = {})
       path: markdownPath,
       zoomKey: `mermaid:${index}`,
       context: options.context || '',
+      isCurrent: options.isCurrent,
     }));
   });
   return renders.length ? Promise.allSettled(renders) : null;

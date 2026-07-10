@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "같은 탭",
   "pref.file_explorer.image_preview_max_px.help": "Finder/파일 탐색기의 호버 미리보기 최대 너비 및 높이입니다.",
   "pref.file_explorer.image_preview_max_px.label": "이미지 미리보기 최대 크기",
+  "pref.file_explorer.index_exclude_dir_names.help": "Quick Open 인덱싱에서 제외할 디렉터리 이름입니다. 나타나는 위치와 관계없이 적용되며 줄마다 이름 하나를 입력합니다. 일반적인 VCS, 비밀, 의존성, 캐시, 빌드 디렉터리로 미리 채워져 있습니다.",
+  "pref.file_explorer.index_exclude_dir_names.label": "인덱스 제외 디렉터리 이름",
   "pref.file_explorer.index_exclude_paths.help": "빠른 열기 제외입니다. 한 줄에 규칙 하나를 입력하세요. 일반 절대 경로 또는 홈 상대 경로는 인덱싱된 루트에 포함될 때만 해당 하위 트리를 제외합니다. `glob:<root-relative glob>`은 각 인덱싱된 루트 아래의 경로와 일치합니다. 예: `glob:**/.uploads/**`. `regex:<regular expression>`은 루트 상대 POSIX 경로와 일치합니다. 예: `regex:(^|/)target(?:/|$)`. 잘못된 regex 규칙은 무시됩니다.",
   "pref.file_explorer.index_exclude_paths.label": "빠른 열기 제외",
   "pref.file_explorer.index_max_files.help": "인덱싱된 루트당 최대 Quick Open 항목 수입니다. 한도에 도달하면 부분 인덱스 경고가 표시됩니다.",

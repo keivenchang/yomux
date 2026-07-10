@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Zelfde tabblad",
   "pref.file_explorer.image_preview_max_px.help": "Maximale breedte en hoogte voor hover-voorbeelden in Finder/Verkenner.",
   "pref.file_explorer.image_preview_max_px.label": "Beeldvoorbeeld maximale grootte",
+  "pref.file_explorer.index_exclude_dir_names.help": "Mapnamen die overal van Quick Open-indexering worden uitgesloten, één naam per regel. Vooraf gevuld met algemene VCS-, geheim-, afhankelijkheids-, cache- en buildmappen.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Uitgesloten indexmapnamen",
   "pref.file_explorer.index_exclude_paths.help": "Mapstructuren die van Quick Open-indexering zijn uitgesloten, één absoluut of home-relatief pad per regel.",
   "pref.file_explorer.index_exclude_paths.label": "Uitgesloten indexpaden",
   "pref.file_explorer.index_max_files.help": "Maximumaantal Quick Open-items per geïndexeerde hoofdmap. Bij deze limiet verschijnt een waarschuwing voor een gedeeltelijke index.",

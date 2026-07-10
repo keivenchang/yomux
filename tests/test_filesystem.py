@@ -59,6 +59,18 @@ def test_listing_reuses_child_canonicalization_for_security_and_identity(monkeyp
     assert calls.count(tmp_path / "second.txt") == 1
 
 
+def test_index_secret_filter_avoids_realpath_for_ordinary_walk_entries(monkeypatch, tmp_path):
+    # Index walks do not follow symlinks, so their secret filter can use the
+    # lexical policy and avoid one resolve() syscall per candidate.
+    paths = filesystem.paths
+    paths._secret_exact_paths()
+    paths._secret_directories()
+    monkeypatch.setattr(paths, "_normalized_scope_path", lambda _path: (_ for _ in ()).throw(AssertionError("ordinary index entries must not resolve")))
+
+    assert paths._path_is_secret(tmp_path / "ordinary.txt", resolve=False) is False
+    assert paths._path_is_secret(tmp_path / ".ssh" / "id_rsa", resolve=False) is True
+
+
 def test_listing_does_not_cache_stale_identity_after_inode_replacement(tmp_path):
     target = tmp_path / "replace.txt"
     target.write_text("old\n", encoding="utf-8")

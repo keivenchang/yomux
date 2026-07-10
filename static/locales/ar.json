@@ -1122,6 +1122,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "علامة التبويب نفسها",
   "pref.file_explorer.image_preview_max_px.help": "الحد الأقصى للعرض والارتفاع لمعاينات التحويم في Finder/مستعرض الملفات.",
   "pref.file_explorer.image_preview_max_px.label": "الحجم الأقصى لمعاينة الصور",
+  "pref.file_explorer.index_exclude_dir_names.help": "أسماء الأدلة المستثناة من فهرسة Quick Open أينما ظهرت، اسم واحد في كل سطر. مملوءة مسبقاً بمجلدات VCS والأسرار والاعتماديات والذاكرة المؤقتة والبناء الشائعة.",
+  "pref.file_explorer.index_exclude_dir_names.label": "أسماء أدلة مستثناة من الفهرس",
   "pref.file_explorer.index_exclude_paths.help": "استثناءات الفتح السريع، قاعدة واحدة في كل سطر. يستبعد المسار العادي المطلق أو النسبي للمنزل تلك الشجرة الفرعية فقط عندما يحتويها جذر مفهرس. `glob:<root-relative glob>` يطابق المسارات أسفل كل جذر مفهرس، مثل `glob:**/.uploads/**`. `regex:<regular expression>` يطابق كل مسار POSIX نسبي للجذر، مثل `regex:(^|/)target(?:/|$)`. تُتجاهل قواعد regex غير الصالحة.",
   "pref.file_explorer.index_exclude_paths.label": "استثناءات الفتح السريع",
   "pref.file_explorer.index_max_files.help": "الحد الأقصى لإدخالات Quick Open لكل جذر مفهرس. يظهر تحذير بفهرس جزئي عند بلوغ الحد.",

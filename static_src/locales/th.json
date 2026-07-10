@@ -1026,6 +1026,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "แท็บเดิม",
   "pref.file_explorer.image_preview_max_px.help": "ความกว้างและความสูงสูงสุดสําหรับการแสดงตัวอย่างโฮเวอร์ใน Finder/File Explorer",
   "pref.file_explorer.image_preview_max_px.label": "ขนาดสูงสุดของการแสดงตัวอย่างรูปภาพ",
+  "pref.file_explorer.index_exclude_dir_names.help": "ชื่อไดเรกทอรีที่ยกเว้นจากดัชนี Quick Open ทุกที่ที่พบ หนึ่งชื่อต่อบรรทัด กรอกไว้ล่วงหน้าด้วยไดเรกทอรี VCS ความลับ การพึ่งพา แคช และบิลด์ที่พบบ่อย",
+  "pref.file_explorer.index_exclude_dir_names.label": "ชื่อไดเรกทอรีที่ยกเว้นจากดัชนี",
   "pref.file_explorer.index_exclude_paths.help": "แผนผังย่อยของไดเรกทอรีที่ยกเว้นจากดัชนี Quick Open หนึ่งพาธแบบเต็มหรือสัมพันธ์กับโฮมต่อบรรทัด",
   "pref.file_explorer.index_exclude_paths.label": "พาธที่ยกเว้นจากดัชนี",
   "pref.file_explorer.index_max_files.help": "จำนวนรายการ Quick Open สูงสุดต่อรากที่จัดทำดัชนี เมื่อถึงขีดจำกัดจะแสดงคำเตือนดัชนีบางส่วน",

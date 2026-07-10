@@ -1050,6 +1050,8 @@
   "pref.file_explorer.image_open_mode.sameTab": "Même onglet",
   "pref.file_explorer.image_preview_max_px.help": "Largeur et hauteur maximales pour les aperçus au survol dans le Finder/Explorateur de fichiers.",
   "pref.file_explorer.image_preview_max_px.label": "Taille max. de l'aperçu d'image",
+  "pref.file_explorer.index_exclude_dir_names.help": "Noms de répertoires exclus de l'indexation Quick Open où qu'ils apparaissent, un nom par ligne. Prérempli avec des répertoires courants de VCS, secrets, dépendances, cache et build.",
+  "pref.file_explorer.index_exclude_dir_names.label": "Noms de répertoires exclus de l'index",
   "pref.file_explorer.index_exclude_paths.help": "Exclusions d’ouverture rapide, une règle par ligne. Un chemin simple absolu ou relatif au dossier personnel exclut ce sous-arbre seulement lorsqu’une racine indexée le contient. `glob:<root-relative glob>` correspond aux chemins sous chaque racine indexée, par exemple `glob:**/.uploads/**`. `regex:<regular expression>` correspond à chaque chemin POSIX relatif à la racine, par exemple `regex:(^|/)target(?:/|$)`. Les règles regex non valides sont ignorées.",
   "pref.file_explorer.index_exclude_paths.label": "Exclusions d’ouverture rapide",
   "pref.file_explorer.index_max_files.help": "Nombre maximal d'entrées Quick Open par racine indexée. Une alerte d'index partiel s'affiche lorsque cette limite est atteinte.",

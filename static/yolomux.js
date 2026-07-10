@@ -39940,6 +39940,7 @@ function preferenceSections() {
       preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
       preferenceSettingItem('file_explorer.quick_access_paths', {type: 'list'}),
       preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
+      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true}),
       preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 4, autosize: true}),
       preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
       preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
@@ -40125,6 +40126,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
+  if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);
   if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
   if (path === 'file_explorer.index_max_files') add(['index', 'limit', 'cap', 'maximum', 'partial', 'quick-open']);
   if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
@@ -49003,7 +49005,26 @@ function markdownPreviewHtml(text) {
   return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
 }
 
+function invalidateMarkdownPreviewArtifacts(container) {
+  // A Markdown source replacement invalidates every derived artifact below it:
+  // Mermaid's async SVG/blob image, rewritten local images, syntax highlighting,
+  // and zoom observers. Mark old Mermaid hosts stale before replacing the DOM so
+  // a slow prior render cannot install its SVG after newer Markdown wins.
+  const generation = Number(container?._markdownPreviewGeneration || 0) + 1;
+  if (container) container._markdownPreviewGeneration = generation;
+  for (const host of Array.from(container?.querySelectorAll?.('.mermaid-preview-host') || [])) {
+    host.dataset.mermaidRenderSeq = `stale-${generation}`;
+    if (typeof disconnectPreviewZoomSurface === 'function') {
+      disconnectPreviewZoomSurface(host, {resetClasses: true});
+    }
+    const source = host.querySelector?.('img.mermaid-preview-image')?.getAttribute?.('src') || '';
+    if (source.startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(source);
+  }
+  return generation;
+}
+
 function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) {
+  const generation = invalidateMarkdownPreviewArtifacts(container);
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
@@ -49014,7 +49035,10 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   rewriteMarkdownPreviewImages(frag, markdownPath);
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
-  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {context: options.context || ''});
+  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {
+    context: options.context || '',
+    isCurrent: () => container._markdownPreviewGeneration === generation,
+  });
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -49868,6 +49892,8 @@ function mermaidLoadingNode() {
 }
 
 async function renderMermaidSourceInto(container, source, options = {}) {
+  const isCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
+  if (!isCurrent()) return false;
   const text = String(source || '').trim();
   disconnectPreviewZoomSurface(container, {resetClasses: true});
   if (!text) {
@@ -49880,10 +49906,10 @@ async function renderMermaidSourceInto(container, source, options = {}) {
   container.replaceChildren(mermaidLoadingNode());
   try {
     const api = await loadMermaidApi();
-    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
     const id = `yolomux-mermaid-${Date.now()}-${seq}`;
     const result = await api.render(id, text);
-    if (container.dataset.mermaidRenderSeq !== String(seq)) return false;
+    if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
     const rawSvg = typeof result === 'string' ? result : result?.svg;
     const svg = sanitizeStandaloneSvg(rawSvg);
     if (!svg) throw new Error(t('preview.mermaid.noSvg'));
@@ -49902,7 +49928,7 @@ async function renderMermaidSourceInto(container, source, options = {}) {
     return true;
   } catch (error) {
     disconnectPreviewZoomSurface(container, {resetClasses: true});
-    if (container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
+    if (isCurrent() && container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
     return false;
   }
 }
@@ -49923,6 +49949,7 @@ function renderMarkdownMermaidBlocks(container, markdownPath = '', options = {})
       path: markdownPath,
       zoomKey: `mermaid:${index}`,
       context: options.context || '',
+      isCurrent: options.isCurrent,
     }));
   });
   return renders.length ? Promise.allSettled(renders) : null;
