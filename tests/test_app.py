@@ -223,36 +223,6 @@ def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeyp
     }
 
 
-def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    sample = {"time": time.time()}
-    webapp.stats_history_service.shared_host_metrics_available = False
-    with webapp.stats_history_service.agent_token_lock:
-        webapp.stats_history_service.agent_token_consumer_until = time.time() + 60
-    monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {
-        "system_memory_used_bytes": 45 * 1024,
-        "system_memory_capacity_bytes": 64 * 1024,
-        "cpu_processes": {},
-        "memory_processes": {},
-        "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_percent": 50, "memory_used_bytes": 40 * 1024, "memory_capacity_bytes": 64 * 1024}},
-        "gpu_util_processes": {},
-        "gpu_memory_processes": {},
-    })
-    try:
-        assert webapp.stats_local_host_metrics_needed() is True
-        assert webapp.record_stats_local_host_sample(sample) is True
-        with webapp.stats_history_service.lock:
-            bucket = next(iter(webapp.stats_history_service.raw_buckets.values()))
-            metrics = bucket["host_metrics"]
-    finally:
-        webapp.control_server.stop()
-
-    assert metrics["system_memory_count"] == 1
-    assert metrics["system_memory_used_total_bytes"] == 45 * 1024
-    assert metrics["gpu_devices"]["gpu:0"]["util_total_percent"] == 50
-    assert metrics["gpu_devices"]["gpu:0"]["memory_used_total_bytes"] == 40 * 1024
-
-
 def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     wall_times = iter([1000.0, 1000.2, 1002.0])

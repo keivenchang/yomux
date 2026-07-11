@@ -49,6 +49,8 @@ SERVER_FIELDS = (
 
 def empty_host_metrics() -> dict[str, Any]:
     return {
+        "cpu_label": "",
+        "system_memory_label": "",
         "system_memory_used_total_bytes": 0.0,
         "system_memory_capacity_total_bytes": 0.0,
         "system_memory_count": 0.0,

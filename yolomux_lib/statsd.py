@@ -276,6 +276,11 @@ class PersistentStatsService:
             return False
         target = bucket.setdefault("host_metrics", stats_store.empty_host_metrics())
         changed = False
+        for field in ("cpu_label", "system_memory_label"):
+            label = str(metrics.get(field) or "").strip()
+            if label:
+                target[field] = label
+                changed = True
         try:
             memory_used = max(0.0, float(metrics.get("system_memory_used_bytes") or 0.0))
             memory_capacity = max(0.0, float(metrics.get("system_memory_capacity_bytes") or 0.0))
@@ -878,6 +883,9 @@ class PersistentStatsService:
         source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
         if source_metrics:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())
+            for field in ("cpu_label", "system_memory_label"):
+                if source_metrics.get(field):
+                    target_metrics[field] = str(source_metrics[field])
             for field in ("system_memory_used_total_bytes", "system_memory_capacity_total_bytes", "system_memory_count"):
                 target_metrics[field] = float(target_metrics.get(field) or 0.0) + float(source_metrics.get(field) or 0.0)
             for mapping_field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices"):

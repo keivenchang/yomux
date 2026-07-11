@@ -560,7 +560,7 @@ def stats_GPU_gpu_metrics() -> dict[str, Any]:
     """Collect aggregate GPU device facts through the installed driver CLI, if present."""
     try:
         devices_result = subprocess.run(
-            ["gpu-info", "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            ["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
@@ -584,7 +584,7 @@ def stats_GPU_gpu_metrics() -> dict[str, Any]:
             continue
         key = f"gpu:{index}"
         devices[key] = {
-            "label": f"GPU {index}",
+            "label": f"GPU {index} ({parts[1]})" if parts[1] else f"GPU {index}",
             "util_percent": util,
             "memory_used_bytes": int(memory_used * 1024 * 1024),
             "memory_capacity_bytes": int(memory_total * 1024 * 1024),
@@ -594,7 +594,7 @@ def stats_GPU_gpu_metrics() -> dict[str, Any]:
     return {"devices": devices}
 
 
-def stats_macos_gpu_metrics() -> dict[str, Any]:
+def stats_macos_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
     """Use macOS IORegistry's public aggregate GPU counters; macOS exposes no per-process GPU API."""
     if sys.platform != "darwin":
         return {}
@@ -627,7 +627,7 @@ def stats_macos_gpu_metrics() -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
         devices[f"gpu:{index}"] = {
-            "label": f"GPU {index}",
+            "label": f"GPU {index} ({gpu_name})" if gpu_name else f"GPU {index}",
             "util_percent": util_percent,
             "memory_used_bytes": memory_used_bytes,
             "memory_capacity_bytes": total_memory,
@@ -635,12 +635,64 @@ def stats_macos_gpu_metrics() -> dict[str, Any]:
     return {"devices": devices} if devices else {}
 
 
+_stats_hardware_metadata_lock = threading.RLock()
+_stats_hardware_metadata_cache: dict[str, str] = {}
+_stats_hardware_metadata_initialized = False
+
+
+def stats_macos_hardware_metadata() -> dict[str, str]:
+    """Return static Apple-silicon labels without treating unified memory as discrete VRAM."""
+    try:
+        result = subprocess.run(
+            ["system_profiler", "-json", "SPHardwareDataType", "SPMemoryDataType", "SPDisplaysDataType"],
+            capture_output=True,
+            text=True,
+            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
+            check=False,
+        )
+        payload = json.loads(result.stdout) if result.returncode == 0 and result.stdout else {}
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    hardware = next((item for item in payload.get("SPHardwareDataType", []) if isinstance(item, dict)), {})
+    memory = next((item for item in payload.get("SPMemoryDataType", []) if isinstance(item, dict)), {})
+    display = next((item for item in payload.get("SPDisplaysDataType", []) if isinstance(item, dict)), {})
+    chip = str(hardware.get("chip_type") or display.get("sppci_model") or "").strip()
+    core_fields = re.findall(r"\d+", str(hardware.get("number_processors") or ""))
+    cpu_detail = chip
+    if len(core_fields) >= 3:
+        cpu_detail = f"{chip} · {core_fields[0]} cores ({core_fields[1]} performance + {core_fields[2]} efficiency)" if chip else f"{core_fields[0]} cores ({core_fields[1]} performance + {core_fields[2]} efficiency)"
+    elif core_fields:
+        cpu_detail = f"{chip} · {core_fields[0]} cores" if chip else f"{core_fields[0]} cores"
+    memory_type = str(memory.get("dimm_type") or "").strip()
+    metadata = {"cpu_label": cpu_detail, "gpu_label": str(display.get("sppci_model") or chip).strip()}
+    if memory_type:
+        metadata["system_memory_label"] = f"{memory_type} unified memory"
+    return {key: value for key, value in metadata.items() if value}
+
+
+def stats_host_hardware_metadata() -> dict[str, str]:
+    global _stats_hardware_metadata_initialized
+    with _stats_hardware_metadata_lock:
+        if _stats_hardware_metadata_initialized:
+            return dict(_stats_hardware_metadata_cache)
+        metadata = stats_macos_hardware_metadata() if sys.platform == "darwin" else {}
+        _stats_hardware_metadata_cache.clear()
+        _stats_hardware_metadata_cache.update(metadata)
+        _stats_hardware_metadata_initialized = True
+        return dict(_stats_hardware_metadata_cache)
+
+
 def stats_host_resource_metrics() -> dict[str, Any]:
-    gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics()
+    hardware = stats_host_hardware_metadata()
+    gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics(hardware.get("gpu_label", ""))
     memory = current_system_memory_bytes()
     return {
         "system_memory_used_bytes": memory[1] if memory is not None else None,
         "system_memory_capacity_bytes": memory[0] if memory is not None else None,
+        "cpu_label": hardware.get("cpu_label", ""),
+        "system_memory_label": hardware.get("system_memory_label", ""),
         "cpu_processes": {},
         "memory_processes": {},
         "gpu_devices": gpu.get("devices", {}),
@@ -10240,6 +10292,8 @@ class TmuxWebtermApp:
                 "-d",
                 "-s",
                 session,
+                "-e",
+                "TERM=xterm-256color",
                 "-c",
                 str(cwd),
                 command,
