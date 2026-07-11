@@ -43,6 +43,8 @@ INDEXER_LOCK_NAME = "indexer.lock"
 # macOS permits roughly 104 bytes for a Unix-domain socket path. Leave room
 # below that ceiling because Python and platform C libraries differ slightly.
 UNIX_SOCKET_SAFE_PATH_BYTES = 96
+_ACTIVE_SOCKET_PATHS: set[str] = set()
+_ACTIVE_SOCKET_PATHS_LOCK = threading.Lock()
 
 
 def _safe_socket_path(path: Path) -> Path:
@@ -200,9 +202,19 @@ class PersistentSearchIndexer:
             os.chmod(self.socket_path.parent, 0o700)
         except OSError:
             pass
-        lock_fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        socket_key = str(self.socket_path)
+        with _ACTIVE_SOCKET_PATHS_LOCK:
+            # macOS permits a second thread in this process to acquire a separate
+            # flock(2) descriptor. Keep the cross-process advisory lock below,
+            # but also prevent a local contender from unlinking this owner's
+            # socket before it gets there.
+            if socket_key in _ACTIVE_SOCKET_PATHS:
+                return 0
+            _ACTIVE_SOCKET_PATHS.add(socket_key)
+        lock_fd = -1
         owns_lock = False
         try:
+            lock_fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
@@ -243,7 +255,10 @@ class PersistentSearchIndexer:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
-            os.close(lock_fd)
+            if lock_fd >= 0:
+                os.close(lock_fd)
+            with _ACTIVE_SOCKET_PATHS_LOCK:
+                _ACTIVE_SOCKET_PATHS.discard(socket_key)
         return 0
 
 
