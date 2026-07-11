@@ -887,7 +887,10 @@ function projectDirName(session, info) {
   if (!info) return t('common.loading');
   const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
   const repo = selectedSessionRepo(session, info);
-  const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath;
+  // Transcript/repository discovery can lag an already-connected terminal, especially for a
+  // non-git shell. The live tmux signal is the owner of that pane's current directory, and the
+  // existing terminalCurrentPath() helper already reconciles it with transcript metadata.
+  const path = repo?.cwd || repo?.root || gitRoot || gitCwd || selectedPath || terminalCurrentPath(session);
   return pathBasename(path) || t('info.missing.path');
 }
 

@@ -34,6 +34,28 @@ const {
 } = require('./layout_test_helper');
 
 async function runTabberSuite() {
+  test('terminal tabs use the live tmux pane path while transcript metadata is incomplete', () => {
+    const api = loadYolomux('', ['8882']);
+    api.setTmuxSignalStateForTest({windows: [{
+      session: '8882',
+      window_index: '1',
+      active: true,
+      panes: [{
+        target: '8882:1.0',
+        pane_id: '8882:1.0',
+        pane_index: '0',
+        window_index: '1',
+        active: true,
+        current_path: '/Users/keivenc/Documents/bin/yolomux.dev8882',
+        current_command: 'codex',
+      }],
+    }]});
+
+    const html = api.tmuxPaneTabHtml('8882', {panes: []}, null, false);
+    assert.ok(html.includes('yolomux.dev8882'), 'a live non-git shell tab shows its pane directory instead of No path while transcript metadata catches up');
+    assert.equal(html.includes('No path'), false, 'the missing-path placeholder is not rendered when tmux supplies the working directory');
+  });
+
   test('shared tree controller is the Finder, Tabber, and Differ interaction parent', () => {
     const source = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
