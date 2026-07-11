@@ -263,7 +263,33 @@ def test_codex_generated_tokens_reads_latest_cumulative_usage_from_the_tail(tmp_
     monkeypatch.setattr(session_files.json, "loads", tracking_loads)
 
     assert session_files.transcript_generated_tokens(transcript, "codex") == 17
-    assert len(parsed) == 1
+    # Family discovery reads the rollout metadata once before preserving the tail-only fast path.
+    assert len(parsed) <= 5
+
+
+def test_codex_generated_tokens_sum_spawned_rollouts_into_the_parent(tmp_path, monkeypatch):
+    parent = tmp_path / "rollout-parent.jsonl"
+    child = tmp_path / "rollout-child.jsonl"
+    grandchild = tmp_path / "rollout-grandchild.jsonl"
+    unrelated = tmp_path / "rollout-unrelated.jsonl"
+
+    def lines(thread_id, totals, model, parent_thread_id=""):
+        meta = {"id": thread_id}
+        if parent_thread_id:
+            meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+        records = [{"type": "session_meta", "payload": meta}, {"type": "turn_context", "payload": {"model": model}}]
+        records.extend({"timestamp": index + 1, "payload": {"info": {"total_token_usage": {"output_tokens": total}}}} for index, total in enumerate(totals))
+        return "".join(json.dumps(record) + "\n" for record in records)
+
+    parent.write_text(lines("parent", [100, 160], "gpt-5.5"), encoding="utf-8")
+    child.write_text(lines("child", [20, 50], "gpt-5.4-mini", "parent"), encoding="utf-8")
+    grandchild.write_text(lines("grandchild", [5, 11], "gpt-5.5", "child"), encoding="utf-8")
+    unrelated.write_text(lines("unrelated", [999], "gpt-unrelated", "other"), encoding="utf-8")
+    monkeypatch.setattr(session_files, "codex_transcript_family_paths", lambda path: [parent, child, grandchild] if path == parent else [path])
+
+    assert session_files.transcript_generated_tokens(parent, "codex") == 221
+    assert session_files.transcript_generated_tokens_by_model(parent, "codex") == {"gpt-5.5": 171, "gpt-5.4-mini": 50}
+    assert {event.source for event in session_files.transcript_generated_token_events(parent, "codex")} == {str(parent), str(child), str(grandchild)}
 
 
 def test_transcript_usage_identity_changes_after_in_place_replacement(tmp_path):

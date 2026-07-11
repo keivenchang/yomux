@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "⟦ǦƤÚ ɱéɱóřý····⟧",
   "debug.graph.chart.gpuUtil": "⟦ǦƤÚ úťíłížáťíóñ······⟧",
   "debug.graph.chart.memory": "⟦Šýšťéɱ ɱéɱóřý·····⟧",
+  "debug.graph.chart.modelTokens": "⟦Ɱóđéł ťóķéñš/ɱíñ······⟧",
   "debug.graph.clientWork": "⟦Çłíéñť ŵóřķ | áñíɱáťíóñš {animations} | łóñǧ ťášķš {tasks}{timing}················⟧",
   "debug.graph.clientWorkTiming": "⟦ áṽǧ {average}ɱš ɱáẋ {max}ɱš······⟧",
   "debug.graph.control.bucketSize": "⟦Ǧřáƥĥ ƀúçķéť šížé·······⟧",

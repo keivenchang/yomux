@@ -2404,4 +2404,6 @@
   "yoagent.job.answer.loopSend": "YO!agent-Auftrag `{id}` erstellt: Nach der Bestätigung bis zu {runs}-mal alle {interval}s an tmux-Sitzung `{session}` senden:\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "alle {seconds}s · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "verifizierte Sendung wiederholen"
+,
+  "debug.graph.chart.modelTokens": "Modell-Token/Min"
 }

@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "模型令牌/分钟",
   "debug.graph.clientWork": "客户端工作 | 动画 {animations} | 长任务 {tasks}{timing}",
   "debug.graph.clientWorkTiming": " 平均 {average}ms 最大 {max}ms",
   "debug.graph.control.bucketSize": "图表采样间隔",

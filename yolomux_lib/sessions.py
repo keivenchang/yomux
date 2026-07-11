@@ -242,6 +242,73 @@ def claude_transcript_family_paths(path: Path) -> list[Path]:
     return paths
 
 
+def codex_transcript_meta(path: Path) -> tuple[str, str]:
+    """Return a rollout's thread id and immediate spawning parent, if transcript metadata has them."""
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index >= 20:
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") != "session_meta" or not isinstance(record.get("payload"), dict):
+                    continue
+                payload = record["payload"]
+                thread_id = str(payload.get("id") or "").strip()
+                source = payload.get("source")
+                subagent = source.get("subagent") if isinstance(source, dict) else None
+                thread_spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+                parent_thread_id = str(thread_spawn.get("parent_thread_id") or "").strip() if isinstance(thread_spawn, dict) else ""
+                return thread_id, parent_thread_id
+    except OSError:
+        return "", ""
+    return "", ""
+
+
+def codex_transcript_family_paths(path: Path, candidates: list[Path] | None = None) -> list[Path]:
+    """Return one interactive rollout plus currently discoverable spawned descendants.
+
+    Codex records a subagent in a separate rollout rather than below the parent's file. The
+    parent thread id in each child ``session_meta`` is the durable linkage. We deliberately
+    inspect the bounded recent-candidate window: active children move to the mtime front, while
+    scanning every historical rollout on each ten-second stats pass would be an avoidable cost.
+    """
+
+    root = path.expanduser().resolve(strict=False)
+    root_id, _parent_thread_id = codex_transcript_meta(root)
+    if candidates is None and not root_id:
+        return [root]
+    sessions_root = next((ancestor for ancestor in root.parents if ancestor.name == "sessions"), None)
+    window = list(candidates) if candidates is not None else recent_codex_transcript_candidates(root=sessions_root)
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in [root, *window]:
+        resolved = candidate.expanduser().resolve(strict=False)
+        if resolved in seen or not resolved.name.startswith("rollout-") or resolved.suffix != ".jsonl":
+            continue
+        seen.add(resolved)
+        paths.append(resolved)
+    metadata = {candidate: codex_transcript_meta(candidate) for candidate in paths}
+    included_ids = {root_id}
+    family = [root]
+    # Iteration, rather than a one-level filter, includes grandchildren when all active rollout
+    # files are in the candidate window.
+    while True:
+        additions = [
+            candidate
+            for candidate in paths
+            if candidate not in family and metadata[candidate][1] in included_ids
+        ]
+        if not additions:
+            break
+        family.extend(additions)
+        included_ids.update(metadata[candidate][0] for candidate in additions if metadata[candidate][0])
+    return family
+
+
 def read_claude_agent(
     session: str,
     pane: PaneInfo,

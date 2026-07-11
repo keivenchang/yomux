@@ -2404,4 +2404,6 @@
   "yoagent.job.answer.loopSend": "確認後、tmux セッション `{session}` に {interval}秒ごと、最大 {runs} 回送信する YO!agent ジョブ `{id}` を作成しました。\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "{seconds}秒ごと · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "検証済み送信を繰り返す"
+,
+  "debug.graph.chart.modelTokens": "モデルトークン/分"
 }

@@ -1107,6 +1107,7 @@ globalThis.__layoutTestApi = {
   recordApiDebugResponseBytesForGraphForTest: recordApiDebugResponseBytesForGraph,
   debugGraphAgentTokenDisplayBucketsForTest: debugGraphAgentTokenDisplayBuckets,
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
+  debugGraphTokenSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphAgentTokenDisplayBuckets(nowMs)),
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,

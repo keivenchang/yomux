@@ -4964,6 +4964,9 @@ body :is(
   color: var(--muted);
   font: 600 var(--js-debug-legend-font-size)/1 var(--ui-font);
 }
+.js-debug-legend-item--hovered {
+  color: var(--text);
+}
 .js-debug-legend-swatch {
   width: 10px;
   height: 10px;
@@ -7404,6 +7407,18 @@ body.layout-resizing {
    when necessary so its right edge stays aligned with the pane. */
 .pane-info-bar-popover-zone .pane-info-bar-scroll-viewport {
   flex: 0 1 auto;
+}
+/* A terminal Info Bar has fixed child-window and repository controls first. Its metadata must
+   begin immediately after those controls; generic popover panels retain their trailing metadata. */
+.pane-info-bar:has(> .tmux-window-bar) .pane-info-bar-popover-zone .pane-info-bar-meta {
+  margin-inline-start: 0;
+  justify-content: flex-start;
+}
+.pane-info-bar:has(> .tmux-window-bar) .panel-session-label {
+  display: none;
+}
+.pane-info-bar:has(> .tmux-window-bar) > .pane-info-bar-controls {
+  margin-inline-end: 0;
 }
 .pane-info-bar-controls,
 .pane-info-bar-fixed-sep {

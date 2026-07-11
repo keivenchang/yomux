@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "मॉडल टोकन/मिनट",
   "debug.graph.clientWork": "ग्राहक कार्य | एनिमेशन {animations} | लंबे कार्य {tasks}{timing}",
   "debug.graph.clientWorkTiming": " औसत {average}ms अधिकतम {max}ms",
   "debug.graph.control.bucketSize": "बाल्टी का आकार ग्राफ़ करें",

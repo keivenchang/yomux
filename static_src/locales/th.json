@@ -2404,4 +2404,6 @@
   "yoagent.job.answer.loopSend": "สร้างงาน YO!agent `{id}` เพื่อส่งไปยังเซสชัน tmux `{session}` ทุก {interval} วินาที สูงสุด {runs} ครั้ง หลังยืนยัน:\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "ทุก {seconds} วินาที · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "ส่งที่ตรวจสอบแล้วซ้ำ"
+,
+  "debug.graph.chart.modelTokens": "โทเค็นโมเดล/นาที"
 }

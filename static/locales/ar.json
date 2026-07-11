@@ -236,6 +236,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "رموز النموذج / دقيقة",
   "debug.graph.clientWork": "عمل العميل | الرسوم المتحركة {animations} | المهام الطويلة {tasks}{timing}",
   "debug.graph.clientWorkTiming": " متوسط {average}ms ماكس {max}ms",
   "debug.graph.control.bucketSize": "حجم دلو الرسم البياني",

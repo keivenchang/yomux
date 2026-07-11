@@ -443,7 +443,7 @@ STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS = STATS_HISTORY_SAMPLER_SECONDS
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
 STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 45.0
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS * 3
-STATS_AGENT_TOKEN_SCHEMA_VERSION = 3
+STATS_AGENT_TOKEN_SCHEMA_VERSION = 5
 # Versioned separately from the token-rate schema: this one-time repair reconstructs the history
 # erased by the first schema-3 writer from the transcript counters that remain on disk.
 STATS_AGENT_TOKEN_HISTORY_RECOVERY_VERSION = 1
@@ -824,6 +824,35 @@ def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
             record["seconds"] = seconds
         if source_label:
             record["source"] = source_label
+        raw_model_rates = item.get("model_rates")
+        if not isinstance(raw_model_rates, dict):
+            # Schema 4 briefly placed one model alongside an agent record. Older rate history
+            # has no attribution at all. Preserve both honestly under the nested dimension so
+            # Model tokens/min remains a projection of the same agent record.
+            model = str(item.get("model") or "unknown").strip()[:256] or "unknown"
+            raw_model_rates = {model: {"total": total, "samples": samples, "tokens": tokens or total, "seconds": seconds}}
+        model_rates: dict[str, dict[str, float]] = {}
+        for raw_model, raw_rate in raw_model_rates.items():
+            model = str(raw_model or "unknown").strip()[:256] or "unknown"
+            rate = raw_rate if isinstance(raw_rate, dict) else {"total": raw_rate}
+            model_total = positive_finite_number(rate.get("total", rate.get("rate", rate.get("value"))))
+            model_samples = positive_finite_number(rate.get("samples"))
+            model_tokens = positive_finite_number(rate.get("tokens", rate.get("token_total")))
+            model_seconds = positive_finite_number(rate.get("seconds", rate.get("duration_seconds")))
+            if model_tokens and not model_total:
+                model_total = model_tokens
+            if model_total and not model_samples:
+                model_samples = 1.0
+            if not model_total and not model_samples and not model_tokens:
+                continue
+            model_rates[model] = {
+                "total": model_total,
+                "samples": model_samples,
+                "tokens": model_tokens or model_total,
+                "seconds": model_seconds or seconds,
+            }
+        if model_rates:
+            record["model_rates"] = model_rates
         records.append(record)
     return records
 
@@ -1811,7 +1840,7 @@ class TmuxWebtermApp:
             key = item["key"]
             existing = token_rates.get(key)
             if not isinstance(existing, dict):
-                existing = {"label": item["label"], "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0}
+                existing = {"label": item["label"], "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "model_rates": {}}
                 token_rates[key] = existing
             existing["label"] = item["label"] or existing.get("label") or key
             existing["total"] = float(existing.get("total") or 0.0) + float(item.get("total") or 0.0)
@@ -1820,6 +1849,20 @@ class TmuxWebtermApp:
             existing["seconds"] = float(existing.get("seconds") or 0.0) + float(item.get("seconds") or 0.0)
             if item.get("source"):
                 existing["source"] = str(item.get("source") or "")
+            model_rates = existing.get("model_rates")
+            if not isinstance(model_rates, dict):
+                model_rates = {}
+                existing["model_rates"] = model_rates
+            for model, model_rate in (item.get("model_rates") or {}).items():
+                if not isinstance(model_rate, dict):
+                    continue
+                model_key = str(model or "unknown").strip()[:256] or "unknown"
+                target = model_rates.get(model_key)
+                if not isinstance(target, dict):
+                    target = {"total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0}
+                    model_rates[model_key] = target
+                for field in ("total", "samples", "tokens", "seconds"):
+                    target[field] = float(target.get(field) or 0.0) + float(model_rate.get(field) or 0.0)
             changed = True
         return changed
 
@@ -2141,6 +2184,16 @@ class TmuxWebtermApp:
                         "tokens": float(item.get("tokens") or 0.0),
                         "seconds": float(item.get("seconds") or 0.0),
                         "source": str(item.get("source") or ""),
+                        "model_rates": {
+                            str(model): {
+                                "total": float(rate.get("total") or 0.0),
+                                "samples": float(rate.get("samples") or 0.0),
+                                "tokens": float(rate.get("tokens") or 0.0),
+                                "seconds": float(rate.get("seconds") or 0.0),
+                            }
+                            for model, rate in sorted((item.get("model_rates") or {}).items())
+                            if isinstance(rate, dict)
+                        },
                     }
                     for key, item in sorted((bucket.get("agent_token_rates") or {}).items())
                     if isinstance(item, dict)
@@ -2487,6 +2540,16 @@ class TmuxWebtermApp:
                 "tokens": float(item.get("tokens") or 0.0),
                 "seconds": float(item.get("seconds") or 0.0),
                 "source": str(item.get("source") or ""),
+                "model_rates": {
+                    str(model): {
+                        "total": float(rate.get("total") or 0.0),
+                        "samples": float(rate.get("samples") or 0.0),
+                        "tokens": float(rate.get("tokens") or 0.0),
+                        "seconds": float(rate.get("seconds") or 0.0),
+                    }
+                    for model, rate in sorted((item.get("model_rates") or {}).items())
+                    if isinstance(rate, dict)
+                },
             }
         return snapshot
 
@@ -2976,6 +3039,13 @@ class TmuxWebtermApp:
                 text = str(raw_item.get(field) or "").strip()
                 if text:
                     item[field] = text
+            models = raw_item.get("models")
+            if isinstance(models, dict):
+                item["models"] = {
+                    str(model or "unknown").strip()[:256] or "unknown": positive_finite_number(tokens)
+                    for model, tokens in models.items()
+                    if positive_finite_number(tokens) > 0
+                }
             snapshot[key] = item
         return snapshot
 
@@ -3457,11 +3527,13 @@ class TmuxWebtermApp:
         if generated_tokens is None:
             return None
         row["_stats_agent_token_identity"] = session_files.transcript_usage_identity(transcript_path, kind)
+        row["_stats_agent_token_models"] = session_files.transcript_generated_tokens_by_model(transcript_path, kind)
         return generated_tokens
 
     def stats_agent_token_count(self, row: dict[str, Any]) -> float | None:
         row.pop("_stats_agent_token_source", None)
         row.pop("_stats_agent_token_identity", None)
+        row.pop("_stats_agent_token_models", None)
         transcript_tokens = self.stats_agent_transcript_token_count(row)
         if transcript_tokens is not None:
             row["_stats_agent_token_source"] = "transcript"
@@ -3484,7 +3556,15 @@ class TmuxWebtermApp:
         kind = str(row.get("kind") or "agent").strip() or "agent"
         return ":".join(part for part in (session, window_label or kind) if part) or kind
 
-    def stats_agent_token_delta_records(self, key: str, label: str, start_time: float, end_time: float, token_delta: float) -> list[dict[str, Any]]:
+    def stats_agent_token_delta_records(
+        self,
+        key: str,
+        label: str,
+        start_time: float,
+        end_time: float,
+        token_delta: float,
+        model_deltas: dict[str, float] | None = None,
+    ) -> list[dict[str, Any]]:
         if not key or not math.isfinite(start_time) or not math.isfinite(end_time) or end_time <= start_time:
             return []
         if not math.isfinite(token_delta) or token_delta <= 0:
@@ -3501,6 +3581,19 @@ class TmuxWebtermApp:
                 cursor = min(end_time, cursor + bucket_seconds)
                 continue
             tokens = token_delta * (overlap / elapsed)
+            raw_model_rates = model_deltas if isinstance(model_deltas, dict) else {}
+            model_rates = {
+                str(model or "unknown").strip()[:256] or "unknown": {
+                    "total": max(0.0, float(value)) * (overlap / elapsed),
+                    "samples": 1.0,
+                    "tokens": max(0.0, float(value)) * (overlap / elapsed),
+                    "seconds": overlap,
+                }
+                for model, value in raw_model_rates.items()
+                if positive_finite_number(value) > 0
+            }
+            if not model_rates:
+                model_rates = {"unknown": {"total": tokens, "samples": 1.0, "tokens": tokens, "seconds": overlap}}
             records.append({
                 "time": bucket_start,
                 "tokens_per_agent_total": tokens,
@@ -3513,6 +3606,7 @@ class TmuxWebtermApp:
                     "tokens": tokens,
                     "seconds": overlap,
                     "source": "transcript",
+                    "model_rates": model_rates,
                 }],
             })
             cursor = bucket_end
@@ -3534,6 +3628,7 @@ class TmuxWebtermApp:
             token_source = str(measurement["source"])
             token_identity = str(measurement["identity"])
             label = str(measurement["label"])
+            models = measurement.get("models") if isinstance(measurement.get("models"), dict) else {}
             previous = state.get(key)
             previous_source = str(previous.get("source") or "") if isinstance(previous, dict) else ""
             previous_identity = str(previous.get("identity") or previous_source) if isinstance(previous, dict) else ""
@@ -3547,8 +3642,28 @@ class TmuxWebtermApp:
                 and token_count >= previous_tokens
                 and 0 < elapsed <= STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS
             ):
-                records.extend(self.stats_agent_token_delta_records(key, label, previous_time, sample_time, token_count - previous_tokens))
-            state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source, "identity": token_identity}
+                token_delta = token_count - previous_tokens
+                previous_models = previous.get("models") if isinstance(previous.get("models"), dict) else {}
+                model_deltas: dict[str, float] = {}
+                for model, model_total in models.items():
+                    model_key = str(model or "unknown").strip()[:256] or "unknown"
+                    current_total = positive_finite_number(model_total)
+                    previous_total = positive_finite_number(previous_models.get(model_key))
+                    model_delta = max(0.0, current_total - previous_total)
+                    if model_delta > 0:
+                        model_deltas[model_key] = model_delta
+                attributed = sum(model_deltas.values())
+                if token_delta > attributed:
+                    model_deltas["unknown"] = model_deltas.get("unknown", 0.0) + (token_delta - attributed)
+                records.extend(self.stats_agent_token_delta_records(key, label, previous_time, sample_time, token_delta, model_deltas))
+            state[key] = {
+                "tokens": token_count,
+                "time": sample_time,
+                "label": label,
+                "source": token_source,
+                "identity": token_identity,
+                "models": {str(model or "").strip() or "unknown": positive_finite_number(total) for model, total in models.items()},
+            }
         for key in list(state):
             if key not in seen_keys:
                 state.pop(key, None)
@@ -3569,6 +3684,16 @@ class TmuxWebtermApp:
                 "tokens": float(item.get("tokens") or 0.0),
                 "seconds": float(item.get("seconds") or 0.0),
                 "source": str(item.get("source") or ""),
+                "model_rates": {
+                    str(model): {
+                        "total": float(rate.get("total") or 0.0),
+                        "samples": float(rate.get("samples") or 0.0),
+                        "tokens": float(rate.get("tokens") or 0.0),
+                        "seconds": float(rate.get("seconds") or 0.0),
+                    }
+                    for model, rate in sorted((item.get("model_rates") or {}).items())
+                    if isinstance(rate, dict)
+                },
             }
             canonical_rates[key] = canonical
             token_total += canonical["tokens"]
@@ -3608,8 +3733,19 @@ class TmuxWebtermApp:
                     # rate is still useful, so preserve it while projecting duplicate elapsed
                     # coverage back onto this bucket's real wall-clock duration.
                     if duration > 0 and seconds > duration:
-                        tokens *= duration / seconds
+                        scale = duration / seconds
+                        tokens *= scale
                         seconds = duration
+                        model_rates = item.get("model_rates")
+                        if isinstance(model_rates, dict):
+                            for model_rate in model_rates.values():
+                                if not isinstance(model_rate, dict):
+                                    continue
+                                for field in ("total", "tokens", "seconds"):
+                                    try:
+                                        model_rate[field] = max(0.0, float(model_rate.get(field) or 0.0) * scale)
+                                    except (TypeError, ValueError):
+                                        model_rate[field] = 0.0
                     item["tokens"] = tokens
                     item["total"] = tokens
                     item["seconds"] = seconds
@@ -3670,6 +3806,7 @@ class TmuxWebtermApp:
                     clipped_start,
                     clipped_end,
                     event.tokens * covered_fraction,
+                    {str(event.model or "unknown").strip()[:256] or "unknown": event.tokens * covered_fraction},
                 ))
         return records
 
@@ -3740,6 +3877,16 @@ class TmuxWebtermApp:
                     "tokens": float(item.get("tokens") or 0.0),
                     "seconds": float(item.get("seconds") or 0.0),
                     "source": str(item.get("source") or "transcript"),
+                    "model_rates": {
+                        str(model): {
+                            "total": float(rate.get("total") or 0.0),
+                            "samples": float(rate.get("samples") or 0.0),
+                            "tokens": float(rate.get("tokens") or 0.0),
+                            "seconds": float(rate.get("seconds") or 0.0),
+                        }
+                        for model, rate in sorted((item.get("model_rates") or {}).items())
+                        if isinstance(rate, dict)
+                    },
                 }
                 changed = True
             if changed:
@@ -3865,7 +4012,8 @@ class TmuxWebtermApp:
                     token_source = str(row.get("_stats_agent_token_source") or "sample").strip() or "sample"
                     token_identity = str(row.get("_stats_agent_token_identity") or token_source).strip() or token_source
                     label = self.stats_agent_token_label(row)
-                    token_measurements.append({"key": key, "tokens": token_count, "source": token_source, "identity": token_identity, "label": label})
+                    models = row.get("_stats_agent_token_models") if isinstance(row.get("_stats_agent_token_models"), dict) else {}
+                    token_measurements.append({"key": key, "tokens": token_count, "source": token_source, "identity": token_identity, "label": label, "models": models})
             if include_token_rates:
                 if self.stats_history_uses_shared_status():
                     agent_token_records = self.stats_agent_token_claim_shared_delta_records_locked(token_measurements, seen_keys, sample_time)

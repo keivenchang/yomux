@@ -2404,4 +2404,6 @@
   "yoagent.job.answer.loopSend": "पुष्टि के बाद मैंने YO!agent कार्य `{id}` बनाया है जो tmux सत्र `{session}` को हर {interval}s पर अधिकतम {runs} बार भेजेगा:\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "हर {seconds}s · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "सत्यापित भेजना दोहराएं"
+,
+  "debug.graph.chart.modelTokens": "मॉडल टोकन/मिनट"
 }
