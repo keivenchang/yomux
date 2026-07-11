@@ -71,6 +71,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 - [ ] [M] Add a peek/reply action for a session when it needs only a short response and the user does not need to attach to the full terminal.
 - [ ] [M] Add worktree cleanup guardrails: never delete a worktree with uncommitted changes; show the path and stop.
 - [ ] [M] Add per-session token/cost/context metrics only if they can be read reliably from Claude/Codex metadata without scraping fragile terminal text.
+- [ ] [L] Add an opt-in displayed-range Cost summary after billable token categories and a source-linked pricing catalog exist. Reuse the exact `Σ displayed` interval, break down input/output/cache and exact-model costs, reconcile an All models total, migrate retained history, and preserve revision history plus unknown/partial estimate labeling; see [`RESEARCH.md`](RESEARCH.md#transparent-model-pricing-and-estimated-cost--2026-07-11).
 - [ ] [M] Add lightweight CPU/memory/load probes and per-session process trees. Add optional `nv-smi` GPU status when available, but do not make GPU support required.
 
 ## Global Summaries
