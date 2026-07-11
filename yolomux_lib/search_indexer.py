@@ -28,6 +28,10 @@ from .filesystem import search
 
 INDEXER_PROTOCOL_VERSION = 1
 INDEXER_DEBOUNCE_SECONDS = 2.0
+INDEXER_MAX_DEBOUNCE_SECONDS = 15.0
+INDEXER_CHURN_BACKOFF_MAX_SECONDS = 30.0
+INDEXER_CHURN_WINDOW_SECONDS = 60.0
+INDEXER_MAINTENANCE_SECONDS = 2.0
 INDEXER_MAX_REQUEST_BYTES = 256 * 1024
 INDEXER_SOCKET_NAME = "indexer.sock"
 INDEXER_LOCK_NAME = "indexer.lock"
@@ -82,7 +86,11 @@ class PersistentSearchIndexer:
         self.stop_event = threading.Event()
         self.pending_paths: dict[str, set[str]] = defaultdict(set)
         self.pending_due_at: dict[str, float] = {}
+        self.pending_first_at: dict[str, float] = {}
         self.pending_reasons: dict[str, set[str]] = defaultdict(set)
+        self.root_last_processed_at: dict[str, float] = {}
+        self.root_churn_level: dict[str, int] = defaultdict(int)
+        self.next_maintenance_at = 0.0
 
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         clean_root = str(Path(root).expanduser().resolve(strict=False))
@@ -93,9 +101,15 @@ class PersistentSearchIndexer:
             for path in paths
             if isinstance(path, str) and path.startswith("/")
         }
+        now = time.monotonic()
         self.pending_paths[clean_root].update(clean_paths)
         self.pending_reasons[clean_root].add(str(reason or "index-request"))
-        self.pending_due_at.setdefault(clean_root, time.monotonic() + INDEXER_DEBOUNCE_SECONDS)
+        first_at = self.pending_first_at.setdefault(clean_root, now)
+        churn_level = self.root_churn_level.get(clean_root, 0)
+        delay = min(INDEXER_CHURN_BACKOFF_MAX_SECONDS, INDEXER_DEBOUNCE_SECONDS * (2 ** churn_level))
+        # Use a trailing debounce to batch a save storm, but impose a maximum
+        # wait so an actively changing repository is not starved indefinitely.
+        self.pending_due_at[clean_root] = min(first_at + INDEXER_MAX_DEBOUNCE_SECONDS, now + delay)
         return {"ok": True, "accepted": True, "root": clean_root, "queued_paths": len(self.pending_paths[clean_root])}
 
     def unindex(self, root: str) -> dict[str, Any]:
@@ -104,21 +118,36 @@ class PersistentSearchIndexer:
             return {"ok": False, "error": "root must be absolute"}
         self.pending_paths.pop(clean_root, None)
         self.pending_due_at.pop(clean_root, None)
+        self.pending_first_at.pop(clean_root, None)
         self.pending_reasons.pop(clean_root, None)
         file_index.unindex(Path(clean_root))
         return {"ok": True, "accepted": True, "root": clean_root}
+
+    def schedule_maintenance_if_due(self, now: float) -> int:
+        if now < self.next_maintenance_at:
+            return 0
+        started = file_index.schedule_refreshes(now=time.time())
+        self.next_maintenance_at = now + INDEXER_MAINTENANCE_SECONDS
+        return started
 
     def process_due(self) -> int:
         now = time.monotonic()
         roots = [root for root, due_at in self.pending_due_at.items() if due_at <= now]
         if not roots:
-            file_index.schedule_refreshes()
+            self.schedule_maintenance_if_due(now)
             return 0
         processed = 0
         for root_text in sorted(roots):
             paths = sorted(self.pending_paths.pop(root_text, set()))
             self.pending_due_at.pop(root_text, None)
+            self.pending_first_at.pop(root_text, None)
             self.pending_reasons.pop(root_text, None)
+            previous = self.root_last_processed_at.get(root_text, 0.0)
+            if previous and now - previous <= INDEXER_CHURN_WINDOW_SECONDS:
+                self.root_churn_level[root_text] = min(self.root_churn_level.get(root_text, 0) + 1, 4)
+            else:
+                self.root_churn_level[root_text] = 0
+            self.root_last_processed_at[root_text] = now
             root = Path(root_text)
             if not root.is_dir():
                 continue
@@ -127,7 +156,7 @@ class PersistentSearchIndexer:
             if paths:
                 search.reindex_roots_for_paths(paths, reason="persistent-indexer")
             else:
-                file_index.schedule_refreshes()
+                self.schedule_maintenance_if_due(now)
             processed += 1
         return processed
 

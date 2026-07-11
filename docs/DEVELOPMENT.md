@@ -204,7 +204,7 @@ python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang --dev
 
 After every YOLOmux change in a dev worktree, restart that active dev server and verify it before reporting the change ready for testing. Restart prod only when explicitly requested.
 
-Use `boot.sh` from the checkout you want to serve. It restarts only the requested port listener, waits for that old listener to leave the port before launching the replacement, sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible, defaults `MALLOC_ARENA_MAX` to 2 so threaded JSON/transcript work cannot retain one glibc arena per request thread, and appends logs under `/tmp` by default. On Linux it finds listeners with `ss`; on macOS it falls back to `lsof`, and it uses plain `nohup` when `setsid -f` is unavailable.
+Use `boot.sh` from the checkout you want to serve. It serializes restarts for each port, restarts only that port listener, waits for the old listener to leave the port before launching the replacement, sets `PATH` explicitly before launch so agent CLIs under `~/.local/bin` are visible, defaults `MALLOC_ARENA_MAX` to 2 so threaded JSON/transcript work cannot retain one glibc arena per request thread, and appends logs under `/tmp` by default. The server also holds a process-lifetime per-port lease, so direct launch and self-update races fail before app/background initialization. On Linux it finds listeners with `ss`; on macOS it falls back to `lsof`, and it uses plain `nohup` when `setsid -f` is unavailable.
 
 ```bash
 ./boot.sh

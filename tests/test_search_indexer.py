@@ -51,3 +51,44 @@ def test_persistent_indexer_owns_unindex_writes(tmp_path, monkeypatch):
 
     assert service.unindex(str(root)) == {"ok": True, "accepted": True, "root": str(root)}
     assert removed == [root]
+
+
+def test_persistent_indexer_applies_trailing_debounce_and_churn_backoff(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
+    moment = [100.0]
+    monkeypatch.setattr(search_indexer.time, "monotonic", lambda: moment[0])
+
+    service.enqueue(str(root), [], "watch")
+    assert service.pending_due_at[str(root)] == 102.0
+    moment[0] = 101.0
+    service.enqueue(str(root), [], "watch")
+    assert service.pending_due_at[str(root)] == 103.0
+
+    service.pending_due_at[str(root)] = 0.0
+    monkeypatch.setattr(search, "_ensure_search_index", lambda _root: None)
+    monkeypatch.setattr(search, "reindex_roots_for_paths", lambda *_args, **_kwargs: None)
+    moment[0] = 102.0
+    service.process_due()
+    moment[0] = 103.0
+    service.enqueue(str(root), [], "watch")
+    assert service.pending_due_at[str(root)] == 105.0
+
+    service.pending_due_at[str(root)] = 0.0
+    moment[0] = 104.0
+    service.process_due()
+    moment[0] = 105.0
+    service.enqueue(str(root), [], "watch")
+    assert service.pending_due_at[str(root)] == 109.0
+
+
+def test_persistent_indexer_does_not_spin_idle_maintenance(tmp_path, monkeypatch):
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
+    scheduled = []
+    monkeypatch.setattr(search_indexer.file_index, "schedule_refreshes", lambda **_kwargs: scheduled.append(True) or 0)
+
+    service.process_due()
+    service.process_due()
+
+    assert scheduled == [True]
