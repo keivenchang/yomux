@@ -451,8 +451,8 @@ async function runTabberSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/repo/app.py'], 'diff-ref input key leaves Differ tree selection untouched');
   });
 
-  // S2 BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its
-  // Tabs row — with its Recent/Files duplicate suppressed. Without the dedup it would appear twice.
+  // Cmd-P is a file chooser, so an already-open file stays a file row rather than being replaced by
+  // a Tab/action row. The path still appears exactly once even when both Recent and search provide it.
   test('file tab layout state round-trips through the URL', () => {
     const path = '/repo/app/notes.py';
     const enc = encodeURIComponent('file:' + path);   // file%3A%2Frepo%2Fapp%2Fnotes.py
@@ -467,9 +467,8 @@ async function runTabberSuite() {
     api.setCommandPaletteStateForTest('files', 'notes');
     const items = api.commandPaletteItems();
     const fileGroupRows = items.filter(it => it.category === 'file' && (it.searchFields?.[1] || it.detail) === path);
-    const tabRows = items.filter(it => it.category === 'pane' && api.fileItemPath(it.targetItem || '') === path);
-    assert.equal(fileGroupRows.length, 0, 'S2: the open file is NOT duplicated as a Recent/Files row');
-    assert.ok(tabRows.length >= 1, 'S2: the open file still appears as its Tabs row');
+    assert.equal(fileGroupRows.length, 1, 'Cmd-P keeps the open file as one file row instead of duplicating it');
+    assert.equal(items.every(it => it.category === 'file'), true, 'Cmd-P does not inject tab/action rows into a file search');
   });
 
   test('chrome labels, File triplet command, and theme refresh use shared owners', () => {
@@ -1142,9 +1141,10 @@ async function runTabberSuite() {
     assert.ok(source.includes('const openTabPaths = new Set(commandPaletteVisibleTabItems().map(fileItemPath).filter(Boolean))'), 'S2: merged palette collects visible open-tab file paths');
     assert.ok(/dedupedFileItems = fileQuickOpenItems\(\)\.filter\(item => !openTabPaths\.has\(commandPaletteFilePath\(item\)\)\)/.test(source), 'S2: open-tab files are dropped from the file list so a file appears once total');
     assert.ok(/return \[\.\.\.dedupedFileItems, \.\.\.commandPaletteCommandItems\(\)\]/.test(source), 'S2: merged palette returns deduped files then commands');
+    assert.ok(/return \[\.\.\.tabItems, \.\.\.menuItems, \.\.\.settingItems\];/.test(source), 'the mixed palette does not inject repeated active-file terminal actions');
     assert.ok(candidateStart > 0 && candidateEnd > candidateStart, 'DOIT.55: unified command palette candidate provider exists');
-    assert.ok(candidateBody.includes('return commandPaletteMergedItems()'), 'DOIT.55: typed Cmd-P and Shift-Cmd-P queries use one merged candidate universe');
-    assert.ok(candidateBody.includes('mode === \'files\' ? fileQuickOpenItems() : commandPaletteCommandItems()'), 'DOIT.55: mode only chooses the empty-query home category');
+    assert.ok(candidateBody.includes("if (mode === 'files') return fileQuickOpenItems()"), 'Cmd-P uses the shared file-only Quick Open provider for both empty and typed queries');
+    assert.ok(candidateBody.includes('return commandPaletteMergedItems()'), 'Shift-Cmd-P typed queries keep the shared mixed candidate universe');
     assert.ok(rankStart > 0 && rankEnd > rankStart, 'DOIT.55: shared command palette ranker exists');
     assert.ok(rankBody.includes('commandPaletteItemScore(item, query, options)'), 'DOIT.55: both surfaces rank through the shared scorer');
     assert.ok(rankBody.includes('commandPaletteMixFirstScreenResults(ranked, query, options)'), 'DOIT.55 follow-up: shared ranker keeps first-screen file/pane results mixed after scoring');
@@ -1165,12 +1165,20 @@ async function runTabberSuite() {
       {group: 'Tabs', category: 'pane', label: 'YO!agent', detail: 'Activity assistant', searchFields: ['YO!agent', 'yo agent activity assistant']},
       {group: 'Menu', category: 'command', label: 'File / YO!agent', detail: 'Open YO!agent', searchFields: ['File / YO!agent', 'open agent assistant']},
       {group: 'Settings', category: 'setting', label: 'YO!agent / Backend', detail: 'Choose agent backend', searchFields: ['YO!agent Backend', 'agent backend']},
-    ], 'agent', {surface: 'files'}).slice(0, 8);
+    ], 'agent', {surface: 'command'}).slice(0, 8);
     const mixedDomains = new Set(mixedRows.map(item => item.category || 'command'));
-    assert.ok(mixedDomains.has('file'), 'typed Cmd-P still leads with relevant files');
-    assert.ok(mixedDomains.has('pane'), 'typed Cmd-P first screen includes a matching pane/tab row');
-    assert.ok(mixedDomains.has('command'), 'typed Cmd-P first screen includes a matching command row');
-    assert.ok(mixedDomains.has('setting'), 'typed Cmd-P first screen includes a matching setting row');
+    assert.ok(mixedDomains.has('file'), 'typed Shift-Cmd-P keeps relevant files available');
+    assert.ok(mixedDomains.has('pane'), 'typed Shift-Cmd-P first screen includes a matching pane/tab row');
+    assert.ok(mixedDomains.has('command'), 'typed Shift-Cmd-P first screen includes a matching command row');
+    assert.ok(mixedDomains.has('setting'), 'typed Shift-Cmd-P first screen includes a matching setting row');
+    api.setFileQuickOpenCandidatesForTest('/home/user/dynamo', [
+      {name: '2026.md', path: '/home/user/dynamo/notes/t5t/2026.md', relative_path: 'notes/t5t/2026.md', kind: 'file'},
+      {name: 't5t.md', path: '/home/user/dynamo/notes/t5t/t5t.md', relative_path: 'notes/t5t/t5t.md', kind: 'file'},
+    ]);
+    api.setCommandPaletteStateForTest('files', 't5t.md');
+    const quickOpenRows = api.commandPaletteRankItems(api.commandPaletteItems(), api.commandPaletteSearchQuery());
+    assert.equal(quickOpenRows[0]?.label, 't5t.md', 'Cmd-P ranks the exact t5t.md filename first');
+    assert.equal(quickOpenRows.every(item => item.category === 'file'), true, 'Cmd-P shows no unrelated FILE ACTIONS rows');
     api.setFileQuickOpenCandidatesForTest('/repo/app', []);
     api.setFileQuickOpenLoadingForTest(true);
     api.setCommandPaletteQueryForTest('');

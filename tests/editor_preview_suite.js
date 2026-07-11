@@ -5755,9 +5755,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(Number.isFinite(api.tabSearchScore('4', 'cut over')), 'searching other-branch PR description matches the session');
     assert.ok(api.tabSearchScore('4', '#10289') >= 0, 'searching #10289 matches the session');
     assert.ok(api.tabSearchScore('4', 'DIS-2193') >= 0, 'searching the Linear ID matches the session');
-    api.setCommandPaletteStateForTest('files', 'cut over');
+    api.setCommandPaletteStateForTest('command', 'cut over');
     const visibleRows = api.commandPaletteRankItems(api.commandPaletteItems(), 'cut over').slice(0, 60);
-    assert.ok(visibleRows.some(item => item.targetItem === '4'), 'Cmd-P searching cut over shows the matching pane');
+    assert.ok(visibleRows.some(item => item.targetItem === '4'), 'Shift-Cmd-P searching cut over shows the matching pane');
   });
 
   await testAsync('Shift-Cmd-P opens tabs in the focused pane', async () => {
@@ -5805,16 +5805,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       path: `/home/test/dynamo/noise/10569-noise-${index}.txt`,
       relative_path: `noise/10569-noise-${index}.txt`,
     })));
-    api.setCommandPaletteStateForTest('files', '10569');
+    api.setCommandPaletteStateForTest('command', '10569');
     const fields = api.tabSearchFields('2');
     assert.ok(fields.includes('10569'), 'current branch PR from other_branches is indexed as a bare number');
     assert.ok(api.tabMenuDetailText('2').includes('#10569'), 'current branch PR from other_branches is visible in the tab detail');
     const rows = api.commandPaletteRankItems(api.commandPaletteItems(), '10569').slice(0, 8);
     const row = rows.find(item => item.targetItem === '2');
-    assert.ok(row, 'Cmd-P searching the current PR number keeps the matching pane on the first screen');
-    assert.ok(row.detail.startsWith('PR #10569 · '), 'Cmd-P row detail puts the matching PR number before long branch/path text');
+    assert.ok(row, 'Shift-Cmd-P searching the current PR number keeps the matching pane on the first screen');
+    assert.ok(row.detail.startsWith('PR #10569 · '), 'Shift-Cmd-P row detail puts the matching PR number before long branch/path text');
     const popupText = api.commandPaletteResultsHtmlForTest().replace(/<[^>]+>/g, '');
-    assert.ok(popupText.includes('PR #10569'), 'rendered Cmd-P popup visibly shows the matching PR number');
+    assert.ok(popupText.includes('PR #10569'), 'rendered Shift-Cmd-P popup visibly shows the matching PR number');
   });
 
   test('YO!info groups shared tab path branch and PR records', () => {
@@ -9615,17 +9615,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/[⟦⟧]/.test(enXA['common.openFile']) && !/^Open file$/.test(enXA['common.openFile']), '#121: menu keys are pseudo-localized in en-XA');
   });
 
-  test('command palette blends commands and matching files by mode', () => {
-    // the default (files-mode) search bar blends matching commands/tabs into the results.
+  test('command palette separates file Quick Open from mixed command search', () => {
     const api = loadYolomux('', ['1']);
     const prefsLabel = api.itemLabel(api.prefsItemId);
     api.setFileQuickOpenCandidatesForTest('/repo/app', [
       {name: 'notes.py', path: '/repo/app/notes.py', relative_path: 'notes.py'},
     ]);
     api.setCommandPaletteStateForTest('files', prefsLabel);
-    assert.ok(api.commandPaletteItems().some(item => item.group === 'Tabs' && item.label === prefsLabel), '#7: a command/tab matching a plain files-mode query is blended in (no > needed)');
+    assert.ok(!api.commandPaletteItems().some(item => item.group === 'Tabs' && item.label === prefsLabel), 'Cmd-P stays file-only when a command/tab label matches the query');
     api.setCommandPaletteStateForTest('command', 'notes');
     assert.ok(api.commandPaletteItems().some(item => item.category === 'file' && item.path === '/repo/app/notes.py'), 'DOIT.55: command-mode queries also blend matching file-index results');
+    assert.equal(api.commandPaletteItems().some(item => item.group === 'File actions'), false, 'filename/command search never repeats the active file once per contextual terminal action');
     // `>` stays commands-only — no file candidates blended.
     api.setCommandPaletteStateForTest('files', `>${prefsLabel}`);
     assert.ok(!api.commandPaletteItems().some(item => item.path === '/repo/app/notes.py'), '#7: the > prefix stays commands-only');

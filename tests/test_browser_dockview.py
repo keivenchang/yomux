@@ -76,6 +76,81 @@ def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(bro
     assert result["elapsedMs"] < 300, result
 
 
+def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
+    """Cmd-P must retain separate tabs for separate paths, even in the same directory."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    t5t_path = "/home/test/dynamo/notes/t5t/t5t.md"
+    year_path = "/home/test/dynamo/notes/t5t/2026.md"
+    t5t_item = f"file:{t5t_path}"
+    year_item = f"file:{year_path}"
+    metrics = browser.execute_async_script(
+        """
+        const t5tPath = arguments[0];
+        const yearPath = arguments[1];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname === '/api/fs/search') {
+            const query = url.searchParams.get('query') || '';
+            const files = query.includes('2026')
+              ? [{name: '2026.md', path: yearPath, relative_path: 't5t/2026.md', size: 140250, mtime_ns: 2}]
+              : [{name: 't5t.md', path: t5tPath, relative_path: 't5t/t5t.md', size: 79334, mtime_ns: 1}];
+            return new Response(JSON.stringify({root: '/home/test/dynamo/notes', files}), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          if (url.pathname === '/api/fs/read') {
+            const path = url.searchParams.get('path') || '';
+            return new Response(JSON.stringify({
+              path,
+              content: path === t5tPath ? '# t5t\\n' : '# 2026\\n',
+              size: path === t5tPath ? 79334 : 140250,
+              mtime: path === t5tPath ? 1 : 2,
+              mtime_ns: path === t5tPath ? 1 : 2,
+              realpath: path,
+              file_id: path === t5tPath ? 'dev:10:ino:t5t' : 'dev:10:ino:2026',
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        const openPath = async (query, path) => {
+          openFileQuickOpen();
+          const input = document.querySelector('.command-palette-input');
+          input.value = query;
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+          await waitFor(() => commandPaletteState.items.some(item => item.path === path), {description: `Quick Open result for ${query}`});
+          const row = Array.from(document.querySelectorAll('.command-palette-row')).find(node => Number(node.dataset.commandIndex) === commandPaletteState.items.findIndex(item => item.path === path));
+          row.click();
+          await waitFor(() => openFiles.has(path) && slotForItem(fileEditorItemFor(path)) === 'left', {description: `editor tab for ${query}`});
+        };
+        (async () => {
+          await openPath('t5t.md', t5tPath);
+          await openPath('2026.md', yearPath);
+          done({
+            tabs: paneTabs('left'),
+            active: activeItemForSide('left'),
+            t5tState: fileStateFor(t5tPath)?.content || '',
+            yearState: fileStateFor(yearPath)?.content || '',
+            renderedTabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
+            errors: window.__bootErrors || [],
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        t5t_path,
+        year_path,
+    )
+    assert metrics.get("error") is None, metrics
+    assert t5t_item in metrics["tabs"], metrics
+    assert year_item in metrics["tabs"], metrics
+    assert metrics["active"] == year_item, metrics
+    assert metrics["t5tState"] == "# t5t\n", metrics
+    assert metrics["yearState"] == "# 2026\n", metrics
+    assert t5t_item in metrics["renderedTabs"], metrics
+    assert year_item in metrics["renderedTabs"], metrics
+    assert metrics["errors"] == [], metrics
+
+
 def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
     wait_for_dockview(browser, min_tabs=1)
@@ -182,7 +257,7 @@ def test_dockview_empty_pane_close_removes_only_selected_placeholder(browser, tm
     assert result["lastPaneHasClose"] is False and result["lastPaneCloseResult"] is False, result
 
 
-def test_dockview_empty_pane_add_tab_opens_command_palette_for_that_pane(browser, tmp_path):
+def test_dockview_empty_pane_add_tab_opens_file_quick_open_for_that_pane(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
     wait_for_dockview(browser, min_tabs=1)
     result = browser.execute_async_script(
@@ -212,9 +287,9 @@ def test_dockview_empty_pane_add_tab_opens_command_palette_for_that_pane(browser
         poll();
         """
     )
-    assert result["mode"] == "command" and result["targetSlot"] == "right", result
+    assert result["mode"] == "files" and result["targetSlot"] == "right", result
     assert result["open"] is True, result
-    assert "Shift" in result["title"] and result["ariaLabel"] == "Command palette", result
+    assert "P" in result["title"] and "Shift" not in result["title"] and result["ariaLabel"] == "Quick open", result
 
 
 def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp_path):

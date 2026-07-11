@@ -3770,7 +3770,11 @@ function commandPaletteCommandItems() {
       });
     },
   })));
-  return [...tabItems, ...menuItems, ...settingItems, ...commandPaletteDropActionItems()];
+  // A command palette row must name one thing the user can navigate to or
+  // execute.  Per-file terminal actions repeat the active file once for every
+  // verb and make a filename lookup look like duplicate search hits; keep
+  // those actions in the file context menu instead.
+  return [...tabItems, ...menuItems, ...settingItems];
 }
 
 function commandPaletteDropActionPath() {
@@ -4176,19 +4180,16 @@ function commandPaletteMergedItems() {
 }
 
 function commandPaletteCandidateItems(mode = commandPaletteMode, rawQuery = commandPaletteState.query) {
-  // Unified palette provider. `mode` is a priority flag: Cmd-P and Shift-Cmd-P draw from the same
-  // candidate universe and differ only in searchRankWeights.domainPrior.
   const parts = fileQuickOpenQueryParts(rawQuery);
   if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
   if (parts.symbolMode || fileQuickOpenPathQuery(rawQuery).active) return fileQuickOpenItems(); // `@` / path = files only
-  // Lean on open: an empty box shows only the priority's home category (no command dump — #7).
-  if (!commandPaletteSearchQuery(rawQuery, mode)) {
-    return mode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
-  }
-  // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
-  // S2: a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
-  // both edit + preview chips). Drop its Recent/Files duplicate so it isn't listed twice. Only here, in
-  // the merged view; the files-only and empty-box modes above have no Tabs rows, so Recent stays intact.
+  // Cmd-P is a file chooser, not a broad command search.  Keeping its candidate
+  // source file-only means an exact filename cannot be displaced by contextual
+  // FILE ACTIONS rows. Shift-Cmd-P remains the mixed command/pane surface.
+  if (mode === 'files') return fileQuickOpenItems();
+  if (!commandPaletteSearchQuery(rawQuery, mode)) return commandPaletteCommandItems();
+  // S2: a file that is already an open tab shows ONCE — as the deduped Tabs row
+  // which carries both edit + preview chips.
   return commandPaletteMergedItems();
 }
 

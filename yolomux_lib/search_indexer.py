@@ -27,6 +27,11 @@ from .filesystem import search
 
 
 INDEXER_PROTOCOL_VERSION = 1
+# Keep the wire protocol at v1 while older YOLOmux servers are alive.  A v2
+# bump would make their service managers fight a newer process.  New optional
+# operations are therefore negotiated by capability, and an old service is
+# replaced only when a caller actually needs one.
+INDEXER_CAPABILITIES = frozenset({"search"})
 INDEXER_DEBOUNCE_SECONDS = 2.0
 INDEXER_MAX_DEBOUNCE_SECONDS = 15.0
 INDEXER_CHURN_BACKOFF_MAX_SECONDS = 30.0
@@ -163,13 +168,25 @@ class PersistentSearchIndexer:
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "")
         if action == "ping":
-            return {"ok": True, "version": INDEXER_PROTOCOL_VERSION, "pid": os.getpid()}
+            return {
+                "ok": True,
+                "version": INDEXER_PROTOCOL_VERSION,
+                "pid": os.getpid(),
+                "capabilities": sorted(INDEXER_CAPABILITIES),
+            }
         if action == "status":
             return {"ok": True, "status": file_index.runtime_diagnostics()}
         if action == "enqueue":
             raw_paths = request.get("paths", [])
             paths = raw_paths if isinstance(raw_paths, list) else []
             return self.enqueue(str(request.get("root") or ""), paths, str(request.get("reason") or ""))
+        if action == "search":
+            return {"ok": True, "payload": search.search_files(
+                str(request.get("root") or ""),
+                str(request.get("query") or ""),
+                request.get("limit"),
+                recursive=True,
+            )}
         if action == "unindex":
             return self.unindex(str(request.get("root") or ""))
         if action == "shutdown":
@@ -184,11 +201,13 @@ class PersistentSearchIndexer:
         except OSError:
             pass
         lock_fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        owns_lock = False
         try:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 return 0
+            owns_lock = True
             try:
                 self.socket_path.unlink()
             except FileNotFoundError:
@@ -212,14 +231,18 @@ class PersistentSearchIndexer:
             finally:
                 server.close()
         finally:
-            try:
-                self.socket_path.unlink()
-            except FileNotFoundError:
-                pass
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+            # A losing contender must leave the owner's socket name intact.  It may
+            # see the same pathname, but it never owned the advisory lock or bound
+            # the socket behind it.
+            if owns_lock:
+                try:
+                    self.socket_path.unlink()
+                except FileNotFoundError:
+                    pass
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
             os.close(lock_fd)
         return 0
 
@@ -247,31 +270,68 @@ class SearchIndexerClient:
         response = self.request({"action": "ping"}, timeout=0.15)
         return bool(response.get("ok")) and int(response.get("version") or 0) == INDEXER_PROTOCOL_VERSION
 
-    def ensure_started(self) -> bool:
-        if self.healthy():
+    def supports(self, capability: str) -> bool:
+        response = self.request({"action": "ping"}, timeout=0.15)
+        capabilities = response.get("capabilities")
+        return (
+            bool(response.get("ok"))
+            and int(response.get("version") or 0) == INDEXER_PROTOCOL_VERSION
+            and isinstance(capabilities, list)
+            and capability in capabilities
+        )
+
+    def _stop_legacy_indexer(self) -> bool:
+        """Gracefully replace a v1 peer that lacks an optional capability.
+
+        Old servers understand ``shutdown`` and the v1 request framing.  They
+        can therefore keep using the replacement, which still reports v1,
+        instead of being broken by a protocol-version split during a rolling
+        worktree update.
+        """
+        response = self.request({"action": "ping"}, timeout=0.15)
+        if not (bool(response.get("ok")) and int(response.get("version") or 0) == INDEXER_PROTOCOL_VERSION):
+            return False
+        stopped = self.request({"action": "shutdown"}, timeout=0.5)
+        if not stopped.get("ok"):
+            return False
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not self.request({"action": "ping"}, timeout=0.1).get("ok"):
+                return True
+            time.sleep(0.03)
+        return False
+
+    def _start_until(self, predicate: callable) -> bool:
+        if predicate():
             return True
         with self.lock:
-            if self.healthy():
-                return True
-            try:
-                process = subprocess.Popen(
-                    [sys.executable, "-m", "yolomux_lib.search_indexer", "--serve", "--socket", str(self.socket_path)],
-                    close_fds=True,
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except OSError:
-                return False
-            self.process = process
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
-                if self.healthy():
+                if predicate():
                     return True
-                if process.poll() is not None:
+                try:
+                    process = subprocess.Popen(
+                        [sys.executable, "-m", "yolomux_lib.search_indexer", "--serve", "--socket", str(self.socket_path)],
+                        close_fds=True,
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except OSError:
                     return False
+                self.process = process
+                attempt_deadline = min(deadline, time.monotonic() + 0.35)
+                while time.monotonic() < attempt_deadline:
+                    if predicate():
+                        return True
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.03)
                 time.sleep(0.03)
         return False
+
+    def ensure_started(self) -> bool:
+        return self._start_until(self.healthy)
 
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         if not self.ensure_started():
@@ -284,6 +344,17 @@ class SearchIndexerClient:
             return {"ok": False, "accepted": False, "error": "persistent indexer unavailable"}
         response = self.request({"action": "unindex", "root": root})
         return {**response, "accepted": bool(response.get("ok"))}
+
+    def search(self, root: str, query: str, limit: int) -> dict[str, Any]:
+        payload = {"action": "search", "root": root, "query": query, "limit": limit}
+        if self.supports("search"):
+            return self.request(payload, timeout=5.0)
+        if not self.ensure_started():
+            return {"ok": False, "error": "persistent indexer unavailable"}
+        if not self.supports("search"):
+            if not self._stop_legacy_indexer() or not self._start_until(lambda: self.supports("search")):
+                return {"ok": False, "error": "persistent indexer lacks search capability"}
+        return self.request(payload, timeout=5.0)
 
 
 def main(argv: list[str] | None = None) -> int:

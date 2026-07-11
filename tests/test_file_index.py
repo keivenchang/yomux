@@ -410,6 +410,121 @@ def test_search_files_uses_index_to_find_deep_file(tmp_path, monkeypatch):
     assert "a/b/c/deep_target.md" in relative_paths
 
 
+def test_cold_capped_full_tree_search_waits_for_index_instead_of_returning_false_hits(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(filesystem, "MAX_SEARCH_FILES", 2)
+    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_CHECKER", lambda _role: False)
+    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", lambda _role, _payload: {"fallback": True})
+    root = tmp_path / "root"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "fuzzy-t5t-notes.md").write_text("noise", encoding="utf-8")
+    (root / "a" / "other.md").write_text("noise", encoding="utf-8")
+    target = root / "z" / "t5t.md"
+    target.parent.mkdir()
+    target.write_text("target", encoding="utf-8")
+
+    try:
+        payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
+    finally:
+        file_index.set_background_owner_checker(None)
+        file_index.set_background_owner_refresh_requester(None)
+
+    assert payload["truncated"] is True
+    assert payload["index_state"] == "warming"
+    assert payload["index_coverage"] == "pending"
+    assert payload["files"] == []
+
+
+def test_read_only_search_uses_the_persistent_indexer_snapshot(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_CHECKER", lambda _role: False)
+    root = tmp_path / "root"
+    root.mkdir()
+    requested = []
+    expected = {
+        "root": str(root),
+        "root_realpath": str(root),
+        "query": "t5t.md",
+        "limit": 20,
+        "truncated": False,
+        "index_state": "ready",
+        "index_coverage": "full",
+        "files": [{"name": "t5t.md", "path": str(root / "t5t.md"), "relative_path": "t5t.md", "kind": "file"}],
+    }
+    monkeypatch.setattr(file_index, "_BACKGROUND_INDEX_SEARCH_REQUESTER", lambda payload: requested.append(payload) or {"ok": True, "payload": expected})
+    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", lambda _role, _payload: {"fallback": False})
+
+    try:
+        payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
+    finally:
+        file_index.set_background_owner_checker(None)
+        file_index.set_background_index_search_requester(None)
+        file_index.set_background_owner_refresh_requester(None)
+
+    assert requested == [{"root": str(root), "query": "t5t.md", "limit": 20}]
+    assert payload == expected
+
+
+def test_read_only_search_uses_persisted_snapshot_before_persistent_rpc(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "t5t.md"
+    target.write_text("notes\n", encoding="utf-8")
+    try:
+        file_index.build_now(
+            root,
+            filesystem.SEARCH_SKIP_DIRS,
+            exclude_path=filesystem.search.paths._path_is_secret,
+            exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
+        _clear_registry()
+        file_index.set_background_owner_checker(lambda _role: False)
+        calls = []
+        file_index.set_background_index_search_requester(lambda payload: calls.append(payload) or {"ok": False, "error": "legacy peer"})
+
+        payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
+    finally:
+        file_index.set_background_owner_checker(None)
+        file_index.set_background_index_search_requester(None)
+        _clear_registry()
+
+    assert calls == []
+    assert [entry["path"] for entry in payload["files"]] == [str(target)]
+    assert payload["index_state"] == "follower-ready"
+
+
+def test_warming_parent_search_uses_persisted_child_index(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    root = tmp_path / "root"
+    child = root / "notes"
+    child.mkdir(parents=True)
+    target = child / "t5t.md"
+    target.write_text("notes\n", encoding="utf-8")
+    try:
+        file_index.build_now(
+            child,
+            filesystem.SEARCH_SKIP_DIRS,
+            exclude_path=filesystem.search.paths._path_is_secret,
+            exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
+        _clear_registry()
+        file_index.set_background_owner_checker(lambda _role: True)
+
+        payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
+    finally:
+        file_index.set_background_owner_checker(None)
+        _clear_registry()
+
+    assert [entry["path"] for entry in payload["files"]] == [str(target)]
+    assert payload["index_state"] == "warming"
+    assert payload["index_coverage"] == "partial"
+
+
 def test_index_status_warms_and_reports_state(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

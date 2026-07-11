@@ -1942,8 +1942,9 @@ async function runLayoutAsyncSuite() {
             : {id: request.id, ok: true, status: 200, payload: {path: request.path, kind: 'file'}}),
         }));
       });
-      assert.ok(validatingDoitApi.commandPaletteItems().some(item => item.targetItem === validatingDoitItem), 'unknown file tabs remain visible before path-info validation resolves');
-      assert.ok(validatingDoitApi.commandPaletteItems().some(item => item.targetItem === dirtyMissingItem), 'dirty missing tabs remain reachable through quick search');
+      assert.ok(validatingDoitApi.commandPaletteItems().some(item => item.category === 'file' && item.path === realDoitPath), 'Cmd-P keeps the matching filesystem candidate visible before path-info validation resolves');
+      validatingDoitApi.setCommandPaletteStateForTest('command', 'doit57');
+      assert.ok(validatingDoitApi.commandPaletteItems().some(item => item.targetItem === dirtyMissingItem), 'dirty missing tabs remain reachable through Shift-Cmd-P');
       await validatingDoitApi.flushFileExplorerFsBatchForTest();
       await flushAsyncWork();
       const validatedDoitItems = validatingDoitApi.commandPaletteItems();
