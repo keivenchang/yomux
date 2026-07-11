@@ -3649,6 +3649,52 @@ def test_dockview_pending_renamed_tmux_session_survives_stale_roster_socket_clos
     assert "55" in metrics["pending"], metrics
 
 
+def test_dockview_rename_preserves_yostats_in_existing_vertical_side_pane(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=5&layout=row@28(side,main)&tabs=side:@side-left,finder,debug*;main:5",
+        sessions=["5"],
+        available_agents=["term"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+        const snapshot = () => {
+          const side = sidePaneSlot(paneSideLeft);
+          const main = slotForItem('5') || slotForItem('Yi Qin');
+          return {
+            tree: JSON.parse(JSON.stringify(layoutSlots[layoutTreeKey])),
+            side,
+            sideRole: paneRoleForSlot(side),
+            sideTabs: paneTabs(side),
+            main,
+            mainTabs: paneTabs(main),
+            debugSlot: slotForItem(debugPaneItemId),
+            errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+          };
+        };
+        (async () => {
+          const before = snapshot();
+          await renameTmuxSession('5', 'Yi Qin');
+          for (let index = 0; index < 50 && !paneTabs(before.side).includes(debugPaneItemId); index += 1) await wait(10);
+          done({before, after: snapshot()});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    before = metrics["before"]
+    after = metrics["after"]
+    assert before["errors"] == [] and after["errors"] == [], metrics
+    assert after["tree"] == before["tree"], metrics
+    assert after["side"] == before["side"] and after["debugSlot"] == before["side"], metrics
+    assert after["sideRole"]["kind"] == "side" and after["sideRole"]["side"] == "left", metrics
+    assert after["sideTabs"] == ["__finder__", "__debug__"], metrics
+    assert after["mainTabs"] == ["Yi Qin"], metrics
+
+
 def test_dockview_rename_dialog_survives_fresh_roster_then_stale_socket_close(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,

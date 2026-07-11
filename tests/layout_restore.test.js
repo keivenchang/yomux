@@ -414,6 +414,28 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['8002b'], 'fresh server roster does not end the renamed-session grace window before tmux/socket state settles');
   });
 
+  test('renaming a tmux tab preserves a YO!stats tab in its existing Vertical Side Pane', () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=5&layout=left&tabs=left:5', ['5']);
+    api.setLayoutSlotsForTest({
+      [api.layoutTreeKey]: {split: 'row', pct: 28, children: [api.leafNode('side'), api.leafNode('main')]},
+      side: api.paneStateWithTabs([api.finderItemId, api.debugPaneItemId], api.debugPaneItemId, {kind: api.paneRoleSide, side: api.paneSideLeft}),
+      main: api.paneStateWithTabs(['5'], '5'),
+    });
+    const topologyBefore = JSON.stringify(api.currentSlots()[api.layoutTreeKey]);
+
+    api.replaceTmuxSessionInClient('5', 'Yi Qin', ['Yi Qin']);
+
+    const slots = api.currentSlots();
+    assert.equal(JSON.stringify(slots[api.layoutTreeKey]), topologyBefore, 'a rename preserves the existing pane tree and split sizes');
+    assert.deepStrictEqual(canonical(api.serialize(slots).panes), {
+      side: {tabs: [api.finderItemId, api.debugPaneItemId], active: api.debugPaneItemId},
+      main: {tabs: ['Yi Qin'], active: 'Yi Qin'},
+    }, 'a rename changes only the tmux item identity, not side-pane membership');
+    const role = api.paneRoleForSlot('side', slots);
+    assert.equal(role.kind, api.paneRoleSide, 'the shared replacement helper keeps the side-pane role');
+    assert.equal(role.side, api.paneSideLeft, 'the shared replacement helper keeps the side-pane side');
+  });
+
   await testAsync('new Claude/Codex tab opens before delayed discovery lists it', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
     let createRequest = null;

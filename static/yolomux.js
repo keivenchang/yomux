@@ -23913,7 +23913,10 @@ function layoutWithReplacedItems(replacements) {
     const tabs = paneTabs(side).map(item => replacements.get(item) || item);
     const activeItem = activeItemForSide(side);
     const active = replacements.get(activeItem) || activeItem;
-    next[side] = paneStateWithTabsForSlot(side, tabs, active, next);
+    // Replacements rename an item; they do not change where its pane lives.  Looking the role up
+    // in `next` here loses a side pane's role because `next` is still being assembled, and the
+    // later canonicalizer then relocates side-allowed tabs such as YO!stats into a generic pane.
+    next[side] = paneStateWithTabsForSlot(side, tabs, active, layoutSlots);
   }
   return compactLayoutSlots(next);
 }

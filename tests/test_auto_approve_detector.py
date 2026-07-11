@@ -1074,6 +1074,36 @@ def test_parse_claude_background_agent_status_counter():
     assert counter["status_marker"] == "○"
 
 
+def test_claude_live_shell_status_counter_is_verb_independent():
+    counter = prompt_detector.parse_agent_status_counter("✻ Crunched for 4m 57s · 1 shell still running")
+
+    assert counter is not None
+    assert counter["status_elapsed_seconds"] == 297
+    assert counter["status_live_shell"] is True
+    assert counter["status_identity"] == "crunched for <elapsed> · 1 shell still running"
+
+
+def test_live_shell_spinner_overrides_queued_composer_and_footer_chrome():
+    first = "\n".join([
+        "✻ Crunched for 4m 57s · 1 shell still running",
+        "",
+        "────────────────────────────────────────────────────────────────",
+        "❯ regenerate CONFORMANCE_v2.80.html and let me eyeball it",
+        "────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #80 · esc to interrupt · ← for agents",
+    ])
+    second = first.replace("✻ Crunched for 4m 57s", "✶ Sauteed for 4m 58s")
+
+    first_state = prompt_detector.agent_screen_state(first, pane_target="%live-shell-queued-composer", now=1000.0)
+    second_state = prompt_detector.agent_screen_state(second, pane_target="%live-shell-queued-composer", now=1001.0)
+
+    assert first_state["key"] == "idle"
+    assert second_state["key"] == "working"
+    assert second_state["status_live_shell"] is True
+    assert second_state["status_spinner_advanced"] is True
+    assert second_state["status_counter_advanced"] is True
+
+
 def test_agent_screen_state_reports_visible_counter_evidence_and_advancement():
     first = "✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)"
     second = first.replace("7m 12s", "7m 13s")

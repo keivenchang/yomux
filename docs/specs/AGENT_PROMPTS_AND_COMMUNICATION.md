@@ -188,6 +188,8 @@ This stale example is idle, not `needs-input`, because the current bottom prompt
 ❯
 ```
 
+An explicit Claude live-shell status row, such as `✻ <status> for 4m 57s · 1 shell still running`, is a verb-independent working candidate. It becomes RUN only after a successive capture observes its spinner or counter advance; once observed, it wins over submitted or queued composer text and footer chrome below it until the row disappears or becomes stale. A real visible approval prompt still has higher priority.
+
 ## Claude Approval Patterns
 
 Claude bash permission prompts usually contain a Bash command header, a command block, a permission-rule sentence, a question, Yes/No options, and a footer.

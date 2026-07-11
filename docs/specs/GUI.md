@@ -33,6 +33,7 @@ Section order follows the reading path: capabilities and terms, layout and tab m
 - [x] Editor themes include dark/light mode switching, separate dark/light scheme defaults, caret style, and caret color.
 - [ ] Partial: pinned-tab behavior is per browser profile through local storage, not yet a shareable URL or server-side preference.
 - [x] Generic and Vertical Side Pane roles are explicit, and tab placement is capability-based. Finder/Differ/Tabber remain Vertical-Side-only, ordinary tabs remain Generic-only, and YO!info/YO!stats/YO!agent/YO!chat may move or be adopted across the role boundary; edge position alone never changes a pane's role.
+- [x] Identity-only changes, including tmux-session and file-path renames, preserve the complete pane topology: split tree, pane role, tab membership, active tab, and pane sizes may not change except for the renamed item ID.
 - [ ] Partial: preview/edit interactions are implemented for Markdown task checkboxes, not for every possible rendered widget.
 - [ ] Keyboard-only tab reordering and pane splitting are not implemented.
 - [ ] Multi-root project workspaces are represented through Finder roots and companion directories, not a full workspace model.

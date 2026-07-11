@@ -549,6 +549,10 @@ _STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)
 _STATUS_COUNTER_TOOL_USE_RE = re.compile(r"\b(?P<count>\d+)\s+tool uses?\b", re.IGNORECASE)
 _STATUS_COUNTER_PAYLOAD_RE = re.compile(r"\b(?:thinking|effort|tokens?|tool uses?|esc\s+to\s+interrupt)\b|[↑↓]", re.IGNORECASE)
 _STATUS_COUNTER_BACKGROUND_RE = re.compile(r"^\s*[○◯]\s*\S.*\b\d+(?:\.\d+)?s\s*·\s*(?:[↑↓]\s*)?\d", re.IGNORECASE)
+_CLAUDE_LIVE_SHELL_STATUS_RE = re.compile(
+    rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+\S.*\b\d+(?:\.\d+)?\s*[smh]\b\s*·\s*\d+\s+shells?\s+still\s+running\b",
+    re.IGNORECASE,
+)
 _VISIBLE_STATUS_COUNTER_CACHE_MAX_ITEMS = 512
 _VISIBLE_STATUS_COUNTER_CACHE_IDLE_SECONDS = 30.0
 _VISIBLE_STATUS_COUNTER_CACHE: dict[str, dict[str, object]] = {}
@@ -921,7 +925,8 @@ def parse_agent_status_counter(line: str) -> dict[str, object] | None:
     is_codex_status = bool(elapsed_seconds is not None and _WORKING_LINE_RE.search(stripped))
     is_background_row = bool(elapsed_seconds is not None and tokens is not None and _STATUS_COUNTER_BACKGROUND_RE.search(stripped))
     is_multi_agent_subline = bool((tokens is not None or tool_uses is not None) and _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped))
-    if not (is_parenthesized_status or is_codex_status or is_background_row or is_multi_agent_subline):
+    is_live_shell_status = bool(elapsed_seconds is not None and _CLAUDE_LIVE_SHELL_STATUS_RE.search(stripped))
+    if not (is_parenthesized_status or is_codex_status or is_background_row or is_multi_agent_subline or is_live_shell_status):
         return None
 
     return {
@@ -931,6 +936,7 @@ def parse_agent_status_counter(line: str) -> dict[str, object] | None:
         "status_elapsed_seconds": elapsed_seconds,
         "status_tokens": tokens,
         "status_tool_uses": tool_uses,
+        "status_live_shell": is_live_shell_status,
     }
 
 
@@ -1055,7 +1061,10 @@ def _status_counter_screen_state(counter: dict[str, object], pane_target: str | 
 
 
 def _is_working_line(line: str) -> bool:
-    return bool(parse_agent_status_counter(line) is not None or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
+    counter = parse_agent_status_counter(line)
+    # A Claude live-shell row becomes working evidence only when its spinner advances across
+    # captures. Treating its static text as working here would make old completed screens green.
+    return bool((counter is not None and counter.get("status_live_shell") is not True) or _WORKING_LINE_RE.search(line) or _CLAUDE_MULTI_AGENT_HEADER_RE.search(line))
 
 
 def visible_agent_working(visible_text: str) -> bool:
@@ -1087,12 +1096,18 @@ def completed_agent_followup_question(visible_text: str) -> str:
     return ""
 
 
-def visible_agent_status_counter(visible_text: str) -> dict[str, object] | None:
+def visible_agent_status_counter(visible_text: str, *, allow_later_prompt: bool = False) -> dict[str, object] | None:
     """Return the newest current visible status counter, ignoring stale rows above real output."""
     visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()[-25:]
     counter_index, counter = _last_status_counter(lines)
-    if counter_index < 0 or counter is None or _working_line_has_later_prompt(lines, counter_index):
+    if counter_index < 0 or counter is None:
+        return None
+    # A live-shell counter requires temporal proof from a changing spinner. Keep it out of the
+    # normal one-capture path so stale retained rows do not paint a completed pane green.
+    if counter.get("status_live_shell") is True and not allow_later_prompt:
+        return None
+    if not allow_later_prompt and _working_line_has_later_prompt(lines, counter_index):
         return None
     counter = dict(counter)
     counter["status_row_from_bottom"] = len(lines) - counter_index - 1
@@ -1495,7 +1510,18 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
     visible_text = normalize_capture_text(visible_text)
     observation_now = time.monotonic() if now is None else now
     counter = visible_agent_status_counter(visible_text)
+    deferred_live_shell_counter = None
     if counter is None:
+        candidate = visible_agent_status_counter(visible_text, allow_later_prompt=True)
+        if candidate is not None and candidate.get("status_live_shell") is True:
+            candidate_state = _status_counter_screen_state(candidate, pane_target=pane_target, now=observation_now)
+            # A live-shell status has a trustworthy visual liveness signal only when Claude's
+            # spinner changes. Until then, leave the normal completed/question/composer rules in
+            # charge so stale copied status text cannot make a finished pane green.
+            if candidate_state.get("status_spinner_advanced") is True:
+                return candidate_state
+            deferred_live_shell_counter = candidate
+    if counter is None and deferred_live_shell_counter is None:
         _forget_visible_status_counter(pane_target, observation_now)
     prompt_state = approval_prompt_state(visible_text)
     prompt_type = prompt_state.get("type") or None
