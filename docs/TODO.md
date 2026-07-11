@@ -1,12 +1,14 @@
 # YOLOmux TODOs
 
-Roadmap notes for YOLOmux. Keep active product, architecture, and refactor work here. Put completed work in [`DONE.md`](DONE.md), GUI behavior contracts in [`specs/GUI.md`](specs/GUI.md), YO!share replay details in [`specs/SHARE_MIRRORING.md`](specs/SHARE_MIRRORING.md), and build/restart/CPS commands in [`DEVELOPMENT.md`](DEVELOPMENT.md).
+Roadmap notes for YOLOmux. Keep active product, architecture, and refactor work here. Put completed work in [`DONE.md`](DONE.md), GUI behavior contracts in [`specs/GUI.md`](specs/GUI.md), YO!share replay details in [`specs/SHARE_MIRRORING.md`](specs/SHARE_MIRRORING.md), dated peer research in [`RESEARCH.md`](RESEARCH.md), and build/restart/CPS commands in [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ## Product Direction
 
-YOLOmux should stay a lightweight local tmux browser control plane. The useful niche is a fast local UI for existing Claude/Codex/tmux sessions with clear state, safe YOLO controls, repo metadata, file paste/upload, and low-friction attach/reply.
+YOLOmux is a lightweight, powerful workspace for managing AI work: it brings agent state and control, editing and viewing, collaboration, repo/file context, and low-friction attach/reply into one coherent UI. It should make existing Claude/Codex sessions easier to understand, direct, and safely complete, without requiring a heavyweight platform.
 
-Borrow from other tools only when the feature improves the local control loop: know which session needs attention, understand what changed, approve or block risky work, and jump back into the right terminal quickly. Structured agent channels are the durable direction for approvals, state, and controlled sends; tmux capture and paste remain necessary fallbacks for already-open visible panes.
+Borrow from other tools only when the feature improves the local control loop: know which AI task needs attention, understand and review what changed, edit or view the relevant artifact, collaborate safely, approve or block risky work, and return to the right context quickly. Structured agent channels are the durable direction for approvals, state, and controlled sends; terminal capture and paste remain necessary fallbacks for already-open visible panes.
+
+[`RESEARCH.md`](RESEARCH.md) records the external evidence behind these constraints. It may suggest bounded experiments, but this TODO remains the decision record for what YOLOmux will actually build.
 
 ## Orientation
 
@@ -84,5 +86,5 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 - Keep `Needs input` / `Working` / `Done` grouping high on the roadmap because it makes every existing pane easier to manage without changing tmux architecture.
 - Build event/audit data before timeline UI. The data model matters more than a visual feed.
-- Keep tmux as a core differentiator. Do not replace it with a heavier runtime just to match orchestration products.
+- Preserve tmux compatibility and existing terminal workflows, but keep the product centered on AI management, editing/viewing, and collaboration. Do not add a heavier runtime merely to match orchestration products.
 - Defer visual canvases, broad multi-machine orchestration, and full pipeline boards until the local control loop is stronger.

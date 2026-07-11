@@ -8,6 +8,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): development workflow, build/test commands, source layout, restart workflow, production sync, API notes, version bump rules, timing constants, and responsive UI conventions.
 - [`docs/specs/GUI.md`](docs/specs/GUI.md): GUI behavior contract and test coverage map.
 - [`docs/specs/SHARE_MIRRORING.md`](docs/specs/SHARE_MIRRORING.md) and [`docs/specs/SHARE_TEST_INVENTORY.md`](docs/specs/SHARE_TEST_INVENTORY.md): YO!share replay architecture and fixture/live/manual test coverage.
+- [`docs/RESEARCH.md`](docs/RESEARCH.md): dated peer research, including actionable lessons and non-goals.
 - [`docs/TODO.md`](docs/TODO.md): open roadmap and future work.
 - [`docs/DONE.md`](docs/DONE.md): completed work archive.
 
