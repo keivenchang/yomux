@@ -96,9 +96,7 @@
   background: color-mix(in srgb, var(--text) 12%, transparent);
 }
 .mobile-terminal-key-drag {
-  grid-row: 1 / -1;
-  align-self: stretch;
-  width: 18px;
+  width: 36px;
   min-height: 36px;
   padding: 0;
   border: 0;
@@ -112,6 +110,19 @@
 .mobile-terminal-key-drag:active {
   cursor: grabbing;
 }
+.mobile-terminal-key-side {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-rows: repeat(3, 36px);
+  align-content: start;
+  gap: var(--space-3);
+}
+.mobile-terminal-key-side .mobile-terminal-key {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+}
 .mobile-terminal-keyrow {
   display: flex;
   min-width: 0;
@@ -123,7 +134,7 @@
 }
 .mobile-terminal-keyrow--primary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: visible;
 }
 .mobile-terminal-keyrow-shell {
@@ -152,6 +163,7 @@
   display: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
+.mobile-terminal-keybar--more .mobile-terminal-key-side,
 .mobile-terminal-keybar--more .mobile-terminal-key-dpad {
   display: none;
 }

@@ -57,7 +57,7 @@ flowchart TB
 
   subgraph services["Shared local services per YOLOMUX_STATE_DIR"]
     direction TB
-    statsd["statsd\nSTATE_DIR/services/statsd.sock\nowns stats-history.sqlite3\n300s idle after leases"]
+    statsd["statsd\nSTATE_DIR/services/statsd.sock\nowns stats-history.sqlite3\nsampler stays alive; otherwise 300s idle"]
     indexd["indexd\nSTATE_DIR/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
     jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\n60s idle when queue empty"]
     execs["jobd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
@@ -168,7 +168,7 @@ flowchart TB
     caches["session-files-cache\nactivity-cache\nwatch-index.json"]
   end
   subgraph svc["Shared service PIDs"]
-    statsd2["statsd\nservices/statsd.sock\n300s idle"]
+    statsd2["statsd\nservices/statsd.sock\nsampler stays alive; otherwise 300s idle"]
     indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
     jobd2["jobd\nservices/jobd.sock\n60s empty-queue idle"]
     approvald2["approvald\nservices/approvald.sock\nexits when no targets"]

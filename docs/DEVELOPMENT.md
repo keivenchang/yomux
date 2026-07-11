@@ -379,7 +379,7 @@ Local services share one lifecycle and RPC parent. `local_services/rpc.py` owns 
 
 | Service | Module | Socket | Owns | Idle behavior |
 | --- | --- | --- | --- | --- |
-| `statsd` | `yolomux_lib.statsd` | `STATE_DIR/services/statsd.sock` | `STATE_DIR/stats-history.sqlite3`, one-second sampling, YO!stats retention/rollups, agent-token recovery/claims, pre-encoded stats responses | Starts while servers use stats, exits after 300 seconds without leases/clients |
+| `statsd` | `yolomux_lib.statsd` | `STATE_DIR/services/statsd.sock` | `STATE_DIR/stats-history.sqlite3`, one-second sampling, YO!stats retention/rollups, agent-token recovery/claims, pre-encoded stats responses | Starts while servers use stats; the durable sampler owner keeps it alive, otherwise it exits after 300 seconds without leases/clients |
 | `indexd` | `yolomux_lib.search_indexer` | `STATE_DIR/search_index/indexer.sock` | Quick Open queue, per-root `<digest>.sqlite3` WAL databases, manifests, tombstones, unindex writes, search snapshots | Lazy, exits after 60 seconds without leases/clients |
 | `jobd` | `yolomux_lib.jobd` | `STATE_DIR/services/jobd.sock` | Interactive/freshness/maintenance queues, coalescing, cancellation, result cache, registered stateless tasks such as `transcript_view` and `text_facts` | Lazy, exits after 60 seconds with no leases, queued work, or running work |
 | `jobd` executors | spawn `ProcessPoolExecutor` children | broker-owned pipes | JSON-only registered task execution, bounded payload/result bytes | Broker lifetime; default worker count is `max(1, min(2, cpu_count - 1))` |

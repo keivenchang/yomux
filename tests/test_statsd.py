@@ -1,7 +1,8 @@
+import json
+import os
 import sqlite3
 import threading
 import time
-import json
 
 import pytest
 
@@ -210,6 +211,32 @@ def test_statsd_service_has_single_writer_protocol_and_recovers_after_restart(tm
     assert client.request({"action": "query_buckets"})["buckets"] == [_bucket()]
     assert client.request({"action": "shutdown"}) == {"ok": True}
     restarted_worker.join(timeout=2.0)
+
+
+def test_statsd_restart_recovers_durable_sampler_owner_and_does_not_idle_exit(tmp_path):
+    owner_path = tmp_path / "background-owner" / "owner.json"
+    owner_path.parent.mkdir()
+    owner = {
+        "status": "owner",
+        "roles": ["stats-sampler"],
+        "control_socket": str(tmp_path / "owner.sock"),
+        "generation_id": "generation-1",
+        "last_heartbeat": time.time(),
+        "pid": os.getpid(),
+        "port": 9991,
+    }
+    owner_path.write_text(json.dumps(owner), encoding="utf-8")
+    service = statsd.PersistentStatsService(
+        tmp_path / "statsd.sock",
+        tmp_path / "stats.sqlite3",
+        idle_seconds=1.0,
+        sampler_owner_path=owner_path,
+    )
+    service.last_client_at = time.monotonic() - 10
+
+    assert service._sampler_owner_for_cycle()["generation_id"] == "generation-1"
+    assert service._idle_shutdown_ready() is False
+    service.store.close()
 
 
 def test_stats_client_registry_spawns_statsd_with_its_requested_database(tmp_path):

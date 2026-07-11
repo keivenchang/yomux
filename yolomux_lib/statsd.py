@@ -37,8 +37,8 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 5
-STATSD_COMPAT_PROTOCOL_VERSION = 4
+STATSD_PROTOCOL_VERSION = 7
+STATSD_COMPAT_PROTOCOL_VERSION = 6
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
@@ -66,6 +66,7 @@ STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_sampl
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATSD_SAMPLE_INTERVAL_SECONDS = 1.0
+STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 
 
 def stats_history_client_id(value: Any = "") -> str:
@@ -83,6 +84,10 @@ def default_database_path() -> Path:
     return STATE_DIR / STATSD_DATABASE_NAME
 
 
+def default_sampler_owner_path(state_dir: Path = STATE_DIR) -> Path:
+    return state_dir / "background-owner" / "owner.json"
+
+
 def default_legacy_client_history_paths(state_dir: Path = STATE_DIR) -> list[Path]:
     return [
         state_dir / "stats-client-history-v4.json",
@@ -98,7 +103,13 @@ def default_legacy_shared_history_path(state_dir: Path = STATE_DIR) -> Path:
 class PersistentStatsService:
     """The only process allowed to mutate the row-based stats database."""
 
-    def __init__(self, socket_path: Path, database_path: Path, idle_seconds: float = STATSD_DEFAULT_IDLE_SECONDS):
+    def __init__(
+        self,
+        socket_path: Path,
+        database_path: Path,
+        idle_seconds: float = STATSD_DEFAULT_IDLE_SECONDS,
+        sampler_owner_path: Path | None = None,
+    ):
         self.socket_path = safe_socket_path(socket_path, prefix="yolomux-statsd")
         self.lock_path = self.socket_path.with_suffix(".lock")
         self.store = StatsStore(database_path)
@@ -110,6 +121,7 @@ class PersistentStatsService:
         self._encoded_query_cache: dict[tuple[Any, ...], tuple[dict[str, Any], float]] = {}
         self._query_cache_ttl_seconds = 1.0
         self.sampler_owner: dict[str, Any] = {}
+        self.sampler_owner_path = Path(sampler_owner_path) if sampler_owner_path is not None else None
         self.agent_token_consumer_until = 0.0
         self.last_sampler_success_at = 0.0
         self.last_sampler_failure = ""
@@ -117,9 +129,51 @@ class PersistentStatsService:
         self.sampler_thread: threading.Thread | None = None
         self.sampler_wake_event = threading.Event()
 
+    def _durable_sampler_owner(self) -> dict[str, Any]:
+        path = self.sampler_owner_path
+        if path is None:
+            return {}
+        try:
+            owner = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        if not isinstance(owner, dict) or owner.get("status") != "owner":
+            return {}
+        control_socket = owner.get("control_socket")
+        if not isinstance(control_socket, str) or not control_socket:
+            return {}
+        roles = owner.get("roles")
+        if not isinstance(roles, list) or "stats-sampler" not in roles:
+            return {}
+        try:
+            heartbeat = float(owner.get("last_heartbeat") or 0.0)
+            pid = int(owner.get("pid") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if heartbeat <= 0 or abs(time.time() - heartbeat) > STATSD_BACKGROUND_OWNER_STALE_SECONDS or pid <= 0:
+            return {}
+        try:
+            os.kill(pid, 0)
+        except (OSError, ValueError):
+            return {}
+        return owner
+
+    def _sampler_owner_for_cycle(self) -> dict[str, Any]:
+        # A history request can launch statsd after the elected web process has
+        # already acquired background ownership. Adopt that durable owner rather
+        # than waiting for another election transition to register it over RPC.
+        durable_owner = self._durable_sampler_owner()
+        if durable_owner:
+            self.sampler_owner = durable_owner
+        return dict(self.sampler_owner)
+
+    def _idle_shutdown_ready(self) -> bool:
+        # An elected sampler is active work even while no browser reads YO!stats.
+        return not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
+
     def _sampler_loop(self) -> None:
         while not self.stop_event.is_set():
-            owner = dict(self.sampler_owner)
+            owner = self._sampler_owner_for_cycle()
             if owner:
                 self.last_sampler_attempt_at = time.time()
                 response = send_yolomux_control_request(
@@ -1449,7 +1503,7 @@ class PersistentStatsService:
             service_name="statsd",
             stop_event=self.stop_event,
             handle=self.handle_with_binary,
-            on_idle=lambda: not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds,
+            on_idle=self._idle_shutdown_ready,
             on_client=lambda: setattr(self, "last_client_at", monotonic_clock()),
             on_shutdown=self._shutdown,
         )
@@ -1473,7 +1527,7 @@ class StatsClient(LocalServiceClient):
             socket_path or default_socket_path(),
             STATSD_PROTOCOL_VERSION,
             idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
-            extra_args=("--database", str(self.database_path)),
+            extra_args=("--database", str(self.database_path), "--sampler-owner", str(default_sampler_owner_path(self.database_path.parent))),
         )
 
     def healthy(self) -> bool:
@@ -1615,12 +1669,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--socket", default=str(default_socket_path()))
     parser.add_argument("--database", default=str(default_database_path()))
+    parser.add_argument("--sampler-owner", default=str(default_sampler_owner_path()))
     parser.add_argument("--idle-seconds", type=float, default=STATSD_DEFAULT_IDLE_SECONDS)
     args = parser.parse_args(argv)
     if not args.serve:
         parser.error("--serve is required")
     apply_service_process_priority()
-    return PersistentStatsService(Path(args.socket), Path(args.database), idle_seconds=args.idle_seconds).run()
+    return PersistentStatsService(
+        Path(args.socket),
+        Path(args.database),
+        idle_seconds=args.idle_seconds,
+        sampler_owner_path=Path(args.sampler_owner),
+    ).run()
 
 
 if __name__ == "__main__":

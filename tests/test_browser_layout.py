@@ -6978,8 +6978,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
             <button id="smart-key-close" class="mobile-terminal-key-close">×</button>
-            <button class="mobile-terminal-key-drag">⠿</button>
-            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key active">Ctrl</button><button class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-drag" class="mobile-terminal-key-drag">⠿</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button></div>
+            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
             <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
             <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
           </div>
@@ -7007,25 +7007,26 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const dpad = document.getElementById('smart-key-dpad');
         const shell = document.getElementById('smart-key-shell');
         const moreRow = document.getElementById('smart-key-more-row');
-        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        const side = document.getElementById('smart-key-side');
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), drag: box(document.getElementById('smart-key-drag')), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
-        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display};
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display};
         return {
           pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')), close: box(document.getElementById('smart-key-close')),
           paneDisplay: getComputedStyle(pane).display,
           overflowX: getComputedStyle(row).overflowX,
-          activeBackground: getComputedStyle(row.querySelector('.active')).backgroundColor,
+          activeBackground: getComputedStyle(document.getElementById('smart-key-ctrl')).backgroundColor,
           launcherUserSelect: getComputedStyle(document.getElementById('smart-key-launcher')).userSelect,
           barUserSelect: getComputedStyle(bar).userSelect,
-          interruptColor: getComputedStyle(row.querySelector('.mobile-terminal-key--interrupt')).color,
+          interruptColor: getComputedStyle(document.getElementById('smart-key-interrupt')).color,
           primaryColumns: getComputedStyle(row).gridTemplateColumns,
           primaryLabels: [...row.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent),
           more: normal.more,
           shell: normal.shell,
           movedInsetEnd: bar.style.insetBlockEnd,
           initiallyHidden: hidden,
-              up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              side: normal.side, drag: normal.drag, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
           initial, normal, overflow,
         };
@@ -7040,21 +7041,23 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["close"]["right"] <= metrics["bar"]["right"] and metrics["close"]["top"] >= metrics["bar"]["top"], metrics
     assert metrics["key"]["height"] >= 36, metrics
     assert metrics["overflowX"] == "visible", metrics
-    assert metrics["primaryColumns"].startswith("repeat(5,"), metrics
-    assert metrics["primaryLabels"] == ["Ctrl", "^C", "Esc", "Tab", "^B"], metrics
+    assert metrics["primaryColumns"].startswith("repeat(3,"), metrics
+    assert metrics["primaryLabels"] == ["Esc", "Tab", "^B"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
     assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
     assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
     assert metrics["movedInsetEnd"] == "auto", metrics
     assert metrics["bar"]["height"] < metrics["pane"]["height"], metrics
-    assert metrics["normal"]["shellDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
+    assert metrics["normal"]["shellDisplay"] == metrics["normal"]["sideDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
     assert metrics["overflow"]["rowDisplay"] == "grid", metrics
-    assert metrics["overflow"]["shellDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
+    assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
     assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
     assert metrics["overflow"]["more"]["right"] <= metrics["overflow"]["row"]["right"] + 0.5, metrics
     assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
     assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
+    assert metrics["drag"]["top"] < metrics["ctrl"]["top"] < metrics["interrupt"]["top"], metrics
+    assert metrics["ctrl"]["right"] <= metrics["dpad"]["left"] and metrics["interrupt"]["right"] <= metrics["dpad"]["left"], metrics
     assert metrics["up"]["top"] < metrics["left"]["top"] and metrics["up"]["top"] < metrics["right"]["top"], metrics
     assert metrics["left"]["left"] < metrics["up"]["left"] < metrics["right"]["left"], metrics
     assert metrics["down"]["top"] > metrics["left"]["top"] and metrics["down"]["top"] > metrics["right"]["top"], metrics
