@@ -306,8 +306,8 @@ def test_two_app_instances_same_state_dir_elect_newer_owner(monkeypatch, tmp_pat
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     try:
-        assert first.start_background_owner(port=7771) is True
-        assert second.start_background_owner(port=8003) is True
+        assert first.start_background_owner(port=9901) is True
+        assert second.start_background_owner(port=9903) is True
 
         assert first.background_owner.is_owner() is False
         assert first.background_owner.status == "follower"
@@ -337,8 +337,8 @@ def test_background_refresh_done_fanout_reaches_follower_client_broker(monkeypat
     second = app_module.TmuxWebtermApp(["1"])
     subscriber_id, subscriber_queue = first.client_events.subscribe()
     try:
-        assert first.start_background_owner(port=7771) is True
-        assert second.start_background_owner(port=8003) is True
+        assert first.start_background_owner(port=9901) is True
+        assert second.start_background_owner(port=9903) is True
         assert first.background_owner.status == "follower"
         assert second.background_owner.status == "owner"
 
@@ -381,19 +381,19 @@ def test_background_owner_startup_order_latest_port_wins(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     apps = []
     try:
-        for port in (7770, 7771, 7772, 7773):
+        for port in (9910, 9911, 9912, 9913):
             app = app_module.TmuxWebtermApp(["1"])
             apps.append(app)
             assert app.start_background_owner(port=port) is True
         assert [app.background_owner.status for app in apps] == ["follower", "follower", "follower", "owner"]
-        assert apps[-1].background_owner.port == 7773
+        assert apps[-1].background_owner.port == 9913
 
-        restarted_7771 = app_module.TmuxWebtermApp(["1"])
-        apps.append(restarted_7771)
-        assert restarted_7771.start_background_owner(port=7771) is True
+        restarted_9911 = app_module.TmuxWebtermApp(["1"])
+        apps.append(restarted_9911)
+        assert restarted_9911.start_background_owner(port=9911) is True
 
         assert [app.background_owner.status for app in apps] == ["follower", "follower", "follower", "follower", "owner"]
-        assert restarted_7771.background_owner.port == 7771
+        assert restarted_9911.background_owner.port == 9911
     finally:
         for app in apps:
             app.background_owner.stop()
@@ -414,8 +414,8 @@ def test_follower_has_no_expensive_worker_threads_after_takeover(monkeypatch, tm
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     try:
-        assert first.start_background_owner(port=7771) is True
-        assert second.start_background_owner(port=8003) is True
+        assert first.start_background_owner(port=9901) is True
+        assert second.start_background_owner(port=9903) is True
         assert first.background_owner.status == "follower"
         assert first.start_tabber_activity_cache_warmer() is False
         assert first.start_session_files_cache_refresh(("payload", "1"), lambda *_args: None) is False

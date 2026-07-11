@@ -76,7 +76,24 @@ def py_compile_files() -> list[str]:
     ]
 
 
+def pytest_worker_counts() -> tuple[str, str, str]:
+    """Return non-browser, browser, and E2E worker counts for this host."""
+    override = os.environ.get("YOLOMUX_PYTEST_WORKERS", "").strip()
+    if override:
+        parts = [part.strip() for part in override.split(",")]
+        if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) > 0:
+            return parts[0], parts[0], parts[0]
+        if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
+            return parts[0], parts[1], parts[2]
+        raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
+    if sys.platform == "darwin":
+        cpus = max(1, os.cpu_count() or 1)
+        return str(max(2, min(6, cpus // 2))), str(max(2, min(4, cpus // 3))), "2"
+    return "auto", "auto", "4"
+
+
 def lanes() -> list[Lane]:
+    nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts()
     return [
         Lane(
             "py-compile",
@@ -119,7 +136,7 @@ def lanes() -> list[Lane]:
             # fast unit failure surfaces immediately and the two pools do not thrash each other's cores.
             # Exclude browser too: Selenium tests are a separate `pytest-browser` lane so browser-only
             # script errors and timing flakes do not hide inside the generic pytest lane.
-            (Step("pytest non-browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e and not browser", "-q"]),),
+            (Step("pytest non-browser", ["python3", "-m", "pytest", "tests", "-n", nonbrowser_workers, "-m", "not node_bridge and not e2e and not browser", "-q"]),),
             True,
         ),
         Lane(
@@ -138,7 +155,7 @@ def lanes() -> list[Lane]:
                 # goldens compare rendered pixels against reviewed machine baselines, so they run in
                 # a separate serial step: parallel Chrome font/compositor pressure can otherwise add
                 # enough non-product raster variation to cross the RMS threshold.
-                Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
+                Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
                 Step("pytest browser visual goldens", ["python3", "-m", "pytest", "tests", "-m", "visual_golden", "-q"]),
             ),
             True,
@@ -150,7 +167,7 @@ def lanes() -> list[Lane]:
             # bounded: `-n auto` can launch dozens of tmux/mock-agent subprocesses while the browser and
             # unit pools are also running, which slows the whole default gate down and makes flakes harder
             # to diagnose.
-            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]),),
+            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", "-n", e2e_workers, "-m", "e2e", "-q"]),),
             True,
         ),
         Lane(

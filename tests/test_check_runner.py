@@ -80,6 +80,7 @@ def test_check_runner_reuses_background_owner_process_liveness():
 
 def test_default_check_lanes_keep_full_pytest_gate():
     check = load_check_module()
+    nonbrowser_workers, browser_workers, e2e_workers = check.pytest_worker_counts()
     lanes = check.lanes()
     default_names = [lane.name for lane in lanes if lane.default]
     assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
@@ -89,24 +90,25 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # it ran that ~20s node suite twice concurrently), e2e tests launch real tmux + mock agents, and
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e and not browser", "-q"]
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", nonbrowser_workers, "-m", "not node_bridge and not e2e and not browser", "-q"]
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
     assert boot_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
     assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
     assert browser_lane.steps[2].args == ["python3", "-m", "pytest", "tests", "-m", "visual_golden", "-q"]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
-    assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]
+    assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", e2e_workers, "-m", "e2e", "-q"]
     assert "pytest-unit" not in default_names
     assert "pytest-socket" not in default_names
 
 
 def test_focused_pytest_lanes_keep_expected_filters():
     check = load_check_module()
+    _nonbrowser_workers, browser_workers, _e2e_workers = check.pytest_worker_counts()
     lanes = {lane.name: lane for lane in check.lanes()}
     assert lanes["pytest-unit"].steps[0].args == [
         "python3",
@@ -143,7 +145,7 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "pytest",
         "tests",
         "-n",
-        "auto",
+        browser_workers,
         "--dist",
         "worksteal",
         "-m",
@@ -168,6 +170,18 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "boot",
         "-q",
     ]
+
+
+def test_check_runner_bounds_concurrent_pytest_pools_on_macos(monkeypatch):
+    check = load_check_module()
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.setattr(check.sys, "platform", "darwin")
+    monkeypatch.setattr(check.os, "cpu_count", lambda: 14)
+
+    assert check.pytest_worker_counts() == ("6", "4", "2")
+
+    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
+    assert check.pytest_worker_counts() == ("5", "3", "1")
 
 
 def test_every_slowest_first_base_node_id_resolves_in_collection():
