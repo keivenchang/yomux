@@ -996,18 +996,18 @@ def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(bro
           noDataRegions: chart.querySelectorAll('[data-js-debug-no-data-range]').length,
         };
 
-        clearJsDebugGraphData();
-        setDebugGraphRange(60, {render: false});
-        debugGraphApplyServerHistory({sequence: 3, records: [{
-          start: nowSeconds - 3, duration: 1, sequence: 1, disconnected_ms: 1000,
-          clients: {'client-stale': {disconnected_ms: 1000}},
-        }, {
-          start: nowSeconds - 2, duration: 1, sequence: 2,
-          clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
-        }, {
-          start: nowSeconds - 1, duration: 1, sequence: 3, disconnected_ms: 1000,
-          clients: {'client-stale': {disconnected_ms: 1000}, 'client-live': {disconnected_ms: 1000}},
-        }]});
+            clearJsDebugGraphData();
+            setDebugGraphRange(60, {render: false});
+            debugGraphApplyServerHistory({sequence: 3, records: [{
+              start: nowSeconds - 3, duration: 1, sequence: 1,
+              clients: {[currentClientId]: {disconnected_ms: 1000}, 'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+            }, {
+              start: nowSeconds - 2, duration: 1, sequence: 2,
+              clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+            }, {
+              start: nowSeconds - 1, duration: 1, sequence: 3,
+              clients: {[currentClientId]: {disconnected_ms: 1000}, 'client-live': {disconnected_ms: 1000}},
+            }]});
         renderDebugPanels({force: true});
         const thisClientOutageRegions = document.querySelectorAll('[data-js-debug-chart="bandwidth"] [data-js-debug-disconnected-range]').length;
         return {
@@ -10413,6 +10413,64 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
     assert terminal_closed["openIds"] == [], terminal_closed
 
 
+def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return transcriptMetadataState.loaded && !transcriptMetadataState.request && document.querySelector('.app-menu[data-app-menu=\"tabs\"] > .app-menu-button');"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        let resolveMetadata = null;
+        window.fetch = (input, options) => {
+          const url = new URL(String(input), window.location.href);
+          if (url.pathname === '/api/session-metadata' && url.searchParams.get('force') === '1') {
+            return new Promise(resolve => { resolveMetadata = resolve; });
+          }
+          return originalFetch(input, options);
+        };
+        const wrapper = document.querySelector('.app-menu[data-app-menu="tabs"]');
+        const button = wrapper?.querySelector(':scope > .app-menu-button');
+        button?.click();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const popover = wrapper?.querySelector(':scope > .app-menu-popover');
+          const cached = {
+            open: wrapper?.classList.contains('open') || false,
+            rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
+            text: popover?.textContent || '',
+            requested: typeof resolveMetadata === 'function',
+          };
+          resolveMetadata?.(new Response(JSON.stringify({
+            session_order: ['1'],
+            sessions: {'1': {panes: [], agents: [], project: {git: {branch: 'menu-live-branch'}}}},
+          }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          window.__yolomuxTestWaitFor(
+            () => (popover?.textContent || '').includes('menu-live-branch'),
+            {description: 'live Tabs menu metadata'},
+          ).then(() => done({
+            cached,
+            final: {
+              open: wrapper?.classList.contains('open') || false,
+              text: popover?.textContent || '',
+              rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
+            },
+            errors: window.__bootErrors || [],
+          }), error => done({error: String(error?.stack || error)}));
+        }));
+        """
+    )
+    assert result.get("error") is None, result
+    assert result["cached"]["open"] is True and result["cached"]["rows"] >= 1, result
+    assert "menu-live-branch" not in result["cached"]["text"], result
+    assert result["cached"]["requested"] is True, result
+    assert result["final"]["open"] is True and result["final"]["rows"] >= 1, result
+    assert "menu-live-branch" in result["final"]["text"], result
+    assert result["errors"] == [], result
+
+
 def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1", "2"])
     WebDriverWait(browser, 5).until(
@@ -13800,7 +13858,7 @@ def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
           changesHeight: changesRect.height,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
-          visibleSortSelects: visible('[data-session-files-sort]').length,
+          visibleSortSelects: visible('[data-file-explorer-tree-sort]').length,
           visibleDateButtons: visible('[data-file-explorer-tree-dates]').length,
           visibleReloadButtons: visible('[data-session-files-refresh], [data-file-explorer-refresh]').length,
         };

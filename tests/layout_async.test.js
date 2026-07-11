@@ -363,6 +363,39 @@ async function runLayoutAsyncSuite() {
     assert.ok(api.vmConsoleErrorsForTest().some(message => message.includes('session metadata fetch failed')), 'the expected transport diagnostic is captured by this test instead of printed in a green run');
   });
 
+  await testAsync('Tabs menu shows cached labels immediately then refreshes its open rows from live session metadata', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata?force=1', 'opening Tabs requests one live metadata refresh after rendering cached rows');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    api.renderSessionButtonsForTest({force: true});
+    const tabs = Array.from(api.sessionButtonsForTest().querySelectorAll('.app-menu'))
+      .find(menu => menu.dataset.appMenu === 'tabs');
+    assert.ok(tabs, 'Tabs menu is rendered from the existing cached session snapshot');
+    const cachedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
+    assert.ok(cachedCommand, 'cached session row is available without waiting for list-sessions');
+    assert.equal(cachedCommand.html.includes('fresh-session-name'), false, 'the initial row is the pre-refresh cached label');
+
+    api.openAppMenuForTest(tabs);
+    assert.equal(tabs.classList.contains('open'), true, 'Tabs opens immediately while live metadata is pending');
+    assert.equal(pending.length, 1, 'reopening work is coalesced through the shared metadata request record');
+    pending[0].resolve(jsonResponse({
+      session_order: ['1'],
+      sessions: {
+        '1': {panes: [], agents: [], project: {git: {branch: 'fresh-session-name'}}},
+      },
+    }));
+    await flushAsyncWork();
+    assert.equal(tabs.classList.contains('open'), true, 'the live update patches the open Tabs menu instead of closing it');
+    const refreshedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
+    assert.ok(refreshedCommand, 'the live update retains the cached session row identity');
+    assert.equal(refreshedCommand.html.includes('fresh-session-name'), true, 'the open Tabs row receives the live list-sessions name/description');
+  });
+
   await testAsync('Search and Runs records reject stale query and refresh completions', async () => {
     const pendingSearch = [];
     const pendingRuns = [];

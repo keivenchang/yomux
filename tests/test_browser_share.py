@@ -2118,22 +2118,27 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   hideFileTreeRepoPopover?.();
                   document.getElementById('modal')?.classList?.remove('open', 'about-open', 'share-open');
                 };
-                const detail = extra => ({
-                  ...extra,
+                const detail = extra => {
+                  const finderMode = normalizeFileExplorerMode(fileExplorerMode);
+                  const activeFinderView = finderMode === 'diff' ? 'differ' : finderMode === 'tabber' ? 'tabber' : 'finder';
+                  return {
+                    ...extra,
                       finderOpen: itemInLayout(fileExplorerItemId),
                       finderSlot: slotForItem(fileExplorerItemId) || '',
                       finderPaneRole: slotForItem(fileExplorerItemId) ? paneRoleForSlot(slotForItem(fileExplorerItemId)).kind : '',
                       finderPaneSide: slotForItem(fileExplorerItemId) ? paneRoleForSlot(slotForItem(fileExplorerItemId)).side : null,
-                  finderMode: normalizeFileExplorerMode(fileExplorerMode),
+                  finderMode,
+                  activeFinderView,
                   rootMode: fileExplorerRootModeValue(),
-                  treeSortMode: fileExplorerTreeSortMode,
-                  sessionFilesSortMode,
-                  dateMode: normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode),
-                  dateLabel: fileExplorerTreeDateModeButtonLabel(fileExplorerTreeDateMode),
+                  treeSortMode: fileExplorerTreeSortModeForView('finder'),
+                  sessionFilesSortMode: fileExplorerTreeSortModeForView('differ'),
+                  dateMode: fileExplorerTreeDateModeForView(activeFinderView),
+                  dateLabel: fileExplorerTreeDateModeButtonLabel(fileExplorerTreeDateModeForView(activeFinderView)),
                   finderPanelCount: document.querySelectorAll('.file-explorer-panel').length,
                   menuOpen: document.querySelector('.app-menu.open')?.dataset?.appMenu || '',
                   modalTitle: document.querySelector('#modal.open #modalTitle')?.textContent || '',
-                });
+                  };
+                };
                 const publish = async (phase, extra = {}) => {
                   const state = detail(extra);
                   const node = marker();
@@ -2210,16 +2215,16 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   if (fileExplorerRootModeValue() !== rootMode) setFileExplorerRootMode(rootMode, {sync: false, persist: false});
                   await frame();
                 };
-                const clickDateMode = async dateMode => {
-                  const panel = await ensureFinder();
-                  const button = panel?.querySelector('[data-file-explorer-tree-dates]');
-                  for (let attempt = 0; attempt < 5 && normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode) !== dateMode; attempt += 1) {
-                    button?.click();
+                  const clickDateMode = async (dateMode, view = 'finder') => {
+                    const panel = await ensureFinder();
+                    const button = panel?.querySelector(`[data-file-explorer-tree-dates][data-file-explorer-view="${view}"]`) || panel?.querySelector('[data-file-explorer-tree-dates]');
+                    for (let attempt = 0; attempt < 5 && fileExplorerTreeDateModeForView(view) !== dateMode; attempt += 1) {
+                      button?.click();
+                      await frame();
+                    }
+                    if (fileExplorerTreeDateModeForView(view) !== dateMode) setFileExplorerTreeDateMode(dateMode, view);
                     await frame();
-                  }
-                  if (normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode) !== dateMode) setFileExplorerTreeDateMode(dateMode);
-                  await frame();
-                };
+                  };
                 return {
                   async initial() {
                     return publish('initial');
@@ -2273,11 +2278,11 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     if (normalizeFileExplorerMode(fileExplorerMode) !== mode) setFileExplorerMode(mode);
                     await clickRootMode(rootMode);
                     if (mode === 'diff') {
-                      sessionFilesSortMode = normalizeSessionFilesSortMode(sortMode);
+                      setFileExplorerViewSetting('differ', 'treeSortMode', sortMode, {publish: false});
                       renderFileExplorerChangesPanels({force: true});
-                      const diffSort = document.querySelector('[data-session-files-sort]');
+                      const diffSort = document.querySelector('[data-file-explorer-tree-sort]');
                       if (diffSort) {
-                        diffSort.value = sessionFilesSortMode;
+                        diffSort.value = fileExplorerTreeSortModeForView('differ');
                         diffSort.dispatchEvent(new Event('change', {bubbles: true}));
                       }
                     } else {
@@ -2286,10 +2291,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                         treeSort.value = sortMode;
                         treeSort.dispatchEvent(new Event('change', {bubbles: true}));
                       }
-                      fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(sortMode) ? sortMode : 'az';
-                      writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
+	                      setFileExplorerViewSetting('finder', 'treeSortMode', sortMode, {publish: false});
 	                    }
-	                    await clickDateMode(dateMode);
+	                    await clickDateMode(dateMode, mode === 'diff' ? 'differ' : 'finder');
 	                    await clickRootMode(rootMode);
 	                    renderFileExplorerChangesPanels({force: true});
 	                    await frame();

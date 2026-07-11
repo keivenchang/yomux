@@ -261,6 +261,9 @@ const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.
 const fileExplorerTreeDateModeStorageKey = 'yolomux.fileExplorer.treeDateMode.v1';
 const fileExplorerTreeDateModes = ['none', 'date', 'relative'];
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
+// v2 keeps one common schema while each fixed file surface owns its own choices. The v1
+// Finder keys remain read-only migration inputs so existing browser preferences survive.
+const fileExplorerViewSettingsStorageKey = 'yolomux.fileExplorer.viewSettings.v2';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
@@ -700,9 +703,7 @@ let fileExplorerRefreshDeferred = false;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
 let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
-let sessionFilesSortMode = 'newest';
-let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
-let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
+let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'

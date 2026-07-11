@@ -1601,6 +1601,82 @@ function writeStoredFileExplorerTreeSortMode(value) {
   storageSet(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
 }
 
+function normalizeFileExplorerView(view) {
+  return ['finder', 'tabber', 'differ'].includes(view) ? view : 'finder';
+}
+
+function normalizeFileExplorerViewSettings(value, fallback = {}) {
+  const settings = value && typeof value === 'object' ? value : {};
+  return {
+    treeDateMode: normalizeFileExplorerTreeDateMode(settings.treeDateMode ?? fallback.treeDateMode),
+    treeSortMode: normalizeSessionFilesSortMode(settings.treeSortMode ?? fallback.treeSortMode),
+  };
+}
+
+function readStoredFileExplorerViewSettings() {
+  const legacyFinder = {
+    treeDateMode: readStoredFileExplorerTreeDateMode(),
+    treeSortMode: readStoredFileExplorerTreeSortMode(),
+  };
+  const stored = readStoredJson(fileExplorerViewSettingsStorageKey, null);
+  const tabberFallback = legacyFinder;
+  const differFallback = {treeDateMode: legacyFinder.treeDateMode, treeSortMode: 'newest'};
+  return {
+    finder: normalizeFileExplorerViewSettings(stored?.finder, legacyFinder),
+    tabber: normalizeFileExplorerViewSettings(stored?.tabber, tabberFallback),
+    differ: normalizeFileExplorerViewSettings(stored?.differ, differFallback),
+  };
+}
+
+function fileExplorerViewSettingsFor(view = 'finder') {
+  const key = normalizeFileExplorerView(view);
+  const fallback = key === 'differ' ? {treeDateMode: 'none', treeSortMode: 'newest'} : {treeDateMode: 'none', treeSortMode: 'az'};
+  const settings = normalizeFileExplorerViewSettings(fileExplorerViewSettings?.[key], fallback);
+  if (!fileExplorerViewSettings || fileExplorerViewSettings[key] !== settings) {
+    fileExplorerViewSettings = {...(fileExplorerViewSettings || {}), [key]: settings};
+  }
+  return settings;
+}
+
+function fileExplorerTreeDateModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeDateMode;
+}
+
+function fileExplorerTreeSortModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeSortMode;
+}
+
+function writeStoredFileExplorerViewSettings() {
+  storageSet(fileExplorerViewSettingsStorageKey, JSON.stringify(fileExplorerViewSettings));
+}
+
+function setFileExplorerViewSetting(view, key, value, options = {}) {
+  const surface = normalizeFileExplorerView(view);
+  const current = fileExplorerViewSettingsFor(surface);
+  const next = normalizeFileExplorerViewSettings({...current, [key]: value}, current);
+  if (next.treeDateMode === current.treeDateMode && next.treeSortMode === current.treeSortMode) return false;
+  fileExplorerViewSettings = {...fileExplorerViewSettings, [surface]: next};
+  writeStoredFileExplorerViewSettings();
+  if (options.refresh !== false) refreshFileExplorerViewSettingsSurface(surface);
+  if (options.publish !== false) scheduleShareUiStatePublish();
+  return true;
+}
+
+// URL state and YO!share use the same payload shape. Keep legacy-field migration here so a
+// restored URL and a replayed frame can never teach the three fixed surfaces different rules.
+function applyFileExplorerViewSettingsSeed(seed = {}) {
+  if (!seed || typeof seed !== 'object') return;
+  if (seed.viewSettings && typeof seed.viewSettings === 'object') {
+    for (const view of ['finder', 'tabber', 'differ']) {
+      if (seed.viewSettings[view]) fileExplorerViewSettings = {...fileExplorerViewSettings, [view]: normalizeFileExplorerViewSettings(seed.viewSettings[view], fileExplorerViewSettingsFor(view))};
+    }
+    return;
+  }
+  if ('treeDateMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeDateMode: normalizeFileExplorerTreeDateMode(seed.treeDateMode)}};
+  if ('treeSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeSortMode: normalizeSessionFilesSortMode(seed.treeSortMode)}};
+  if ('sessionFilesSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, differ: {...fileExplorerViewSettingsFor('differ'), treeSortMode: normalizeSessionFilesSortMode(seed.sessionFilesSortMode)}};
+}
+
 function normalizeStoredFileExplorerIndexedDir(path) {
   const normalized = normalizeDirectoryPath(expandUserPath(path));
   return normalized.startsWith('/') ? normalized : '';
@@ -1855,17 +1931,17 @@ function syncFileExplorerHiddenButton(button) {
   });
 }
 
-function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return t(`finder.dateMode.${normalized}`);
 }
 
-function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return normalized === 'none' ? t('finder.dateMode.date') : fileExplorerTreeDateModeLabel(normalized);
 }
 
-function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateModeForView('finder')) {
   return t('finder.dateMode.title', {
     mode: fileExplorerTreeDateModeLabel(mode),
     none: fileExplorerTreeDateModeLabel('none'),
@@ -1876,7 +1952,8 @@ function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
 
 function syncFileExplorerTreeDateButton(button) {
   if (!button) return;
-  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const view = normalizeFileExplorerView(button.dataset.fileExplorerView || fileExplorerViewForItem(button.closest?.('.file-explorer-panel')?.dataset?.panelItem));
+  const mode = fileExplorerTreeDateModeForView(view);
   const active = mode !== 'none';
   button.classList.toggle(CLS.active, active);
   button.dataset.dateMode = mode;
@@ -1893,31 +1970,28 @@ function syncFileExplorerTreeDateButtons(scope = document) {
   }
 }
 
-function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateMode) {
+function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   const index = fileExplorerTreeDateModes.indexOf(normalized);
   return fileExplorerTreeDateModes[(index + 1) % fileExplorerTreeDateModes.length];
 }
 
-function refreshFileExplorerTreeDateModeSurfaces() {
-  syncFileExplorerTreeDateButtons();
-  if (typeof refreshFileExplorerTrees === 'function') {
-    void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+function refreshFileExplorerViewSettingsSurface(view) {
+  const surface = normalizeFileExplorerView(view);
+  if (surface === 'finder') {
+    if (typeof refreshFileExplorerTrees === 'function') void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  } else if (typeof renderFileExplorerChangesPanels === 'function') {
+    renderFileExplorerChangesPanels({force: true, view: surface});
   }
-  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+  syncFileExplorerTreeDateButtons();
 }
 
-function setFileExplorerTreeDateMode(mode) {
-  const next = normalizeFileExplorerTreeDateMode(mode);
-  if (next === fileExplorerTreeDateMode) return;
-  fileExplorerTreeDateMode = next;
-  writeStoredFileExplorerTreeDateMode(fileExplorerTreeDateMode);
-  refreshFileExplorerTreeDateModeSurfaces();
-  scheduleShareUiStatePublish();
+function setFileExplorerTreeDateMode(mode, view = 'finder') {
+  setFileExplorerViewSetting(view, 'treeDateMode', mode);
 }
 
-function cycleFileExplorerTreeDateMode() {
-  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode());
+function cycleFileExplorerTreeDateMode(view = 'finder') {
+  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode(fileExplorerTreeDateModeForView(view)), view);
 }
 
 function renderTabMetaToggle() {

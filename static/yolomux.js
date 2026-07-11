@@ -262,6 +262,9 @@ const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.
 const fileExplorerTreeDateModeStorageKey = 'yolomux.fileExplorer.treeDateMode.v1';
 const fileExplorerTreeDateModes = ['none', 'date', 'relative'];
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
+// v2 keeps one common schema while each fixed file surface owns its own choices. The v1
+// Finder keys remain read-only migration inputs so existing browser preferences survive.
+const fileExplorerViewSettingsStorageKey = 'yolomux.fileExplorer.viewSettings.v2';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
@@ -701,9 +704,7 @@ let fileExplorerRefreshDeferred = false;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
 let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
-let sessionFilesSortMode = 'newest';
-let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
-let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
+let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'
@@ -3779,6 +3780,82 @@ function writeStoredFileExplorerTreeSortMode(value) {
   storageSet(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
 }
 
+function normalizeFileExplorerView(view) {
+  return ['finder', 'tabber', 'differ'].includes(view) ? view : 'finder';
+}
+
+function normalizeFileExplorerViewSettings(value, fallback = {}) {
+  const settings = value && typeof value === 'object' ? value : {};
+  return {
+    treeDateMode: normalizeFileExplorerTreeDateMode(settings.treeDateMode ?? fallback.treeDateMode),
+    treeSortMode: normalizeSessionFilesSortMode(settings.treeSortMode ?? fallback.treeSortMode),
+  };
+}
+
+function readStoredFileExplorerViewSettings() {
+  const legacyFinder = {
+    treeDateMode: readStoredFileExplorerTreeDateMode(),
+    treeSortMode: readStoredFileExplorerTreeSortMode(),
+  };
+  const stored = readStoredJson(fileExplorerViewSettingsStorageKey, null);
+  const tabberFallback = legacyFinder;
+  const differFallback = {treeDateMode: legacyFinder.treeDateMode, treeSortMode: 'newest'};
+  return {
+    finder: normalizeFileExplorerViewSettings(stored?.finder, legacyFinder),
+    tabber: normalizeFileExplorerViewSettings(stored?.tabber, tabberFallback),
+    differ: normalizeFileExplorerViewSettings(stored?.differ, differFallback),
+  };
+}
+
+function fileExplorerViewSettingsFor(view = 'finder') {
+  const key = normalizeFileExplorerView(view);
+  const fallback = key === 'differ' ? {treeDateMode: 'none', treeSortMode: 'newest'} : {treeDateMode: 'none', treeSortMode: 'az'};
+  const settings = normalizeFileExplorerViewSettings(fileExplorerViewSettings?.[key], fallback);
+  if (!fileExplorerViewSettings || fileExplorerViewSettings[key] !== settings) {
+    fileExplorerViewSettings = {...(fileExplorerViewSettings || {}), [key]: settings};
+  }
+  return settings;
+}
+
+function fileExplorerTreeDateModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeDateMode;
+}
+
+function fileExplorerTreeSortModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeSortMode;
+}
+
+function writeStoredFileExplorerViewSettings() {
+  storageSet(fileExplorerViewSettingsStorageKey, JSON.stringify(fileExplorerViewSettings));
+}
+
+function setFileExplorerViewSetting(view, key, value, options = {}) {
+  const surface = normalizeFileExplorerView(view);
+  const current = fileExplorerViewSettingsFor(surface);
+  const next = normalizeFileExplorerViewSettings({...current, [key]: value}, current);
+  if (next.treeDateMode === current.treeDateMode && next.treeSortMode === current.treeSortMode) return false;
+  fileExplorerViewSettings = {...fileExplorerViewSettings, [surface]: next};
+  writeStoredFileExplorerViewSettings();
+  if (options.refresh !== false) refreshFileExplorerViewSettingsSurface(surface);
+  if (options.publish !== false) scheduleShareUiStatePublish();
+  return true;
+}
+
+// URL state and YO!share use the same payload shape. Keep legacy-field migration here so a
+// restored URL and a replayed frame can never teach the three fixed surfaces different rules.
+function applyFileExplorerViewSettingsSeed(seed = {}) {
+  if (!seed || typeof seed !== 'object') return;
+  if (seed.viewSettings && typeof seed.viewSettings === 'object') {
+    for (const view of ['finder', 'tabber', 'differ']) {
+      if (seed.viewSettings[view]) fileExplorerViewSettings = {...fileExplorerViewSettings, [view]: normalizeFileExplorerViewSettings(seed.viewSettings[view], fileExplorerViewSettingsFor(view))};
+    }
+    return;
+  }
+  if ('treeDateMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeDateMode: normalizeFileExplorerTreeDateMode(seed.treeDateMode)}};
+  if ('treeSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeSortMode: normalizeSessionFilesSortMode(seed.treeSortMode)}};
+  if ('sessionFilesSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, differ: {...fileExplorerViewSettingsFor('differ'), treeSortMode: normalizeSessionFilesSortMode(seed.sessionFilesSortMode)}};
+}
+
 function normalizeStoredFileExplorerIndexedDir(path) {
   const normalized = normalizeDirectoryPath(expandUserPath(path));
   return normalized.startsWith('/') ? normalized : '';
@@ -4033,17 +4110,17 @@ function syncFileExplorerHiddenButton(button) {
   });
 }
 
-function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return t(`finder.dateMode.${normalized}`);
 }
 
-function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return normalized === 'none' ? t('finder.dateMode.date') : fileExplorerTreeDateModeLabel(normalized);
 }
 
-function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateModeForView('finder')) {
   return t('finder.dateMode.title', {
     mode: fileExplorerTreeDateModeLabel(mode),
     none: fileExplorerTreeDateModeLabel('none'),
@@ -4054,7 +4131,8 @@ function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
 
 function syncFileExplorerTreeDateButton(button) {
   if (!button) return;
-  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const view = normalizeFileExplorerView(button.dataset.fileExplorerView || fileExplorerViewForItem(button.closest?.('.file-explorer-panel')?.dataset?.panelItem));
+  const mode = fileExplorerTreeDateModeForView(view);
   const active = mode !== 'none';
   button.classList.toggle(CLS.active, active);
   button.dataset.dateMode = mode;
@@ -4071,31 +4149,28 @@ function syncFileExplorerTreeDateButtons(scope = document) {
   }
 }
 
-function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateMode) {
+function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   const index = fileExplorerTreeDateModes.indexOf(normalized);
   return fileExplorerTreeDateModes[(index + 1) % fileExplorerTreeDateModes.length];
 }
 
-function refreshFileExplorerTreeDateModeSurfaces() {
-  syncFileExplorerTreeDateButtons();
-  if (typeof refreshFileExplorerTrees === 'function') {
-    void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+function refreshFileExplorerViewSettingsSurface(view) {
+  const surface = normalizeFileExplorerView(view);
+  if (surface === 'finder') {
+    if (typeof refreshFileExplorerTrees === 'function') void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  } else if (typeof renderFileExplorerChangesPanels === 'function') {
+    renderFileExplorerChangesPanels({force: true, view: surface});
   }
-  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+  syncFileExplorerTreeDateButtons();
 }
 
-function setFileExplorerTreeDateMode(mode) {
-  const next = normalizeFileExplorerTreeDateMode(mode);
-  if (next === fileExplorerTreeDateMode) return;
-  fileExplorerTreeDateMode = next;
-  writeStoredFileExplorerTreeDateMode(fileExplorerTreeDateMode);
-  refreshFileExplorerTreeDateModeSurfaces();
-  scheduleShareUiStatePublish();
+function setFileExplorerTreeDateMode(mode, view = 'finder') {
+  setFileExplorerViewSetting(view, 'treeDateMode', mode);
 }
 
-function cycleFileExplorerTreeDateMode() {
-  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode());
+function cycleFileExplorerTreeDateMode(view = 'finder') {
+  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode(fileExplorerTreeDateModeForView(view)), view);
 }
 
 function renderTabMetaToggle() {
@@ -7658,9 +7733,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
     setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
-  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
-  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
-  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
   if ('diffRefsByRepo' in finder) {
@@ -13259,6 +13332,28 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   return resultItems;
 }
 
+function refreshOpenTabsMenuRows() {
+  const wrapper = Array.from(sessionButtons?.querySelectorAll?.('.app-menu') || [])
+    .find(menu => menu.dataset.appMenu === 'tabs' && menu.classList.contains(CLS.open));
+  if (!wrapper) return false;
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (!popover) return false;
+  const tabsMenu = appMenuTree().find(menu => menu.id === 'tabs');
+  if (!tabsMenu) return false;
+  popover.replaceChildren(...tabsMenu.items.map(createAppMenuItem));
+  fitAppMenuPopover(popover);
+  scheduleSharePopupLayerPublish({immediate: true});
+  return true;
+}
+
+function refreshTabsMenuMetadataOnOpen() {
+  // Opening Tabs must be instant: render the last accepted metadata snapshot first. A fresh
+  // forced request then performs tmux list-sessions in the background and refreshes only this
+  // open menu when names/descriptions arrive. The metadata request record coalesces repeats.
+  if (typeof refreshSessionMetadata !== 'function') return;
+  void refreshSessionMetadata({force: true, refreshAuto: false, refreshActivity: false, refreshContext: false});
+}
+
 function fileMenuVirtualCommand(item, detail) {
   return menuCommand(itemLabel(item), () => selectSession(item, {userInitiated: true}), {
     checked: itemInLayout(item),
@@ -14460,6 +14555,7 @@ function openAppMenu(wrapper, options = {}) {
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   scheduleSharePopupLayerPublish({immediate: true});
   scheduleShareTopologySnapshot('popup-open');
+  if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
 
@@ -16479,8 +16575,8 @@ function fileTreeDisplayParts(path, entry) {
   return {text: baseText, html: ''};
 }
 
-function fileTreeMtimeText(entry) {
-  return sessionFileDisplayTimeTextForEntry(entry);
+function fileTreeMtimeText(entry, options = {}) {
+  return sessionFileDisplayTimeTextForEntry(entry, options);
 }
 
 const FILE_TREE_RECENCY_THRESHOLDS = Object.freeze([
@@ -16581,7 +16677,7 @@ function clearFileTreeRowRecency(row) {
 }
 
 function applyFileTreeRowRecency(row, entry, options = {}) {
-  if (!row || fileExplorerTreeDateMode === 'none') {
+  if (!row || fileExplorerTreeDateModeForView(options.view || (options.differMode ? 'differ' : 'finder')) === 'none') {
     clearFileTreeRowRecency(row);
     return;
   }
@@ -16613,7 +16709,7 @@ function applyFileTreeRowRecency(row, entry, options = {}) {
   else clearFileTreeRecencyAttentionTimer(row);
 }
 
-function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, options = {}) {
+function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForView('finder'), options = {}) {
   const includeHidden = options.includeHidden === true;
   const visible = entries.filter(entry => includeHidden || fileExplorerShowHidden || !entry.name.startsWith('.'));
   if (options.tabberWindowOrder === true) {
@@ -16948,7 +17044,7 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
     ...options,
     expanded,
-    dateText: fileTreeMtimeText(entry),
+    dateText: fileTreeMtimeText(entry, options),
   });
   const changedFile = derivedState.changedFile;
   const changedFileStatus = derivedState.changedFileStatus;
@@ -17154,7 +17250,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   applyFileTreeRowDataset(row, rowState);
   applyFileTreeRowDerivedState(row, rowState.derivedState);
-  applyFileTreeRowRecency(row, entry, {differMode: rowState.differMode});
+  applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
   bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);
   return fullPath;
@@ -18252,9 +18348,9 @@ function tabberWindowRecency(row) {
 }
 
 function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
-  if (fileExplorerTreeDateMode === 'none') return {text: '', html: ''};
+  if (fileExplorerTreeDateModeForView('tabber') === 'none') return {text: '', html: ''};
   const state = String(agentStatus?.state || STATE_KEY.idle);
-  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds});
+  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds, view: 'tabber'});
   if (!text) return {text: '', html: ''};
   if (agentWindowIsAttentionState(state)) {
     return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
@@ -18563,7 +18659,7 @@ function buildTabberTree() {
 }
 
 function tabberSortMode() {
-  return ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'newest';
+  return fileExplorerTreeSortModeForView('tabber');
 }
 
 function renderTabberTree(groupsEl) {
@@ -18589,6 +18685,7 @@ function renderTabberTree(groupsEl) {
     collapsedSet,
     entriesByDir,
     treeSortMode: tabberSortMode(),
+    view: 'tabber',
     includeHidden: true,
   });
   syncTabberTreeLayoutState(container, {force: true});
@@ -18885,7 +18982,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
     disclosureExpanded: expandable ? expanded : undefined,
     nameHtml,
-    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : '')),
+    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
     dateHtml: data.dateHtml || '',
   });
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
@@ -20735,7 +20832,7 @@ async function fileExplorerDirectoryPathsForRoot(root = currentFileExplorerRoot(
     const directory = queue.shift();
     const entries = await fetchDirectory(directory);
     if (!Array.isArray(entries)) continue;
-    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortMode, {includeHidden: fileExplorerShowHidden})) {
+    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortModeForView('finder'), {includeHidden: fileExplorerShowHidden})) {
       if (entry?.kind !== 'dir') continue;
       const child = childPath(directory, entry.name);
       if (seen.has(child)) continue;
@@ -20851,7 +20948,7 @@ function handleFileExplorerTreeToolbarAction(container, event) {
     setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand', {view})
       .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
   } else {
-    cycleFileExplorerTreeDateMode();
+    cycleFileExplorerTreeDateMode(view);
   }
   return true;
 }
@@ -20861,11 +20958,7 @@ function handleFileExplorerTreeToolbarChange(container, event) {
   if (!select || !container?.contains(select)) return false;
   event.preventDefault();
   event.stopPropagation();
-  fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
-  writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
-  if (fileExplorerToolbarView(container) === 'tabber') refreshTabberPanels();
-  else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-  scheduleShareUiStatePublish();
+  setFileExplorerViewSetting(fileExplorerToolbarView(container), 'treeSortMode', select.value);
   return true;
 }
 
@@ -20881,11 +20974,12 @@ function bindFileExplorerHeaderActions(container = document) {
     if (action.matches('[data-file-explorer-new-file]')) createFileExplorerFile();
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
-      if (fileExplorerMode === 'tabber') {
-        clearTabberSessionFilesStates();
-        fetchTabberActivity();
-        refreshTabberPanels();
-      } else if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+    const view = fileExplorerToolbarView(container);
+    if (view === 'tabber') {
+      clearTabberSessionFilesStates();
+      fetchTabberActivity();
+      refreshTabberPanels();
+    } else if (view === 'differ') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         refreshFileExplorerTrees();
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -31524,10 +31618,16 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
 
 function dockviewRootBoundaryDropIntent(event) {
   if (narrowSingleColumnMode()) return null;
-  const pointerIntent = event?.nativeEvent
-    ? dockviewTabPointerRootBoundaryIntent(event.nativeEvent, dockviewLayoutState.tabPointerDrag)
-    : null;
-  if (pointerIntent) return pointerIntent;
+  const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
+  if (event?.nativeEvent && tabPointerDrag?.item) {
+    // Dockview labels the tab strip at the top of an outermost pane as a `top` edge. That is
+    // useful for a deliberate root drop, but wrong for an ordinary tab move across that strip.
+    // The pointer gesture owns the decision while it is live: it only returns a root intent when
+    // the drag actually reaches an eligible root boundary. Falling through to Dockview's broad
+    // overlay here would recreate the false top-root drop after the shared pointer resolver
+    // rejected it.
+    return dockviewTabPointerRootBoundaryIntent(event.nativeEvent, tabPointerDrag);
+  }
   if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -31968,6 +32068,8 @@ function dockviewBeginTabPointerDrag(event, item) {
     slot,
     x: Number(event.clientX) || 0,
     y: Number(event.clientY) || 0,
+    rootBoundaryStartEdges: dockviewRootBoundaryEdgesAtPoint(event),
+    rootBoundaryExitedEdges: {},
   };
 }
 
@@ -31978,11 +32080,38 @@ function dockviewTabContentInteractionSuppressed() {
   );
 }
 
+function dockviewRootBoundaryEdgesAtPoint(event, rect = null) {
+  const targetRect = rect || rootBoundaryLayoutTarget()?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
+  if (!targetRect?.width || !targetRect?.height) return {};
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return {};
+  const xBand = layoutBoundaryDropBandPx(targetRect.width);
+  const yBand = layoutBoundaryDropBandPx(targetRect.height);
+  return {
+    left: x >= targetRect.left && x <= targetRect.left + xBand,
+    right: x <= targetRect.right && x >= targetRect.right - xBand,
+    top: y >= targetRect.top && y <= targetRect.top + yBand,
+    bottom: y <= targetRect.bottom && y >= targetRect.bottom - yBand,
+  };
+}
+
+function dockviewUpdateRootBoundaryExitEdges(event, state, rect) {
+  if (!state) return;
+  const startEdges = state.rootBoundaryStartEdges || {};
+  const currentEdges = dockviewRootBoundaryEdgesAtPoint(event, rect);
+  const exitedEdges = state.rootBoundaryExitedEdges || (state.rootBoundaryExitedEdges = {});
+  for (const zone of ['left', 'right', 'top', 'bottom']) {
+    if (startEdges[zone] && !currentEdges[zone]) exitedEdges[zone] = true;
+  }
+}
+
 function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState.tabPointerDrag) {
   if (!state?.item || narrowSingleColumnMode()) return null;
   const target = rootBoundaryLayoutTarget();
   const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!rect) return null;
+  dockviewUpdateRootBoundaryExitEdges(event, state, rect);
   const dx = (Number(event.clientX) || 0) - state.x;
   const dy = (Number(event.clientY) || 0) - state.y;
   const horizontalZone = Math.abs(dx) >= DRAG_HYSTERESIS_PX
@@ -31991,9 +32120,23 @@ function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState
   const verticalZone = Math.abs(dy) >= DRAG_HYSTERESIS_PX
     ? rootBoundaryDropZoneForEvent(event, rect, dy >= 0 ? 'bottom' : 'top')
     : null;
-  const zone = horizontalZone && verticalZone
+  let zone = horizontalZone && verticalZone
     ? (Math.abs(dx) >= Math.abs(dy) ? horizontalZone : verticalZone)
     : (horizontalZone || verticalZone);
+  // A deliberate edge gesture can return to the tab's original root band, making its final
+  // start-to-end delta too small to identify an axis. The tracked exit proves it was not merely
+  // released in the header; use the current boundary only for that re-entry case.
+  if (!zone) {
+    const reenteredZone = rootBoundaryDropZoneForEvent(event, rect);
+    if (reenteredZone && state.rootBoundaryStartEdges?.[reenteredZone] && state.rootBoundaryExitedEdges?.[reenteredZone]) {
+      zone = reenteredZone;
+    }
+  }
+  // A tab header can itself live inside an outer root band's top/left/right/bottom hit area.
+  // Require the pointer to leave that same band once before it can create a new outer pane there.
+  // That preserves ordinary tab movement from the outermost pane while retaining an explicit,
+  // intentional root-edge gesture: move into the content area, then back to the desired edge.
+  if (zone && state.rootBoundaryStartEdges?.[zone] && !state.rootBoundaryExitedEdges?.[zone]) return null;
   if (!layoutSplitZone(zone) || !dockviewSplitLayoutHasMinimumSize(zone, rect)) return null;
   return {
     item: state.item,
@@ -43166,7 +43309,10 @@ function debugGraphDisconnectedRanges(buckets, domain) {
   for (const bucket of buckets || []) {
     const startMs = Number(bucket?.startMs);
     const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
-    const disconnectedMs = Math.min(durationMs, Math.max(0, Number(bucket?.disconnectedMs || 0)));
+    // EventSource can reconnect while ordinary API requests still succeed. A stream reconnect is
+    // useful telemetry, but it is not a full client outage and must not paint over real latency.
+    if (debugGraphCurrentClientCommunicationCount(bucket) > 0) continue;
+    const disconnectedMs = Math.min(durationMs, Math.max(0, debugGraphCurrentClientDisconnectedMs(bucket)));
     if (!Number.isFinite(startMs) || disconnectedMs <= 0) continue;
     const rangeStart = Math.max(domainStart, startMs);
     const rangeEnd = Math.min(domainEnd, startMs + disconnectedMs);
@@ -43243,9 +43389,21 @@ function debugGraphCurrentClientSeriesItems(seriesItems) {
   return currentClientItems.length ? currentClientItems : items;
 }
 
-function debugGraphCurrentClientHeartbeatCount(bucket) {
-  const clientBucket = bucket?.clients instanceof Map ? bucket.clients.get(jsDebugStatsClientIdForRequest()) : null;
-  return Number(clientBucket?.heartbeatCount ?? bucket?.heartbeatCount ?? 0);
+function debugGraphCurrentClientRecord(bucket) {
+  const clients = bucket?.clients;
+  if (clients instanceof Map && clients.size > 0) return clients.get(jsDebugStatsClientIdForRequest()) || null;
+  return bucket && typeof bucket === 'object' ? bucket : null;
+}
+
+function debugGraphCurrentClientCommunicationCount(bucket) {
+  const record = debugGraphCurrentClientRecord(bucket);
+  if (!record) return 0;
+  return ['apiCount', 'sseCount', 'latencyCount', 'bandwidthBytes', 'heartbeatCount']
+    .reduce((total, key) => total + Math.max(0, Number(record[key] || 0)), 0);
+}
+
+function debugGraphCurrentClientDisconnectedMs(bucket) {
+  return Math.max(0, Number(debugGraphCurrentClientRecord(bucket)?.disconnectedMs || 0));
 }
 
 function debugGraphCommunicationGapThresholdMs(seriesItems) {
@@ -43261,11 +43419,11 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
   if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
   const perf = clientPerfStart('statsNoDataSweep');
   try {
-    const hasCurrentClientHeartbeat = debugGraphBucketRanges(buckets)
-      .some(item => debugGraphCurrentClientHeartbeatCount(item.bucket) > 0);
+    const hasCurrentClientCommunication = debugGraphBucketRanges(buckets)
+      .some(item => debugGraphCurrentClientCommunicationCount(item.bucket) > 0);
     const dataRanges = debugGraphBucketRanges(buckets)
-      .filter(item => hasCurrentClientHeartbeat
-        ? debugGraphCurrentClientHeartbeatCount(item.bucket) > 0
+      .filter(item => hasCurrentClientCommunication
+        ? debugGraphCurrentClientCommunicationCount(item.bucket) > 0
         : items.some(series => series.hasData(item.bucket)))
       .map(item => ({startMs: item.startMs, endMs: item.endMs}));
     const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
@@ -45922,9 +46080,10 @@ function sessionFileMissingTimeText() {
 }
 
 function sessionFileDisplayTimeText(mtime, options = {}) {
-  if (fileExplorerTreeDateMode === 'none') return '';
-  const text = fileExplorerTreeDateMode === 'date' ? sessionFileTimeText(mtime)
-    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
+  const mode = fileExplorerTreeDateModeForView(options.view || 'differ');
+  if (mode === 'none') return '';
+  const text = mode === 'date' ? sessionFileTimeText(mtime)
+    : mode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
       : '';
   if (!text && options.placeholderForMissingTime === true) return sessionFileMissingTimeText();
   return text;
@@ -45943,8 +46102,8 @@ function sessionFileDatePlaceholderNeeded(item) {
   return Boolean(item && sessionFileHasMissingTime(item));
 }
 
-function sessionFileDisplayTimeTextForEntry(entry) {
-  return sessionFileDisplayTimeText(entry?.mtime, {placeholderForMissingTime: entry?.changedFileMissingTime === true});
+function sessionFileDisplayTimeTextForEntry(entry, options = {}) {
+  return sessionFileDisplayTimeText(entry?.mtime, {...options, placeholderForMissingTime: entry?.changedFileMissingTime === true});
 }
 
 function sessionFileDiffText(item) {
@@ -45968,10 +46127,10 @@ function sessionFileStatusCountParts(counts = {}) {
   return parts;
 }
 
-function sortedSessionFiles(files) {
+function sortedSessionFiles(files, view = 'differ') {
   const items = Array.isArray(files) ? files.slice() : [];
   const uploadOrder = item => item?.uploaded === true ? 1 : 0;
-  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
+  const mode = fileExplorerTreeSortModeForView(view);
   const nameCompare = (left, right) => String(left.path || '').localeCompare(String(right.path || ''), undefined, {numeric: true, sensitivity: 'base'})
     || String(left.repo || '').localeCompare(String(right.repo || ''), undefined, {numeric: true, sensitivity: 'base'});
   if (mode === 'az' || mode === 'za') {
@@ -46352,7 +46511,8 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     differMode: true,
     compact: options.compact,
     repoForDiffer: treeRoot,
-    treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
+    view: options.view || 'differ',
+    treeSortMode: fileExplorerTreeSortModeForView(options.view || 'differ'),
     includeHidden: true,
   });
 }
@@ -46383,7 +46543,8 @@ function changeFileAgentsHtml(item) {
 // Replaces changesRepoGroupsHtml — incrementally updates sections rather than replacing innerHTML.
 function renderChangesGroups(groupsEl, files, options = {}) {
   if (!groupsEl) return;
-  const regular = sortedSessionFiles(files);
+  const view = normalizeFileExplorerView(options.view || 'differ');
+  const regular = sortedSessionFiles(files, view);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
   const groups = new Map(groupedSessionFiles(regular));
@@ -46452,7 +46613,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       }
       fileList.hidden = false;
       if (repoFiles.length) {
-        renderChangedFileList(fileList, repo, repoFiles, {compact});
+        renderChangedFileList(fileList, repo, repoFiles, {compact, view});
       } else if (options.loading === true) {
         fileList.innerHTML = '';
       } else {
@@ -46468,28 +46629,19 @@ function renderChangesGroups(groupsEl, files, options = {}) {
 
 // Returns the static toolbar/header HTML for the main Changes panel.
 // The .changes-groups div is filled by renderChangesGroups separately.
-function fileExplorerTreeDateButtonHtml(extraClass = '') {
-  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+function fileExplorerTreeDateButtonHtml(extraClass = '', view = 'finder') {
+  const surface = normalizeFileExplorerView(view);
+  const mode = fileExplorerTreeDateModeForView(surface);
   const active = mode !== 'none';
   const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass, active ? 'active' : ''].filter(Boolean).join(' ');
-  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-file-explorer-view="${esc(surface)}" data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
 }
 
-function sessionFilesSortSelectHtml(extraClass = '') {
-  const classes = ['file-explorer-sort-select', 'changes-sort-select', extraClass].filter(Boolean).join(' ');
-  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
-  return `<select class="${esc(classes)}" data-session-files-sort title="${esc(t('changes.sort'))}" aria-label="${esc(t('changes.sort'))}">
-        <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
-        <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-        <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
-        <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
-      </select>`;
-}
-
-function fileExplorerTreeSortSelectHtml(extraClass = '') {
+function fileExplorerTreeSortSelectHtml(extraClass = '', view = 'finder') {
   const classes = ['file-explorer-sort-select', extraClass].filter(Boolean).join(' ');
-  const mode = ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az';
-  return `<select class="${esc(classes)}" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
+  const surface = normalizeFileExplorerView(view);
+  const mode = fileExplorerTreeSortModeForView(surface);
+  return `<select class="${esc(classes)}" data-file-explorer-tree-sort data-file-explorer-view="${esc(surface)}" title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
               <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
               <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
@@ -46532,8 +46684,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
     return `
       <div class="changes-toolbar tabber-toolbar">
         ${tabberLookbackControlHtml()}
-        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact')}
-        ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact', 'tabber')}
+        ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'tabber')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       </div>
       <div class="changes-groups"></div>`;
@@ -46551,8 +46703,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   if (full) {
     return `
       <div class="changes-toolbar file-explorer-diff-toolbar">
-        <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
-        ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        <label class="changes-control">${esc(t('changes.sort'))} ${fileExplorerTreeSortSelectHtml('changes-sort-select', 'differ')}</label>
+        ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'differ')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       </div>
@@ -46565,8 +46717,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">${esc(titleText)}</span>
-      ${sessionFilesSortSelectHtml('changes-sort-select-compact')}
-      ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+      ${fileExplorerTreeSortSelectHtml('changes-sort-select changes-sort-select-compact', 'differ')}
+      ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'differ')}
       ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
@@ -46639,6 +46791,7 @@ function fileExplorerChangesPanelHtml(options = {}) {
     compact: view !== 'differ',
     loading,
     includeEmptyRepoSections: view === 'differ' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesState.payload)),
+    view,
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
@@ -46698,7 +46851,7 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-sort], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
@@ -46794,13 +46947,6 @@ function bindChangesPanel(panel) {
       fileExplorerChangesSelectedSession = sessionSelect.value;
       rememberFileExplorerExplicitSyncSession(fileExplorerChangesSelectedSession);
       switchFileExplorerChangesSession(fileExplorerChangesSelectedSession);
-      return;
-    }
-    const sortSelect = event.target.closest('[data-session-files-sort]');
-    if (sortSelect && panel.contains(sortSelect)) {
-      sessionFilesSortMode = normalizeSessionFilesSortMode(sortSelect.value);
-      renderFileExplorerChangesPanels({force: true});
-      scheduleShareUiStatePublish();
       return;
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -46978,7 +47124,7 @@ function changedFileRowEntry(row) {
 }
 
 function differTreeEventTargetsControl(event) {
-  return Boolean(event?.target?.closest?.('[data-diff-ref-controls], [data-session-files-session], [data-session-files-sort], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-repo-toggle], input, select, textarea, button'));
+  return Boolean(event?.target?.closest?.('[data-diff-ref-controls], [data-session-files-session], [data-file-explorer-tree-sort], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-repo-toggle], input, select, textarea, button'));
 }
 
 function differTreeRowPath(row) {
@@ -47384,9 +47530,9 @@ function createFileExplorerPanel(item = finderItemId) {
             <button type="button" class="file-explorer-header-action file-explorer-folder-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            ${fileExplorerTreeSortSelectHtml()}
+            ${fileExplorerTreeSortSelectHtml('', 'finder')}
             <span class="file-explorer-date-controls">
-              ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+              ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'finder')}
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
             </span>
           </div>
@@ -47453,6 +47599,7 @@ function createFileExplorerPanel(item = finderItemId) {
 }
 
 async function refreshFileExplorerPanelTree(panel, options = {}) {
+  const view = fileExplorerViewForItem(panel?.dataset?.panelItem) || 'finder';
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
@@ -47465,7 +47612,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   renderFileExplorerRootModeControls();
   syncFileExplorerHiddenButton(hiddenBtn);
   syncFileExplorerTreeDateButton(dateBtn);
-  if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
+  if (sortSelect && sortSelect.value !== fileExplorerTreeSortModeForView(view)) sortSelect.value = fileExplorerTreeSortModeForView(view);
   if (clientPushCanSupplyData() && !options.entries && options.force !== true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
@@ -47501,6 +47648,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
         compact: false,
         loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, fileExplorerDifferFiles()),
         includeEmptyRepoSections: true,
+        view,
       },
       {force: options.force === true},
     );
@@ -47513,7 +47661,9 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
 
 function renderFileExplorerChangesPanels(options = {}) {
   if (!itemInLayout(differItemId) && !itemInLayout(tabberItemId)) return;
+  const requestedView = options.view ? normalizeFileExplorerView(options.view) : '';
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
+    if (requestedView && fileExplorerViewForItem(panel.dataset.panelItem) !== requestedView) continue;
     renderFileExplorerChangesPanel(panel, options);
   }
   if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
@@ -56858,9 +57008,11 @@ function shareFinderStateSnapshot(options = {}) {
   const finder = {
     ...shareFinderSeed(),
     showHidden: fileExplorerShowHidden === true,
-    treeDateMode: normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode),
-    treeSortMode: ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az',
-    sessionFilesSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
+    // Retain the v1 fields for older viewers; new viewers use independent per-surface settings.
+    treeDateMode: fileExplorerTreeDateModeForView('finder'),
+    treeSortMode: fileExplorerTreeSortModeForView('finder'),
+    sessionFilesSortMode: fileExplorerTreeSortModeForView('differ'),
+    viewSettings: fileExplorerViewSettings,
     diffRefFrom: cleanDiffRef(diffRefFrom, 'HEAD'),
     diffRefTo: cleanDiffRef(diffRefTo, 'current'),
   };
@@ -57150,9 +57302,7 @@ async function applyShareFinderState(finder = {}) {
     fileExplorerChangesSelectedSession = session;
     setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
-  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
-  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
-  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
   if ('diffRefsByRepo' in finder) diffRefsByRepo = shareCleanDiffRefsByRepo(finder.diffRefsByRepo);
@@ -57179,7 +57329,7 @@ async function applyShareFinderState(finder = {}) {
       await openFileExplorerAt(normalizedRoot, {preserveExpanded: true, preserveScroll: true});
     } else {
       setFileExplorerPathDisplay(fileExplorerRoot);
-      const shouldRefreshTree = expandedChanged || 'showHidden' in finder || 'treeDateMode' in finder || 'treeSortMode' in finder;
+      const shouldRefreshTree = expandedChanged || 'showHidden' in finder || 'treeDateMode' in finder || 'treeSortMode' in finder || Boolean(finder.viewSettings?.finder);
       if (shouldRefreshTree) {
         const refreshed = await refreshFileExplorerTreesInPlace({
           root: fileExplorerRoot,
@@ -64348,6 +64498,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return false;
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
+  // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The
+  // topbar renderer intentionally defers all full rebuilds during an open menu so pointer/click
+  // targets cannot disappear; this shared owner updates just the cache-backed menu rows instead.
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   renderSessionButtons();
   renderInfoPanel();
   renderYoagentPanel();

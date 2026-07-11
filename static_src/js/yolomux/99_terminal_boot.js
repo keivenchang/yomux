@@ -4912,6 +4912,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return false;
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
+  // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The
+  // topbar renderer intentionally defers all full rebuilds during an open menu so pointer/click
+  // targets cannot disappear; this shared owner updates just the cache-backed menu rows instead.
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   renderSessionButtons();
   renderInfoPanel();
   renderYoagentPanel();

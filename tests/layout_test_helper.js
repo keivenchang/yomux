@@ -721,6 +721,7 @@ globalThis.__layoutTestApi = {
   agentErrorIsBlocking,
   appModifier,
   appMenuTree,
+  openAppMenuForTest: openAppMenu,
   topbarMenuTreeForTest: topbarMenuTree,
   topbarFullNavigationFitsForTest: topbarFullNavigationFits,
   topbarFullMenuFitsAvailableSpaceForTest: topbarFullMenuFitsAvailableSpace,
@@ -1766,10 +1767,18 @@ globalThis.__layoutTestApi = {
 	  fileExplorerTreeDateModeLabel,
 	  fileExplorerTreeDateModeButtonLabel,
 	  fileExplorerTreeDateModeTitle,
+	  fileExplorerViewSettingsForTest() { return JSON.parse(JSON.stringify(fileExplorerViewSettings)); },
+	  fileExplorerTreeDateModeForViewForTest: fileExplorerTreeDateModeForView,
+	  fileExplorerTreeSortModeForViewForTest: fileExplorerTreeSortModeForView,
+	  setFileExplorerViewSettingForTest(view, key, value) { return setFileExplorerViewSetting(view, key, value, {refresh: false, publish: false}); },
 	  nextFileExplorerTreeDateMode,
-	  cycleFileExplorerTreeDateModeForTest: cycleFileExplorerTreeDateMode,
-	  fileExplorerTreeDateModeForTest() { return fileExplorerTreeDateMode; },
-	  setFileExplorerTreeDateModeForTest(value) { fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(value); },
+	  cycleFileExplorerTreeDateModeForTest() {
+	    for (const view of ['finder', 'tabber', 'differ']) cycleFileExplorerTreeDateMode(view);
+	  },
+	  fileExplorerTreeDateModeForTest() { return fileExplorerTreeDateModeForView('finder'); },
+	  setFileExplorerTreeDateModeForTest(value) {
+	    for (const view of ['finder', 'tabber', 'differ']) setFileExplorerViewSetting(view, 'treeDateMode', value, {refresh: false, publish: false});
+	  },
   fileTreeRecencyStateForMtimeForTest(mtime, nowMs) {
     const state = fileTreeRecencyStateForMtime(mtime, nowMs);
     return state ? {...state} : null;
@@ -2205,6 +2214,7 @@ globalThis.__layoutTestApi = {
   rightmostExistingPaneSlot,
   paneTabDropIndex,
   paneTabDropPlacement,
+  dockviewTabPointerRootBoundaryIntentForTest: dockviewTabPointerRootBoundaryIntent,
   dockviewTabDropWouldNoop,
   dockviewTabEdgeReorderIntent,
   dockviewTabStripEndDropIntent,
@@ -2590,7 +2600,9 @@ globalThis.__layoutTestApi = {
   fetchTabberActivityForTest: fetchTabberActivity,
   tabberActivityPayloadForTest() { return tabberActivityPayload; },
   tabberActivityStateForTest() { return {...tabberActivityState}; },
-  setFileExplorerTreeSortModeForTest(mode) { fileExplorerTreeSortMode = mode; },
+  setFileExplorerTreeSortModeForTest(mode) {
+    for (const view of ['finder', 'tabber', 'differ']) setFileExplorerViewSetting(view, 'treeSortMode', mode, {refresh: false, publish: false});
+  },
   setTabberSessionFilesForTest(session, files) {
     const state = tabberSessionFilesState(session);
     state.files = files;
@@ -2670,7 +2682,7 @@ globalThis.__layoutTestApi = {
     });
   },
   setSessionFilesSortModeForTest(mode) {
-    sessionFilesSortMode = normalizeSessionFilesSortMode(mode);
+    setFileExplorerViewSetting('differ', 'treeSortMode', mode, {refresh: false, publish: false});
   },
   sortedSessionFiles,
   sessionYoloIsWorking,

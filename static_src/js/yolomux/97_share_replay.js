@@ -2022,9 +2022,11 @@ function shareFinderStateSnapshot(options = {}) {
   const finder = {
     ...shareFinderSeed(),
     showHidden: fileExplorerShowHidden === true,
-    treeDateMode: normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode),
-    treeSortMode: ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az',
-    sessionFilesSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
+    // Retain the v1 fields for older viewers; new viewers use independent per-surface settings.
+    treeDateMode: fileExplorerTreeDateModeForView('finder'),
+    treeSortMode: fileExplorerTreeSortModeForView('finder'),
+    sessionFilesSortMode: fileExplorerTreeSortModeForView('differ'),
+    viewSettings: fileExplorerViewSettings,
     diffRefFrom: cleanDiffRef(diffRefFrom, 'HEAD'),
     diffRefTo: cleanDiffRef(diffRefTo, 'current'),
   };
@@ -2314,9 +2316,7 @@ async function applyShareFinderState(finder = {}) {
     fileExplorerChangesSelectedSession = session;
     setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
-  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
-  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
-  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
   if ('diffRefsByRepo' in finder) diffRefsByRepo = shareCleanDiffRefsByRepo(finder.diffRefsByRepo);
@@ -2343,7 +2343,7 @@ async function applyShareFinderState(finder = {}) {
       await openFileExplorerAt(normalizedRoot, {preserveExpanded: true, preserveScroll: true});
     } else {
       setFileExplorerPathDisplay(fileExplorerRoot);
-      const shouldRefreshTree = expandedChanged || 'showHidden' in finder || 'treeDateMode' in finder || 'treeSortMode' in finder;
+      const shouldRefreshTree = expandedChanged || 'showHidden' in finder || 'treeDateMode' in finder || 'treeSortMode' in finder || Boolean(finder.viewSettings?.finder);
       if (shouldRefreshTree) {
         const refreshed = await refreshFileExplorerTreesInPlace({
           root: fileExplorerRoot,

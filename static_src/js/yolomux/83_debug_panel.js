@@ -2515,7 +2515,10 @@ function debugGraphDisconnectedRanges(buckets, domain) {
   for (const bucket of buckets || []) {
     const startMs = Number(bucket?.startMs);
     const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
-    const disconnectedMs = Math.min(durationMs, Math.max(0, Number(bucket?.disconnectedMs || 0)));
+    // EventSource can reconnect while ordinary API requests still succeed. A stream reconnect is
+    // useful telemetry, but it is not a full client outage and must not paint over real latency.
+    if (debugGraphCurrentClientCommunicationCount(bucket) > 0) continue;
+    const disconnectedMs = Math.min(durationMs, Math.max(0, debugGraphCurrentClientDisconnectedMs(bucket)));
     if (!Number.isFinite(startMs) || disconnectedMs <= 0) continue;
     const rangeStart = Math.max(domainStart, startMs);
     const rangeEnd = Math.min(domainEnd, startMs + disconnectedMs);
@@ -2592,9 +2595,21 @@ function debugGraphCurrentClientSeriesItems(seriesItems) {
   return currentClientItems.length ? currentClientItems : items;
 }
 
-function debugGraphCurrentClientHeartbeatCount(bucket) {
-  const clientBucket = bucket?.clients instanceof Map ? bucket.clients.get(jsDebugStatsClientIdForRequest()) : null;
-  return Number(clientBucket?.heartbeatCount ?? bucket?.heartbeatCount ?? 0);
+function debugGraphCurrentClientRecord(bucket) {
+  const clients = bucket?.clients;
+  if (clients instanceof Map && clients.size > 0) return clients.get(jsDebugStatsClientIdForRequest()) || null;
+  return bucket && typeof bucket === 'object' ? bucket : null;
+}
+
+function debugGraphCurrentClientCommunicationCount(bucket) {
+  const record = debugGraphCurrentClientRecord(bucket);
+  if (!record) return 0;
+  return ['apiCount', 'sseCount', 'latencyCount', 'bandwidthBytes', 'heartbeatCount']
+    .reduce((total, key) => total + Math.max(0, Number(record[key] || 0)), 0);
+}
+
+function debugGraphCurrentClientDisconnectedMs(bucket) {
+  return Math.max(0, Number(debugGraphCurrentClientRecord(bucket)?.disconnectedMs || 0));
 }
 
 function debugGraphCommunicationGapThresholdMs(seriesItems) {
@@ -2610,11 +2625,11 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
   if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
   const perf = clientPerfStart('statsNoDataSweep');
   try {
-    const hasCurrentClientHeartbeat = debugGraphBucketRanges(buckets)
-      .some(item => debugGraphCurrentClientHeartbeatCount(item.bucket) > 0);
+    const hasCurrentClientCommunication = debugGraphBucketRanges(buckets)
+      .some(item => debugGraphCurrentClientCommunicationCount(item.bucket) > 0);
     const dataRanges = debugGraphBucketRanges(buckets)
-      .filter(item => hasCurrentClientHeartbeat
-        ? debugGraphCurrentClientHeartbeatCount(item.bucket) > 0
+      .filter(item => hasCurrentClientCommunication
+        ? debugGraphCurrentClientCommunicationCount(item.bucket) > 0
         : items.some(series => series.hasData(item.bucket)))
       .map(item => ({startMs: item.startMs, endMs: item.endMs}));
     const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);

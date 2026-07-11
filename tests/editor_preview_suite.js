@@ -3941,9 +3941,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal((gappedChart.match(/data-js-debug-no-data-range=/g) || []).length, 1, 'the same real gap renders one consolidated no-data region');
   });
 
-  test('YO!stats keeps this-client outage overlays visible while a peer reports data', () => {
+  test('YO!stats only paints a this-client outage when its communication is actually absent', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000) * 1000;
+    const clientId = api.jsDebugStatsClientIdForRequestForTest();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(60, {render: false});
     api.debugGraphApplyServerHistoryForTest({
@@ -3952,21 +3953,19 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         start: (now / 1000) - 3,
         duration: 1,
         sequence: 1,
-        disconnected_ms: 1000,
-        clients: {'client-stale': {disconnected_ms: 1000}},
+        clients: {[clientId]: {disconnected_ms: 1000}, 'peer-client': {api_count: 1, latency_total_ms: 12, latency_count: 1}},
       }, {
         start: (now / 1000) - 2,
         duration: 1,
         sequence: 2,
-        clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+        clients: {[clientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256, disconnected_ms: 1000}},
       }, {
         start: (now / 1000) - 1,
         duration: 1,
         sequence: 3,
-        disconnected_ms: 1000,
         clients: {
-          'client-stale': {disconnected_ms: 1000},
-          'client-live': {disconnected_ms: 1000},
+          [clientId]: {disconnected_ms: 1000},
+          'peer-client': {api_count: 1, latency_total_ms: 12, latency_count: 1},
         },
       }],
     });
@@ -3974,7 +3973,31 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     for (const chart of ['latency', 'count', 'bandwidth']) {
       const start = html.indexOf(`data-js-debug-chart="${chart}"`);
       const chartHtml = html.slice(start, html.indexOf('</section>', start));
-      assert.equal((chartHtml.match(/data-js-debug-disconnected-range=/g) || []).length, 2, `${chart} preserves both this-client outage ranges even while a peer is represented`);
+      assert.equal((chartHtml.match(/data-js-debug-disconnected-range=/g) || []).length, 2, `${chart} keeps true this-client outages visible around peer traffic but suppresses a reconnect interval containing this-client requests`);
+    }
+  });
+
+  test('YO!stats treats this-client latency as communication coverage even without a health heartbeat', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const clientId = api.jsDebugStatsClientIdForRequestForTest();
+    api.setDebugGraphRangeForTest(60, {render: false});
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    api.debugGraphApplyServerHistoryForTest({sequence: 2, records: [{
+      start: (now / 1000) - 2,
+      duration: 1,
+      sequence: 1,
+      clients: {[clientId]: {api_count: 1, latency_total_ms: 15, latency_count: 1, disconnected_ms: 1000}},
+    }, {
+      start: (now / 1000) - 1,
+      duration: 1,
+      sequence: 2,
+      clients: {[clientId]: {api_count: 1, latency_total_ms: 16, latency_count: 1, disconnected_ms: 1000}},
+    }]});
+    const html = api.debugGraphInnerHtmlForTest(now);
+    for (const chart of ['latency', 'count', 'bandwidth']) {
+      const start = html.indexOf(`data-js-debug-chart="${chart}"`);
+      const chartHtml = html.slice(start, html.indexOf('</section>', start));
+      assert.equal(chartHtml.includes('data-js-debug-disconnected-range='), false, `${chart} does not show a false full-outage box when the selected client had successful traffic`);
     }
   });
 

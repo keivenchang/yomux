@@ -284,7 +284,7 @@ async function runShareThemeSuite() {
     assert.equal(changesHtml.includes('touched-only.py'), false, 'Differ hides transcript-only T rows that have no real diff');
     const fullToolbarSlice = changesHtml.slice(changesHtml.indexOf('changes-toolbar'), changesHtml.indexOf('</div>', changesHtml.indexOf('changes-toolbar')));
     assert.equal(fullToolbarSlice.includes('data-session-files-session'), false, 'full Differ body toolbar no longer repeats the Session dropdown');
-    assert.ok(/data-session-files-sort[\s\S]*data-file-explorer-tree-dates[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar keeps Sort, date mode, and Reload');
+    assert.ok(/data-file-explorer-tree-sort[\s\S]*data-file-explorer-tree-dates[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar keeps Sort, date mode, and Reload');
     assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar orders Date, Expand all, Collapse all, Reload');
     assert.ok(changesHtml.includes('Behind 0 commits'), 'Finder diff shows behind count');
     assert.ok(changesHtml.includes('Ahead 2 commits'), 'Finder diff shows ahead count');
@@ -776,7 +776,7 @@ async function runShareThemeSuite() {
     // C8/C13 follow-up: Finder embedded Differ now uses the same compact select control pattern as Finder's
     // own A-Z/Z-A/recent/oldest sort control, defaulting to recent.
     const finderSortPanel = api.fileExplorerChangesPanelHtml({view: 'finder'});
-    assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
+    assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-file-explorer-tree-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
     assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(finderSortPanel), 'Finder embedded Differ header orders Date, Expand all, Collapse all, Reload');
     const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'common.sort.recent', oldest: 'finder.sort.oldest'};
     for (const [value, key] of Object.entries(sortLabels)) {
@@ -1945,13 +1945,13 @@ async function runShareThemeSuite() {
     assert.ok(finderPanelSource.includes('title="${esc(t(\'finder.toolbar.syncTitle\'))}"') && finderPanelSource.includes('${esc(t(\'finder.toolbar.syncLabel\'))}</button>'), 'Finder Sync panel button uses the full tooltip while keeping the compact visible label');
     assert.equal(finderPanelBundle.includes('fileExplorerQuickAccess'), false, 'legacy Finder quick-root code is removed instead of left inactive');
     assert.ok(/const fileExplorerTripletRegistry = Object\.freeze\([\s\S]*\[finderItemId\][\s\S]*\[differItemId\][\s\S]*\[tabberItemId\]/.test(finderPanelBundle) && /function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(finderPanelBundle), 'Finder, Differ, and Tabber use the fixed-identity registry with no duplicate in-panel mode switcher');
-    assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
-    assert.ok(/fileExplorerTreeSortSelectHtml\(\)[\s\S]*file-explorer-date-controls[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)/.test(finderPanelSource), 'Finder Date, Expand all, and Collapse all form a trailing action-row cluster while Reload stays in the primary row');
+    assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle', 'finder')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
+    assert.ok(/fileExplorerTreeSortSelectHtml\('', 'finder'\)[\s\S]*file-explorer-date-controls[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle', 'finder'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)/.test(finderPanelSource), 'Finder Date, Expand all, and Collapse all form a trailing action-row cluster while Reload stays in the primary row');
     assert.equal(finderPanelSource.includes('file-explorer-repo-summary'), false, 'Finder files-only action row no longer prints repo/path text between sort and date display');
     const finderActionsRowStart = finderPanelSource.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
     const finderActionsRowSource = finderPanelSource.slice(finderActionsRowStart, finderPanelSource.indexOf('</div>', finderActionsRowStart));
     assert.ok(/data-file-explorer-new-file[\s\S]*data-file-explorer-new-folder[\s\S]*file-explorer-folder-icon/.test(finderActionsRowSource), 'Finder files-only action row renders new file, then a folder-icon new-folder button');
-    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\(\)/.test(finderActionsRowSource), 'Finder action row puts .* before the sort selector');
+    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\('', 'finder'\)/.test(finderActionsRowSource), 'Finder action row puts .* before the sort selector');
     assert.equal(finderActionsRowSource.includes('data-file-explorer-collapse'), false, 'Finder files-only action row no longer renders the old standalone left-side collapse button');
     const treeExpandCollapseButtons = api.fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle');
     assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders Expand all before Collapse all');

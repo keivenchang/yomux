@@ -1992,8 +1992,8 @@ function fileTreeDisplayParts(path, entry) {
   return {text: baseText, html: ''};
 }
 
-function fileTreeMtimeText(entry) {
-  return sessionFileDisplayTimeTextForEntry(entry);
+function fileTreeMtimeText(entry, options = {}) {
+  return sessionFileDisplayTimeTextForEntry(entry, options);
 }
 
 const FILE_TREE_RECENCY_THRESHOLDS = Object.freeze([
@@ -2094,7 +2094,7 @@ function clearFileTreeRowRecency(row) {
 }
 
 function applyFileTreeRowRecency(row, entry, options = {}) {
-  if (!row || fileExplorerTreeDateMode === 'none') {
+  if (!row || fileExplorerTreeDateModeForView(options.view || (options.differMode ? 'differ' : 'finder')) === 'none') {
     clearFileTreeRowRecency(row);
     return;
   }
@@ -2126,7 +2126,7 @@ function applyFileTreeRowRecency(row, entry, options = {}) {
   else clearFileTreeRecencyAttentionTimer(row);
 }
 
-function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, options = {}) {
+function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForView('finder'), options = {}) {
   const includeHidden = options.includeHidden === true;
   const visible = entries.filter(entry => includeHidden || fileExplorerShowHidden || !entry.name.startsWith('.'));
   if (options.tabberWindowOrder === true) {
@@ -2461,7 +2461,7 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
     ...options,
     expanded,
-    dateText: fileTreeMtimeText(entry),
+    dateText: fileTreeMtimeText(entry, options),
   });
   const changedFile = derivedState.changedFile;
   const changedFileStatus = derivedState.changedFileStatus;
@@ -2667,7 +2667,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   applyFileTreeRowDataset(row, rowState);
   applyFileTreeRowDerivedState(row, rowState.derivedState);
-  applyFileTreeRowRecency(row, entry, {differMode: rowState.differMode});
+  applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
   bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);
   return fullPath;
@@ -3765,9 +3765,9 @@ function tabberWindowRecency(row) {
 }
 
 function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
-  if (fileExplorerTreeDateMode === 'none') return {text: '', html: ''};
+  if (fileExplorerTreeDateModeForView('tabber') === 'none') return {text: '', html: ''};
   const state = String(agentStatus?.state || STATE_KEY.idle);
-  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds});
+  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds, view: 'tabber'});
   if (!text) return {text: '', html: ''};
   if (agentWindowIsAttentionState(state)) {
     return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
@@ -4076,7 +4076,7 @@ function buildTabberTree() {
 }
 
 function tabberSortMode() {
-  return ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'newest';
+  return fileExplorerTreeSortModeForView('tabber');
 }
 
 function renderTabberTree(groupsEl) {
@@ -4102,6 +4102,7 @@ function renderTabberTree(groupsEl) {
     collapsedSet,
     entriesByDir,
     treeSortMode: tabberSortMode(),
+    view: 'tabber',
     includeHidden: true,
   });
   syncTabberTreeLayoutState(container, {force: true});
@@ -4398,7 +4399,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
     disclosureExpanded: expandable ? expanded : undefined,
     nameHtml,
-    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : '')),
+    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
     dateHtml: data.dateHtml || '',
   });
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);

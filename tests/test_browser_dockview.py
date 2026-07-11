@@ -323,6 +323,10 @@ def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp
           transcriptMetadataState.payload.sessions['1'] = {
             panes: [{window: '0', pane: '0', window_name: 'codex', process_label: 'codex', window_active: true, active: true}],
           };
+          setFileExplorerViewSetting('finder', 'treeSortMode', 'az', {publish: false});
+          setFileExplorerViewSetting('finder', 'treeDateMode', 'relative', {publish: false});
+          setFileExplorerViewSetting('differ', 'treeSortMode', 'oldest', {publish: false});
+          setFileExplorerViewSetting('differ', 'treeDateMode', 'none', {publish: false});
           refreshTabberPanels();
           let currentToolbar = panel.querySelector('.tabber-toolbar');
           const currentLookback = currentToolbar.querySelector('[data-tabber-lookback]');
@@ -342,7 +346,7 @@ def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp
             currentSort.dispatchEvent(new Event('change', {bubbles: true}));
             currentToolbar = panel.querySelector('.tabber-toolbar');
             const currentDates = currentToolbar.querySelector('[data-file-explorer-tree-dates]');
-            const dateBefore = fileExplorerTreeDateMode;
+            const dateBefore = fileExplorerTreeDateModeForView('tabber');
             currentDates.click();
             currentToolbar = panel.querySelector('.tabber-toolbar');
             const currentCollapse = currentToolbar.querySelector('[data-file-tree-expand-collapse-all="collapse"]');
@@ -355,9 +359,10 @@ def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp
             nextExpand?.click();
             requestAnimationFrame(() => requestAnimationFrame(() => done({
               lookback: tabberSessionFileLookbackHours,
-              sort: fileExplorerTreeSortMode,
+              sort: fileExplorerTreeSortModeForView('tabber'),
               dateBefore,
-              dateAfter: fileExplorerTreeDateMode,
+              dateAfter: fileExplorerTreeDateModeForView('tabber'),
+              settings: JSON.parse(JSON.stringify(fileExplorerViewSettings)),
               collapsedAfterCollapse,
               collapsedAfterExpand: Array.from(fileExplorerTabberCollapsed),
               rows: panel.querySelectorAll('.file-tree-row[data-tabber-type]').length,
@@ -374,6 +379,11 @@ def test_dockview_tabber_toolbar_controls_use_the_tabber_panel_view(browser, tmp
     assert result["lookback"] == 48, result
     assert result["sort"] == "za", result
     assert result["dateAfter"] != result["dateBefore"], result
+    assert result["settings"] == {
+        "finder": {"treeSortMode": "az", "treeDateMode": "relative"},
+        "tabber": {"treeSortMode": "za", "treeDateMode": result["dateAfter"]},
+        "differ": {"treeSortMode": "oldest", "treeDateMode": "none"},
+    }, result
     assert result["panelView"] == "tabber", result
     assert result["directoriesBeforeCollapse"] >= 1, result
     assert result["collapsedAfterCollapse"], repr(result)
@@ -6014,6 +6024,29 @@ def test_dockview_drag_between_content_panes_preserves_docked_finder_width(brows
     finder_after = next(group for group in after["groups"] if "__finder__" in group["tabs"])
     assert abs(finder_after["rect"]["width"] - finder_before["rect"]["width"]) <= 3
     assert round(after["slots"]["__tree"]["pct"]) == round(before["slots"]["__tree"]["pct"])
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
+def test_dockview_top_tab_header_drag_to_another_pane_is_not_a_root_top_drop(browser, tmp_path):
+    """A top-row tab move must not turn the tab strip itself into the Full top root target."""
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2",
+        sessions=["1", "2"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="1"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.5, 0.5)
+    cdp_drag(browser, start, end, steps=32)
+    WebDriverWait(browser, 5).until(
+        lambda driver: any(set(group["tabs"]) == {"1", "2"} for group in dockview_layout_metrics(driver)["groups"])
+    )
+    metrics = dockview_layout_metrics(browser)
+    groups = [group for group in metrics["groups"] if group["tabs"]]
+    assert len(groups) == 1, metrics
+    assert set(groups[0]["tabs"]) == {"1", "2"}, metrics
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 

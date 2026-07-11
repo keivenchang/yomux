@@ -336,7 +336,7 @@ async function fileExplorerDirectoryPathsForRoot(root = currentFileExplorerRoot(
     const directory = queue.shift();
     const entries = await fetchDirectory(directory);
     if (!Array.isArray(entries)) continue;
-    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortMode, {includeHidden: fileExplorerShowHidden})) {
+    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortModeForView('finder'), {includeHidden: fileExplorerShowHidden})) {
       if (entry?.kind !== 'dir') continue;
       const child = childPath(directory, entry.name);
       if (seen.has(child)) continue;
@@ -452,7 +452,7 @@ function handleFileExplorerTreeToolbarAction(container, event) {
     setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand', {view})
       .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
   } else {
-    cycleFileExplorerTreeDateMode();
+    cycleFileExplorerTreeDateMode(view);
   }
   return true;
 }
@@ -462,11 +462,7 @@ function handleFileExplorerTreeToolbarChange(container, event) {
   if (!select || !container?.contains(select)) return false;
   event.preventDefault();
   event.stopPropagation();
-  fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
-  writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
-  if (fileExplorerToolbarView(container) === 'tabber') refreshTabberPanels();
-  else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-  scheduleShareUiStatePublish();
+  setFileExplorerViewSetting(fileExplorerToolbarView(container), 'treeSortMode', select.value);
   return true;
 }
 
@@ -482,11 +478,12 @@ function bindFileExplorerHeaderActions(container = document) {
     if (action.matches('[data-file-explorer-new-file]')) createFileExplorerFile();
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
-      if (fileExplorerMode === 'tabber') {
-        clearTabberSessionFilesStates();
-        fetchTabberActivity();
-        refreshTabberPanels();
-      } else if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+    const view = fileExplorerToolbarView(container);
+    if (view === 'tabber') {
+      clearTabberSessionFilesStates();
+      fetchTabberActivity();
+      refreshTabberPanels();
+    } else if (view === 'differ') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         refreshFileExplorerTrees();
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});

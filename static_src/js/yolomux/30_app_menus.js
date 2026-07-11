@@ -708,6 +708,28 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   return resultItems;
 }
 
+function refreshOpenTabsMenuRows() {
+  const wrapper = Array.from(sessionButtons?.querySelectorAll?.('.app-menu') || [])
+    .find(menu => menu.dataset.appMenu === 'tabs' && menu.classList.contains(CLS.open));
+  if (!wrapper) return false;
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (!popover) return false;
+  const tabsMenu = appMenuTree().find(menu => menu.id === 'tabs');
+  if (!tabsMenu) return false;
+  popover.replaceChildren(...tabsMenu.items.map(createAppMenuItem));
+  fitAppMenuPopover(popover);
+  scheduleSharePopupLayerPublish({immediate: true});
+  return true;
+}
+
+function refreshTabsMenuMetadataOnOpen() {
+  // Opening Tabs must be instant: render the last accepted metadata snapshot first. A fresh
+  // forced request then performs tmux list-sessions in the background and refreshes only this
+  // open menu when names/descriptions arrive. The metadata request record coalesces repeats.
+  if (typeof refreshSessionMetadata !== 'function') return;
+  void refreshSessionMetadata({force: true, refreshAuto: false, refreshActivity: false, refreshContext: false});
+}
+
 function fileMenuVirtualCommand(item, detail) {
   return menuCommand(itemLabel(item), () => selectSession(item, {userInitiated: true}), {
     checked: itemInLayout(item),
@@ -1909,6 +1931,7 @@ function openAppMenu(wrapper, options = {}) {
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   scheduleSharePopupLayerPublish({immediate: true});
   scheduleShareTopologySnapshot('popup-open');
+  if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
 

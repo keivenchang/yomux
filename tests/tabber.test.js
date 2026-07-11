@@ -92,6 +92,26 @@ async function runTabberSuite() {
     assert.ok(/function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(panelSource), 'the retired in-panel mode switcher is a compatibility no-op');
   });
 
+  test('Finder, Tabber, and Differ keep independent shared tree settings', () => {
+    const api = loadYolomux('', ['1']);
+    const source = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    assert.ok(/function fileExplorerViewSettingsFor\(view = 'finder'\)[\s\S]*function setFileExplorerViewSetting\(view, key, value/.test(source), 'one keyed shared settings owner replaces global per-control variables');
+    api.setFileExplorerViewSettingForTest('finder', 'treeSortMode', 'za');
+    api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'relative');
+    api.setFileExplorerViewSettingForTest('tabber', 'treeSortMode', 'newest');
+    api.setFileExplorerViewSettingForTest('tabber', 'treeDateMode', 'date');
+    api.setFileExplorerViewSettingForTest('differ', 'treeSortMode', 'oldest');
+    api.setFileExplorerViewSettingForTest('differ', 'treeDateMode', 'none');
+    assert.deepStrictEqual(canonical(api.fileExplorerViewSettingsForTest()), {
+      finder: {treeDateMode: 'relative', treeSortMode: 'za'},
+      tabber: {treeDateMode: 'date', treeSortMode: 'newest'},
+      differ: {treeDateMode: 'none', treeSortMode: 'oldest'},
+    }, 'each fixed surface owns its own Sort by and Date choice');
+    assert.equal(api.fileExplorerTreeSortModeForViewForTest('finder'), 'za');
+    assert.equal(api.fileExplorerTreeSortModeForViewForTest('tabber'), 'newest');
+    assert.equal(api.fileExplorerTreeSortModeForViewForTest('differ'), 'oldest');
+  });
+
   test('Finder shared tree controller handles keyboard cursor navigation', () => {
     const api = loadYolomux('', ['1']);
     api.setFileExplorerModeForTest('files');
@@ -593,6 +613,35 @@ async function runTabberSuite() {
     assert.equal(api.paneTabDropPlacement(strip, {clientX: 190, clientY: 8}, 'P').index, 0, 'R dropped on L RIGHT half reorders LEFT');
     // Cross-pane drops keep the centered insert threshold (unchanged behavior).
     assert.equal(api.paneTabDropPlacement(strip, {clientX: 230, clientY: 8}, '9').index, 1, 'cross-pane drop keeps the centered threshold');
+  });
+
+  test('an outermost tab header does not impersonate a root top-edge drop', () => {
+    const api = loadYolomux('', ['1', '2']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    slots.right = api.paneStateWithTabs(['2'], '2');
+    api.setLayoutSlotsForTest(slots);
+    const state = {
+      item: '1',
+      slot: 'left',
+      x: 220,
+      y: 20,
+      rootBoundaryStartEdges: {top: true},
+      rootBoundaryExitedEdges: {},
+    };
+    const acrossTopHeaders = {clientX: 780, clientY: 42};
+    assert.equal(
+      api.dockviewTabPointerRootBoundaryIntentForTest(acrossTopHeaders, state),
+      null,
+      'a horizontal tab move across outermost top headers stays a normal tab move instead of making a Full top pane',
+    );
+    api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 780, clientY: 160}, state);
+    assert.equal(
+      api.dockviewTabPointerRootBoundaryIntentForTest({clientX: 220, clientY: 18}, state)?.zone,
+      'top',
+      'leaving the root band and deliberately returning to it still creates the requested Full top pane',
+    );
   });
 
   test('adjacent same-strip tab drops are no-ops', () => {
@@ -1450,7 +1499,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('function tabberWindowRecency(row)') && source.includes('const activityTs = tabberAgentRecency(row?.agentActivity)') && source.includes('return tabberRecency(`${session}:${windowIndex}`)'), 'Tabber window rows have one helper that owns the semantic recency timestamp');
     assert.ok(source.includes('const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});'), 'Tabber window mtime comes from the shared window-recency helper');
 	    assert.ok(/function updateTabberRow\([\s\S]*updateFileTreeRowContents\(row, icon, label,[\s\S]*applyFileTreeRowRecency\(row, entry, options\)/.test(source), 'Tabber timestamp rows route through the shared Finder/Differ recency styling');
-	    assert.ok(/function tabberWindowDateDisplay\(recencyTs, agentStatus = null, nowSeconds = Date\.now\(\) \/ 1000\)[\s\S]*fileExplorerTreeDateMode === 'none'[\s\S]*sessionFileDisplayTimeText\(recencyTs, \{nowSeconds\}\)/.test(source), 'Tabber window date text renders the same timestamp used for row mtime and parent bubbling');
+	    assert.ok(/function tabberWindowDateDisplay\(recencyTs, agentStatus = null, nowSeconds = Date\.now\(\) \/ 1000\)[\s\S]*fileExplorerTreeDateModeForView\('tabber'\) === 'none'[\s\S]*sessionFileDisplayTimeText\(recencyTs, \{nowSeconds, view: 'tabber'\}\)/.test(source), 'Tabber window date text renders the same timestamp used for row mtime and parent bubbling');
 	    assert.equal(/const dateText = agentStatusForDisplay \? sessionPopoverAgentStateText/.test(source), false, 'Tabber agent rows do not bypass the Date toggle with popover-only status text');
 	    assert.equal(/icon:\s*'▢'|icon:\s*'■'/.test(source), false, 'Tabber shell/session rows avoid checkbox-looking square glyphs');
     assert.ok(/let tabberActivityRefreshMs;[\s\S]*tabberActivityRefreshMs = initialSetting\('performance\.tabber_activity_refresh_ms'\);/.test(source), 'Tabber activity refresh initializes from server-provided settings defaults');
@@ -1496,9 +1545,9 @@ async function runTabberSuite() {
     assert.ok(/function bindTabberSessionChrome\(row, session\)[\s\S]*applySessionStateClasses\(tab, state\)[\s\S]*bindPaneTabPopover\(tab, session\)[\s\S]*toggleAutoApprove/.test(source), 'TR2: Tabber session rows reuse the shared state classes, popover binding, and YO toggle action');
     assert.ok(/const detached = tab\.classList\?\.contains\('dockview-pane-tab'\) === true\s*\|\| tab\.classList\?\.contains\('tabber-session-tab'\) === true/.test(source), 'TR2: Dockview and Tabber popovers detach through the same app-overlay path');
     assert.ok(/if \(name\.innerHTML !== options\.nameHtml\) \{\s*cleanupDetachedPopoversWithin\(name\);\s*name\.innerHTML = options\.nameHtml;/.test(source), 'TR2: Tabber row replacement cleans detached popovers through the shared cleanup helper');
-    assert.ok(/function fileExplorerTreeSortSelectHtml\(extraClass = ''\)[\s\S]*data-file-explorer-tree-sort[\s\S]*finder\.sort\.az[\s\S]*finder\.sort\.oldest/.test(source), 'TS1/TS4: Finder and Tabber share one tree sort select component and locale keys');
-    assert.ok(/view === 'tabber'[\s\S]*tabberLookbackControlHtml\(\)[\s\S]*fileExplorerTreeSortSelectHtml\('changes-sort-select-compact'\)/.test(source), 'TS1: Tabber toolbar renders the shared A-Z/Z-A/recent/oldest sort control');
-    assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerTreeSortSelectHtml\(\)/.test(source), "TS3: Finder's fixed panel renders the shared tree sort select");
+    assert.ok(/function fileExplorerTreeSortSelectHtml\(extraClass = '', view = 'finder'\)[\s\S]*data-file-explorer-tree-sort[\s\S]*finder\.sort\.az[\s\S]*finder\.sort\.oldest/.test(source), 'TS1/TS4: Finder and Tabber share one tree sort select component and locale keys');
+    assert.ok(/view === 'tabber'[\s\S]*tabberLookbackControlHtml\(\)[\s\S]*fileExplorerTreeSortSelectHtml\('changes-sort-select-compact', 'tabber'\)/.test(source), 'TS1: Tabber toolbar renders the shared A-Z/Z-A/recent/oldest sort control');
+    assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerTreeSortSelectHtml\('', 'finder'\)/.test(source), "TS3: Finder's fixed panel renders the shared tree sort select");
     assert.ok(/row\.classList\.toggle\('tabber-active-session', data\.type === 'session' && data\.active === true\)/.test(source), 'A5: active-session styling is data-driven only for session rows');
     assert.ok(/function refreshTabberPanelsForFocusChange\(\)[\s\S]*scheduleTabberTreeLayoutStateSync\(\)/.test(source) && !/function refreshTabberPanelsForFocusChange\(\)[\s\S]{0,160}refreshTabberPanels\(\)/.test(source), 'focus changes schedule one Tabber layout-state patch without rebuilding the tree');
     assert.ok(/function updatePanelSlot\(panel, session, slot\)[\s\S]*updatePaneTabStrip\(panel, slot\);\s*\}/.test(source), 'slot-local panel updates do not recursively synchronize global focus state');

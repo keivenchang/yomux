@@ -1778,7 +1778,7 @@ def finder_click_toolbar_fixture_html():
           <div class="file-explorer-pane">
             <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
               <div class="changes-toolbar file-explorer-diff-toolbar">
-                <label class="changes-control">Sort <select data-session-files-sort><option>new</option></select></label>
+                <label class="changes-control">Sort <select data-file-explorer-tree-sort><option>new</option></select></label>
                 <button type="button" data-file-explorer-tree-dates>Ago</button>
                 <button type="button" class="changes-refresh" data-session-files-refresh>Reload</button>
               </div>

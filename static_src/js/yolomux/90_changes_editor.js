@@ -1173,9 +1173,10 @@ function sessionFileMissingTimeText() {
 }
 
 function sessionFileDisplayTimeText(mtime, options = {}) {
-  if (fileExplorerTreeDateMode === 'none') return '';
-  const text = fileExplorerTreeDateMode === 'date' ? sessionFileTimeText(mtime)
-    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
+  const mode = fileExplorerTreeDateModeForView(options.view || 'differ');
+  if (mode === 'none') return '';
+  const text = mode === 'date' ? sessionFileTimeText(mtime)
+    : mode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
       : '';
   if (!text && options.placeholderForMissingTime === true) return sessionFileMissingTimeText();
   return text;
@@ -1194,8 +1195,8 @@ function sessionFileDatePlaceholderNeeded(item) {
   return Boolean(item && sessionFileHasMissingTime(item));
 }
 
-function sessionFileDisplayTimeTextForEntry(entry) {
-  return sessionFileDisplayTimeText(entry?.mtime, {placeholderForMissingTime: entry?.changedFileMissingTime === true});
+function sessionFileDisplayTimeTextForEntry(entry, options = {}) {
+  return sessionFileDisplayTimeText(entry?.mtime, {...options, placeholderForMissingTime: entry?.changedFileMissingTime === true});
 }
 
 function sessionFileDiffText(item) {
@@ -1219,10 +1220,10 @@ function sessionFileStatusCountParts(counts = {}) {
   return parts;
 }
 
-function sortedSessionFiles(files) {
+function sortedSessionFiles(files, view = 'differ') {
   const items = Array.isArray(files) ? files.slice() : [];
   const uploadOrder = item => item?.uploaded === true ? 1 : 0;
-  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
+  const mode = fileExplorerTreeSortModeForView(view);
   const nameCompare = (left, right) => String(left.path || '').localeCompare(String(right.path || ''), undefined, {numeric: true, sensitivity: 'base'})
     || String(left.repo || '').localeCompare(String(right.repo || ''), undefined, {numeric: true, sensitivity: 'base'});
   if (mode === 'az' || mode === 'za') {
@@ -1603,7 +1604,8 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     differMode: true,
     compact: options.compact,
     repoForDiffer: treeRoot,
-    treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
+    view: options.view || 'differ',
+    treeSortMode: fileExplorerTreeSortModeForView(options.view || 'differ'),
     includeHidden: true,
   });
 }
@@ -1634,7 +1636,8 @@ function changeFileAgentsHtml(item) {
 // Replaces changesRepoGroupsHtml — incrementally updates sections rather than replacing innerHTML.
 function renderChangesGroups(groupsEl, files, options = {}) {
   if (!groupsEl) return;
-  const regular = sortedSessionFiles(files);
+  const view = normalizeFileExplorerView(options.view || 'differ');
+  const regular = sortedSessionFiles(files, view);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
   const groups = new Map(groupedSessionFiles(regular));
@@ -1703,7 +1706,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       }
       fileList.hidden = false;
       if (repoFiles.length) {
-        renderChangedFileList(fileList, repo, repoFiles, {compact});
+        renderChangedFileList(fileList, repo, repoFiles, {compact, view});
       } else if (options.loading === true) {
         fileList.innerHTML = '';
       } else {
@@ -1719,28 +1722,19 @@ function renderChangesGroups(groupsEl, files, options = {}) {
 
 // Returns the static toolbar/header HTML for the main Changes panel.
 // The .changes-groups div is filled by renderChangesGroups separately.
-function fileExplorerTreeDateButtonHtml(extraClass = '') {
-  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+function fileExplorerTreeDateButtonHtml(extraClass = '', view = 'finder') {
+  const surface = normalizeFileExplorerView(view);
+  const mode = fileExplorerTreeDateModeForView(surface);
   const active = mode !== 'none';
   const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass, active ? 'active' : ''].filter(Boolean).join(' ');
-  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-file-explorer-view="${esc(surface)}" data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
 }
 
-function sessionFilesSortSelectHtml(extraClass = '') {
-  const classes = ['file-explorer-sort-select', 'changes-sort-select', extraClass].filter(Boolean).join(' ');
-  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
-  return `<select class="${esc(classes)}" data-session-files-sort title="${esc(t('changes.sort'))}" aria-label="${esc(t('changes.sort'))}">
-        <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
-        <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-        <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
-        <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
-      </select>`;
-}
-
-function fileExplorerTreeSortSelectHtml(extraClass = '') {
+function fileExplorerTreeSortSelectHtml(extraClass = '', view = 'finder') {
   const classes = ['file-explorer-sort-select', extraClass].filter(Boolean).join(' ');
-  const mode = ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az';
-  return `<select class="${esc(classes)}" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
+  const surface = normalizeFileExplorerView(view);
+  const mode = fileExplorerTreeSortModeForView(surface);
+  return `<select class="${esc(classes)}" data-file-explorer-tree-sort data-file-explorer-view="${esc(surface)}" title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
               <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
               <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
@@ -1783,8 +1777,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
     return `
       <div class="changes-toolbar tabber-toolbar">
         ${tabberLookbackControlHtml()}
-        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact')}
-        ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact', 'tabber')}
+        ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'tabber')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       </div>
       <div class="changes-groups"></div>`;
@@ -1802,8 +1796,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   if (full) {
     return `
       <div class="changes-toolbar file-explorer-diff-toolbar">
-        <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
-        ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        <label class="changes-control">${esc(t('changes.sort'))} ${fileExplorerTreeSortSelectHtml('changes-sort-select', 'differ')}</label>
+        ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'differ')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       </div>
@@ -1816,8 +1810,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">${esc(titleText)}</span>
-      ${sessionFilesSortSelectHtml('changes-sort-select-compact')}
-      ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+      ${fileExplorerTreeSortSelectHtml('changes-sort-select changes-sort-select-compact', 'differ')}
+      ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'differ')}
       ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
@@ -1890,6 +1884,7 @@ function fileExplorerChangesPanelHtml(options = {}) {
     compact: view !== 'differ',
     loading,
     includeEmptyRepoSections: view === 'differ' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesState.payload)),
+    view,
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
@@ -1949,7 +1944,7 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-sort], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
@@ -2045,13 +2040,6 @@ function bindChangesPanel(panel) {
       fileExplorerChangesSelectedSession = sessionSelect.value;
       rememberFileExplorerExplicitSyncSession(fileExplorerChangesSelectedSession);
       switchFileExplorerChangesSession(fileExplorerChangesSelectedSession);
-      return;
-    }
-    const sortSelect = event.target.closest('[data-session-files-sort]');
-    if (sortSelect && panel.contains(sortSelect)) {
-      sessionFilesSortMode = normalizeSessionFilesSortMode(sortSelect.value);
-      renderFileExplorerChangesPanels({force: true});
-      scheduleShareUiStatePublish();
       return;
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -2229,7 +2217,7 @@ function changedFileRowEntry(row) {
 }
 
 function differTreeEventTargetsControl(event) {
-  return Boolean(event?.target?.closest?.('[data-diff-ref-controls], [data-session-files-session], [data-session-files-sort], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-repo-toggle], input, select, textarea, button'));
+  return Boolean(event?.target?.closest?.('[data-diff-ref-controls], [data-session-files-session], [data-file-explorer-tree-sort], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-repo-toggle], input, select, textarea, button'));
 }
 
 function differTreeRowPath(row) {
@@ -2635,9 +2623,9 @@ function createFileExplorerPanel(item = finderItemId) {
             <button type="button" class="file-explorer-header-action file-explorer-folder-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            ${fileExplorerTreeSortSelectHtml()}
+            ${fileExplorerTreeSortSelectHtml('', 'finder')}
             <span class="file-explorer-date-controls">
-              ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+              ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'finder')}
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
             </span>
           </div>
@@ -2704,6 +2692,7 @@ function createFileExplorerPanel(item = finderItemId) {
 }
 
 async function refreshFileExplorerPanelTree(panel, options = {}) {
+  const view = fileExplorerViewForItem(panel?.dataset?.panelItem) || 'finder';
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
@@ -2716,7 +2705,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   renderFileExplorerRootModeControls();
   syncFileExplorerHiddenButton(hiddenBtn);
   syncFileExplorerTreeDateButton(dateBtn);
-  if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
+  if (sortSelect && sortSelect.value !== fileExplorerTreeSortModeForView(view)) sortSelect.value = fileExplorerTreeSortModeForView(view);
   if (clientPushCanSupplyData() && !options.entries && options.force !== true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
@@ -2752,6 +2741,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
         compact: false,
         loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, fileExplorerDifferFiles()),
         includeEmptyRepoSections: true,
+        view,
       },
       {force: options.force === true},
     );
@@ -2764,7 +2754,9 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
 
 function renderFileExplorerChangesPanels(options = {}) {
   if (!itemInLayout(differItemId) && !itemInLayout(tabberItemId)) return;
+  const requestedView = options.view ? normalizeFileExplorerView(options.view) : '';
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
+    if (requestedView && fileExplorerViewForItem(panel.dataset.panelItem) !== requestedView) continue;
     renderFileExplorerChangesPanel(panel, options);
   }
   if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {

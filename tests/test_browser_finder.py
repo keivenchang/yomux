@@ -137,7 +137,7 @@ def test_legacy_changes_url_opens_differ(browser, tmp_path, legacy_token):
           newFileAbsent: panel.querySelector('[data-file-explorer-new-file]') === null,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
-          visibleSortSelects: visible('[data-session-files-sort]').length,
+          visibleSortSelects: visible('[data-file-explorer-tree-sort]').length,
           visibleDateButtons: visible('[data-file-explorer-tree-dates]').length,
           visibleReloadButtons: visible('[data-session-files-refresh], [data-file-explorer-refresh]').length,
           sessionOptionTexts: Array.from(panel.querySelectorAll('[data-session-files-session] option')).map(option => option.textContent.trim()),

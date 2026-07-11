@@ -129,10 +129,16 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
 
 function dockviewRootBoundaryDropIntent(event) {
   if (narrowSingleColumnMode()) return null;
-  const pointerIntent = event?.nativeEvent
-    ? dockviewTabPointerRootBoundaryIntent(event.nativeEvent, dockviewLayoutState.tabPointerDrag)
-    : null;
-  if (pointerIntent) return pointerIntent;
+  const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
+  if (event?.nativeEvent && tabPointerDrag?.item) {
+    // Dockview labels the tab strip at the top of an outermost pane as a `top` edge. That is
+    // useful for a deliberate root drop, but wrong for an ordinary tab move across that strip.
+    // The pointer gesture owns the decision while it is live: it only returns a root intent when
+    // the drag actually reaches an eligible root boundary. Falling through to Dockview's broad
+    // overlay here would recreate the false top-root drop after the shared pointer resolver
+    // rejected it.
+    return dockviewTabPointerRootBoundaryIntent(event.nativeEvent, tabPointerDrag);
+  }
   if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -573,6 +579,8 @@ function dockviewBeginTabPointerDrag(event, item) {
     slot,
     x: Number(event.clientX) || 0,
     y: Number(event.clientY) || 0,
+    rootBoundaryStartEdges: dockviewRootBoundaryEdgesAtPoint(event),
+    rootBoundaryExitedEdges: {},
   };
 }
 
@@ -583,11 +591,38 @@ function dockviewTabContentInteractionSuppressed() {
   );
 }
 
+function dockviewRootBoundaryEdgesAtPoint(event, rect = null) {
+  const targetRect = rect || rootBoundaryLayoutTarget()?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
+  if (!targetRect?.width || !targetRect?.height) return {};
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return {};
+  const xBand = layoutBoundaryDropBandPx(targetRect.width);
+  const yBand = layoutBoundaryDropBandPx(targetRect.height);
+  return {
+    left: x >= targetRect.left && x <= targetRect.left + xBand,
+    right: x <= targetRect.right && x >= targetRect.right - xBand,
+    top: y >= targetRect.top && y <= targetRect.top + yBand,
+    bottom: y <= targetRect.bottom && y >= targetRect.bottom - yBand,
+  };
+}
+
+function dockviewUpdateRootBoundaryExitEdges(event, state, rect) {
+  if (!state) return;
+  const startEdges = state.rootBoundaryStartEdges || {};
+  const currentEdges = dockviewRootBoundaryEdgesAtPoint(event, rect);
+  const exitedEdges = state.rootBoundaryExitedEdges || (state.rootBoundaryExitedEdges = {});
+  for (const zone of ['left', 'right', 'top', 'bottom']) {
+    if (startEdges[zone] && !currentEdges[zone]) exitedEdges[zone] = true;
+  }
+}
+
 function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState.tabPointerDrag) {
   if (!state?.item || narrowSingleColumnMode()) return null;
   const target = rootBoundaryLayoutTarget();
   const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!rect) return null;
+  dockviewUpdateRootBoundaryExitEdges(event, state, rect);
   const dx = (Number(event.clientX) || 0) - state.x;
   const dy = (Number(event.clientY) || 0) - state.y;
   const horizontalZone = Math.abs(dx) >= DRAG_HYSTERESIS_PX
@@ -596,9 +631,23 @@ function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState
   const verticalZone = Math.abs(dy) >= DRAG_HYSTERESIS_PX
     ? rootBoundaryDropZoneForEvent(event, rect, dy >= 0 ? 'bottom' : 'top')
     : null;
-  const zone = horizontalZone && verticalZone
+  let zone = horizontalZone && verticalZone
     ? (Math.abs(dx) >= Math.abs(dy) ? horizontalZone : verticalZone)
     : (horizontalZone || verticalZone);
+  // A deliberate edge gesture can return to the tab's original root band, making its final
+  // start-to-end delta too small to identify an axis. The tracked exit proves it was not merely
+  // released in the header; use the current boundary only for that re-entry case.
+  if (!zone) {
+    const reenteredZone = rootBoundaryDropZoneForEvent(event, rect);
+    if (reenteredZone && state.rootBoundaryStartEdges?.[reenteredZone] && state.rootBoundaryExitedEdges?.[reenteredZone]) {
+      zone = reenteredZone;
+    }
+  }
+  // A tab header can itself live inside an outer root band's top/left/right/bottom hit area.
+  // Require the pointer to leave that same band once before it can create a new outer pane there.
+  // That preserves ordinary tab movement from the outermost pane while retaining an explicit,
+  // intentional root-edge gesture: move into the content area, then back to the desired edge.
+  if (zone && state.rootBoundaryStartEdges?.[zone] && !state.rootBoundaryExitedEdges?.[zone]) return null;
   if (!layoutSplitZone(zone) || !dockviewSplitLayoutHasMinimumSize(zone, rect)) return null;
   return {
     item: state.item,
