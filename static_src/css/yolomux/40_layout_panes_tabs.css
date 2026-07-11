@@ -95,16 +95,17 @@
 .yolomux-dockview .dv-right-actions-container {
   position: absolute;
   top: 0;
-  right: 1px;
+  right: 0;
   z-index: var(--z-pane-tab-strip);
   flex: 0 0 auto;
   align-items: flex-start;
   min-height: calc(var(--pane-tab-height) + 2px);
-  padding-top: var(--space-2);
+  padding-top: 0;
   pointer-events: none;
 }
 .yolomux-dockview .dockview-pane-header-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   min-width: 0;
   pointer-events: auto;
@@ -118,6 +119,18 @@
   max-width: none;
   margin: 0 var(--space-1) 0 var(--space-4);
   overflow: visible;
+}
+.yolomux-dockview .dockview-pane-header-actions :is(
+  .pane-drag-handle,
+  .pane-actions,
+  .panel-tab-overflow,
+  .pane-detail-toggle,
+  .pane-popout,
+  .pane-expand,
+  .pane-minimize,
+  .pane-close
+) {
+  flex-shrink: 0;
 }
 .yolomux-dockview .dockview-pane-header-actions .tab {
   box-sizing: border-box;

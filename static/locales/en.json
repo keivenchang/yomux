@@ -22,7 +22,7 @@
   "backgroundOwner.takeoverConfirm": "Server {server} is the current leader; request it to step down and take over?",
   "backgroundOwner.thisServer": "this server",
   "branch.all": "All branches",
-  "branch.current": "active",
+  "branch.current": "current",
   "branch.more": "+ {count} more",
   "branch.none": "none found in this checkout",
   "brand.marker": "YO",

@@ -1509,7 +1509,8 @@ def test_statsd_recovers_missing_agent_token_history_from_transcript_without_ove
     transcript = tmp_path / "rollout.jsonl"
     now = 200_040.0
     transcript.write_text(
-        json.dumps({"timestamp": now - 180, "payload": {"info": {"total_token_usage": {"output_tokens": 100}}}}) + "\n"
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-terra"}}) + "\n"
+        + json.dumps({"timestamp": now - 180, "payload": {"info": {"total_token_usage": {"output_tokens": 100}}}}) + "\n"
         + json.dumps({"timestamp": now - 60, "payload": {"info": {"total_token_usage": {"output_tokens": 220}}}}) + "\n"
         + json.dumps({"timestamp": now, "payload": {"info": {"total_token_usage": {"output_tokens": 340}}}}) + "\n",
         encoding="utf-8",
@@ -1539,12 +1540,33 @@ def test_statsd_recovers_missing_agent_token_history_from_transcript_without_ove
     }
     fresh_rates = raw[(fresh_start, 60)]["agent_token_rates"]
     assert fresh_rates[0]["tokens"] == pytest.approx(9.0)
+    assert fresh_rates[0]["model_rates"]["gpt-5.6-terra"]["tokens"] > 0
     assert any(
         item["tokens"] == pytest.approx(100.0)
         for snapshot in raw.values()
         for item in snapshot["agent_token_rates"]
         if item["key"] == "1|0|codex"
     )
+
+
+def test_statsd_recovery_waits_for_every_active_agent_transcript(tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    calls = []
+    webapp.stats_client = SimpleNamespace(
+        recover_agent_token_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True}
+    )
+    rows = [
+        {"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")},
+        {"session": "1", "kind": "claude", "window_index": 1, "window_label": "1:claude", "transcript": ""},
+    ]
+    try:
+        assert webapp.statsd_recover_agent_token_history(rows, 1_000.0) is False
+        assert calls == []
+        rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
+        assert webapp.statsd_recover_agent_token_history(rows, 1_001.0) is True
+        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
+    finally:
+        webapp.control_server.stop()
 
 
 def test_statsd_agent_token_delta_records_accumulate_actual_overlap_seconds(tmp_path):

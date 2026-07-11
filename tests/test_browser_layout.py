@@ -138,6 +138,27 @@ def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
+def test_info_order_by_popup_has_unique_public_dimension_names(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof infoGroupingControlsHtml === 'function'"))
+    metrics = browser.execute_script(
+        """
+        const root = document.createElement('div');
+        root.innerHTML = infoGroupingControlsHtml();
+        return [...root.querySelectorAll('[data-info-group-level]')].map(select => ({
+          values: [...select.options].map(option => option.value),
+          labels: [...select.options].map(option => option.textContent.trim()),
+        }));
+        """
+    )
+
+    assert len(metrics) == 4, metrics
+    for level in metrics:
+        assert len(level["labels"]) == len(set(level["labels"])), metrics
+    hidden_dimensions = {"tmux-session", "tmux-pane", "git-worktree", "local-repository", "hosted-repository"}
+    assert not hidden_dimensions.intersection(metrics[0]["values"]), metrics
+
+
 def test_pane_width_fixture_keeps_the_production_tab_row_contract(browser, tmp_path):
     """The CSS-only width fixture may be small, but its tab row must not fork from the real builder."""
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
@@ -2017,8 +2038,8 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
           tokens_per_agent_total: 60,
           agent_token_samples: 1,
           agent_token_rates: [
-            {key: '1|0|claude', label: '1:0:claude', total: 10, samples: 1, tokens: 10, seconds: 60, source: 'transcript'},
-            {key: '1|1|codex', label: '1:1:codex', total: 20, samples: 1, tokens: 20, seconds: 60, source: 'transcript'},
+            {key: '1|0|claude', label: '1:0:claude', total: 10, samples: 1, tokens: 10, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-sol': {total: 10, samples: 1, tokens: 10, seconds: 60}}},
+            {key: '1|1|codex', label: '1:1:codex', total: 20, samples: 1, tokens: 20, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-terra': {total: 20, samples: 1, tokens: 20, seconds: 60}}},
             {key: '2|0|codex', label: '2:0:codex', total: 30, samples: 1, tokens: 30, seconds: 60, source: 'transcript'},
             {key: '3|0|codex', label: '3:0:codex', total: 40, samples: 1, tokens: 40, seconds: 60, source: 'transcript'},
             {key: '4|0|codex', label: '4:0:codex', total: 50, samples: 1, tokens: 50, seconds: 60, source: 'transcript'},
@@ -2026,10 +2047,13 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
             {key: '6|0|codex', label: '6:0:codex', total: 70, samples: 1, tokens: 70, seconds: 60, source: 'transcript'},
           ],
         }]}}, {forceGraphRefresh: true});
+        setDebugGraphChartVisibleForTest('modelTokens', true);
         renderDebugPanels({force: true});
         const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
         const bars = [...chart.querySelectorAll('[data-js-debug-bar-series^="agentToken:"]')];
         const legends = [...chart.querySelectorAll('[data-js-debug-legend^="agentToken:"]')];
+        const modelChart = document.querySelector('[data-js-debug-chart="modelTokens"]');
+        const modelBars = new Map([...modelChart.querySelectorAll('[data-js-debug-bar-series^="modelToken:"]')].map(bar => [bar.dataset.jsDebugBarSeries, bar]));
         return {
           patternDefs: [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')].map(node => ({
             id: node.id,
@@ -2045,6 +2069,25 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
             const rect = [...(swatch?.children || [])].find(node => node.tagName?.toLowerCase() === 'rect');
             return {pattern: item.dataset.jsDebugTokenPattern, fill: getComputedStyle(rect).fill, fillAttr: rect?.getAttribute('fill') || '', definition: pattern?.innerHTML || ''};
           }),
+          modelLegends: [...modelChart.querySelectorAll('[data-js-debug-legend^="modelToken:"]')].map(item => {
+            const key = item.dataset.jsDebugLegend;
+            const swatch = item.querySelector('.js-debug-legend-swatch');
+            const bar = modelBars.get(key);
+            return {
+              key,
+              background: getComputedStyle(swatch).backgroundColor,
+              barFill: getComputedStyle(bar).fill,
+              swatchSeriesColor: getComputedStyle(swatch).getPropertyValue('--js-debug-series-color').trim(),
+              barSeriesColor: getComputedStyle(bar).getPropertyValue('--js-debug-series-color').trim(),
+            };
+          }),
+          tokenAxes: [chart, modelChart].map(item => ({
+            key: item.dataset.jsDebugChart,
+            owner: item.dataset.jsDebugTokenAxis,
+            max: item.dataset.jsDebugChartAxisMax,
+            scale: item.dataset.jsDebugChartScale || 'linear',
+            midpoint: item.querySelector('[data-js-debug-axis-mid]')?.textContent || '',
+          })),
           hover: (() => {
             const svg = chart.querySelector('.js-debug-line-chart');
             const rect = bars[0].getBoundingClientRect();
@@ -2071,9 +2114,72 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
     assert [item["pattern"] for item in metrics["legends"]] == [str(index) for index in range(7)], metrics
     assert all(item["fillAttr"].startswith("url(") for item in metrics["legends"]), metrics
     assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
+    assert [item["key"] for item in metrics["modelLegends"]] == ["modelToken:gpt-5.6-sol", "modelToken:gpt-5.6-terra"], metrics
+    assert len({item["background"] for item in metrics["modelLegends"]}) == 2, metrics
+    assert all(item["background"] == item["barFill"] for item in metrics["modelLegends"]), metrics
+    assert all(item["swatchSeriesColor"] == item["barSeriesColor"] for item in metrics["modelLegends"]), metrics
+    assert [item["owner"] for item in metrics["tokenAxes"]] == ["shared", "shared"], metrics
+    assert len({(item["max"], item["scale"], item["midpoint"]) for item in metrics["tokenAxes"]}) == 1, metrics
     assert all(item["hovered"] for item in metrics["hover"]["dark"]), metrics
     assert all(item["color"] == "rgb(228, 232, 238)" for item in metrics["hover"]["dark"]), metrics
     assert all(color == "rgb(23, 32, 44)" for color in metrics["hover"]["light"]), metrics
+
+
+def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof recordJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        const values = [100, 110, 120, 130, 140, 150, 160, 170, 180, 5000];
+        const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+        recordJsDebugStatsSample({history: {sequence: 20, records: values.map((tokens, index) => ({
+          start: nowSeconds - ((values.length - 1 - index) * 60),
+          duration: 60,
+          sequence: 10 + index,
+          tokens_per_agent_total: tokens,
+          agent_token_samples: 1,
+          agent_token_rates: [{
+            key: '1|0|codex', label: '1:0:codex', total: tokens, samples: 1, tokens, seconds: 60, source: 'transcript',
+            model_rates: {'gpt-5.6-sol': {total: tokens, samples: 1, tokens, seconds: 60}},
+          }],
+        }))}}, {forceGraphRefresh: true});
+        setDebugGraphChartVisibleForTest('modelTokens', true);
+        renderDebugPanels({force: true});
+        return ['agentTokens', 'modelTokens'].map(key => {
+          const chart = document.querySelector(`[data-js-debug-chart="${key}"]`);
+          const breakPath = chart.querySelector(`[data-js-debug-axis-break="${key}"]`);
+          const breakLabel = chart.querySelector(`[data-js-debug-axis-break-label="${key}"]`);
+          const ordinary = chart.querySelector('[data-js-debug-bar-total="180"]');
+          const peak = chart.querySelector('[data-js-debug-bar-total="5000"]');
+          return {
+            key,
+            owner: chart.dataset.jsDebugTokenAxis,
+            scale: chart.dataset.jsDebugChartScale,
+            max: chart.dataset.jsDebugChartAxisMax,
+            threshold: chart.dataset.jsDebugChartAxisBreak,
+            breakPathValue: breakPath?.dataset.jsDebugAxisBreakValue || '',
+            breakPathY: breakPath?.getBBox?.().y ?? -1,
+            breakLabel: breakLabel?.textContent || '',
+            breakGlyph: getComputedStyle(breakLabel, '::after').content,
+            ordinaryY: Number(ordinary?.getAttribute('y')),
+            peakY: Number(peak?.getAttribute('y')),
+          };
+        });
+        """
+    )
+    assert [item["owner"] for item in metrics] == ["shared", "shared"], metrics
+    assert [item["scale"] for item in metrics] == ["broken-linear", "broken-linear"], metrics
+    assert len({(item["max"], item["threshold"], item["breakPathValue"], item["breakPathY"]) for item in metrics}) == 1, metrics
+    assert 180 <= float(metrics[0]["threshold"]) < 5000, metrics
+    assert all("≋" in item["breakGlyph"] for item in metrics), metrics
+    assert all(item["ordinaryY"] > item["peakY"] for item in metrics), metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
@@ -6871,8 +6977,9 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <div id="terminal" class="terminal"><div class="xterm"></div></div>
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
+            <button id="smart-key-close" class="mobile-terminal-key-close">×</button>
             <button class="mobile-terminal-key-drag">⠿</button>
-            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key active">Ctrl</button><button class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key active">Ctrl</button><button class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
             <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
             <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
           </div>
@@ -6892,6 +6999,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const key = row.querySelector('.mobile-terminal-key');
         const hidden = bar.hidden;
         bar.hidden = false;
+        const initial = {bar: box(bar), launcher: box(document.getElementById('smart-key-launcher'))};
         bar.style.insetInlineStart = '12px';
         bar.style.insetInlineEnd = 'auto';
         bar.style.insetBlockStart = '12px';
@@ -6904,10 +7012,12 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         moreRow.hidden = false;
         const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display};
         return {
-          pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
+          pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')), close: box(document.getElementById('smart-key-close')),
           paneDisplay: getComputedStyle(pane).display,
           overflowX: getComputedStyle(row).overflowX,
           activeBackground: getComputedStyle(row.querySelector('.active')).backgroundColor,
+          launcherUserSelect: getComputedStyle(document.getElementById('smart-key-launcher')).userSelect,
+          barUserSelect: getComputedStyle(bar).userSelect,
           interruptColor: getComputedStyle(row.querySelector('.mobile-terminal-key--interrupt')).color,
           primaryColumns: getComputedStyle(row).gridTemplateColumns,
           primaryLabels: [...row.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent),
@@ -6917,7 +7027,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           initiallyHidden: hidden,
               up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
-          normal, overflow,
+          initial, normal, overflow,
         };
         """
     )
@@ -6925,10 +7035,13 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["initiallyHidden"] is True, metrics
     assert abs(metrics["terminal"]["height"] - metrics["pane"]["height"]) <= 1, metrics
     assert metrics["launcher"]["width"] >= 40 and metrics["launcher"]["height"] >= 40, metrics
+    assert metrics["launcherUserSelect"] == metrics["barUserSelect"] == "none", metrics
+    assert 0 <= metrics["initial"]["launcher"]["top"] - metrics["initial"]["bar"]["bottom"] <= 16, metrics
+    assert metrics["close"]["right"] <= metrics["bar"]["right"] and metrics["close"]["top"] >= metrics["bar"]["top"], metrics
     assert metrics["key"]["height"] >= 36, metrics
     assert metrics["overflowX"] == "visible", metrics
     assert metrics["primaryColumns"].startswith("repeat(5,"), metrics
-    assert all(label in metrics["primaryLabels"] for label in ["Tab", "^B"]), metrics
+    assert metrics["primaryLabels"] == ["Ctrl", "^C", "Esc", "Tab", "^B"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
     assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
     assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
@@ -8080,6 +8193,40 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
     assert metrics["askBarOpacity"] == "0.82", metrics
 
 
+def test_agent_status_idle_gray_is_brighter_only_in_dark_mode(browser, tmp_path):
+    values = {}
+    for theme_class in ("theme-dark", "theme-light"):
+        page = tmp_path / f"agent-status-idle-{theme_class}.html"
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
+            page_html(
+                f"""
+                <script>document.body.className = {json.dumps(theme_class)};</script>
+                <section class="js-debug-graph-view">
+                  <svg><path id="idle-line" class="js-debug-line--idleAgents"></path><rect id="idle-bar" class="js-debug-bar--idleAgents"></rect></svg>
+                  <span id="idle-legend" class="js-debug-legend-swatch js-debug-legend-swatch--idleAgents"></span>
+                  <span id="idle-light-owner" style="color:var(--editor-line-number)"></span>
+                </section>
+                """,
+                extra_css="body { margin: 0; background: var(--bg); }",
+            ),
+        )
+        values[theme_class] = browser.execute_script(
+            """
+            const line = getComputedStyle(document.getElementById('idle-line'));
+            const bar = getComputedStyle(document.getElementById('idle-bar'));
+            const legend = getComputedStyle(document.getElementById('idle-legend'));
+            const lightOwner = getComputedStyle(document.getElementById('idle-light-owner')).color;
+            return {line: line.stroke, bar: bar.fill, legend: legend.color, lightOwner};
+            """
+        )
+    assert values["theme-dark"]["line"] == values["theme-dark"]["bar"] == values["theme-dark"]["legend"] == "rgb(89, 98, 115)", values
+    assert values["theme-light"]["line"] == values["theme-light"]["bar"] == values["theme-light"]["legend"], values
+    assert values["theme-light"]["line"] == values["theme-light"]["lightOwner"], values
+
+
 def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser, tmp_path):
     for theme_class in ("theme-dark", "theme-light"):
         page = tmp_path / f"subwindow-metadata-{theme_class}.html"
@@ -8418,6 +8565,125 @@ def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrappi
     assert metrics["valueWidth"] >= 220, metrics
     assert metrics["textWidth"] >= 180, metrics
     assert metrics["textHeight"] <= metrics["lineHeight"] * 4.5, metrics
+
+
+def test_yoinfo_relationship_projection_paints_current_path_branch_distinctly(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const rows = [
+          {
+            path: '/repo/worktree', pathLabel: '/repo/worktree', pathTitle: '/repo/worktree',
+            branch: 'feature/current', branchState: 'current',
+            tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}],
+          },
+          {
+            path: '/repo/worktree', pathLabel: '/repo/worktree', pathTitle: '/repo/worktree',
+            branch: 'feature/other', branchState: 'available',
+            tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}],
+          },
+        ];
+        const records = infoRelationshipRecords(rows);
+        const host = document.createElement('div');
+        host.className = 'info-tree';
+        host.style.width = '720px';
+        host.innerHTML = records.map(record => infoRecordHtml(record)).join('');
+        document.body.append(host);
+        const badges = [...host.querySelectorAll('.info-tree-branch-state')];
+        const result = {
+          states: records.map(record => record.branchState),
+          labels: badges.map(badge => badge.textContent.trim()),
+          classes: badges.map(badge => badge.className),
+          colors: badges.map(badge => getComputedStyle(badge).color),
+          borders: badges.map(badge => getComputedStyle(badge).borderColor),
+          branchNames: [...host.querySelectorAll('.info-tree-value-text')].map(node => node.textContent.trim()),
+        };
+        host.remove();
+        return result;
+        """
+    )
+    assert metrics["states"] == ["current", "available"], metrics
+    assert metrics["labels"] == ["current", "available"], metrics
+    assert "info-tree-branch-state-current" in metrics["classes"][0], metrics
+    assert "info-tree-branch-state-available" in metrics["classes"][1], metrics
+    assert metrics["colors"][0] != metrics["colors"][1], metrics
+    assert metrics["borders"][0] != metrics["borders"][1], metrics
+    assert metrics["branchNames"] == ["feature/current", "feature/other"], metrics
+
+
+def test_yoinfo_deep_narrow_record_and_toolbar_use_container_responsive_layout(browser, tmp_path):
+    page = tmp_path / "yoinfo-deep-narrow-responsive-layout.html"
+    nested_open = '<div class="info-tree-group-children">' * 6
+    nested_close = "</div>" * 6
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            f"""
+            <script>document.body.className = 'theme-dark';</script>
+            <div style="width: 940px">
+              <div id="toolbar" class="info-actions-bar info-tree-actions-bar">
+                <div id="selects" class="info-tree-group-selects">
+                  <span id="order-label" class="info-tree-order-label">Order by:</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>Tab</option></select></label>
+                  <span class="info-tree-order-separator">&gt;</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>tmux sub-window</option></select></label>
+                  <span class="info-tree-order-separator">&gt;</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>Path</option></select></label>
+                  <span class="info-tree-order-separator">&gt;</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>None</option></select></label>
+                </div>
+              </div>
+              <div class="info-tree">{nested_open}
+                <div id="record" class="info-tree-record"><div class="info-tree-record-main">
+                  <div id="branch-field" class="info-tree-field info-tree-field-branch">
+                    <span id="branch-label" class="info-tree-field-label">Git branch:</span>
+                    <span id="branch-value" class="info-tree-field-value"><span id="branch-text" class="info-tree-value-text">yolomux.dev8881</span><span id="branch-state" class="info-tree-branch-state">available</span><span id="branch-time" class="info-tree-meta-updated">Git commit 48 minutes ago</span></span>
+                  </div>
+                </div></div>
+              {nested_close}</div>
+            </div>
+            """,
+            extra_css="body { margin: 0; background: var(--bg); }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const rect = id => document.getElementById(id).getBoundingClientRect();
+        const selects = [...document.querySelectorAll('.info-tree-order-select')];
+        const separators = [...document.querySelectorAll('.info-tree-order-separator')];
+        const textStyle = getComputedStyle(document.getElementById('branch-text'));
+        return {
+          recordWidth: rect('record').width,
+          columns: getComputedStyle(document.getElementById('branch-field')).gridTemplateColumns,
+          labelBottom: rect('branch-label').bottom,
+          valueTop: rect('branch-value').top,
+          textWidth: rect('branch-text').width,
+          textHeight: rect('branch-text').height,
+          textLineHeight: Number.parseFloat(textStyle.lineHeight),
+          stateWidth: rect('branch-state').width,
+          stateHeight: rect('branch-state').height,
+          timeTop: rect('branch-time').top,
+          valueTopEdge: rect('branch-value').top,
+          separatorDisplays: separators.map(node => getComputedStyle(node).display),
+          selectWidths: selects.map(node => rect(node).width),
+          selectTops: selects.map(node => Math.round(rect(node).top)),
+          labelTop: rect('order-label').top,
+        };
+        """
+    )
+    assert metrics["recordWidth"] <= 768, metrics
+    assert " " not in metrics["columns"].strip(), metrics
+    assert metrics["valueTop"] >= metrics["labelBottom"], metrics
+    assert metrics["textWidth"] >= 180, metrics
+    assert metrics["textHeight"] <= metrics["textLineHeight"] * 2.5, metrics
+    assert metrics["stateWidth"] >= 60 and metrics["stateHeight"] <= metrics["textLineHeight"] * 2, metrics
+    assert metrics["timeTop"] > metrics["valueTopEdge"], metrics
+    assert metrics["separatorDisplays"] == ["none", "none", "none"], metrics
+    assert max(metrics["selectWidths"]) - min(metrics["selectWidths"]) <= 1, metrics
+    assert len(set(metrics["selectTops"])) == 2, metrics
+    assert min(metrics["selectTops"]) > metrics["labelTop"], metrics
 
 
 def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tmp_path):

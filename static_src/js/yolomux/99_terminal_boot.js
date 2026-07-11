@@ -218,7 +218,7 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'more']);
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['ctrl', 'interrupt', 'escape', 'tab', 'tmux-prefix', 'more']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -287,6 +287,7 @@ function terminalMobileAccessoryHtml(session) {
   const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
   return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
+      <button type="button" class="mobile-terminal-key-close" data-terminal-mobile-close="${esc(session)}" aria-label="${esc(t('shortcuts.close'))}">×</button>
       <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
       <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
@@ -1124,20 +1125,20 @@ const infoSortDefs = Object.freeze([
 ]);
 const infoDimensionDefs = Object.freeze([
   {key: 'tab', labelKey: 'info.dimension.tab', legacyKeys: ['tab']},
-  {key: 'tmux-session', labelKey: 'info.field.tabTmuxSession', legacyKeys: []},
+  {key: 'tmux-session', labelKey: 'info.field.tabTmuxSession', legacyKeys: [], userSelectable: false},
   {key: 'tmux-window', labelKey: 'info.field.tmuxWindow', legacyKeys: ['tmux-window']},
-  {key: 'tmux-pane', labelKey: 'info.field.tmuxWindow', legacyKeys: []},
+  {key: 'tmux-pane', labelKey: 'info.field.tmuxWindow', legacyKeys: [], userSelectable: false},
   {key: 'ai', labelKey: 'info.dimension.ai', legacyKeys: ['ai']},
   {key: 'path', labelKey: 'common.pathLabel', legacyKeys: ['path']},
-  {key: 'git-worktree', labelKey: 'common.pathLabel', legacyKeys: []},
-  {key: 'local-repository', labelKey: 'common.pathLabel', legacyKeys: []},
-  {key: 'hosted-repository', labelKey: 'common.pathLabel', legacyKeys: []},
+  {key: 'git-worktree', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'local-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'hosted-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
   {key: 'branch', labelKey: 'common.branchLabel', legacyKeys: ['branch']},
   {key: 'pr', labelKey: 'common.pullRequestShort', legacyKeys: ['pr']},
   {key: 'linear', labelKey: 'info.field.linear', legacyKeys: ['linear']},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window', 'path']},
   {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
   {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['git-worktree', 'local-repository', 'branch']},
   {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
@@ -1176,9 +1177,20 @@ function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const index = Number(level);
   const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(5, index)) : 0;
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
-  return infoDimensionDefs
+  const selectedKey = String(activeGrouping[normalizedIndex] || '');
+  const dimensions = infoDimensionDefs
+    .filter(dimension => dimension.userSelectable !== false || dimension.key === selectedKey)
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
     .map(localizedInfoDefinition);
+  const selected = dimensions.find(dimension => dimension.key === selectedKey);
+  const ordered = selected ? [selected, ...dimensions.filter(dimension => dimension !== selected)] : dimensions;
+  const labels = new Set();
+  return ordered.filter(dimension => {
+    const label = String(dimension.label || dimension.key);
+    if (labels.has(label)) return false;
+    labels.add(label);
+    return true;
+  });
 }
 
 function infoSortFields() {
@@ -1186,7 +1198,14 @@ function infoSortFields() {
 }
 
 function infoGroupingPresets() {
-  return infoPresetDefs.map(preset => ({...localizedInfoDefinition(preset), grouping: preset.grouping.slice()}));
+  return infoPresetDefs.map(preset => {
+    const localized = localizedInfoDefinition(preset);
+    if (preset.key === 'tab-tmux-window') {
+      localized.label = `${localized.label} > ${t('common.pathLabel')}`;
+      localized.title = localized.label;
+    }
+    return {...localized, grouping: preset.grouping.slice()};
+  });
 }
 
 function normalizeInfoGrouping(value, options = {}) {
@@ -1210,6 +1229,7 @@ function normalizeInfoGrouping(value, options = {}) {
 
 function normalizeInfoLegacyPresetGrouping(grouping) {
   const key = (Array.isArray(grouping) ? grouping : []).join('|');
+  if (key === 'tab|tmux-window') return ['tab', 'tmux-window', 'path'];
   if (key === 'tab|ai|path|branch') return ['tab', 'path', 'tmux-window'];
   if (key === 'path|branch|tab|ai') return ['path', 'branch'];
   if (key === 'branch|path|tab|ai') return ['path', 'branch'];
@@ -1537,6 +1557,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         branchLabel: branch || t('info.missing.branch'),
         branchTitle: branch || t('info.missing.branch'),
         branchHtml: row?.branchHtml || esc(branch || t('info.missing.branch')),
+        branchState: normalizeInfoBranchState(row?.branchState),
         prKey: prCompactLabel || prKeyLabel || '__no_pr__',
         prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || t('info.missing.pr'),
         prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
@@ -2232,12 +2253,17 @@ function infoRecordMainChipsHtml(record, options = {}) {
   }
   if (branchVisible) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    const state = String(record?.branchState || 'available');
+    const state = normalizeInfoBranchState(record?.branchState);
     const stateLabel = state === 'current' ? t('branch.current') : state;
     const stateHtml = `<span class="info-tree-branch-state info-tree-branch-state-${esc(state)}">${esc(stateLabel)}</span>`;
     fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${stateHtml}${updatedMeta}`, record.branchTitle));
   }
   return fields.join('');
+}
+
+function normalizeInfoBranchState(value) {
+  const state = String(value || '').trim().toLowerCase();
+  return ['current', 'worked', 'missing'].includes(state) ? state : 'available';
 }
 
 function infoRecordHtml(record, options = {}) {
@@ -3086,6 +3112,7 @@ function shareInfoRowSnapshot(row = {}) {
     pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
     pathActivitySource: shareInfoString(row.pathActivitySource, 100),
     branch: shareInfoString(row.branch, 500),
+    branchState: normalizeInfoBranchState(row.branchState),
     desc: shareInfoString(row.desc, 1000),
     updated: shareInfoString(row.updated, 200),
     updatedText: shareInfoString(row.updatedText, 200),
@@ -3182,6 +3209,11 @@ function bindPanelControls(panel, session) {
     const targetSession = button.dataset.terminalMobileToggle || session;
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-close]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissTerminalMobileAccessory(button.dataset.terminalMobileClose || session);
   });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
     // Do not blur xterm/close the software keyboard before the click sends its byte.

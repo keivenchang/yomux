@@ -37,7 +37,8 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 4
+STATSD_PROTOCOL_VERSION = 5
+STATSD_COMPAT_PROTOCOL_VERSION = 4
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
@@ -45,7 +46,7 @@ STATSD_LEGACY_IMPORT_VERSION = 1
 STATSD_LEGACY_IMPORT_MARKER = "legacy_import_version"
 STATSD_AGENT_TOKEN_STATE_KEY = "agent_token_state"
 STATSD_AGENT_TOKEN_RECOVERY_MARKER = "agent_token_history_recovery_version"
-STATSD_AGENT_TOKEN_RECOVERY_VERSION = 1
+STATSD_AGENT_TOKEN_RECOVERY_VERSION = 5
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
@@ -60,7 +61,7 @@ STATS_HISTORY_TIERS = (
 )
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
-STATS_AGENT_TOKEN_SCHEMA_VERSION = 3
+STATS_AGENT_TOKEN_SCHEMA_VERSION = 4
 STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_samples")
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_POST_MAX_RECORDS = 1000
@@ -201,6 +202,17 @@ class PersistentStatsService:
             item["total"] = tokens
             item["seconds"] = seconds
             item["samples"] = 1.0 if tokens > 0 or seconds > 0 else 0.0
+            model_rates = item.get("model_rates")
+            if isinstance(model_rates, dict) and duration > 0:
+                for model_rate in model_rates.values():
+                    if not isinstance(model_rate, dict):
+                        continue
+                    model_seconds = max(0.0, float(model_rate.get("seconds") or 0.0))
+                    if model_seconds > duration:
+                        scale = duration / model_seconds
+                        for field in ("total", "tokens", "seconds"):
+                            model_rate[field] = max(0.0, float(model_rate.get(field) or 0.0) * scale)
+                    model_rate["samples"] = 1.0 if float(model_rate.get("tokens") or model_rate.get("total") or 0.0) > 0 else 0.0
             token_total += tokens
             sample_total += float(item["samples"])
         if changed:
@@ -364,12 +376,13 @@ class PersistentStatsService:
                     key = str(raw_rate.get("key") or "").strip()
                     if not key:
                         continue
-                    target = target_rates.setdefault(key, {"label": str(raw_rate.get("label") or key), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": ""})
+                    target = target_rates.setdefault(key, {"label": str(raw_rate.get("label") or key), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": "", "model_rates": {}})
                     for field in ("total", "samples", "tokens", "seconds"):
                         target[field] = float(target.get(field) or 0.0) + self._positive_finite(raw_rate.get(field))
                     target["label"] = str(raw_rate.get("label") or target.get("label") or key)
                     if raw_rate.get("source"):
                         target["source"] = str(raw_rate["source"])
+                    self._merge_agent_token_model_rates(target, raw_rate.get("model_rates"))
                     record_changed = True
             record_changed = self._merge_host_metrics(bucket, record.get("host_metrics")) or record_changed
             process = record.get("process")
@@ -427,6 +440,13 @@ class PersistentStatsService:
                 text = str(raw_item.get(field) or "").strip()
                 if text:
                     item[field] = text
+            raw_models = raw_item.get("models")
+            if isinstance(raw_models, dict):
+                item["models"] = {
+                    str(model or "unknown").strip()[:256] or "unknown": PersistentStatsService._positive_finite(total)
+                    for model, total in raw_models.items()
+                    if PersistentStatsService._positive_finite(total) > 0
+                }
             snapshot[key] = item
         return snapshot
 
@@ -446,7 +466,14 @@ class PersistentStatsService:
         self.store.set_metadata_value(STATSD_AGENT_TOKEN_STATE_KEY, json.dumps(state, sort_keys=True, separators=(",", ":")))
 
     @staticmethod
-    def _agent_token_delta_records(key: str, label: str, start_time: float, end_time: float, token_delta: float) -> list[dict[str, Any]]:
+    def _agent_token_delta_records(
+        key: str,
+        label: str,
+        start_time: float,
+        end_time: float,
+        token_delta: float,
+        model_deltas: dict[str, float] | None = None,
+    ) -> list[dict[str, Any]]:
         if not key or not math.isfinite(start_time) or not math.isfinite(end_time) or end_time <= start_time:
             return []
         if not math.isfinite(token_delta) or token_delta <= 0:
@@ -462,6 +489,27 @@ class PersistentStatsService:
                 cursor = min(end_time, cursor + STATS_AGENT_TOKEN_BUCKET_SECONDS)
                 continue
             tokens = token_delta * (overlap / elapsed)
+            raw_model_deltas = {
+                str(model or "unknown").strip()[:256] or "unknown": PersistentStatsService._positive_finite(value)
+                for model, value in (model_deltas or {}).items()
+                if PersistentStatsService._positive_finite(value) > 0
+            }
+            attributed = sum(raw_model_deltas.values())
+            if attributed > token_delta and attributed > 0:
+                scale = token_delta / attributed
+                raw_model_deltas = {model: value * scale for model, value in raw_model_deltas.items()}
+                attributed = token_delta
+            if token_delta > attributed:
+                raw_model_deltas["unknown"] = raw_model_deltas.get("unknown", 0.0) + token_delta - attributed
+            model_rates = {
+                model: {
+                    "total": value * (overlap / elapsed),
+                    "samples": 1.0,
+                    "tokens": value * (overlap / elapsed),
+                    "seconds": overlap,
+                }
+                for model, value in raw_model_deltas.items()
+            }
             records.append({
                 "time": bucket_start,
                 "tokens_per_agent_total": tokens,
@@ -474,6 +522,7 @@ class PersistentStatsService:
                     "tokens": tokens,
                     "seconds": overlap,
                     "source": "transcript",
+                    "model_rates": model_rates,
                 }],
             })
             cursor = bucket_end
@@ -505,6 +554,11 @@ class PersistentStatsService:
             token_source = str(measurement.get("source") or "").strip()
             token_identity = str(measurement.get("identity") or token_source).strip() or token_source
             label = str(measurement.get("label") or key)
+            models = {
+                str(model or "unknown").strip()[:256] or "unknown": self._positive_finite(total)
+                for model, total in (measurement.get("models") if isinstance(measurement.get("models"), dict) else {}).items()
+                if self._positive_finite(total) > 0
+            }
             previous = state.get(key)
             previous_source = str(previous.get("source") or "") if isinstance(previous, dict) else ""
             previous_identity = str(previous.get("identity") or previous_source) if isinstance(previous, dict) else ""
@@ -518,8 +572,22 @@ class PersistentStatsService:
                 and token_count >= previous_tokens
                 and 0 < elapsed <= STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS
             ):
-                records.extend(self._agent_token_delta_records(key, label, previous_time, sample_time, token_count - previous_tokens))
-            state[key] = {"tokens": token_count, "time": sample_time, "label": label, "source": token_source, "identity": token_identity}
+                token_delta = token_count - previous_tokens
+                previous_models = previous.get("models") if isinstance(previous.get("models"), dict) else {}
+                model_deltas = {
+                    model: max(0.0, total - self._positive_finite(previous_models.get(model)))
+                    for model, total in models.items()
+                    if previous_models and total > self._positive_finite(previous_models.get(model))
+                }
+                records.extend(self._agent_token_delta_records(key, label, previous_time, sample_time, token_delta, model_deltas))
+            state[key] = {
+                "tokens": token_count,
+                "time": sample_time,
+                "label": label,
+                "source": token_source,
+                "identity": token_identity,
+                "models": models,
+            }
         for key in list(state):
             if key not in seen_keys:
                 state.pop(key, None)
@@ -554,6 +622,7 @@ class PersistentStatsService:
                 "tokens": generated_tokens,
                 "source": "transcript",
                 "identity": session_files.transcript_usage_identity(transcript_path, kind),
+                "models": session_files.transcript_generated_tokens_by_model(transcript_path, kind),
             })
         return self.claim_agent_token_deltas(measurements, seen_keys, sample_time, fallback_state=fallback_state)
 
@@ -572,16 +641,71 @@ class PersistentStatsService:
             key = str(raw_item.get("key", raw_key) or "").strip()
             if not key:
                 continue
+            total = PersistentStatsService._positive_finite(raw_item.get("total", raw_item.get("tokens")))
+            samples = PersistentStatsService._positive_finite(raw_item.get("samples"))
+            tokens = PersistentStatsService._positive_finite(raw_item.get("tokens", raw_item.get("total")))
+            seconds = PersistentStatsService._positive_finite(raw_item.get("seconds"))
+            raw_model_rates = raw_item.get("model_rates")
+            if not isinstance(raw_model_rates, dict):
+                raw_model_rates = {"unknown": {"total": total, "samples": samples, "tokens": tokens, "seconds": seconds}}
+            model_rates: dict[str, dict[str, float]] = {}
+            for raw_model, raw_rate in raw_model_rates.items():
+                rate = raw_rate if isinstance(raw_rate, dict) else {"total": raw_rate}
+                model = str(raw_model or "unknown").strip()[:256] or "unknown"
+                model_total = PersistentStatsService._positive_finite(rate.get("total", rate.get("tokens")))
+                model_samples = PersistentStatsService._positive_finite(rate.get("samples"))
+                model_tokens = PersistentStatsService._positive_finite(rate.get("tokens", rate.get("total")))
+                model_seconds = PersistentStatsService._positive_finite(rate.get("seconds"))
+                if not model_total and not model_samples and not model_tokens:
+                    continue
+                model_rates[model] = {
+                    "total": model_total,
+                    "samples": model_samples or (1.0 if model_total or model_tokens else 0.0),
+                    "tokens": model_tokens or model_total,
+                    "seconds": model_seconds or seconds,
+                }
+            model_token_total = sum(float(rate.get("tokens") or 0.0) for rate in model_rates.values())
+            if tokens <= 0:
+                model_rates = {}
+            elif model_token_total > tokens:
+                scale = tokens / model_token_total
+                for rate in model_rates.values():
+                    rate["tokens"] = float(rate.get("tokens") or 0.0) * scale
+                    rate["total"] = rate["tokens"]
+            elif tokens > model_token_total:
+                unknown = model_rates.setdefault("unknown", {"total": 0.0, "samples": 1.0, "tokens": 0.0, "seconds": seconds})
+                unknown["tokens"] = float(unknown.get("tokens") or 0.0) + tokens - model_token_total
+                unknown["total"] = unknown["tokens"]
+            for rate in model_rates.values():
+                rate["seconds"] = seconds
+                rate["samples"] = 1.0 if float(rate.get("tokens") or 0.0) > 0 else 0.0
             records.append({
                 "key": key,
                 "label": str(raw_item.get("label") or key),
-                "total": PersistentStatsService._positive_finite(raw_item.get("total", raw_item.get("tokens"))),
-                "samples": PersistentStatsService._positive_finite(raw_item.get("samples")),
-                "tokens": PersistentStatsService._positive_finite(raw_item.get("tokens", raw_item.get("total"))),
-                "seconds": PersistentStatsService._positive_finite(raw_item.get("seconds")),
+                "total": total,
+                "samples": samples,
+                "tokens": tokens,
+                "seconds": seconds,
                 "source": str(raw_item.get("source") or ""),
+                "model_rates": model_rates,
             })
         return records
+
+    @staticmethod
+    def _merge_agent_token_model_rates(target: dict[str, Any], source: Any) -> None:
+        target_rates = target.setdefault("model_rates", {})
+        if not isinstance(target_rates, dict):
+            target_rates = {}
+            target["model_rates"] = target_rates
+        if not isinstance(source, dict):
+            return
+        for raw_model, raw_rate in source.items():
+            if not isinstance(raw_rate, dict):
+                continue
+            model = str(raw_model or "unknown").strip()[:256] or "unknown"
+            rate = target_rates.setdefault(model, {"total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0})
+            for field in ("total", "samples", "tokens", "seconds"):
+                rate[field] = float(rate.get(field) or 0.0) + PersistentStatsService._positive_finite(raw_rate.get(field))
 
     @staticmethod
     def _recalculate_agent_token_totals(bucket: dict[str, Any]) -> None:
@@ -597,6 +721,7 @@ class PersistentStatsService:
                 "tokens": float(item.get("tokens") or 0.0),
                 "seconds": float(item.get("seconds") or 0.0),
                 "source": str(item.get("source") or ""),
+                "model_rates": copy.deepcopy(item.get("model_rates") or {}),
             }
             token_total += canonical_rates[key]["tokens"]
             sample_total += canonical_rates[key]["samples"]
@@ -627,39 +752,58 @@ class PersistentStatsService:
             bucket = recovered.setdefault((start, duration), stats_store.empty_bucket(start, duration))
             target_rates = bucket.setdefault("agent_token_rates", {})
             for item in self._agent_token_rate_records(record.get("agent_token_rates")):
-                target = target_rates.setdefault(item["key"], {"label": item["label"], "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": ""})
+                target = target_rates.setdefault(item["key"], {"label": item["label"], "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": "", "model_rates": {}})
                 for field in ("total", "samples", "tokens", "seconds"):
                     target[field] = float(target.get(field) or 0.0) + float(item.get(field) or 0.0)
                 target["label"] = item["label"]
                 if item.get("source"):
                     target["source"] = str(item["source"])
+                self._merge_agent_token_model_rates(target, item.get("model_rates"))
             self._recalculate_agent_token_totals(bucket)
         connection = self.store._connection()
         changed = False
         with connection:
+            next_sequence = int(self.store.diagnostics().get("sequence") or 0)
             for key, recovered_bucket in recovered.items():
                 existing = self.store.bucket(*key) or stats_store.empty_bucket(*key)
                 target_rates = existing.setdefault("agent_token_rates", {})
                 bucket_changed = False
                 for item in self._agent_token_rate_records(recovered_bucket.get("agent_token_rates")):
-                    if item["key"] in target_rates:
-                        continue
-                    target_rates[item["key"]] = {
-                        "label": item["label"],
-                        "total": float(item.get("total") or 0.0),
-                        "samples": float(item.get("samples") or 0.0),
-                        "tokens": float(item.get("tokens") or 0.0),
-                        "seconds": float(item.get("seconds") or 0.0),
-                        "source": str(item.get("source") or "transcript"),
-                    }
-                    bucket_changed = True
+                    existing_rate = target_rates.get(item["key"])
+                    if isinstance(existing_rate, dict):
+                        if existing_rate.get("model_rates"):
+                            continue
+                        existing_rate["model_rates"] = copy.deepcopy(item.get("model_rates") or {})
+                        bucket_changed = bool(existing_rate["model_rates"]) or bucket_changed
+                    else:
+                        target_rates[item["key"]] = {
+                            "label": item["label"],
+                            "total": float(item.get("total") or 0.0),
+                            "samples": float(item.get("samples") or 0.0),
+                            "tokens": float(item.get("tokens") or 0.0),
+                            "seconds": float(item.get("seconds") or 0.0),
+                            "source": str(item.get("source") or "transcript"),
+                            "model_rates": copy.deepcopy(item.get("model_rates") or {}),
+                        }
+                        bucket_changed = True
                 if bucket_changed:
-                    next_sequence = int(self.store.diagnostics().get("sequence") or 0) + 1
+                    next_sequence += 1
                     existing["server_sequence"] = max(int(existing.get("server_sequence") or 0), next_sequence)
                     existing["sequence"] = max(int(existing.get("sequence") or 0), next_sequence)
                     self._recalculate_agent_token_totals(existing)
                     self.store._upsert_bucket(connection, existing)
                     changed = True
+            for existing in self.store.query_buckets():
+                before = json.dumps(existing.get("agent_token_rates") or {}, sort_keys=True, separators=(",", ":"))
+                self._recalculate_agent_token_totals(existing)
+                after = json.dumps(existing.get("agent_token_rates") or {}, sort_keys=True, separators=(",", ":"))
+                if before == after:
+                    continue
+                next_sequence += 1
+                existing["server_sequence"] = max(int(existing.get("server_sequence") or 0), next_sequence)
+                existing["sequence"] = max(int(existing.get("sequence") or 0), next_sequence)
+                self.store._upsert_bucket(connection, existing)
+                changed = True
             connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (STATSD_AGENT_TOKEN_RECOVERY_MARKER, str(STATSD_AGENT_TOKEN_RECOVERY_VERSION)),
@@ -670,6 +814,8 @@ class PersistentStatsService:
 
     def recover_agent_token_history_from_rows(self, rows: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
         sample_now = float(time.time() if now is None else now)
+        if not rows:
+            return {"ok": True, "changed": False, "reason": "no_transcript_rows"}
         recovery_start = sample_now - STATS_HISTORY_RETENTION_SECONDS
         records: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
@@ -704,6 +850,7 @@ class PersistentStatsService:
                     clipped_start,
                     clipped_end,
                     event.tokens * covered_fraction,
+                    {str(event.model or "unknown").strip()[:256] or "unknown": event.tokens * covered_fraction},
                 ))
         return self.recover_agent_token_history(records, now=sample_now)
 
@@ -845,6 +992,7 @@ class PersistentStatsService:
                     "tokens": float(value.get("tokens") or 0.0),
                     "seconds": float(value.get("seconds") or 0.0),
                     "source": str(value.get("source") or ""),
+                    "model_rates": copy.deepcopy(value.get("model_rates") if isinstance(value.get("model_rates"), dict) else {}),
                 }
                 for key, value in sorted((bucket.get("agent_token_rates") or {}).items())
                 if isinstance(value, dict)
@@ -874,12 +1022,13 @@ class PersistentStatsService:
         for rate_key, values in source_rates.items():
             if not isinstance(values, dict):
                 continue
-            existing = target_rates.setdefault(str(rate_key), {"label": str(values.get("label") or rate_key), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": ""})
+            existing = target_rates.setdefault(str(rate_key), {"label": str(values.get("label") or rate_key), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": "", "model_rates": {}})
             for field in ("total", "samples", "tokens", "seconds"):
                 existing[field] = float(existing.get(field) or 0.0) + float(values.get(field) or 0.0)
             existing["label"] = str(values.get("label") or existing.get("label") or rate_key)
             if values.get("source"):
                 existing["source"] = str(values["source"])
+            PersistentStatsService._merge_agent_token_model_rates(existing, values.get("model_rates"))
         source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
         if source_metrics:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())
@@ -1081,10 +1230,15 @@ class PersistentStatsService:
         HTTP still owns compression, HEAD, auth cookies, and response metrics.
         """
         action = str(request.get("action") or "")
+        try:
+            requested_protocol = int(request.get("protocol_version") or STATSD_COMPAT_PROTOCOL_VERSION)
+        except (TypeError, ValueError):
+            requested_protocol = STATSD_COMPAT_PROTOCOL_VERSION
+        response_protocol = STATSD_PROTOCOL_VERSION if requested_protocol >= STATSD_PROTOCOL_VERSION else STATSD_COMPAT_PROTOCOL_VERSION
         if action == "ping":
-            return {"ok": True, "version": STATSD_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at}, b""
+            return {"ok": True, "version": response_protocol, "pid": os.getpid(), "started_at": self.started_at}, b""
         if action == "status":
-            return self.common_status(), b""
+            return {**self.common_status(), "version": response_protocol}, b""
         if action == "profile":
             return {"ok": True, "profile": self.common_status()}, b""
         if action == "lease":
@@ -1323,7 +1477,7 @@ class StatsClient(LocalServiceClient):
         )
 
     def healthy(self) -> bool:
-        response = self.request({"action": "ping"}, timeout=0.15)
+        response = self.request({"action": "ping", "protocol_version": STATSD_PROTOCOL_VERSION}, timeout=0.15)
         return bool(response.get("ok")) and int(response.get("version") or 0) == STATSD_PROTOCOL_VERSION
 
     def runtime_status(self) -> dict[str, Any]:

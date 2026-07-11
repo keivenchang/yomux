@@ -284,6 +284,8 @@ registerTest('YO!info deduplicates graph worktree rows but exposes observed-path
   const html = api.infoRecordHtmlForTest(rows[0]);
   assert.ok(html.includes('3 paths') && html.includes('/repo/shared/src/app.js') && html.includes('claude') && html.includes('edit'), 'the expandable path evidence exposes the observed path, actor, and source');
   const records = api.infoRelationshipRecords(rows);
+  assert.equal(records[0].branchState, 'current', 'the relationship projection preserves the GitWorktree current-branch edge');
+  assert.ok(api.infoRecordHtmlForTest(records[0]).includes('info-tree-branch-state-current'), 'the projected current branch renders its distinct state badge');
   assert.equal(records.length, 2, 'two RuntimeActors produce two relationship records for the same deduplicated branch row');
   assert.ok(records.every(record => record.branchLabel === 'shared-work'), 'the graph branch survives every relationship-record projection');
   const searchFields = records.flatMap(record => api.infoRecordSearchFieldsForTest(record));
@@ -318,7 +320,8 @@ registerTest('YO!info graph rows preserve collapse, search, keyboard controls, a
   const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
   const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
   assert.ok(/delegate\(panel, 'keydown', '\[data-info-search\]'/.test(infoPanelSource) || /panel\.addEventListener\('keydown'/.test(infoPanelSource), 'YO!info keeps keyboard handling on the persistent panel owner');
-  assert.ok(/data-pane-role="side"[\s\S]*\.info-tree-field[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(css), 'narrow Vertical Side Panes use one readable field column for graph rows');
+  assert.ok(/@container info-tree-record \(max-width: 48rem\)[\s\S]*\.info-tree-field\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(css), 'every graph row responds to its own narrow container with one readable field column');
+  assert.doesNotMatch(css, /\.dv-groupview\[data-pane-role="side"\] \.info-tree-field\s*\{/, 'Vertical Side Panes do not retain a divergent field-stacking copy');
 });
 
 registerTest('YO!info exposes canonical work-graph dimensions and migration-safe grouping depth', () => {
@@ -350,6 +353,13 @@ registerTest('YO!info makes normalized branch activity state visible without hid
     assert.ok(html.includes(`feature/${state}`), `${state} branch keeps its canonical name visible`);
     assert.ok(html.includes(`info-tree-branch-state-${state}`), `${state} branch renders an explicit normalized state`);
   }
+  const projected = api.infoRelationshipRecords([
+    {branch: 'feature/current', branchState: 'current', tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}]},
+    {branch: 'feature/other', branchState: 'available', tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}]},
+  ]);
+  assert.deepStrictEqual(canonical(projected.map(record => [record.branchLabel, record.branchState])), [
+    ['feature/current', 'current'], ['feature/other', 'available'],
+  ], 'relationship projection distinguishes the path worktree current branch from other available repository branches');
 });
 
 registerTest('YO!info retains every canonical branch PR and renders explicit unresolved lookup states', () => {
@@ -559,6 +569,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       coarsePointer: true,
       viewport: {width: 744, height: 1024},
     });
+    const roomyPortraitTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 1024, height: 1100},
+    });
     const roomyMenuTablet = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
       viewport: {width: 960, height: 768},
@@ -585,31 +599,29 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(tablet.tabletUsesDesktopLayoutForTest(), true, 'a wide landscape iPad adopts the desktop-layout policy');
     assert.equal(tablet.fileExplorerUsesNormalTabMovementForTest(), false, 'a wide landscape iPad keeps Finder as its own desktop-style pane');
     assert.equal(tablet.narrowSingleColumnModeForTest(), false, 'a wide landscape iPad retains its multi-pane layout');
+    assert.equal(roomyPortraitTablet.tabletUsesDesktopLayoutForTest(), true, 'a full-width portrait iPad uses measured width instead of orientation to enable desktop panes');
+    assert.equal(roomyPortraitTablet.narrowSingleColumnModeForTest(), false, 'a 1024px portrait iPad retains directional pane splits');
     assert.deepEqual(
       canonical(Object.values(tablet.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes(tablet.finderItemId))),
       {active: tablet.finderItemId, tabs: [tablet.finderItemId, tablet.differItemId, tablet.tabberItemId], paneRole: tablet.paneRoleSide, side: tablet.paneSideLeft},
       'the wide landscape iPad gives the independent file-surface triplet a dedicated pane instead of mixing it into terminal tabs',
     );
     assert.equal(narrowTablet.mobileSinglePaneModeForTest(), false, 'an iPad remains distinct from the phone-only recent-tab policy');
-    assert.equal(narrowTablet.tabletUsesDesktopLayoutForTest(), false, 'an iPad portrait does not claim laptop-style horizontal room');
-    assert.equal(narrowTablet.narrowSingleColumnModeForTest(), true, 'a 744px portrait iPad uses the one-column touch layout');
-    assert.equal(narrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), false, 'a portrait iPad cannot create a clipped two-column split');
-    assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder/Differ/Tabber remain ordinary tabs in the compact tablet layout');
+    assert.equal(narrowTablet.tabletUsesDesktopLayoutForTest(), false, 'a 744px iPad keeps Finder out of a dedicated one-third-width Side Pane');
+    assert.equal(narrowTablet.narrowSingleColumnModeForTest(), false, 'a 744px portrait iPad retains generic pane splits because two minimum-width panes fit');
+    assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder remains an ordinary tab while its dedicated Side Pane cannot fit');
     assert.equal(narrowTablet.dropItemCanBeDraggedForTest(narrowTablet.fileExplorerItemId), true, 'Finder can be moved through the normal tab drag pipeline on iPad');
-    assert.equal(narrowTablet.dropIntentAllowsSession(narrowTablet.fileExplorerItemId, {targetSlot: 'left', zone: 'right'}), false, 'Finder cannot recreate a split in compact tablet portrait');
-    assert.deepEqual(canonical(narrowTablet.layoutSlotsForTest()), {
-      __tree: {slot: 'left'},
-      left: {active: '1', tabs: [narrowTablet.finderItemId, '1', '2']},
-    }, 'a portrait iPad keeps Finder as a switchable tab beside all current terminals');
+    assert.equal(narrowTablet.layoutSlotKeys(narrowTablet.layoutSlotsForTest()).length, 2, 'a 744px portrait iPad starts with two measured generic panes');
+    assert.equal(narrowTablet.sidePaneSlots(narrowTablet.layoutSlotsForTest()).length, 0, 'the same iPad does not force a clipped dedicated Finder column');
     const tooNarrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
-      viewport: {width: 640, height: 1024},
+      viewport: {width: 599, height: 1024},
     });
     assert.equal(tooNarrowTablet.narrowSingleColumnModeForTest(), true, 'a touch viewport below two shared minimum pane widths collapses to one column');
     assert.equal(tooNarrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'a one-column touch viewport keeps Finder as an ordinary tab');
     assert.deepEqual(canonical(tooNarrowTablet.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '1', tabs: [tooNarrowTablet.finderItemId, '1', '2']},
+      left: {active: '1', tabs: ['1', '2', tooNarrowTablet.finderItemId]},
     }, 'a too-narrow iPad keeps Finder as an ordinary tab beside its terminal tabs instead of reserving a left column');
     assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), false, 'a too-narrow tablet edge drop cannot recreate a split');
     assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle'}), true, 'a too-narrow tablet keeps ordinary middle tab moves');
@@ -618,9 +630,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {name: 'phone portrait', platform: 'Android Mobile', width: 390, height: 844, mobile: true, singleColumn: true},
       {name: 'phone landscape', platform: 'Android Mobile', width: 960, height: 520, mobile: true, singleColumn: true},
       {name: 'wide phone landscape', platform: 'Android Mobile', width: 961, height: 520, mobile: false, singleColumn: false},
-      {name: 'narrow iPad portrait', platform: 'iPad', width: 640, height: 1024, mobile: false, singleColumn: true},
-      {name: 'iPad single-column boundary', platform: 'iPad', width: 680, height: 1024, mobile: false, singleColumn: true},
-      {name: 'iPad portrait', platform: 'iPad', width: 681, height: 1024, mobile: false, singleColumn: true},
+      {name: 'narrow iPad portrait', platform: 'iPad', width: 599, height: 1024, mobile: false, singleColumn: true},
+      {name: 'iPad multi-pane boundary', platform: 'iPad', width: 600, height: 1024, mobile: false, singleColumn: false},
+      {name: 'iPad portrait', platform: 'iPad', width: 681, height: 1024, mobile: false, singleColumn: false},
+      {name: 'roomy iPad portrait', platform: 'iPad', width: 1024, height: 1100, mobile: false, singleColumn: false},
       {name: 'full-menu iPad landscape', platform: 'iPad', width: 980, height: 768, mobile: false, singleColumn: false},
       {name: 'wide iPad', platform: 'iPad', width: 981, height: 768, mobile: false, singleColumn: false},
     ]) {
@@ -640,7 +653,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     resizeSlots.left = resizeApi.paneStateWithTabs(['1'], '1');
     resizeSlots.slot1 = resizeApi.paneStateWithTabs(['2', '3'], '2');
     resizeApi.setLayoutSlotsForTest(resizeSlots);
-    resizeApi.setNativeViewportForTest({width: 640, height: 1024});
+    resizeApi.setNativeViewportForTest({width: 599, height: 1024});
     assert.equal(resizeApi.narrowSingleColumnModeForTest(), true, 'a live iPad rotation to portrait recomputes the one-column policy instead of keeping landscape split geometry');
     assert.equal(resizeApi.compactCurrentLayoutSlotsForTest(), true, 'a live iPad portrait rotation compacts the existing split through the shared layout normalizer');
     const compactedResize = resizeApi.serialize(resizeApi.layoutSlotsForTest());
@@ -705,14 +718,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('one-column pane frame controls remove the selected tab instead of the only pane', () => {
     const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
-      viewport: {width: 640, height: 1024},
+      viewport: {width: 599, height: 1024},
     });
     assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'a selected tab can be minimized while another tab remains in the one-column pane');
     assert.ok(api.panelControlsHtml('1').includes('data-pane-close="1"'), 'a terminal exposes the shared X when narrow mode can safely close its selected tab');
     api.minimizePaneFromLayout('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '2', tabs: [api.finderItemId, '2']},
+      left: {active: '2', tabs: ['2', api.finderItemId]},
     }, 'minus removes only the selected tab and keeps the remaining single-column view visible');
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
@@ -803,10 +816,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'interrupt'[\s\S]*action: 'tmux-prefix'[\s\S]*action: 'tab'[\s\S]*action: 'copy'[\s\S]*action: 'command-v'[\s\S]*action: 'tmux-scroll-up'[\s\S]*action: 'tmux-scroll-down'[\s\S]*action: 'arrow-up'[\s\S]*action: 'enter'/.test(source), 'touch terminal key definitions put Ctrl-B, Tab, Copy/Paste, and direct tmux scrolling on the first palette page');
+    assert.ok(/terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['ctrl', 'interrupt', 'escape', 'tab', 'tmux-prefix', 'more'\]\)/.test(source), 'the primary smart-key row keeps Ctrl and direct Ctrl-C together at the left edge');
     assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'touch terminal overflow retains Cmd-P and secondary navigation while Paste stays visible in the primary grid');
     assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*state\.ctrl = false[\s\S]*state\.alt = false/.test(source), 'Ctrl and Alt latches are one-shot and share terminal input handling');
     assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*queueTmuxScroll\(item, signedLines\)[\s\S]*queueLocalTerminalScroll\(term, signedLines\)[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true, bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; direct scroll controls use the wheel-owned tmux protocol with a local read-only fallback; ordinary smart keys keep using terminal transport');
-    assert.ok(/function terminalMobileAccessoryHtml[\s\S]*primaryKeys[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*mobile-terminal-keybar[\s\S]*mobile-terminal-keyrow-shell[\s\S]*key\('more'\)[\s\S]*state\.open/.test(source) && /function syncTerminalMobileAccessoryState[\s\S]*mobile-terminal-keybar--more/.test(source) && /function beginTerminalMobileAccessoryDrag[\s\S]*function moveTerminalMobileAccessoryDrag/.test(source) && /function beginTerminalMobileAccessoryLauncherPress[\s\S]*state\.more = true/.test(source), 'the touch key palette opens on demand, keeps the More control outside the scrolling primary row, replaces its base keys with a bounded overflow grid, and has one movable per-pane state owner');
+    assert.ok(/function terminalMobileAccessoryHtml[\s\S]*primaryKeys[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*mobile-terminal-keybar[\s\S]*data-terminal-mobile-close[\s\S]*mobile-terminal-keyrow-shell[\s\S]*key\('more'\)[\s\S]*state\.open/.test(source) && /function syncTerminalMobileAccessoryState[\s\S]*mobile-terminal-keybar--more/.test(source) && /function beginTerminalMobileAccessoryDrag[\s\S]*function moveTerminalMobileAccessoryDrag/.test(source) && /function beginTerminalMobileAccessoryLauncherPress[\s\S]*state\.more = true/.test(source) && /delegate\(panel, 'click', '\[data-terminal-mobile-close\]'[\s\S]*dismissTerminalMobileAccessory/.test(source), 'the touch key palette opens on demand, has an explicit close action, keeps the More control outside the scrolling primary row, replaces its base keys with a bounded overflow grid, and has one movable per-pane state owner');
     assert.ok(/async function pasteTerminalMobileAccessoryClipboard[\s\S]*clipboard\.read[\s\S]*uploadFiles\(session, imageFiles, \{source: 'paste'\}\)[\s\S]*handleTerminalData\(session, text/.test(source), 'mobile Cmd-V reads clipboard text or images and routes both through the existing paste/terminal parents');
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     assert.ok(/function terminalClipboardPasteAvailable\(\)[\s\S]*function primeTerminalClipboardAvailability\(\)[\s\S]*clipboard\.read/.test(source) && /function showTerminalContextMenu[\s\S]*terminalClipboardPasteAvailable\(\)[\s\S]*pasteTerminalMobileAccessoryClipboard\(session\)[\s\S]*function installTerminalContextMenu[\s\S]*container\.addEventListener\('pointerdown',[\s\S]*event\.pointerType === 'touch'[\s\S]*primeTerminalClipboardAvailability\(\)/.test(coreSource), 'a touch begins one clipboard availability probe before the shared long-press context menu conditionally adds Paste through the existing terminal paste path');
@@ -821,6 +835,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalMobileAccessoryStateForTest('2').open, true, 'the newly launched palette remains open');
     assert.ok(/function installTerminalMobileAccessoryDismissal\(\)[\s\S]*pointerdown[\s\S]*data-terminal-mobile-keybar[\s\S]*data-terminal-mobile-toggle[\s\S]*dismissTerminalMobileAccessories\(\)[\s\S]*function bindTerminalContainerForSession[\s\S]*installTerminalMobileAccessoryDismissal\(\)[\s\S]*keydown[\s\S]*dismissTerminalMobileAccessory\(session\)/.test(source), 'the shared palette closes on outside app interaction and physical terminal input, while its own launcher and keys remain usable');
     assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*position:\s*absolute[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*position:\s*absolute[\s\S]*grid-auto-rows:\s*max-content[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the touch key palette pins More to the top-right in both layouts, places Copy/Paste left of the D-pad and tmux scrolling right of it, and keeps Ctrl-B/Tab on the first page');
+    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*inset-block-end:\s*calc\([\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-key-close\s*\{[\s\S]*position:\s*absolute[\s\S]*inset-inline-end:[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the non-selectable touch palette opens immediately above its launcher, keeps an explicit top-right close control, pins More to the top-right in both layouts, and preserves the compact D-pad layout');
   });
 
   test('search history pane renders search results and compact runs', () => {
@@ -4830,6 +4845,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         active_agent_total: 3,
         inactive_agent_total: 0,
         agent_activity_samples: 1,
+        tokens_per_agent_total: 5,
+        agent_token_samples: 1,
+        agent_token_rates: [
+          {key: '1|0|claude', label: '1:0:claude', total: 5, samples: 1, tokens: 5, seconds: 60, source: 'transcript', model_rates: {'claude-sonnet-4.7': {total: 5, samples: 1, tokens: 5, seconds: 60}}},
+        ],
       }],
     });
     let baselineSummary = api.debugGraphBucketSummaryForTest(now);
@@ -4862,16 +4882,58 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
     assert.deepStrictEqual([...summary.charts], ['cpu', 'activity', 'agentTokens', 'latency', 'count', 'bandwidth'], 'YO!stats keeps CPU open while System memory and both GPU charts start minimized, with agent charts immediately after memory');
 
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
     assert.ok(/data-js-debug-chart="activity"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="10"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'Agent status uses stacked ten-second bars');
     assert.ok(html.includes('data-js-debug-chart="agentTokens"') && html.includes('Agent tokens/min'), 'YO!stats renders the optional agent token-rate chart');
     assert.ok(html.includes('data-js-debug-chart-toggle="modelTokens"') && html.includes('>Model tokens<'), 'YO!stats exposes the model token-rate chart without making the default graph stack taller');
-    assert.ok(/data-js-debug-displayed-token-sum="210"[^>]*>\(210, Σ displayed\)<\/span>/.test(html), 'Agent tokens/min header sums the exact token deltas in displayed buckets');
+    assert.equal((html.match(/data-js-debug-displayed-token-sum="215"[^>]*>\(215, Σ displayed\)<\/span>/g) || []).length, 2, 'Agent and Model token headers independently sum the same normalized token partition');
     assert.ok(/class="js-debug-chart js-debug-chart--token-agents" data-js-debug-chart="agentTokens"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="60"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'agent token chart is marked as stacked one-minute bars');
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
+    const modelTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="modelTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="modelTokens"')));
+    const agentAxisMax = agentTokenChartHtml.match(/data-js-debug-chart-axis-max="([0-9.]+)"/)?.[1];
+    const modelAxisMax = modelTokenChartHtml.match(/data-js-debug-chart-axis-max="([0-9.]+)"/)?.[1];
+    const agentAxisMid = agentTokenChartHtml.match(/data-js-debug-axis-mid="agentTokens"[^>]*>([^<]+)</)?.[1];
+    const modelAxisMid = modelTokenChartHtml.match(/data-js-debug-axis-mid="modelTokens"[^>]*>([^<]+)</)?.[1];
+    assert.equal(agentAxisMax, modelAxisMax, 'Agent and Model token charts consume one identical numeric Y-axis maximum');
+    assert.equal(agentAxisMid, modelAxisMid, 'Agent and Model token charts render the same Y-axis midpoint label');
+    assert.ok(agentTokenChartHtml.includes('data-js-debug-token-axis="shared"') && modelTokenChartHtml.includes('data-js-debug-token-axis="shared"'), 'both token charts identify the one shared axis owner');
+    assert.ok(agentTokenChartHtml.includes('data-js-debug-chart-scale="linear"') && modelTokenChartHtml.includes('data-js-debug-chart-scale="linear"'), 'ordinary token ranges remain identically linear');
+    const agentTop = agentTokenChartHtml.match(/data-js-debug-bar-total="210"[^>]* y="([0-9.]+)"/);
+    const modelTop = modelTokenChartHtml.match(/data-js-debug-bar-total="210"[^>]* y="([0-9.]+)"/);
+    assert.ok(agentTop && modelTop && agentTop[1] === modelTop[1], 'Agent and Model token stack tops use identical geometry for the same bucket total');
     assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-title') < agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:'), 'agent token legend renders below the title');
     assert.ok(agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:') < agentTokenChartHtml.indexOf('js-debug-chart-body'), 'agent token legend uses the shared position above the plot body');
+
+    const spikeApi = loadYolomux('?debug=1&sessions=debug', ['1']);
+    spikeApi.clearJsDebugEventsForTest();
+    const spikeValues = [100, 110, 120, 130, 140, 150, 160, 170, 180, 5000];
+    spikeApi.debugGraphApplyServerHistoryForTest({
+      sequence: 95,
+      records: spikeValues.map((tokens, index) => ({
+        start: Math.floor(now / 60000) * 60 - ((spikeValues.length - 1 - index) * 60),
+        duration: 60,
+        sequence: 86 + index,
+        tokens_per_agent_total: tokens,
+        agent_token_samples: 1,
+        agent_token_rates: [{
+          key: '1|0|codex', label: '1:0:codex', total: tokens, samples: 1, tokens, seconds: 60, source: 'transcript',
+          model_rates: {'gpt-5.6-sol': {total: tokens, samples: 1, tokens, seconds: 60}},
+        }],
+      })),
+    });
+    spikeApi.setDebugGraphChartVisibleForTest('modelTokens', true);
+    const spikeHtml = spikeApi.debugPanelHtmlForTest();
+    const spikeAgent = spikeHtml.slice(spikeHtml.indexOf('data-js-debug-chart="agentTokens"'), spikeHtml.indexOf('</section>', spikeHtml.indexOf('data-js-debug-chart="agentTokens"')));
+    const spikeModel = spikeHtml.slice(spikeHtml.indexOf('data-js-debug-chart="modelTokens"'), spikeHtml.indexOf('</section>', spikeHtml.indexOf('data-js-debug-chart="modelTokens"')));
+    const spikeAgentBreak = spikeAgent.match(/data-js-debug-chart-axis-break="([0-9.]+)"/)?.[1];
+    const spikeModelBreak = spikeModel.match(/data-js-debug-chart-axis-break="([0-9.]+)"/)?.[1];
+    assert.ok(spikeAgent.includes('data-js-debug-chart-scale="broken-linear"') && spikeModel.includes('data-js-debug-chart-scale="broken-linear"'), 'a lone extreme peak activates the shared broken linear token axis');
+    assert.equal(spikeAgentBreak, spikeModelBreak, 'Agent and Model charts use the identical peak-break threshold');
+    assert.ok(Number(spikeAgentBreak) >= 180 && Number(spikeAgentBreak) < 5000, 'the break preserves the complete ordinary linear range below the peak');
+    assert.equal((spikeAgent.match(/data-js-debug-axis-break="agentTokens"/g) || []).length, 1, 'Agent tokens draws one explicit SVG zigzag break');
+    assert.equal((spikeModel.match(/data-js-debug-axis-break="modelTokens"/g) || []).length, 1, 'Model tokens draws the matching SVG zigzag break');
     assert.ok(/data-js-debug-axis-max="activity"[^>]*>4</.test(html), 'agent status Y axis reserves at least four agents even when the stacked total is smaller');
     for (const value of [4, 3, 2, 1, 0]) {
       assert.ok(html.includes(`data-js-debug-axis-tick="activity" data-js-debug-axis-value="${value}"`), `activity chart Y axis shows whole-number tick ${value}`);
@@ -4937,7 +4999,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual([...tokenSeries.map(series => series.agentTokenPatternIndex)], [0, 1, 2], 'agent token series receive stable palette-aligned infill patterns');
     const modelTokenSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.tokenDimension === 'model');
     assert.deepStrictEqual([...modelTokenSeries.map(series => series.label)], ['claude-sonnet-4.7', 'gpt-5.4-mini', 'gpt-5.5'], 'model token chart groups the exact transcript model identifiers');
-    assert.equal(modelTokenSeries.find(series => series.label === 'gpt-5.5').values.at(-1), 45, 'model chart sums matching model records across parent windows without duplicating them');
+    for (const series of modelTokenSeries) {
+      const legendStart = html.indexOf(`data-js-debug-legend="${series.key}"`);
+      const legendItemHtml = html.slice(legendStart, html.indexOf('</div>', legendStart));
+      assert.ok(legendStart >= 0, `model token legend includes ${series.label}`);
+      assert.ok(legendItemHtml.includes(`--js-debug-series-color: ${series.color};`), `model token legend ${series.label} consumes its bar-series color`);
+    }
+    assert.ok(/\.js-debug-legend-swatch\s*\{[\s\S]*background:\s*var\(--js-debug-series-color, currentColor\)/.test(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8')), 'dynamic legend dots use the shared series color with currentColor only as the fixed-series fallback');
+    assert.equal(modelTokenSeries.find(series => series.label === 'gpt-5.5').values.at(-1), 90, 'model chart sums each agent contribution with its owning elapsed interval instead of dividing by the combined agent seconds');
     assert.equal((agentTokenChartHtml.match(/data-js-debug-token-pattern-def="/g) || []).length, 3, 'agent token chart emits one SVG infill definition per agent');
     for (const patternIndex of [0, 1, 2]) {
       assert.ok(agentTokenChartHtml.includes(`data-js-debug-token-pattern="${patternIndex}"`), `agent token bars and legend expose infill pattern ${patternIndex}`);
@@ -6686,7 +6755,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'desc'}).children.map(group => group.label)), ['ZZZ-200 zeta issue', 'AAA-100 alpha issue', 'No Linear'], 'YO!info reverse Linear grouping keeps No Linear after real Linear issues');
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'desc'}).children.map(group => group.label)), ['#200 zeta PR', '#100 alpha PR', 'No PR'], 'YO!info reverse PR grouping keeps No PR after numbered PRs');
 	    assert.deepStrictEqual(canonical(api.infoGroupingPresetsForTest().map(preset => `${preset.key}:${preset.label}:${preset.grouping.join('>')}`)), [
-	      'tab-tmux-window:Tab > tmux-window:tab>tmux-window',
+	      'tab-tmux-window:Tab > tmux-window > Path:tab>tmux-window>path',
 	      'tab-path:Tab > Path > tmux-window:tab>path>tmux-window',
       'path-branch:Path > Branch:git-worktree>local-repository>branch',
 	      'linear-pr:Linear > PR:linear>pr',
@@ -6694,7 +6763,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    ], 'YO!info quick preset buttons abbreviate tmux sub-window as tmux-window');
 	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info defaults to Tab > Path > tmux sub-window');
 	    api.setInfoGroupingPresetForTest('tab-tmux-window');
-	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window'], 'YO!info first quick preset selects Tab then tmux sub-window');
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window', 'path'], 'YO!info first quick preset selects Tab then tmux sub-window then Path');
 	    api.setInfoGroupingPresetForTest('tab-path');
 	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info Tab > Path preset adds tmux sub-window as its third level');
 	    api.setInfoGroupingPresetForTest('linear-pr');
@@ -6705,6 +6774,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       localStorage: {'yolomux.info2.grouping.v1': JSON.stringify(grouping)},
     }).currentInfoGroupingForTest();
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'ai', 'path', 'branch'])), ['tab', 'path', 'tmux-window'], 'YO!info migrates the old stored Tab-first quick grouping to Tab > Path > tmux sub-window');
+	    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'tmux-window'])), ['tab', 'tmux-window', 'path'], 'YO!info migrates the former first quick preset to Tab > tmux sub-window > Path');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['path', 'branch', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the old stored Path-first quick grouping to Path > Branch');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['branch', 'path', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the removed stored branch-first quick grouping to Path > Branch');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['ai', 'tab', 'path', 'branch'])), ['linear', 'pr'], 'YO!info migrates the removed stored AI-first quick grouping to Linear > PR');
@@ -6725,7 +6795,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	      assert.ok(match, `YO!info renders Order by select ${level + 1}`);
 	      return [...match[1].matchAll(/<option value="([^"]*)"/g)].map(matchItem => matchItem[1]);
 	    };
+	    const optionLabelsForLevel = (html, level) => {
+	      const match = html.match(new RegExp(`<select data-info-group-level="${level}"[^>]*>([\\s\\S]*?)<\\/select>`));
+	      assert.ok(match, `YO!info renders Order by select ${level + 1}`);
+	      return [...match[1].matchAll(/<option value="[^"]*"[^>]*>([^<]*)<\/option>/g)].map(matchItem => matchItem[1]);
+	    };
 	    const tabFirstControlsHtml = api.infoGroupingControlsHtmlForTest();
+	    for (let level = 0; level < 4; level += 1) {
+	      const labels = optionLabelsForLevel(tabFirstControlsHtml, level);
+	      assert.equal(new Set(labels).size, labels.length, `YO!info Order by select ${level + 1} has no duplicate visible names`);
+	    }
+	    assert.equal(['tmux-session', 'tmux-pane', 'git-worktree', 'local-repository', 'hosted-repository'].some(key => optionValuesForLevel(tabFirstControlsHtml, 0).includes(key)), false, 'YO!info hides internal relationship dimensions from ordinary Order by choices');
 	    assert.ok(!optionValuesForLevel(tabFirstControlsHtml, 0).includes('ai') && !optionValuesForLevel(tabFirstControlsHtml, 0).includes('tmux-window'), 'YO!info first Order by dropdown excludes AI and tmux sub-window');
 	    assert.ok(optionValuesForLevel(tabFirstControlsHtml, 1).includes('tmux-window') && optionValuesForLevel(tabFirstControlsHtml, 1).includes('ai'), 'YO!info second Order by dropdown includes tmux sub-window and AI when the first dropdown is Tab');
 	    assert.equal(optionValuesForLevel(tabFirstControlsHtml, 2).includes('tmux-window'), true, 'YO!info third Order by dropdown includes tmux sub-window when the first dropdown is Tab');
@@ -7546,6 +7626,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(terminalBootSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
     assert.equal(/function setInfoColumnWidth/.test(source), false, 'deleted YO!info table column width code is not retained');
     assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*options\.includeRows !== false[\s\S]*snapshot\.branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows when full state is requested');
+    assert.ok(/function shareInfoRowSnapshot\(row = \{\}\)[\s\S]*branchState:\s*normalizeInfoBranchState\(row\.branchState\)/.test(source), 'YO!share preserves each path branch current/available state instead of downgrading it during replay');
     assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)[\s\S]*collapsedGroupKeys/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, search, and collapse state');
     assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*collapsedGroupKeys[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info collapse state and rows without persisting or echo-publishing');
   });
@@ -9560,6 +9641,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'info.dimension.tab': 'Tab A',
       'info.preset.tabTmuxWindow.label': 'Preset A',
       'info.preset.tabTmuxWindow.title': 'Preset title A',
+      'common.pathLabel': 'Path A',
       'preview.unsupported.archive': 'Archive fallback A',
       'fs.error.notDirectory': '{path} directory error A',
     };
@@ -9572,6 +9654,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'info.dimension.tab': 'Tab B',
       'info.preset.tabTmuxWindow.label': 'Preset B',
       'info.preset.tabTmuxWindow.title': 'Preset title B',
+      'common.pathLabel': 'Path B',
       'preview.unsupported.archive': 'Archive fallback B',
       'fs.error.notDirectory': '{path} directory error B',
     };
@@ -9601,8 +9684,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       const tabDimension = api.infoGroupDimensions().find(definition => definition.key === 'tab');
       const tabPreset = api.infoGroupingPresetsForTest().find(definition => definition.key === 'tab-tmux-window');
       assert.equal(tabDimension.label, `Tab ${suffix}`, `YO!info resolves dimension labelKey for locale ${suffix}`);
-      assert.equal(tabPreset.label, `Preset ${suffix}`, `YO!info resolves preset labelKey for locale ${suffix}`);
-      assert.equal(tabPreset.title, `Preset title ${suffix}`, `YO!info resolves preset titleKey for locale ${suffix}`);
+      assert.equal(tabPreset.label, `Preset ${suffix} > Path ${suffix}`, `YO!info composes the first preset with the localized Path label for locale ${suffix}`);
+      assert.equal(tabPreset.title, tabPreset.label, `YO!info keeps the composed first-preset title synchronized for locale ${suffix}`);
     };
 
     const archiveRenderer = api.previewRendererForPath('/tmp/archive.zip');

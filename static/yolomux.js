@@ -1047,8 +1047,7 @@ function browserUsesTabletViewport() {
 function tabletUsesDesktopLayout(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
-  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
-  return width >= tabletDesktopLayoutMinWidthPx && width > height;
+  return width >= tabletDesktopLayoutMinWidthPx;
 }
 
 function fileExplorerUsesNormalTabMovement() {
@@ -1070,9 +1069,10 @@ function mobileSinglePaneMode(viewport = nativeViewport()) {
 function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const tablet = browserUsesTabletViewport();
   return phoneLikeMobileViewport(viewport)
-    || (browserUsesTabletViewport() && !tabletUsesDesktopLayout(viewport))
-    || width <= narrowTouchSingleColumnMaxWidthPx;
+    || (tablet && width < minSplitPaneWidthPx() * 2)
+    || (!tablet && width <= narrowTouchSingleColumnMaxWidthPx);
 }
 
 function narrowSingleColumnMode(viewport = nativeViewport()) {
@@ -7274,8 +7274,18 @@ function nextAvailableLayoutSlot(slots, preferred = null) {
 
 function canonicalizeSidePaneLayout(slots, options = {}) {
   if (!slots?.[layoutTreeKey]) return slots;
-  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return narrowSingleColumnLayoutSlots(slots, {focusSession: options.focusSession});
+  }
+  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+    const generic = cloneLayoutSlots(slots);
+    for (const slot of sidePaneSlots(generic)) {
+      const tabs = paneTabs(slot, generic);
+      generic[slot] = tabs.length
+        ? paneStateWithTabs(tabs, activeItemForSide(slot, generic), paneRoleDefinition(paneRoleGeneric))
+        : emptyPlaceholderPaneState(paneRoleDefinition(paneRoleGeneric));
+    }
+    return compactLayoutSlots(generic, {preservePlaceholderSlots: options.preservePlaceholderSlots === true});
   }
 
   const original = cloneLayoutSlots(slots);
@@ -7566,7 +7576,9 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutWithDefaultLeftSidePane(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
+  const content = layoutSlotsForItems(items, configuredDefaultLayoutMode());
+  if (!sidePaneConstrainedMode()) return layoutWithDefaultLeftSidePane(content);
+  return layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0]);
 }
 
 function layoutFromParam(raw, tabsRaw = '', options = {}) {
@@ -7836,7 +7848,7 @@ function legacyFileSurfaceSelection(params) {
 function migrateLegacyFileSurfaceLayout(slots, params) {
   const selected = legacyFileSurfaceSelection(params);
   if (!selected) return slots;
-  if (sidePaneConstrainedMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
+  if (narrowSingleColumnMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
   const legacySlot = slotForItem(finderItemId, slots) || slotForItem(differItemId, slots) || slotForItem(tabberItemId, slots);
   if (!legacySlot) return layoutWithSidePaneItems(slots, fileSurfaceItems, {
     side: paneSideLeft,
@@ -8108,22 +8120,23 @@ function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
 }
 
 function normalizeLayoutSlotsForViewport(value, options = {}) {
-  const constrained = sidePaneConstrainedMode();
-  let source = constrained
+  const singleColumn = narrowSingleColumnMode();
+  const sideConstrained = sidePaneConstrainedMode();
+  let source = singleColumn
     ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
-  if (!constrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
+  if (!sideConstrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
     const hasFileSurface = layoutFileSurfaceItems().some(item => itemInLayout(item, source));
     if (hasFileSurface) {
       source = canonicalizeSidePaneLayout(source, {...options, allowSidePanes: true});
       source = layoutWithDefaultLeftSidePane(source);
     }
   }
-  sidePaneLayoutWasConstrained = constrained;
+  sidePaneLayoutWasConstrained = sideConstrained;
   return normalizeLayoutSlots(source, {
     ...options,
-    allowSidePanes: !constrained,
-    preserveMissingSidePane: constrained || options.preserveMissingSidePane === true,
+    allowSidePanes: !sideConstrained,
+    preserveMissingSidePane: sideConstrained || options.preserveMissingSidePane === true,
   });
 }
 
@@ -8133,7 +8146,7 @@ function rememberInitialConstrainedLayout(value) {
 }
 
 function availableLayoutModes() {
-  return sidePaneConstrainedMode() ? ['single'] : layoutModeValues;
+  return narrowSingleColumnMode() ? ['single'] : layoutModeValues;
 }
 
 function initialLayoutSlots() {
@@ -8157,7 +8170,9 @@ function initialLayoutSlots() {
   }
   if (selected.length) {
     const selectedLayout = layoutFromSessionList(selected);
-    return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout)) : selectedLayout;
+    return narrowSingleColumnMode()
+      ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout))
+      : normalizeLayoutSlotsForViewport(selectedLayout);
   }
   return defaultLayoutSlots();
 }
@@ -8165,8 +8180,13 @@ function initialLayoutSlots() {
 function defaultLayoutSlots() {
   if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  const standard = layoutWithDefaultLeftSidePane(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()));
-  return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard)) : standard;
+  const content = layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
+  const standard = sidePaneConstrainedMode()
+    ? layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0])
+    : layoutWithDefaultLeftSidePane(content);
+  return narrowSingleColumnMode()
+    ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard))
+    : normalizeLayoutSlotsForViewport(standard);
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -28106,7 +28126,7 @@ function paneTabsForGenericActions(slot, slots = layoutSlots) {
 // therefore operate on the selected tab; removing the only pane would make the control appear to
 // do nothing (or blank the whole view). Keep one remaining tab as the stable single-column view.
 function narrowPaneFrameActionTargetsTab(item, slots = layoutSlots) {
-  if (!sidePaneConstrainedMode()) return false;
+  if (!narrowSingleColumnMode()) return false;
   const slot = slotForItem(item, slots);
   return Boolean(slot && paneTabs(slot, slots).length > 1);
 }
@@ -28136,7 +28156,7 @@ function minimizePaneFromLayout(item) {
     removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
     return;
   }
-  if (sidePaneConstrainedMode()) return;
+  if (narrowSingleColumnMode()) return;
   if (slotIsSidePane(sourceSlot)) {
     removePaneFromLayout(item);
     return;
@@ -28214,7 +28234,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(sidePaneConstrainedMode() ? 'single' : normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(narrowSingleColumnMode() ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -28371,8 +28391,10 @@ async function openFileSurfacePane(item) {
   }
   if (sidePaneConstrainedMode()) {
     const next = layoutWithItems(layoutSlots, [resolved], slotForNewSession());
-    const narrowed = narrowSingleColumnLayoutSlots(next, {focusSession: resolved});
-    applyLayoutSlots(narrowed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
+    const placed = narrowSingleColumnMode()
+      ? narrowSingleColumnLayoutSlots(next, {focusSession: resolved})
+      : next;
+    applyLayoutSlots(placed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
     return true;
   }
   const next = layoutWithSidePaneItems(layoutSlots, [resolved], {side: paneSideLeft});
@@ -28755,7 +28777,7 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
   const allowed = Boolean(
     isLayoutItem(item)
       && sourceSlot
-      && !sidePaneConstrainedMode()
+      && !narrowSingleColumnMode()
       && !tabIsPinned(item)
       && sourceRect,
   );
@@ -31231,7 +31253,7 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     const slotNode = event.target?.closest?.('.drop-slot');
     const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
     const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
@@ -31389,7 +31411,7 @@ function itemCanSplitSinglePurposePane(item, intent) {
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
   const sourceSlot = options.sourceSlot || slotForItem(session);
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return Boolean(intent?.targetSlot)
       && intent.zone === 'middle'
       && paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
@@ -41080,7 +41102,7 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   modelTokens: {
     attribute: 'displayed-token-sum',
     labelKey: 'debug.graph.sumDisplayed',
-    value: debugGraphAgentTokenDisplayedSum,
+    value: debugGraphModelTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
 });
@@ -42739,6 +42761,18 @@ function debugGraphAgentTokenDisplayedSum(buckets) {
   return Math.max(0, total);
 }
 
+function debugGraphModelTokenDisplayedSum(buckets) {
+  let total = 0;
+  for (const bucket of buckets || []) {
+    if (!(bucket?.agentTokenRates instanceof Map)) continue;
+    for (const item of bucket.agentTokenRates.values()) {
+      if (!(item?.modelRates instanceof Map)) continue;
+      for (const rate of item.modelRates.values()) total += Math.max(0, Number(rate?.tokens) || 0);
+    }
+  }
+  return total;
+}
+
 function debugGraphBucketFieldSum(bucket, fields) {
   return fields.reduce((bucketTotal, field) => (
     bucketTotal + Math.max(0, Number(bucket?.[field]) || 0)
@@ -43128,19 +43162,15 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       value: bucket => {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
-        let rate = null;
+        let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
           for (const agentRate of bucket.agentTokenRates.values()) {
             const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
             if (!modelRate) continue;
-            if (!rate) rate = {total: 0, samples: 0, tokens: 0, seconds: 0};
-            rate.total += Number(modelRate.total || 0);
-            rate.samples += Number(modelRate.samples || 0);
-            rate.tokens += Number(modelRate.tokens || 0);
-            rate.seconds += Number(modelRate.seconds || 0);
+            value += debugGraphAgentTokenBucketValue(bucket, {...modelRate, seconds: agentRate.seconds});
           }
         }
-        return rate ? debugGraphAgentTokenBucketValue(bucket, rate) : 0;
+        return value;
       },
       hasData: bucket => {
         if (dimension === 'agent') {
@@ -43428,9 +43458,19 @@ function debugGraphPointForValue(value, timeMs, chartMax, domain, logScale = fal
 function debugGraphPlotYForValue(value, chartMax, logScale = false) {
   const max = Math.max(Number(chartMax) || 0, 1);
   const rawValue = Math.max(0, Number(value) || 0);
-  const normalized = logScale === true
-    ? Math.max(0, Math.min(1, Math.log1p(rawValue) / Math.log1p(max)))
-    : Math.max(0, Math.min(1, rawValue / max));
+  let normalized;
+  if (logScale?.mode === 'broken-linear') {
+    const threshold = Math.max(1, Math.min(max, Number(logScale.threshold) || max));
+    const upperFraction = Math.max(0.1, Math.min(0.3, Number(logScale.upperFraction) || 0.18));
+    normalized = rawValue <= threshold || max <= threshold
+      ? (rawValue / threshold) * (1 - upperFraction)
+      : (1 - upperFraction) + (((rawValue - threshold) / (max - threshold)) * upperFraction);
+    normalized = Math.max(0, Math.min(1, normalized));
+  } else {
+    normalized = logScale === true
+      ? Math.max(0, Math.min(1, Math.log1p(rawValue) / Math.log1p(max)))
+      : Math.max(0, Math.min(1, rawValue / max));
+  }
   return jsDebugGraphGeometry.plotTop + ((1 - normalized) * jsDebugGraphGeometry.plotHeight);
 }
 
@@ -43829,26 +43869,48 @@ function debugGraphAxisTickStyle(value, chartMax, logScale = false) {
 function debugGraphGridLinesHtml(group, axisMax) {
   const max = Math.max(0, Number(axisMax) || 0);
   const fallbackMax = max > 0 ? max : 1;
+  const scale = group.scale ?? (group.logScale === true);
   const values = group.integerGridLines === true
     ? debugGraphIntegerGridValues(max)
-    : group.logScale === true
+    : scale?.mode === 'broken-linear'
+    ? [fallbackMax, scale.threshold, scale.threshold / 2, 0]
+    : scale === true
     ? [fallbackMax, Math.expm1(Math.log1p(fallbackMax) / 2), 0]
     : [fallbackMax, fallbackMax / 2, 0];
   return values.map(value => {
-    const y = debugGraphGridLineY(value, max, group.logScale === true).toFixed(1);
+    const y = debugGraphGridLineY(value, max, scale).toFixed(1);
     const axisValue = group.integerGridLines === true ? ` data-js-debug-grid-value="${esc(value)}"` : '';
     return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="${esc(jsDebugGraphGeometry.width)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
   }).join('');
+}
+
+function debugGraphAxisBreakHtml(group, axisMax, scale) {
+  if (scale?.mode !== 'broken-linear') return '';
+  const y = debugGraphGridLineY(scale.threshold, axisMax, scale);
+  const left = `M0 ${y - 2}l4 4 4-4 4 4`;
+  const rightX = jsDebugGraphGeometry.width - 12;
+  const right = `M${rightX} ${y - 2}l4 4 4-4 4 4`;
+  return `<path class="js-debug-axis-break" data-js-debug-axis-break="${esc(group.key)}" data-js-debug-axis-break-value="${esc(scale.threshold)}" d="${esc(`${left} ${right}`)}" fill="none" vector-effect="non-scaling-stroke"></path>`;
 }
 
 function debugGraphAxisHtml(group, max) {
   const axisMax = Math.max(0, Number(max) || 0);
   if (group.integerAxis === true) return debugGraphIntegerAxisHtml(group, axisMax);
   const positionMax = axisMax > 0 ? axisMax : 1;
+  const scale = group.scale ?? (group.logScale === true);
+  if (scale?.mode === 'broken-linear') {
+    const threshold = Math.min(positionMax, Number(scale.threshold) || positionMax);
+    return `<div class="js-debug-y-axis js-debug-y-axis--broken" data-js-debug-axis="${esc(group.key)}" data-js-debug-axis-break="${esc(threshold)}">
+      <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+      <span data-js-debug-axis-break-label="${esc(group.key)}"${debugGraphAxisTickStyle(threshold, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold, group.unit))}</span>
+      <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(threshold / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold / 2, group.unit))}</span>
+      <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    </div>`;
+  }
   return `<div class="js-debug-y-axis" data-js-debug-axis="${esc(group.key)}">
-    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
-    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(group.logScale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(group.logScale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
-    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(scale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(scale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
+    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
   </div>`;
 }
 
@@ -43998,7 +44060,7 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   return debugGraphValueText(value, data.group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null) {
+function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
@@ -44010,10 +44072,11 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
-  const logScale = debugGraphUsesLogScale(group, plotSeries);
+  const tokenAxis = (group.key === 'agentTokens' || group.key === 'modelTokens') ? options.tokenAxis : null;
+  const plotScale = tokenAxis?.scale || debugGraphUsesLogScale(group, plotSeries);
   const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...lineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
-  const max = debugGraphChartAxisMax(group, rawMax);
+  const max = tokenAxis ? tokenAxis.axisMax : debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
   const chartClasses = ['js-debug-chart'];
   if (group.dynamicAgentTokens === true || group.dynamicTokenDimension) chartClasses.push('js-debug-chart--token-agents');
@@ -44024,7 +44087,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     ? ''
     : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
-  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}${logScale ? ' data-js-debug-chart-scale="log"' : ''}>
+  const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
+  const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${tokenAxis ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
@@ -44034,16 +44099,17 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       ${gpuUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
     ${gpuUnavailable ? `<div class="js-debug-chart-unavailable" data-js-debug-gpu-unavailable="${esc(group.key)}">${esc(t('finder.dateMode.none'))}</div>` : `<div class="js-debug-chart-body">
-      ${debugGraphAxisHtml({...group, logScale}, axisMax)}
+      ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
-          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, logScale)).join('') : ''}
-          ${debugGraphGridLinesHtml({...group, logScale}, axisMax)}
+          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
+          ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
+          ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, logScale)).join('')}
-          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, logScale)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
@@ -44056,12 +44122,37 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
 }
 
 function debugGraphUsesLogScale(group, seriesItems) {
-  const values = (seriesItems || []).flatMap(series => series.plotValues || series.values || []).map(Number).filter(value => Number.isFinite(value) && value > 0);
+  const candidates = (seriesItems || []).flatMap(series => series.plotValues || series.values || []);
+  const values = candidates.map(Number).filter(value => Number.isFinite(value) && value > 0);
   if (!values.length) return false;
   const max = Math.max(...values);
   if (group?.key === 'latency') return max > 1000;
-  if (group?.key === 'modelTokens') return max / Math.min(...values) >= 10;
   return false;
+}
+
+function debugGraphTokenAxisDescriptor(buckets) {
+  const values = (buckets || []).map(bucket => {
+    if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+    let total = 0;
+    for (const rate of bucket.agentTokenRates.values()) total += debugGraphAgentTokenBucketValue(bucket, rate);
+    return total;
+  }).filter(value => Number.isFinite(value) && value > 0);
+  const rawMax = Math.max(0, ...values);
+  const group = jsDebugGraphChartGroups.find(item => item.key === 'agentTokens');
+  const axisMax = debugGraphChartAxisMax(group || {unit: 'tokensPerMinute'}, rawMax);
+  const sorted = [...values].sort((left, right) => left - right);
+  const normalMax = sorted.length >= 8 ? sorted[Math.floor((sorted.length - 1) * 0.9)] : rawMax;
+  const threshold = debugGraphChartAxisMax(group || {unit: 'tokensPerMinute'}, normalMax);
+  const peakCount = sorted.filter(value => value > threshold).length;
+  const broken = sorted.length >= 8
+    && peakCount > 0
+    && peakCount <= Math.max(1, Math.ceil(sorted.length * 0.1))
+    && rawMax >= Math.max(threshold * 2.5, normalMax * 3)
+    && threshold < axisMax;
+  return Object.freeze({
+    axisMax,
+    scale: broken ? Object.freeze({mode: 'broken-linear', threshold, upperFraction: 0.18}) : false,
+  });
 }
 
 function debugGraphChartLabel(group, buckets = []) {
@@ -44083,10 +44174,12 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
+  const tokenBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
+  const tokenAxis = debugGraphTokenAxisDescriptor(tokenBuckets);
   const gridHtml = chartGroups.map(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges);
+      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {tokenAxis});
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }
@@ -59945,7 +60038,7 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'more']);
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['ctrl', 'interrupt', 'escape', 'tab', 'tmux-prefix', 'more']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -60014,6 +60107,7 @@ function terminalMobileAccessoryHtml(session) {
   const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
   return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
+      <button type="button" class="mobile-terminal-key-close" data-terminal-mobile-close="${esc(session)}" aria-label="${esc(t('shortcuts.close'))}">×</button>
       <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
       <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
@@ -60851,20 +60945,20 @@ const infoSortDefs = Object.freeze([
 ]);
 const infoDimensionDefs = Object.freeze([
   {key: 'tab', labelKey: 'info.dimension.tab', legacyKeys: ['tab']},
-  {key: 'tmux-session', labelKey: 'info.field.tabTmuxSession', legacyKeys: []},
+  {key: 'tmux-session', labelKey: 'info.field.tabTmuxSession', legacyKeys: [], userSelectable: false},
   {key: 'tmux-window', labelKey: 'info.field.tmuxWindow', legacyKeys: ['tmux-window']},
-  {key: 'tmux-pane', labelKey: 'info.field.tmuxWindow', legacyKeys: []},
+  {key: 'tmux-pane', labelKey: 'info.field.tmuxWindow', legacyKeys: [], userSelectable: false},
   {key: 'ai', labelKey: 'info.dimension.ai', legacyKeys: ['ai']},
   {key: 'path', labelKey: 'common.pathLabel', legacyKeys: ['path']},
-  {key: 'git-worktree', labelKey: 'common.pathLabel', legacyKeys: []},
-  {key: 'local-repository', labelKey: 'common.pathLabel', legacyKeys: []},
-  {key: 'hosted-repository', labelKey: 'common.pathLabel', legacyKeys: []},
+  {key: 'git-worktree', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'local-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'hosted-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
   {key: 'branch', labelKey: 'common.branchLabel', legacyKeys: ['branch']},
   {key: 'pr', labelKey: 'common.pullRequestShort', legacyKeys: ['pr']},
   {key: 'linear', labelKey: 'info.field.linear', legacyKeys: ['linear']},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window', 'path']},
   {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
   {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['git-worktree', 'local-repository', 'branch']},
   {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
@@ -60903,9 +60997,20 @@ function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const index = Number(level);
   const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(5, index)) : 0;
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
-  return infoDimensionDefs
+  const selectedKey = String(activeGrouping[normalizedIndex] || '');
+  const dimensions = infoDimensionDefs
+    .filter(dimension => dimension.userSelectable !== false || dimension.key === selectedKey)
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
     .map(localizedInfoDefinition);
+  const selected = dimensions.find(dimension => dimension.key === selectedKey);
+  const ordered = selected ? [selected, ...dimensions.filter(dimension => dimension !== selected)] : dimensions;
+  const labels = new Set();
+  return ordered.filter(dimension => {
+    const label = String(dimension.label || dimension.key);
+    if (labels.has(label)) return false;
+    labels.add(label);
+    return true;
+  });
 }
 
 function infoSortFields() {
@@ -60913,7 +61018,14 @@ function infoSortFields() {
 }
 
 function infoGroupingPresets() {
-  return infoPresetDefs.map(preset => ({...localizedInfoDefinition(preset), grouping: preset.grouping.slice()}));
+  return infoPresetDefs.map(preset => {
+    const localized = localizedInfoDefinition(preset);
+    if (preset.key === 'tab-tmux-window') {
+      localized.label = `${localized.label} > ${t('common.pathLabel')}`;
+      localized.title = localized.label;
+    }
+    return {...localized, grouping: preset.grouping.slice()};
+  });
 }
 
 function normalizeInfoGrouping(value, options = {}) {
@@ -60937,6 +61049,7 @@ function normalizeInfoGrouping(value, options = {}) {
 
 function normalizeInfoLegacyPresetGrouping(grouping) {
   const key = (Array.isArray(grouping) ? grouping : []).join('|');
+  if (key === 'tab|tmux-window') return ['tab', 'tmux-window', 'path'];
   if (key === 'tab|ai|path|branch') return ['tab', 'path', 'tmux-window'];
   if (key === 'path|branch|tab|ai') return ['path', 'branch'];
   if (key === 'branch|path|tab|ai') return ['path', 'branch'];
@@ -61264,6 +61377,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         branchLabel: branch || t('info.missing.branch'),
         branchTitle: branch || t('info.missing.branch'),
         branchHtml: row?.branchHtml || esc(branch || t('info.missing.branch')),
+        branchState: normalizeInfoBranchState(row?.branchState),
         prKey: prCompactLabel || prKeyLabel || '__no_pr__',
         prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || t('info.missing.pr'),
         prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
@@ -61959,12 +62073,17 @@ function infoRecordMainChipsHtml(record, options = {}) {
   }
   if (branchVisible) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    const state = String(record?.branchState || 'available');
+    const state = normalizeInfoBranchState(record?.branchState);
     const stateLabel = state === 'current' ? t('branch.current') : state;
     const stateHtml = `<span class="info-tree-branch-state info-tree-branch-state-${esc(state)}">${esc(stateLabel)}</span>`;
     fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${stateHtml}${updatedMeta}`, record.branchTitle));
   }
   return fields.join('');
+}
+
+function normalizeInfoBranchState(value) {
+  const state = String(value || '').trim().toLowerCase();
+  return ['current', 'worked', 'missing'].includes(state) ? state : 'available';
 }
 
 function infoRecordHtml(record, options = {}) {
@@ -62813,6 +62932,7 @@ function shareInfoRowSnapshot(row = {}) {
     pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
     pathActivitySource: shareInfoString(row.pathActivitySource, 100),
     branch: shareInfoString(row.branch, 500),
+    branchState: normalizeInfoBranchState(row.branchState),
     desc: shareInfoString(row.desc, 1000),
     updated: shareInfoString(row.updated, 200),
     updatedText: shareInfoString(row.updatedText, 200),
@@ -62909,6 +63029,11 @@ function bindPanelControls(panel, session) {
     const targetSession = button.dataset.terminalMobileToggle || session;
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-close]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissTerminalMobileAccessory(button.dataset.terminalMobileClose || session);
   });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
     // Do not blur xterm/close the software keyboard before the click sends its byte.

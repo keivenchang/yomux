@@ -145,7 +145,7 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   modelTokens: {
     attribute: 'displayed-token-sum',
     labelKey: 'debug.graph.sumDisplayed',
-    value: debugGraphAgentTokenDisplayedSum,
+    value: debugGraphModelTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
 });
@@ -1804,6 +1804,18 @@ function debugGraphAgentTokenDisplayedSum(buckets) {
   return Math.max(0, total);
 }
 
+function debugGraphModelTokenDisplayedSum(buckets) {
+  let total = 0;
+  for (const bucket of buckets || []) {
+    if (!(bucket?.agentTokenRates instanceof Map)) continue;
+    for (const item of bucket.agentTokenRates.values()) {
+      if (!(item?.modelRates instanceof Map)) continue;
+      for (const rate of item.modelRates.values()) total += Math.max(0, Number(rate?.tokens) || 0);
+    }
+  }
+  return total;
+}
+
 function debugGraphBucketFieldSum(bucket, fields) {
   return fields.reduce((bucketTotal, field) => (
     bucketTotal + Math.max(0, Number(bucket?.[field]) || 0)
@@ -2193,19 +2205,15 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       value: bucket => {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
-        let rate = null;
+        let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
           for (const agentRate of bucket.agentTokenRates.values()) {
             const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
             if (!modelRate) continue;
-            if (!rate) rate = {total: 0, samples: 0, tokens: 0, seconds: 0};
-            rate.total += Number(modelRate.total || 0);
-            rate.samples += Number(modelRate.samples || 0);
-            rate.tokens += Number(modelRate.tokens || 0);
-            rate.seconds += Number(modelRate.seconds || 0);
+            value += debugGraphAgentTokenBucketValue(bucket, {...modelRate, seconds: agentRate.seconds});
           }
         }
-        return rate ? debugGraphAgentTokenBucketValue(bucket, rate) : 0;
+        return value;
       },
       hasData: bucket => {
         if (dimension === 'agent') {
@@ -2493,9 +2501,19 @@ function debugGraphPointForValue(value, timeMs, chartMax, domain, logScale = fal
 function debugGraphPlotYForValue(value, chartMax, logScale = false) {
   const max = Math.max(Number(chartMax) || 0, 1);
   const rawValue = Math.max(0, Number(value) || 0);
-  const normalized = logScale === true
-    ? Math.max(0, Math.min(1, Math.log1p(rawValue) / Math.log1p(max)))
-    : Math.max(0, Math.min(1, rawValue / max));
+  let normalized;
+  if (logScale?.mode === 'broken-linear') {
+    const threshold = Math.max(1, Math.min(max, Number(logScale.threshold) || max));
+    const upperFraction = Math.max(0.1, Math.min(0.3, Number(logScale.upperFraction) || 0.18));
+    normalized = rawValue <= threshold || max <= threshold
+      ? (rawValue / threshold) * (1 - upperFraction)
+      : (1 - upperFraction) + (((rawValue - threshold) / (max - threshold)) * upperFraction);
+    normalized = Math.max(0, Math.min(1, normalized));
+  } else {
+    normalized = logScale === true
+      ? Math.max(0, Math.min(1, Math.log1p(rawValue) / Math.log1p(max)))
+      : Math.max(0, Math.min(1, rawValue / max));
+  }
   return jsDebugGraphGeometry.plotTop + ((1 - normalized) * jsDebugGraphGeometry.plotHeight);
 }
 
@@ -2894,26 +2912,48 @@ function debugGraphAxisTickStyle(value, chartMax, logScale = false) {
 function debugGraphGridLinesHtml(group, axisMax) {
   const max = Math.max(0, Number(axisMax) || 0);
   const fallbackMax = max > 0 ? max : 1;
+  const scale = group.scale ?? (group.logScale === true);
   const values = group.integerGridLines === true
     ? debugGraphIntegerGridValues(max)
-    : group.logScale === true
+    : scale?.mode === 'broken-linear'
+    ? [fallbackMax, scale.threshold, scale.threshold / 2, 0]
+    : scale === true
     ? [fallbackMax, Math.expm1(Math.log1p(fallbackMax) / 2), 0]
     : [fallbackMax, fallbackMax / 2, 0];
   return values.map(value => {
-    const y = debugGraphGridLineY(value, max, group.logScale === true).toFixed(1);
+    const y = debugGraphGridLineY(value, max, scale).toFixed(1);
     const axisValue = group.integerGridLines === true ? ` data-js-debug-grid-value="${esc(value)}"` : '';
     return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="${esc(jsDebugGraphGeometry.width)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
   }).join('');
+}
+
+function debugGraphAxisBreakHtml(group, axisMax, scale) {
+  if (scale?.mode !== 'broken-linear') return '';
+  const y = debugGraphGridLineY(scale.threshold, axisMax, scale);
+  const left = `M0 ${y - 2}l4 4 4-4 4 4`;
+  const rightX = jsDebugGraphGeometry.width - 12;
+  const right = `M${rightX} ${y - 2}l4 4 4-4 4 4`;
+  return `<path class="js-debug-axis-break" data-js-debug-axis-break="${esc(group.key)}" data-js-debug-axis-break-value="${esc(scale.threshold)}" d="${esc(`${left} ${right}`)}" fill="none" vector-effect="non-scaling-stroke"></path>`;
 }
 
 function debugGraphAxisHtml(group, max) {
   const axisMax = Math.max(0, Number(max) || 0);
   if (group.integerAxis === true) return debugGraphIntegerAxisHtml(group, axisMax);
   const positionMax = axisMax > 0 ? axisMax : 1;
+  const scale = group.scale ?? (group.logScale === true);
+  if (scale?.mode === 'broken-linear') {
+    const threshold = Math.min(positionMax, Number(scale.threshold) || positionMax);
+    return `<div class="js-debug-y-axis js-debug-y-axis--broken" data-js-debug-axis="${esc(group.key)}" data-js-debug-axis-break="${esc(threshold)}">
+      <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+      <span data-js-debug-axis-break-label="${esc(group.key)}"${debugGraphAxisTickStyle(threshold, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold, group.unit))}</span>
+      <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(threshold / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold / 2, group.unit))}</span>
+      <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    </div>`;
+  }
   return `<div class="js-debug-y-axis" data-js-debug-axis="${esc(group.key)}">
-    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
-    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(group.logScale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(group.logScale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
-    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(scale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(scale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
+    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
   </div>`;
 }
 
@@ -3063,7 +3103,7 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   return debugGraphValueText(value, data.group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null) {
+function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
@@ -3075,10 +3115,11 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
-  const logScale = debugGraphUsesLogScale(group, plotSeries);
+  const tokenAxis = (group.key === 'agentTokens' || group.key === 'modelTokens') ? options.tokenAxis : null;
+  const plotScale = tokenAxis?.scale || debugGraphUsesLogScale(group, plotSeries);
   const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...lineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
-  const max = debugGraphChartAxisMax(group, rawMax);
+  const max = tokenAxis ? tokenAxis.axisMax : debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
   const chartClasses = ['js-debug-chart'];
   if (group.dynamicAgentTokens === true || group.dynamicTokenDimension) chartClasses.push('js-debug-chart--token-agents');
@@ -3089,7 +3130,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     ? ''
     : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
-  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}${logScale ? ' data-js-debug-chart-scale="log"' : ''}>
+  const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
+  const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${tokenAxis ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
@@ -3099,16 +3142,17 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       ${gpuUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
     ${gpuUnavailable ? `<div class="js-debug-chart-unavailable" data-js-debug-gpu-unavailable="${esc(group.key)}">${esc(t('finder.dateMode.none'))}</div>` : `<div class="js-debug-chart-body">
-      ${debugGraphAxisHtml({...group, logScale}, axisMax)}
+      ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
-          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, logScale)).join('') : ''}
-          ${debugGraphGridLinesHtml({...group, logScale}, axisMax)}
+          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
+          ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
+          ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, logScale)).join('')}
-          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, logScale)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
@@ -3121,12 +3165,37 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
 }
 
 function debugGraphUsesLogScale(group, seriesItems) {
-  const values = (seriesItems || []).flatMap(series => series.plotValues || series.values || []).map(Number).filter(value => Number.isFinite(value) && value > 0);
+  const candidates = (seriesItems || []).flatMap(series => series.plotValues || series.values || []);
+  const values = candidates.map(Number).filter(value => Number.isFinite(value) && value > 0);
   if (!values.length) return false;
   const max = Math.max(...values);
   if (group?.key === 'latency') return max > 1000;
-  if (group?.key === 'modelTokens') return max / Math.min(...values) >= 10;
   return false;
+}
+
+function debugGraphTokenAxisDescriptor(buckets) {
+  const values = (buckets || []).map(bucket => {
+    if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+    let total = 0;
+    for (const rate of bucket.agentTokenRates.values()) total += debugGraphAgentTokenBucketValue(bucket, rate);
+    return total;
+  }).filter(value => Number.isFinite(value) && value > 0);
+  const rawMax = Math.max(0, ...values);
+  const group = jsDebugGraphChartGroups.find(item => item.key === 'agentTokens');
+  const axisMax = debugGraphChartAxisMax(group || {unit: 'tokensPerMinute'}, rawMax);
+  const sorted = [...values].sort((left, right) => left - right);
+  const normalMax = sorted.length >= 8 ? sorted[Math.floor((sorted.length - 1) * 0.9)] : rawMax;
+  const threshold = debugGraphChartAxisMax(group || {unit: 'tokensPerMinute'}, normalMax);
+  const peakCount = sorted.filter(value => value > threshold).length;
+  const broken = sorted.length >= 8
+    && peakCount > 0
+    && peakCount <= Math.max(1, Math.ceil(sorted.length * 0.1))
+    && rawMax >= Math.max(threshold * 2.5, normalMax * 3)
+    && threshold < axisMax;
+  return Object.freeze({
+    axisMax,
+    scale: broken ? Object.freeze({mode: 'broken-linear', threshold, upperFraction: 0.18}) : false,
+  });
 }
 
 function debugGraphChartLabel(group, buckets = []) {
@@ -3148,10 +3217,12 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
+  const tokenBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
+  const tokenAxis = debugGraphTokenAxisDescriptor(tokenBuckets);
   const gridHtml = chartGroups.map(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges);
+      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {tokenAxis});
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }

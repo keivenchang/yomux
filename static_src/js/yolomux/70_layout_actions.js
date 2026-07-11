@@ -172,7 +172,7 @@ function paneTabsForGenericActions(slot, slots = layoutSlots) {
 // therefore operate on the selected tab; removing the only pane would make the control appear to
 // do nothing (or blank the whole view). Keep one remaining tab as the stable single-column view.
 function narrowPaneFrameActionTargetsTab(item, slots = layoutSlots) {
-  if (!sidePaneConstrainedMode()) return false;
+  if (!narrowSingleColumnMode()) return false;
   const slot = slotForItem(item, slots);
   return Boolean(slot && paneTabs(slot, slots).length > 1);
 }
@@ -202,7 +202,7 @@ function minimizePaneFromLayout(item) {
     removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
     return;
   }
-  if (sidePaneConstrainedMode()) return;
+  if (narrowSingleColumnMode()) return;
   if (slotIsSidePane(sourceSlot)) {
     removePaneFromLayout(item);
     return;
@@ -280,7 +280,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(sidePaneConstrainedMode() ? 'single' : normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(narrowSingleColumnMode() ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -437,8 +437,10 @@ async function openFileSurfacePane(item) {
   }
   if (sidePaneConstrainedMode()) {
     const next = layoutWithItems(layoutSlots, [resolved], slotForNewSession());
-    const narrowed = narrowSingleColumnLayoutSlots(next, {focusSession: resolved});
-    applyLayoutSlots(narrowed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
+    const placed = narrowSingleColumnMode()
+      ? narrowSingleColumnLayoutSlots(next, {focusSession: resolved})
+      : next;
+    applyLayoutSlots(placed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
     return true;
   }
   const next = layoutWithSidePaneItems(layoutSlots, [resolved], {side: paneSideLeft});
@@ -821,7 +823,7 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
   const allowed = Boolean(
     isLayoutItem(item)
       && sourceSlot
-      && !sidePaneConstrainedMode()
+      && !narrowSingleColumnMode()
       && !tabIsPinned(item)
       && sourceRect,
   );
@@ -3297,7 +3299,7 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     const slotNode = event.target?.closest?.('.drop-slot');
     const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
     const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
@@ -3455,7 +3457,7 @@ function itemCanSplitSinglePurposePane(item, intent) {
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
   const sourceSlot = options.sourceSlot || slotForItem(session);
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return Boolean(intent?.targetSlot)
       && intent.zone === 'middle'
       && paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {

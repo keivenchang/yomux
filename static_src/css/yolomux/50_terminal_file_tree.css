@@ -45,6 +45,9 @@
   box-shadow: var(--shadow-elevated);
   font: 700 var(--ui-font-size)/1 var(--ui-font);
   touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 /* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
    not a permanent row, so an idle terminal keeps its full visible height. */
@@ -52,8 +55,7 @@
   position: absolute;
   z-index: var(--z-terminal-popover);
   inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
-  inset-block-start: 50%;
-  transform: translateY(-50%);
+  inset-block-end: calc(max(var(--space-8), env(safe-area-inset-bottom)) + 44px);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   grid-auto-rows: max-content;
@@ -61,14 +63,37 @@
   gap: var(--space-4);
   width: min(18rem, calc(100vw - var(--space-12)));
   max-height: calc(100% - var(--space-12));
-  padding: var(--space-5);
+  padding: calc(var(--space-5) + 22px) var(--space-5) var(--space-5);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   box-shadow: var(--shadow-elevated), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 .mobile-terminal-keybar[hidden] {
   display: none;
+}
+.mobile-terminal-key-close {
+  position: absolute;
+  inset-block-start: var(--space-3);
+  inset-inline-end: var(--space-3);
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: transparent;
+  font: 700 20px/1 var(--ui-font);
+  touch-action: manipulation;
+}
+.mobile-terminal-key-close:hover,
+.mobile-terminal-key-close:focus-visible {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
 }
 .mobile-terminal-key-drag {
   grid-row: 1 / -1;
@@ -960,6 +985,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   margin-inline-start: auto;
 }
 .info-tree-actions-bar {
+  container: info-tree-toolbar / inline-size;
   align-items: flex-start;
   flex-wrap: wrap;
   column-gap: var(--space-8);
@@ -2566,6 +2592,7 @@ button.info-tree-tab-token.active:focus-visible {
 }
 .info-tree-record {
   --info-tree-field-label-width: 18ch;
+  container: info-tree-record / inline-size;
   display: block;
   gap: var(--space-6);
   padding: var(--space-2) var(--space-4) var(--space-3);
@@ -2724,6 +2751,7 @@ button.info-tree-tab-token.active:focus-visible {
 }
 .info-tree-branch-state {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   margin-inline-start: var(--space-4);
   padding: 0 var(--space-4);
@@ -2732,6 +2760,7 @@ button.info-tree-tab-token.active:focus-visible {
   color: var(--info-tree-field-color);
   font: 700 var(--ui-font-size-2xs)/1.35 var(--mono-font);
   text-transform: lowercase;
+  white-space: nowrap;
 }
 .info-tree-branch-state-current { color: var(--good); border-color: color-mix(in srgb, var(--good) 70%, transparent); }
 .info-tree-branch-state-worked { color: var(--warning-border-strong); border-color: color-mix(in srgb, var(--warning-border-strong) 70%, transparent); }
@@ -2803,30 +2832,68 @@ button.info-tree-tab-token.active:focus-visible {
   margin-inline-start: auto;
   text-align: end;
 }
-/* A Vertical Side Pane deliberately trades width for a persistent edge view. Keep the same
-   information hierarchy, but stack field labels above values and tighten each tree level so deep
-   branch/path records retain a readable value column instead of wrapping one character per line. */
+/* Tree depth, not only Dockview role, determines how much width a record can actually use. Let
+   each record respond to its own measured inline size so a deeply nested item in an otherwise
+   wide pane cannot squeeze branch/status text into one-character columns. */
+@container info-tree-record (max-width: 48rem) {
+  .info-tree-record-main {
+    padding-inline-start: var(--space-4);
+  }
+  .info-tree-field {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+  .info-tree-field-label {
+    white-space: normal;
+  }
+  .info-tree-field-value {
+    width: 100%;
+  }
+  .info-tree-field-branch .info-tree-field-value,
+  .info-tree-field-path .info-tree-field-value,
+  .info-tree-field-ai .info-tree-field-value {
+    flex-wrap: wrap;
+  }
+  .info-tree-field-branch .info-tree-value-text {
+    flex: 1 1 14rem;
+  }
+  .info-tree-field-branch .info-tree-meta-updated,
+  .info-tree-field-path .info-tree-meta-path-activity,
+  .info-tree-field-ai .info-tree-trailing-meta {
+    flex: 0 0 100%;
+    margin-inline-start: 0;
+    text-align: start;
+  }
+}
+/* At toolbar widths where a flex line can strand a `>` by itself, use a stable two-column control
+   grid. The DOM order remains the grouping order, while the redundant visual separators disappear. */
+@container info-tree-toolbar (max-width: 62rem) {
+  .info-tree-group-selects {
+    flex: 1 1 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+  .info-tree-order-label {
+    grid-column: 1 / -1;
+  }
+  .info-tree-order-separator {
+    display: none;
+  }
+  .info-tree-order-select,
+  .info-tree-order-select select {
+    width: 100%;
+  }
+  .info-tree-sort-controls {
+    margin-inline-start: 0;
+    justify-content: flex-start;
+  }
+}
+/* A Vertical Side Pane deliberately trades width for a persistent edge view. Tighten tree
+   indentation here; the shared info-tree-record container rule above owns field stacking. */
 .yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-group-children {
   margin-inline-start: var(--space-8);
   padding-inline-start: var(--space-8);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-record-main {
-  padding-inline-start: var(--space-4);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field {
-  grid-template-columns: minmax(0, 1fr);
-  row-gap: var(--space-1);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-label {
-  white-space: normal;
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-value {
-  width: 100%;
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-branch .info-tree-meta-updated,
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-ai .info-tree-trailing-meta {
-  margin-inline-start: 0;
-  text-align: start;
 }
 .info-tree-trailing-meta {
   color: var(--subwindow-recency-color);

@@ -34,6 +34,133 @@ def test_stats_store_wal_round_trip_preserves_bucket_and_normalized_rows(tmp_pat
     reopened.close()
 
 
+def test_statsd_new_owner_negotiates_old_and_current_protocols(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+
+    old_ping, _binary = service.handle_with_binary({"action": "ping"})
+    current_ping, _binary = service.handle_with_binary(
+        {"action": "ping", "protocol_version": statsd.STATSD_PROTOCOL_VERSION}
+    )
+    old_status, _binary = service.handle_with_binary({"action": "status", "protocol_version": 4})
+
+    malformed_ping, _binary = service.handle_with_binary({"action": "ping", "protocol_version": "invalid"})
+
+    assert old_ping["version"] == statsd.STATSD_COMPAT_PROTOCOL_VERSION
+    assert old_status["version"] == statsd.STATSD_COMPAT_PROTOCOL_VERSION
+    assert malformed_ping["version"] == statsd.STATSD_COMPAT_PROTOCOL_VERSION
+    assert current_ping["version"] == statsd.STATSD_PROTOCOL_VERSION
+    service.store.close()
+
+
+def test_statsd_claims_model_deltas_and_preserves_them_through_history(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    key = "1|0|codex"
+
+    baseline = service.claim_agent_token_deltas([{
+        "key": key,
+        "label": "1:0:codex",
+        "tokens": 100,
+        "source": "transcript",
+        "identity": "stable",
+        "models": {"gpt-5.6-sol": 80, "gpt-5.6-terra": 20},
+    }], {key}, 1000.0)
+    claimed = service.claim_agent_token_deltas([{
+        "key": key,
+        "label": "1:0:codex",
+        "tokens": 160,
+        "source": "transcript",
+        "identity": "stable",
+        "models": {"gpt-5.6-sol": 110, "gpt-5.6-terra": 40},
+    }], {key}, 1060.0)
+    service.merge_server_records(claimed["records"], now=1060.0)
+    history = service.handle({"action": "history", "token_resolution_seconds": 60})
+
+    assert baseline["records"] == []
+    rates = [record["agent_token_rates"][0] for record in claimed["records"]]
+    assert sum(rate["tokens"] for rate in rates) == pytest.approx(60.0)
+    model_tokens = {
+        model: sum(rate["model_rates"].get(model, {}).get("tokens", 0.0) for rate in rates)
+        for model in {model for rate in rates for model in rate["model_rates"]}
+    }
+    assert model_tokens == {
+        "gpt-5.6-sol": pytest.approx(30.0),
+        "gpt-5.6-terra": pytest.approx(20.0),
+        "unknown": pytest.approx(10.0),
+    }
+    stored_rates = [record["agent_token_rates"][0] for record in history["agent_token_history"]["records"]]
+    assert sum(rate["model_rates"]["gpt-5.6-sol"]["tokens"] for rate in stored_rates) == pytest.approx(30.0)
+    assert claimed["state"][key]["models"] == {"gpt-5.6-sol": 110.0, "gpt-5.6-terra": 40.0}
+    service.store.close()
+
+
+def test_statsd_old_model_less_baseline_does_not_recount_cumulative_models(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    key = "1|0|codex"
+    service._set_agent_token_state({key: {"tokens": 100, "time": 1000, "label": "1:0:codex", "source": "transcript", "identity": "stable"}})
+
+    claimed = service.claim_agent_token_deltas([{
+        "key": key,
+        "label": "1:0:codex",
+        "tokens": 110,
+        "source": "transcript",
+        "identity": "stable",
+        "models": {"gpt-5.6-sol": 110},
+    }], {key}, 1060.0)
+
+    rates = [record["agent_token_rates"][0] for record in claimed["records"]]
+    assert sum(rate["tokens"] for rate in rates) == pytest.approx(10.0)
+    assert sum(rate["model_rates"]["unknown"]["tokens"] for rate in rates) == pytest.approx(10.0)
+    service.store.close()
+
+
+@pytest.mark.parametrize(
+    ("model_rates", "expected"),
+    (
+        ({"gpt-sol": {"tokens": 25, "seconds": 30}}, {"gpt-sol": 25, "unknown": 75}),
+        ({"gpt-sol": {"tokens": 150, "seconds": 30}, "gpt-terra": {"tokens": 50, "seconds": 30}}, {"gpt-sol": 75, "gpt-terra": 25}),
+    ),
+)
+def test_statsd_model_partition_is_normalized_to_owning_agent_total(model_rates, expected):
+    [rate] = statsd.PersistentStatsService._agent_token_rate_records({
+        "1|0|codex": {"tokens": 100, "total": 100, "samples": 1, "seconds": 60, "model_rates": model_rates},
+    })
+
+    assert {model: item["tokens"] for model, item in rate["model_rates"].items()} == pytest.approx(expected)
+    assert sum(item["tokens"] for item in rate["model_rates"].values()) == pytest.approx(rate["tokens"])
+    assert {item["seconds"] for item in rate["model_rates"].values()} == {rate["seconds"]}
+
+
+def test_statsd_recovery_generation_repairs_existing_model_partition_mismatch(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    bucket = stats_store.empty_bucket(960, 60)
+    bucket["sequence"] = bucket["server_sequence"] = 1
+    bucket["agent_token_rates"] = {
+        "1|0|codex": {
+            "label": "1:0:codex", "tokens": 100, "total": 100, "samples": 1, "seconds": 60,
+            "model_rates": {"gpt-sol": {"tokens": 160, "total": 160, "samples": 1, "seconds": 60}},
+        },
+    }
+    service.store.upsert_bucket(bucket)
+
+    result = service.recover_agent_token_history([], now=1_000)
+    repaired = service.store.bucket(960, 60)["agent_token_rates"]["1|0|codex"]
+
+    assert result["changed"] is True
+    assert repaired["model_rates"]["gpt-sol"]["tokens"] == pytest.approx(100)
+    assert service.store.metadata_value(statsd.STATSD_AGENT_TOKEN_RECOVERY_MARKER) == str(statsd.STATSD_AGENT_TOKEN_RECOVERY_VERSION)
+    service.store.close()
+
+
+def test_statsd_empty_transcript_roster_does_not_consume_recovery_marker(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+
+    result = service.recover_agent_token_history_from_rows([], now=1_000.0)
+
+    assert result == {"ok": True, "changed": False, "reason": "no_transcript_rows"}
+    assert service.store.metadata_value(statsd.STATSD_AGENT_TOKEN_RECOVERY_MARKER) is None
+    service.store.close()
+
+
 def test_stats_store_rolls_back_bucket_and_child_rows_when_one_child_is_invalid(tmp_path):
     store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
     too_large = _bucket()

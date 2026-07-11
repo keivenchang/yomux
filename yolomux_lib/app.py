@@ -424,7 +424,7 @@ STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS = STATS_HISTORY_SAMPLER_SECONDS
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
 STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 45.0
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS * 3
-STATS_AGENT_TOKEN_SCHEMA_VERSION = 3
+STATS_AGENT_TOKEN_SCHEMA_VERSION = 4
 # Versioned separately from the token-rate schema: this one-time repair reconstructs the history
 # erased by the first schema-3 writer from the transcript counters that remain on disk.
 STATS_SHARED_FRESH_SECONDS = 3.0
@@ -742,6 +742,19 @@ def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
             record["seconds"] = seconds
         if source_label:
             record["source"] = source_label
+        raw_model_rates = item.get("model_rates")
+        if isinstance(raw_model_rates, dict):
+            model_rates: dict[str, dict[str, float]] = {}
+            for raw_model, raw_rate in raw_model_rates.items():
+                if not isinstance(raw_rate, dict):
+                    continue
+                model = str(raw_model or "unknown").strip()[:256] or "unknown"
+                model_rates[model] = {
+                    field: positive_finite_number(raw_rate.get(field))
+                    for field in ("total", "samples", "tokens", "seconds")
+                }
+            if model_rates:
+                record["model_rates"] = model_rates
         records.append(record)
     return records
 
@@ -1798,6 +1811,13 @@ class TmuxWebtermApp:
                 text = str(raw_item.get(field) or "").strip()
                 if text:
                     item[field] = text
+            raw_models = raw_item.get("models")
+            if isinstance(raw_models, dict):
+                item["models"] = {
+                    str(model or "unknown").strip()[:256] or "unknown": positive_finite_number(total)
+                    for model, total in raw_models.items()
+                    if positive_finite_number(total) > 0
+                }
             snapshot[key] = item
         return snapshot
 
@@ -2006,6 +2026,12 @@ class TmuxWebtermApp:
 
     def statsd_recover_agent_token_history(self, rows: list[dict[str, Any]], now: float) -> bool:
         token_rows = self.stats_agent_token_rows(rows)
+        expected_keys = {self.stats_agent_token_key(row, index) for index, row in enumerate(rows)}
+        recovered_keys = {str(row.get("key") or "") for row in token_rows}
+        if not expected_keys or recovered_keys != expected_keys:
+            # Agent and transcript discovery settle independently at startup.
+            # A partial roster must not consume statsd's one-time generation.
+            return False
         response = self.stats_client.recover_agent_token_history_from_rows(token_rows, now=now)
         if not response.get("ok"):
             # Recovery is a cold-start optimization. A transient daemon spawn

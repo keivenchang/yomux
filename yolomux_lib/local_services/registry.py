@@ -146,7 +146,7 @@ class LocalServiceRegistry:
 
     def _request(self, method: str, payload: dict[str, Any] | None = None, timeout: float = 0.2) -> dict[str, Any]:
         try:
-            request_payload = {"action": method, **(payload or {})}
+            request_payload = {"action": method, "protocol_version": self.spec.protocol_version, **(payload or {})}
             envelope = new_envelope(self.spec.name, method, request_payload, timeout_seconds=timeout)
             response, _binary = request(self.socket_path, envelope, timeout_seconds=timeout, fallback_legacy=True)
         except (OSError, LocalRpcError):

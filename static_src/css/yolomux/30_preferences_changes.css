@@ -507,6 +507,10 @@
   top: var(--js-debug-axis-y, 0%);
   transform: translateY(-50%);
 }
+.js-debug-y-axis--broken [data-js-debug-axis-break-label]::after {
+  content: " ≋";
+  color: var(--active-accent-bright);
+}
 .js-debug-plot {
   display: grid;
   grid-column: 2;
@@ -552,6 +556,11 @@
 .js-debug-grid-line--integer {
   stroke: color-mix(in srgb, var(--text) 55%, var(--line));
   stroke-width: 0.3;
+}
+.js-debug-axis-break {
+  stroke: var(--active-accent-bright);
+  stroke-width: 1.2;
+  opacity: 0.9;
 }
 .js-debug-line {
   stroke: var(--js-debug-series-color, var(--text));
@@ -703,7 +712,7 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--js-debug-series-color, currentColor);
 }
 .js-debug-legend-line {
   width: 18px;

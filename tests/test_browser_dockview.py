@@ -1692,6 +1692,65 @@ def test_dockview_touch_sashes_use_centered_handle_and_small_grip(browser, tmp_p
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
 
 
+def test_roomy_portrait_ipad_tab_menu_keeps_directional_splits(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    try:
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,2&layout=left&tabs=left:1,2",
+            sessions=["1", "2"],
+            grid_width=834,
+            grid_height=1000,
+        )
+        wait_for_dockview(browser, min_tabs=2)
+        metrics = browser.execute_script(
+            """
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+            const tabRect = tab?.getBoundingClientRect();
+            tab?.dispatchEvent(new MouseEvent('contextmenu', {
+              bubbles: true,
+              cancelable: true,
+              clientX: (tabRect?.left || 0) + (tabRect?.width || 0) / 2,
+              clientY: tabRect?.bottom || 0,
+            }));
+            const paneRect = tab?.closest('.dv-groupview')?.getBoundingClientRect();
+            const buttons = Array.from(document.querySelectorAll('.session-context-menu .tab-split-action'));
+            return {
+              viewport: {width: innerWidth, height: innerHeight},
+              pane: {width: paneRect?.width || 0, height: paneRect?.height || 0},
+              tabletDesktop: tabletUsesDesktopLayout(),
+              singleColumn: narrowSingleColumnMode(),
+              groups: Array.from(document.querySelectorAll('.session-context-menu .tab-split-actions')).map(group => group.dataset.tabActionKind),
+              enabledMoves: buttons
+                .filter(button => button.classList.contains('tab-move-action') && !button.disabled)
+                .map(button => button.dataset.direction),
+              buttonCount: buttons.length,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+        assert metrics["viewport"] == {"width": 834, "height": 1112}, metrics
+        assert metrics["pane"]["width"] >= 800 and metrics["pane"]["height"] >= 900, metrics
+        assert metrics["tabletDesktop"] is False and metrics["singleColumn"] is False, metrics
+        assert metrics["groups"] == ["move", "swap"] and metrics["buttonCount"] == 8, metrics
+        assert metrics["enabledMoves"] == ["left", "right", "top", "bottom"], metrics
+        assert metrics["errors"] == [], metrics
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+
+
 def test_dockview_touch_finder_close_is_outside_splitter_hit_target(browser, tmp_path):
     browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True})
     browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
@@ -1923,6 +1982,54 @@ def test_dockview_header_actions_stay_on_first_row(browser, tmp_path):
     assert metrics["headerHeight"] >= (metrics["tabHeight"] * 2) - 2
     assert metrics["maxActionButtonHeight"] <= 20
     assert metrics["maxActionButtonHeight"] <= metrics["tabHeight"] + 1
+
+
+def test_dockview_virtual_pane_actions_stay_unshrunk_at_physical_top_right(browser, tmp_path):
+    browser.set_window_size(900, 560)
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=1&layout=row@52(left,right)&tabs=left:debug*;right:1",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            document.documentElement.style.setProperty('--pane-tab-height', '40px');
+            document.documentElement.style.setProperty('--ui-font-size-2xs', '18px');
+            document.documentElement.style.setProperty('--ui-font-size-xl', '24px');
+            dockviewRefreshTabs();
+            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${debugPaneItemId}"]`);
+            const group = tab?.closest('.dv-groupview');
+            const header = group?.querySelector('.dv-tabs-and-actions-container');
+            const rail = group?.querySelector('.dv-right-actions-container');
+            const actions = group?.querySelector('.dockview-pane-header-actions:not([hidden])');
+            const controls = [...(actions?.querySelectorAll('button') || [])].filter(button => !button.hidden);
+            if (!header || !rail || !actions || controls.length < 4) return false;
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height};
+            };
+            return {
+              header: box(header),
+              rail: box(rail),
+              actions: box(actions),
+              controls: controls.map(button => ({classes: button.className, ...box(button), shrink: getComputedStyle(button).flexShrink})),
+            };
+            """
+        )
+    )
+    assert metrics["rail"]["top"] - metrics["header"]["top"] <= 1, metrics
+    assert abs(metrics["rail"]["right"] - metrics["header"]["right"]) <= 1, metrics
+    assert metrics["actions"]["top"] - metrics["header"]["top"] <= 1, metrics
+    assert all(control["shrink"] == "0" for control in metrics["controls"]), metrics
+    assert all(control["width"] >= 18 for control in metrics["controls"]), metrics
+    assert all(abs(control["top"] - metrics["header"]["top"]) <= 1 for control in metrics["controls"]), metrics
+    assert all(
+        left["right"] <= right["left"] + 1
+        for left, right in zip(metrics["controls"], metrics["controls"][1:])
+    ), metrics
 
 
 @pytest.mark.parametrize("grid_width", (1800, 1300, 1000, 900, 700))

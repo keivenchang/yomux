@@ -1046,8 +1046,7 @@ function browserUsesTabletViewport() {
 function tabletUsesDesktopLayout(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
-  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
-  return width >= tabletDesktopLayoutMinWidthPx && width > height;
+  return width >= tabletDesktopLayoutMinWidthPx;
 }
 
 function fileExplorerUsesNormalTabMovement() {
@@ -1069,9 +1068,10 @@ function mobileSinglePaneMode(viewport = nativeViewport()) {
 function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const tablet = browserUsesTabletViewport();
   return phoneLikeMobileViewport(viewport)
-    || (browserUsesTabletViewport() && !tabletUsesDesktopLayout(viewport))
-    || width <= narrowTouchSingleColumnMaxWidthPx;
+    || (tablet && width < minSplitPaneWidthPx() * 2)
+    || (!tablet && width <= narrowTouchSingleColumnMaxWidthPx);
 }
 
 function narrowSingleColumnMode(viewport = nativeViewport()) {

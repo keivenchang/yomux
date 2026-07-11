@@ -75,6 +75,23 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert kwargs["stderr"] is subprocess.DEVNULL
 
 
+def test_registry_health_request_identifies_expected_service_protocol(tmp_path, monkeypatch):
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", 5),
+    )
+    captured = {}
+
+    def fake_request(_path, envelope, **_kwargs):
+        captured.update(envelope.payload)
+        return {"ok": True, "version": 5, "pid": 1}, b""
+
+    monkeypatch.setattr("yolomux_lib.local_services.registry.request", fake_request)
+
+    assert registry.healthy() is True
+    assert captured == {"action": "ping", "protocol_version": 5}
+
+
 @pytest.mark.parametrize(
     ("module", "service_name", "client_factory", "extra_args"),
     (

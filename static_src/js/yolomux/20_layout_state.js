@@ -495,8 +495,18 @@ function nextAvailableLayoutSlot(slots, preferred = null) {
 
 function canonicalizeSidePaneLayout(slots, options = {}) {
   if (!slots?.[layoutTreeKey]) return slots;
-  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return narrowSingleColumnLayoutSlots(slots, {focusSession: options.focusSession});
+  }
+  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+    const generic = cloneLayoutSlots(slots);
+    for (const slot of sidePaneSlots(generic)) {
+      const tabs = paneTabs(slot, generic);
+      generic[slot] = tabs.length
+        ? paneStateWithTabs(tabs, activeItemForSide(slot, generic), paneRoleDefinition(paneRoleGeneric))
+        : emptyPlaceholderPaneState(paneRoleDefinition(paneRoleGeneric));
+    }
+    return compactLayoutSlots(generic, {preservePlaceholderSlots: options.preservePlaceholderSlots === true});
   }
 
   const original = cloneLayoutSlots(slots);
@@ -787,7 +797,9 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutWithDefaultLeftSidePane(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
+  const content = layoutSlotsForItems(items, configuredDefaultLayoutMode());
+  if (!sidePaneConstrainedMode()) return layoutWithDefaultLeftSidePane(content);
+  return layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0]);
 }
 
 function layoutFromParam(raw, tabsRaw = '', options = {}) {
@@ -1057,7 +1069,7 @@ function legacyFileSurfaceSelection(params) {
 function migrateLegacyFileSurfaceLayout(slots, params) {
   const selected = legacyFileSurfaceSelection(params);
   if (!selected) return slots;
-  if (sidePaneConstrainedMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
+  if (narrowSingleColumnMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
   const legacySlot = slotForItem(finderItemId, slots) || slotForItem(differItemId, slots) || slotForItem(tabberItemId, slots);
   if (!legacySlot) return layoutWithSidePaneItems(slots, fileSurfaceItems, {
     side: paneSideLeft,
@@ -1329,22 +1341,23 @@ function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
 }
 
 function normalizeLayoutSlotsForViewport(value, options = {}) {
-  const constrained = sidePaneConstrainedMode();
-  let source = constrained
+  const singleColumn = narrowSingleColumnMode();
+  const sideConstrained = sidePaneConstrainedMode();
+  let source = singleColumn
     ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
-  if (!constrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
+  if (!sideConstrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
     const hasFileSurface = layoutFileSurfaceItems().some(item => itemInLayout(item, source));
     if (hasFileSurface) {
       source = canonicalizeSidePaneLayout(source, {...options, allowSidePanes: true});
       source = layoutWithDefaultLeftSidePane(source);
     }
   }
-  sidePaneLayoutWasConstrained = constrained;
+  sidePaneLayoutWasConstrained = sideConstrained;
   return normalizeLayoutSlots(source, {
     ...options,
-    allowSidePanes: !constrained,
-    preserveMissingSidePane: constrained || options.preserveMissingSidePane === true,
+    allowSidePanes: !sideConstrained,
+    preserveMissingSidePane: sideConstrained || options.preserveMissingSidePane === true,
   });
 }
 
@@ -1354,7 +1367,7 @@ function rememberInitialConstrainedLayout(value) {
 }
 
 function availableLayoutModes() {
-  return sidePaneConstrainedMode() ? ['single'] : layoutModeValues;
+  return narrowSingleColumnMode() ? ['single'] : layoutModeValues;
 }
 
 function initialLayoutSlots() {
@@ -1378,7 +1391,9 @@ function initialLayoutSlots() {
   }
   if (selected.length) {
     const selectedLayout = layoutFromSessionList(selected);
-    return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout)) : selectedLayout;
+    return narrowSingleColumnMode()
+      ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout))
+      : normalizeLayoutSlotsForViewport(selectedLayout);
   }
   return defaultLayoutSlots();
 }
@@ -1386,8 +1401,13 @@ function initialLayoutSlots() {
 function defaultLayoutSlots() {
   if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  const standard = layoutWithDefaultLeftSidePane(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()));
-  return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard)) : standard;
+  const content = layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
+  const standard = sidePaneConstrainedMode()
+    ? layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0])
+    : layoutWithDefaultLeftSidePane(content);
+  return narrowSingleColumnMode()
+    ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard))
+    : normalizeLayoutSlotsForViewport(standard);
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
