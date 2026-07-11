@@ -3532,28 +3532,166 @@ function setFileConflictDialogOpen(path, open) {
   if (state) state.conflictDialogOpen = open === true;
 }
 
-// Normalized view of a session's transcript metadata — prevents each call site from re-implementing
-// the same `?.[session]?.project?.git?.root` chain differently.
-function sessionTranscriptInfo(session) {
-  const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const git = info.project?.git || {};
-  return {
-    gitRoot: git.root || '',
-    gitCwd: git.cwd || '',
-    gitBranch: git.branch || '',
-    selectedPath: info.selected_pane?.current_path || '',
-    info,
-  };
-}
-
 function repoRootKey(value) {
   return String(value || '').replace(/\/+$/, '');
 }
 
+// `work_graph` owns repository identity. These selectors are deliberately shared by the tab,
+// popover, layout, Finder/Differ, and command-palette paths so every surface chooses the same
+// canonical branch and PR edges.
+function sessionWorkGraph(info = {}) {
+  const graph = info?.work_graph;
+  const required = ['git_worktrees', 'local_repositories', 'local_branches', 'hosted_repositories', 'pull_requests', 'linear_issues', 'path_observations', 'runtime_actors', 'tmux_sessions', 'tmux_windows', 'tmux_panes', 'worktree_branch_activity'];
+  return graph?.version === 1 && required.every(key => graph[key] && typeof graph[key] === 'object') ? graph : null;
+}
+
+function graphEntityValues(graph, key, ids = []) {
+  return (ids || []).map(id => graph?.[key]?.[id]).filter(Boolean);
+}
+
+function graphTmuxPaneIdsForTarget(graph, tmuxTarget = '') {
+  const target = String(tmuxTarget || '').trim();
+  const panes = Object.values(graph?.tmux_panes || {});
+  if (target) {
+    const match = panes.find(pane => String(pane?.target || '') === target || String(pane?.id || '') === target);
+    if (match?.id) return [match.id];
+  }
+  const active = panes.filter(pane => pane?.active === true || pane?.window_active === true).map(pane => pane.id).filter(Boolean);
+  return active.length ? active : panes.map(pane => pane?.id).filter(Boolean);
+}
+
+function graphObservationIdsForTmuxPaneIds(graph, tmuxPaneIds = []) {
+  const ids = new Set();
+  for (const pane of graphEntityValues(graph, 'tmux_panes', tmuxPaneIds)) {
+    for (const id of pane.path_observation_ids || []) ids.add(id);
+    for (const actor of graphEntityValues(graph, 'runtime_actors', pane.runtime_actor_ids)) {
+      for (const id of actor.path_observation_ids || []) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+function focusedRepositoryIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
+    const worktree = graph.git_worktrees?.[observation.git_worktree_id];
+    if (worktree?.local_repository_id) ids.add(worktree.local_repository_id);
+  }
+  return [...ids];
+}
+
+function focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
+    if (observation.git_worktree_id) ids.add(observation.git_worktree_id);
+  }
+  return [...ids];
+}
+
+function branchIdsForGitWorktree(info, gitWorktreeId) {
+  const graph = sessionWorkGraph(info);
+  const worktree = graph?.git_worktrees?.[gitWorktreeId];
+  const repository = graph?.local_repositories?.[worktree?.local_repository_id];
+  return repository?.local_branch_ids ? [...repository.local_branch_ids] : [];
+}
+
+function focusedBranchIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const worktreeId of focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget)) {
+    const branchId = graph.git_worktrees?.[worktreeId]?.current_branch_id;
+    if (branchId) ids.add(branchId);
+  }
+  return [...ids];
+}
+
+function pullRequestIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const branch of graphEntityValues(graph, 'local_branches', focusedBranchIdsForTmuxTarget(info, tmuxTarget))) {
+    for (const prId of branch.pull_request_ids || []) ids.add(prId);
+  }
+  return [...ids];
+}
+
+function graphBranchSummary(graph, branchId, currentBranchId = '') {
+  const branch = graph?.local_branches?.[branchId];
+  if (!branch) return null;
+  const pullRequests = graphEntityValues(graph, 'pull_requests', branch.pull_request_ids);
+  const linear = graphEntityValues(graph, 'linear_issues', branch.linear_issue_ids);
+  return {...branch, current: String(branch.id) === String(currentBranchId), pull_requests: pullRequests, pull_request: pullRequests[0] || null, linear};
+}
+
+function graphRepoSummary(graph, worktree) {
+  const repository = graph?.local_repositories?.[worktree?.local_repository_id] || {};
+  const hostedRepository = graph?.hosted_repositories?.[worktree?.hosted_repository_id || repository?.hosted_repository_id] || null;
+  const branches = (repository.local_branch_ids || []).map(branchId => graphBranchSummary(graph, branchId, worktree?.current_branch_id)).filter(Boolean);
+  const currentBranch = branches.find(branch => branch.current) || null;
+  const root = repoRootKey(worktree?.root || '');
+  return {
+    id: String(worktree?.id || ''),
+    worktree_id: String(worktree?.id || ''),
+    local_repository_id: String(repository?.id || ''),
+    hosted_repository_id: String(hostedRepository?.id || ''),
+    root,
+    cwd: root,
+    branch: String(currentBranch?.name || ''),
+    // Branch identity belongs to the LocalGitRepository, while checkout state belongs to this
+    // GitWorktree. Repositories can share branches across linked worktrees with different dirty
+    // and ahead/behind state, so never project those worktree fields from the branch record.
+    ahead: worktree?.git?.ahead,
+    behind: worktree?.git?.behind,
+    dirty_count: worktree?.git?.dirty_count,
+    head: worktree?.git?.head || '',
+    upstream: worktree?.git?.upstream || '',
+    activity_ts: worktree?.activity_ts ?? currentBranch?.updated_ts,
+    activity_source: worktree?.activity_source || '',
+    github_repo: hostedRepository,
+    other_branches: {branches, hidden_count: 0},
+    worktree: {path: root, kind: worktree?.kind || '', parent_root: worktree?.parent_root || ''},
+  };
+}
+
+function sessionWorkSummary(session, info = {}, options = {}) {
+  const graph = sessionWorkGraph(info);
+  const target = String(options.tmuxTarget || options.target || info?.selected_pane?.target || '');
+  if (graph) {
+    const repositories = Object.values(graph.git_worktrees || {}).map(worktree => graphRepoSummary(graph, worktree)).filter(repo => repo.root);
+    const focusedWorktreeIds = focusedGitWorktreeIdsForTmuxTarget(info, target);
+    const focusedRepositoryIds = focusedRepositoryIdsForTmuxTarget(info, target);
+    const focusedBranchIds = focusedBranchIdsForTmuxTarget(info, target);
+    const pullRequestIds = pullRequestIdsForTmuxTarget(info, target);
+    const focusedRepo = repositories.find(repo => focusedRepositoryIds.includes(repo.local_repository_id)) || repositories.find(repo => focusedWorktreeIds.includes(repo.worktree_id)) || repositories[0] || null;
+    const observations = graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, target)));
+    const selectedPath = observations.sort((left, right) => Number(right?.last_observed_at || 0) - Number(left?.last_observed_at || 0)).find(observation => observation?.path)?.path || focusedRepo?.cwd || '';
+    const pullRequests = graphEntityValues(graph, 'pull_requests', pullRequestIds)
+      .sort((left, right) => Number(right?.updated_at || right?.updated_ts || 0) - Number(left?.updated_at || left?.updated_ts || 0) || Number(left?.number || 0) - Number(right?.number || 0));
+    const linearIssues = graphEntityValues(graph, 'linear_issues', [...new Set(graphEntityValues(graph, 'local_branches', focusedBranchIds).flatMap(branch => branch.linear_issue_ids || []))]);
+    const focusedPullRequest = pullRequests.length === 1 ? pullRequests[0] : null;
+    return {graph, graphBacked: true, repositories, focusedWorktreeIds, focusedRepositoryIds, focusedBranchIds, pullRequestIds, pullRequests, focusedPullRequest, linearIssues, selectedRepo: focusedRepo, git: focusedRepo ? gitFromRepoSummary(focusedRepo) : null, selectedPath};
+  }
+  return {graph: null, graphBacked: false, repositories: [], focusedWorktreeIds: [], focusedRepositoryIds: [], focusedBranchIds: [], pullRequestIds: [], pullRequests: [], focusedPullRequest: null, linearIssues: [], selectedRepo: null, git: null, selectedPath: info?.selected_pane?.current_path || ''};
+}
+
+// Normalized view of a session's transcript metadata. A schema-valid graph is authoritative even
+// when empty; metadata without one has no Git work rather than a hidden compatibility path.
+function sessionTranscriptInfo(session) {
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git || {};
+  return {gitRoot: git.root || '', gitCwd: git.cwd || '', gitBranch: git.branch || '', selectedPath: summary.selectedPath || '', info};
+}
+
 function sessionRepoSummaries(info) {
-  return (Array.isArray(info?.project?.repos) ? info.project.repos : [])
-    .filter(repo => repo && repo.root)
-    .map(repo => ({...repo, root: repoRootKey(repo.root), cwd: repo.cwd || repo.root}));
+  const summary = sessionWorkSummary('', info);
+  if (summary.graphBacked) return summary.repositories;
+  return summary.repositories;
 }
 
 function selectedSessionRepoIndex(session, info) {
@@ -3579,6 +3717,8 @@ function gitFromRepoSummary(repo) {
     ahead: repo.ahead,
     behind: repo.behind,
     dirty_count: repo.dirty_count,
+    head: repo.head || '',
+    upstream: repo.upstream || '',
     activity_ts: repo.activity_ts,
     activity_source: repo.activity_source || '',
     github_repo: repo.github_repo || null,
@@ -3588,8 +3728,8 @@ function gitFromRepoSummary(repo) {
 }
 
 function displayedSessionGit(session, info) {
-  const project = info?.project || {};
-  const git = project.git || null;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const repo = selectedSessionRepo(session, info);
   if (!repo) return git;
   if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
@@ -8833,7 +8973,7 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
     .map(pane => `${pane.command || ''} ${pane.title || ''}`)
     .join(' ')
     .toLowerCase();
-  const pr = info?.project?.pull_request;
+  const pr = displayPullRequest(info);
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
   const checksState = pullRequestCiState(pr);
 
@@ -12835,7 +12975,13 @@ function menuTabDetail(item) {
 
 function commandPaletteTabDetail(item) {
   const detail = menuTabDetail(item);
-  const pr = displayPullRequest(transcriptMetadataState.payload.sessions?.[item]);
+  const info = transcriptMetadataState.payload.sessions?.[item];
+  const summary = sessionWorkSummary(item, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) {
+    const aggregate = pullRequestAggregateLabel(summary.pullRequests);
+    return detail.includes(aggregate) ? detail : [aggregate, detail].filter(Boolean).join(' · ');
+  }
+  const pr = displayPullRequest(info);
   if (!pr?.number) return detail;
   const bareNumber = `#${pr.number}`;
   const visibleNumber = `PR ${bareNumber}`;
@@ -12858,7 +13004,7 @@ function menuTabRowHtml(item, options = {}) {
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
   return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestSummaryBadgesHtml(item, info)}${detailHtml}</span></span>`;
 }
 
 function menuTabCommand(item, options = {}) {
@@ -13239,7 +13385,11 @@ function pullRequestSearchFields(pr) {
     pr.author_login,
     pr.number ? 'PR' : '',
     ...prNumberSearchForms(pr.number),
-    ...linearSearchFields(pr.linear_ids),
+    // Normalized graph PRs own canonical `linear_issue_ids`; older view models exposed the
+    // same relationship as `linear_ids`. Search must index both shapes while metadata is
+    // rendered directly from the graph, otherwise an other-branch PR becomes invisible to
+    // Cmd-P despite being visible in YO!info.
+    ...linearSearchFields(pr.linear_issue_ids || pr.linear_ids),
   ].filter(Boolean);
 }
 
@@ -13253,17 +13403,19 @@ function finderSearchAliases(item) {
 
 function tabSearchFields(item) {
   const info = transcriptMetadataState.payload.sessions?.[item] || {};
+  const summary = sessionWorkSummary(item, info);
   const filePath = fileItemPath(item) || '';
   // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
   // session is findable by any related branch even when it is not the currently checked-out branch.
-  const primaryRoot = info.project?.git?.root || info.project?.git?.cwd || '';
+  const primaryRoot = summary.git?.root || summary.git?.cwd || '';
+  const repositories = summary.graphBacked ? summary.repositories : [
+    ...(summary.git ? [{...summary.git, root: summary.git.root || summary.git.cwd || ''}] : []),
+    ...summary.repositories,
+  ];
   const branchSources = [
-    ...(info.project?.git?.other_branches?.branches || []),
-    ...(Array.isArray(info.project?.repos)
-      ? info.project.repos
-        .filter(repo => (repo?.root || repo?.cwd || '') !== primaryRoot)
-        .flatMap(repo => repo?.other_branches?.branches || [])
-      : []),
+    ...repositories
+      .filter(repo => (repo?.root || repo?.cwd || '') === primaryRoot || !primaryRoot || summary.graphBacked)
+      .flatMap(repo => repo?.other_branches?.branches || []),
   ];
   const pr = displayPullRequest(info);
   return [
@@ -13281,12 +13433,14 @@ function tabSearchFields(item) {
     ...finderSearchAliases(item),
     ...pullRequestSearchFields(pr),
     ...linearSearchFields(info.linear),
-    ...linearSearchFields(info.project?.linear),
+    ...linearSearchFields(summary.linearIssues),
     ...branchSources.flatMap(branch => [
       branch.name,
       branch.subject,
-      ...pullRequestSearchFields(branch.pull_request),
+      ...pullRequestSearchFields(branch.pull_request || branch.pull_requests?.[0]),
+      ...(branch.pull_requests || []).flatMap(pullRequestSearchFields),
       ...linearSearchFields(branch.linear_ids),
+      ...linearSearchFields(branch.linear),
     ]),
   ].filter(Boolean);
 }
@@ -15359,7 +15513,8 @@ function tmuxDirectoryForItem(item) {
 
 function tmuxGitRootForItem(item) {
   if (!isTmuxSession(item)) return '';
-  const root = transcriptMetadataState.payload.sessions?.[item]?.project?.git?.root || '';
+  const info = transcriptMetadataState.payload.sessions?.[item] || {};
+  const root = sessionWorkSummary(item, info).git?.root || '';
   return root ? normalizeDirectoryPath(root) : '';
 }
 
@@ -18625,7 +18780,7 @@ function buildTabberTree() {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const sessionName = `s_${tabberPathToken(session)}`;
     const sessionPath = `/${sessionName}`;
-    const git = info?.project?.git;
+    const git = sessionWorkSummary(session, info).git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const fallbackSessionRecency = tabberRecency(session);
     const sessionWork = sessionWorkDescription(session, info, 0);
@@ -26661,23 +26816,18 @@ function pullRequestWithUrl(git, pr) {
 }
 
 function defaultBranchHeadPullRequestForGit(info, git) {
-  const project = info?.project || {};
   if (!isDefaultBranch(git)) return null;
   const subject = gitHeadSubject(git);
   const number = pullRequestNumberFromSubject(subject);
   if (!number) return null;
-  const projectGitRoot = repoRootKey(project.git?.root);
-  const showingPrimaryGit = !projectGitRoot || projectGitRoot === repoRootKey(git?.root);
-  const existing = showingPrimaryGit && project.pull_request?.number === number ? project.pull_request : {};
-  const title = subjectWithoutPullRequestNumber(existing.title || subject);
-  const description = subjectWithoutPullRequestNumber(existing.description || subject);
+  const title = subjectWithoutPullRequestNumber(subject);
+  const description = subjectWithoutPullRequestNumber(subject);
   return {
-    ...existing,
     number,
     title,
     description,
-    url: existing.url || githubPullRequestUrlFromGit(git, number),
-    checks: existing.checks || {state: 'unknown'},
+    url: githubPullRequestUrlFromGit(git, number),
+    checks: {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
     // (it is in main's history). Keep that fact semantic; shared lifecycle rendering localizes it.
     merged: true,
@@ -26686,7 +26836,7 @@ function defaultBranchHeadPullRequestForGit(info, git) {
 }
 
 function defaultBranchHeadPullRequest(info) {
-  return defaultBranchHeadPullRequestForGit(info, info?.project?.git);
+  return defaultBranchHeadPullRequestForGit(info, sessionWorkSummary('', info).git);
 }
 
 function currentBranchInventoryPullRequestForGit(git) {
@@ -26695,21 +26845,37 @@ function currentBranchInventoryPullRequestForGit(git) {
 }
 
 function currentBranchInventoryPullRequest(info) {
-  return currentBranchInventoryPullRequestForGit(info?.project?.git);
+  return currentBranchInventoryPullRequestForGit(sessionWorkSummary('', info).git);
 }
 
 function displayPullRequestForGit(info, git) {
-  const project = info?.project || {};
-  const targetGit = git || project.git;
-  const projectGitRoot = repoRootKey(project.git?.root);
-  const showingPrimaryGit = !targetGit || !projectGitRoot || projectGitRoot === repoRootKey(targetGit.root);
-  return defaultBranchHeadPullRequestForGit(info, targetGit)
-    || (showingPrimaryGit ? project.pull_request : null)
-    || currentBranchInventoryPullRequestForGit(targetGit);
+  const summary = sessionWorkSummary('', info);
+  if (summary.graphBacked) {
+    const root = repoRootKey(git?.root);
+    const repo = summary.repositories.find(item => repoRootKey(item.root) === root) || summary.selectedRepo;
+    const branch = repo?.other_branches?.branches?.find(item => item.current) || null;
+    return branch?.pull_requests?.[0] || null;
+  }
+  return null;
 }
 
 function displayPullRequest(info) {
-  return displayPullRequestForGit(info, info?.project?.git);
+  const summary = sessionWorkSummary('', info);
+  return summary.graphBacked ? summary.focusedPullRequest : displayPullRequestForGit(info, summary.git);
+}
+
+function pullRequestAggregateLabel(pullRequests = []) {
+  const count = Array.isArray(pullRequests) ? pullRequests.length : 0;
+  return count > 1 ? tPlural('info.count.pr', count) : '';
+}
+
+function pullRequestSummaryBadgesHtml(session, info) {
+  const summary = sessionWorkSummary(session, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) {
+    return `<span class="${metadataBadgeClasses(session, 'pr', 'pr-number-indicator tab-symbol pr-aggregate-indicator')}">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`;
+  }
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
+  return pullRequestCompactBadgesHtml(session, pr);
 }
 
 function metadataBadgePulseClass(session, badge) {
@@ -26744,20 +26910,21 @@ function updateMetadataBadgePulses(meta) {
 }
 
 function defaultBranchBadgeHtml(session, info) {
-  if (!isDefaultBranch(info?.project?.git)) return '';
+  if (!isDefaultBranch(sessionWorkSummary(session, info).git)) return '';
   return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
 }
 
 function sessionWorkDescriptionSource(session, info) {
-  const project = info?.project || {};
-  const git = project.git;
-  const pr = displayPullRequest(info);
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
+  if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, git)) : displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     const prefix = pullRequestLinkLabel(pr);
     return title ? `${prefix}: ${title}` : prefix;
   }
-  const linear = project.linear || [];
+  const linear = summary.linearIssues;
   const issue = linear.find(item => item.title);
   if (issue) return `${issue.identifier}: ${issue.title}`;
   const subject = currentBranchSubject(git);
@@ -26776,7 +26943,9 @@ function sessionTabDescription(session, info) {
   // already identifies the session and tmux window, so a generic "Loading..." description implies
   // the terminal itself is blocked. Omit only this tab-local metadata until a real description arrives.
   if (!info) return '';
-  const pr = displayPullRequest(info);
+  const summary = sessionWorkSummary(session, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     if (title) return shortText(title, 72);
@@ -26786,16 +26955,17 @@ function sessionTabDescription(session, info) {
 
 function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item]) {
   if (isInfoItem(item)) return t('tab.info.detail');
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(item, info);
+  const git = summary.git;
   const parts = [];
   if (git?.branch) parts.push(git.branch);
   const path = panelFullPath(item, info);
   if (path) parts.push(compactHomePath(path));
   const pr = displayPullRequest(info);
-  const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
+  const linear = summary.linearIssues.map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
-  if (pr?.number) {
+  if (summary.graphBacked && summary.pullRequests.length > 1) parts.push(pullRequestAggregateLabel(summary.pullRequests));
+  else if (pr?.number) {
     parts.push(pullRequestLinkLabel(pr));
   }
   const desc = sessionWorkDescription(item, info, 180);
@@ -26866,12 +27036,13 @@ function filePopoverPathHtml(path) {
 }
 
 function sessionPopoverSubtitleHtml(session, info, fallback = '') {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const pr = pullRequestWithUrl(git, displayPullRequest(info));
   const chips = [];
   if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
-  if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
+  if (summary.graphBacked && summary.pullRequests.length > 1) chips.push(`<span class="popover-chip">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`);
+  else if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
   const text = pr?.number
     ? shortText(pr.title || pr.description || '', 220)
     : String(fallback || '');
@@ -26880,7 +27051,7 @@ function sessionPopoverSubtitleHtml(session, info, fallback = '') {
 }
 
 function sessionBranchValueHtml(session, info) {
-  const git = info?.project?.git;
+  const git = sessionWorkSummary(session, info).git;
   if (!git?.branch) return '';
   const branchHtml = isDefaultBranch(git)
     ? defaultBranchBadgeHtml(session, info)
@@ -27111,10 +27282,10 @@ function agentTranscriptRowsHtml(agent) {
 }
 
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const pr = pullRequestWithUrl(git, displayPullRequest(info));
-  const linear = project.linear || [];
+  const linear = summary.linearIssues;
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
   const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
@@ -27278,7 +27449,13 @@ function branchListSubjectHtml(branch, pr) {
   const subject = subjectWithoutPullRequestNumber(branch?.subject || '');
   if (!subject) return '';
   if (branch?.current) {
-    const currentTitles = [pr?.title, pr?.description].map(normalizeBranchSubjectText).filter(Boolean);
+    // A default-branch merge commit title retains its SHA in canonical PR data while the local
+    // branch subject does not. Treat the SHA-free title as the same description.
+    const currentTitles = [pr?.title, pr?.description]
+      .flatMap(value => {
+        const normalized = normalizeBranchSubjectText(value);
+        return [normalized, normalized.replace(/^[0-9a-f]{7,40}\s+/i, '')].filter(Boolean);
+      });
     if (currentTitles.includes(normalizeBranchSubjectText(subject))) return '';
   }
   return `<div class="branch-subject">${esc(shortText(subject, 240))}</div>`;
@@ -27307,7 +27484,7 @@ function branchUpdatedText(branch) {
 }
 
 function otherBranchesHtml(session, info) {
-  const git = info?.project?.git;
+  const git = sessionWorkSummary(session, info).git;
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
   if (!branches.length) {
@@ -29327,109 +29504,49 @@ function repoSummaryAsGit(repo) {
   return gitFromRepoSummary(repo);
 }
 
-function activeAgentWindowMetadataItemForProjectMeta(session, info) {
-  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof windowViewModel !== 'function') return null;
-  const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
-  if (activeWindowIndex === null) return null;
-  const agent = windowViewModel(session, activeWindowIndex, info, autoApproveStates.get(session));
-  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : String(agent?.kind || '').trim().toLowerCase();
-  if (!['claude', 'codex'].includes(kind)) return null;
-  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
-  const paths = pathEntries.map(item => item.path).filter(Boolean);
-  const meta = {
-    window: String(agent?.window ?? ''),
-    window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
-    window_name: String(agent?.window_name || ''),
-    path: paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || '')),
-    paths,
-    path_entries: pathEntries,
-    git: typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null),
-  };
-  return {agent, meta};
-}
-
-function projectMetaPathFromWindowMetadata(meta) {
-  const pathEntries = Array.isArray(meta?.path_entries) ? meta.path_entries.map(item => String(item?.path || '').trim()).filter(Boolean) : [];
-  if (pathEntries.length) return pathEntries[0];
-  const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
-  if (paths.length) return paths[0];
-  const path = String(meta?.path || '').trim();
-  if (path) return path;
-  return String(meta?.git?.root || '').trim();
-}
-
 function projectMetaContextOverridesPrimaryPullRequest(info, contextGit) {
-  const projectGit = info?.project?.git;
-  const primaryPullRequest = displayPullRequest(info);
-  if (!primaryPullRequest?.number) return true;
-  const primaryRoot = repoRootKey(projectGit?.root);
-  const contextRoot = repoRootKey(contextGit?.root);
-  // The selected project is transcript-derived and carries an open PR. A raw pane cwd or a
-  // Tabber activity-cache path is weaker evidence, so it must not hide that PR. A different
-  // active window with its own resolved PR remains an equally strong, more local context.
-  if (!primaryRoot || !contextRoot || primaryRoot === contextRoot) return contextRoot === primaryRoot;
   return Boolean(displayPullRequestForGit(info, contextGit)?.number);
 }
 
 function projectMetaSelection(session, info) {
-  const project = info?.project || {};
-  const repos = sessionRepoSummaries(info);
   const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
-  const primaryRoot = repoRootKey(project.git?.root);
-  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   const activePane = activeWindowPaneForProjectMeta(session, info);
-  const activePath = normalizeDirectoryPath(activePane?.current_path || '');
-  const activeAgent = activePane ? agentForPane(info, activePane) : null;
-  const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
-  const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
-  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info) : null;
-  const activeWindowMeta = activeWindowMetadataItem?.meta || null;
-  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || Boolean(projectMetaPathFromWindowMetadata(activeWindowMeta));
-  const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
+  const activeTarget = String(activePane?.target || '');
+  // The active TmuxWindow's PathObservation owns the Info Bar context. Browser-selected terminal
+  // state and auto-approve status are presentation inputs only; neither may recreate a parallel
+  // per-window Git owner or displace the active tmux window's canonical worktree.
+  const workSummary = sessionWorkSummary(session, info, {tmuxTarget: explicitRoot ? '' : activeTarget});
+  const repos = workSummary.repositories;
+  const activePath = normalizeDirectoryPath(activePane?.current_path || workSummary.selectedPath || '');
+  const hasActiveTmuxTarget = Boolean(activeTarget);
+  const primaryRoot = repoRootKey(workSummary.git?.root);
+  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   let repoIndex = selectedSessionRepoIndex(session, info);
-  if (!explicitRoot && activePath && repos.length) {
+  const hasPinnedRepoSelection = selectedSessionRepoIndex(session, info) >= 0 && Boolean(sessionRepoDisplayRoot.get(session));
+  if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && primaryRepoIndex >= 0) {
+    repoIndex = primaryRepoIndex;
+  } else if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && activePath && repos.length) {
     const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
     const activeRepoGit = activeRepoIndex >= 0 ? repoSummaryAsGit(repos[activeRepoIndex]) : null;
     if (activeRepoIndex >= 0 && projectMetaContextOverridesPrimaryPullRequest(info, activeRepoGit)) repoIndex = activeRepoIndex;
-  }
-  if (!explicitRoot && primaryRepoIndex >= 0 && !projectMetaContextOverridesPrimaryPullRequest(info, repoSummaryAsGit(repos[repoIndex]))) {
-    repoIndex = primaryRepoIndex;
   }
   let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
   let repoSwitchRepos = repos;
   let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
-  if (!explicitRoot && activeWindowMetaHasSharedData) {
-    const activeMetaRoot = repoRootKey(activeWindowMeta.git?.root || '');
-    const activeMetaRepoIndex = activeMetaRoot
-      ? repos.findIndex(repo => repoRootKey(repo.root) === activeMetaRoot)
-      : activeWindowMetaPath
-        ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
-        : -1;
-    const activeMetaGit = activeWindowMeta.git || (activeMetaRepoIndex >= 0 ? repoSummaryAsGit(repos[activeMetaRepoIndex]) : null);
-    if (projectMetaContextOverridesPrimaryPullRequest(info, activeMetaGit)) {
-      if (activeMetaRepoIndex >= 0) {
-        repoIndex = activeMetaRepoIndex;
-        selectedRepo = repos[repoIndex];
-      }
-      if (activeWindowMeta.git) git = activeWindowMeta.git;
-      else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
-      if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
-    }
-  }
-  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
+  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root)) {
     git = null;
     selectedRepo = null;
     repoIndex = -1;
     repoSwitchRepos = [];
     fullPath = activePath;
   }
-  return {project, repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
+  return {repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
 }
 
 function panelFullPath(session, info) {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
@@ -29437,6 +29554,7 @@ function panelFullPath(session, info) {
   if (nonHomePane?.current_path) return nonHomePane.current_path;
   if (git?.cwd) return git.cwd;
   if (git?.root) return git.root;
+  if (summary.selectedPath) return summary.selectedPath;
   if (info?.selected_pane?.current_path) return info.selected_pane.current_path;
   return '';
 }
@@ -29451,8 +29569,9 @@ function compactHomePath(path) {
 }
 
 function projectMetaParts(session, info, options = {}) {
-  const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
-  const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
+  const summary = sessionWorkSummary(session, info);
+  const {repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
+  const showingPrimaryGit = !selectedRepo || repoRootKey(git?.root) === repoRootKey(selectedRepo.root);
   const metadataParts = [];
   const fullText = options.fullText === true;
   const repoSwitchHtml = repos.length > 1 ? (() => {
@@ -29469,11 +29588,11 @@ function projectMetaParts(session, info, options = {}) {
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
-  const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
+  const prGit = selectedRepo ? gitFromRepoSummary(selectedRepo) : git;
   const pr = displayPullRequestForGit(info, prGit);
   if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
-  if (showingPrimaryGit) {
-    for (const issue of project.linear || []) {
+  if (showingPrimaryGit && (!selectedRepo || repoRootKey(selectedRepo.root) === repoRootKey(summary.git?.root))) {
+    for (const issue of summary.linearIssues) {
       const state = issue.state ? ` ${issue.state}` : '';
       metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
@@ -29487,7 +29606,7 @@ function projectMetaParts(session, info, options = {}) {
     const ci = pullRequestCiStatus(pr);
     if (ci) metadataParts.push(pullRequestStatusBadgeHtml('', ci.text, ci.className, {variant: 'meta'}));
   }
-  const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
+  const desc = pr?.title || pr?.description || (showingPrimaryGit ? summary.linearIssues.find(issue => issue.title)?.title : '');
   if (desc) {
     const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
     if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
@@ -29601,8 +29720,8 @@ function summaryContextHtml(session, info, agent) {
     })));
   }
 
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   if (git) {
     lines.push(summaryContextLine(t('common.field.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine(t('popover.repo'), git.root));
@@ -29617,7 +29736,7 @@ function summaryContextHtml(session, info, agent) {
     const label = pullRequestLinkLabel(pr);
     lines.push(summaryContextLine(t('pref.section.github'), `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
   }
-  for (const issue of project.linear || []) {
+  for (const issue of summary.linearIssues) {
     const label = `${issue.identifier}${issue.state ? ` ${issue.state}` : ''}`;
     lines.push(summaryContextLine(t('info.field.linear'), `${label} ${issue.title || ''}`, issue.url, issue.identifier));
   }
@@ -34782,7 +34901,13 @@ function fileEditorPaneTabHtml(item, options = {}) {
 }
 
 function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
-  const pr = options.showBadges === false ? null : displayPullRequest(info);
+  // Callers such as tests and layout previews can pass a fresh metadata payload before it has
+  // entered transcriptMetadataState. Always use the same graph-backed input for badges and detail
+  // instead of silently reading an unrelated cached session record.
+  const summary = sessionWorkSummary(session, info);
+  const pr = options.showBadges === false
+    ? null
+    : (summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info));
   const desc = options.showDetail === false
     ? ''
     : (options.detail !== undefined ? String(options.detail || '') : sessionTabDescription(session, info));
@@ -34793,7 +34918,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     ? ''
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
-  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
+  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestSummaryBadgesHtml(session, info)}`;
   return `<span class="pane-tab-core"><span class="session-tab-leading-activity">${leadingHtml}</span><span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
@@ -35540,18 +35665,15 @@ function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, option
 function sessionMetadataIsLightweight(info) {
   if (!info || typeof info !== 'object') return false;
   if (info.metadata_loading === true) return true;
-  const project = info.project;
-  return Boolean(project && typeof project === 'object' && project.loading === true);
+  const workGraph = info.work_graph;
+  return Boolean(workGraph && typeof workGraph === 'object' && workGraph.loading === true);
 }
 
 function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
   if (!sessionMetadataIsLightweight(nextInfo) || !previousInfo || typeof previousInfo !== 'object') return nextInfo;
   return {
     ...nextInfo,
-    project: previousInfo.project || nextInfo.project,
-    window_metadata: Array.isArray(previousInfo.window_metadata) && previousInfo.window_metadata.length
-      ? previousInfo.window_metadata
-      : nextInfo.window_metadata,
+    work_graph: previousInfo.work_graph || nextInfo.work_graph,
     metadata_loading: true,
   };
 }
@@ -60728,20 +60850,25 @@ const infoSortDefs = Object.freeze([
   {key: 'date', dir: 'asc', value: 'date:asc', labelKey: 'finder.sort.oldest'},
 ]);
 const infoDimensionDefs = Object.freeze([
-  {key: 'tab', labelKey: 'info.dimension.tab'},
-  {key: 'tmux-window', labelKey: 'info.field.tmuxSubWindow'},
-  {key: 'ai', labelKey: 'info.dimension.ai'},
-  {key: 'path', labelKey: 'common.pathLabel'},
-  {key: 'branch', labelKey: 'common.branchLabel'},
-  {key: 'linear', labelKey: 'info.field.linear'},
-  {key: 'pr', labelKey: 'common.pullRequestShort'},
+  {key: 'tab', labelKey: 'info.dimension.tab', legacyKeys: ['tab']},
+  {key: 'tmux-session', labelKey: 'info.field.tabTmuxSession', legacyKeys: []},
+  {key: 'tmux-window', labelKey: 'info.field.tmuxWindow', legacyKeys: ['tmux-window']},
+  {key: 'tmux-pane', labelKey: 'info.field.tmuxWindow', legacyKeys: []},
+  {key: 'ai', labelKey: 'info.dimension.ai', legacyKeys: ['ai']},
+  {key: 'path', labelKey: 'common.pathLabel', legacyKeys: ['path']},
+  {key: 'git-worktree', labelKey: 'common.pathLabel', legacyKeys: []},
+  {key: 'local-repository', labelKey: 'common.pathLabel', legacyKeys: []},
+  {key: 'hosted-repository', labelKey: 'common.pathLabel', legacyKeys: []},
+  {key: 'branch', labelKey: 'common.branchLabel', legacyKeys: ['branch']},
+  {key: 'pr', labelKey: 'common.pullRequestShort', legacyKeys: ['pr']},
+  {key: 'linear', labelKey: 'info.field.linear', legacyKeys: ['linear']},
 ]);
 const infoPresetDefs = Object.freeze([
   {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
   {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
-  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['path', 'branch']},
+  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['git-worktree', 'local-repository', 'branch']},
   {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
-  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['pr', 'branch']},
+  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['hosted-repository', 'pr', 'branch']},
 ]);
 let infoGrouping = readStoredInfoGrouping();
 let infoSort = readStoredInfoSort();
@@ -60763,18 +60890,18 @@ function infoGroupDimensions() {
 function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
   const dimension = String(key || '').trim();
   const index = Number(level);
-  if (!dimension || !Number.isInteger(index) || index < 0 || index > 3) return false;
+  if (!dimension || !Number.isInteger(index) || index < 0 || index > 5) return false;
   if (dimension === 'ai' && index === 0) return false;
-  if (dimension === 'tmux-window') {
+  if (dimension === 'tmux-window' || dimension === 'tmux-pane') {
     const parent = Array.isArray(grouping) ? String(grouping[0] || '') : '';
-    return index >= 1 && parent === 'tab';
+    return index >= 1 && ['tab', 'tmux-session'].includes(parent);
   }
   return true;
 }
 
 function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const index = Number(level);
-  const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(3, index)) : 0;
+  const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(5, index)) : 0;
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
   return infoDimensionDefs
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
@@ -60803,7 +60930,7 @@ function normalizeInfoGrouping(value, options = {}) {
   for (const key of Array.isArray(migrated) ? migrated : []) {
     if (!infoGroupDimensionAllowedAtLevel(key, result.length, result)) continue;
     result.push(key);
-    if (result.length >= 4) break;
+    if (result.length >= 6) break;
   }
   return (result.length ? result : infoDefaultGrouping).slice();
 }
@@ -60922,10 +61049,11 @@ function refreshInfoGroupingControls() {
 
 function setInfoGrouping(value) {
   const previous = infoGrouping.join(',');
-  writeInfoGrouping(value);
+  const next = writeInfoGrouping(value);
   refreshInfoGroupingControls();
   renderInfoPanel();
   if (infoGrouping.join(',') !== previous) scheduleShareUiStatePublish();
+  return next;
 }
 
 function setInfoSort(value, options = {}) {
@@ -60957,7 +61085,7 @@ function setInfoGroupingPreset(key) {
 
 function setInfoGroupingLevel(level, value) {
   const index = Number(level);
-  if (!Number.isInteger(index) || index < 0 || index > 3) return;
+  if (!Number.isInteger(index) || index < 0 || index > 5) return;
   const next = infoGrouping.slice();
   const key = String(value || '').trim();
   next[index] = key;
@@ -60982,8 +61110,8 @@ function infoRecordTmuxWindowIndex(record = {}) {
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
-  if (!infoRecordHasAi(record)) return t('info.missing.tmuxSubWindow');
-  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxSubWindow');
+  if (!infoRecordHasAi(record)) return t('info.missing.tmuxWindow');
+  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxWindow');
 }
 
 function infoRecordTmuxWindowKey(record = {}) {
@@ -60998,9 +61126,14 @@ function infoDimensionValue(record, dimension) {
   const fallback = {key: 'none', label: t('info.group.none'), title: ''};
   if (!record || !dimension) return fallback;
   if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
+  if (dimension === 'tmux-session') return {key: record.tmuxSessionKey, label: record.tmuxSessionLabel, title: record.tmuxSessionTitle, sortValue: infoRecordNumericSortValue(record, 'tmux-session')};
   if (dimension === 'tmux-window') return {key: infoRecordTmuxWindowKey(record), label: infoRecordTmuxWindowLabel(record), title: record.tmuxWindowTitle || record.aiTitle || infoRecordTmuxWindowLabel(record), sortValue: infoRecordNumericSortValue(record, 'tmux-window')};
+  if (dimension === 'tmux-pane') return {key: record.tmuxPaneKey, label: record.tmuxPaneLabel, title: record.tmuxPaneTitle, sortValue: infoRecordNumericSortValue(record, 'tmux-pane')};
   if (dimension === 'ai') return {key: infoRecordAiKind(record) || '__no_ai__', label: infoRecordAiAgentLabel(record), title: record.aiAgentTitle || infoRecordAiAgentLabel(record)};
   if (dimension === 'path') return {key: record.pathKey, label: record.pathTitle || record.pathLabel, title: record.pathTitle};
+  if (dimension === 'git-worktree') return {key: record.gitWorktreeKey, label: record.gitWorktreeLabel, title: record.gitWorktreeTitle};
+  if (dimension === 'local-repository') return {key: record.localRepositoryKey, label: record.localRepositoryLabel, title: record.localRepositoryTitle};
+  if (dimension === 'hosted-repository') return {key: record.hostedRepositoryKey, label: record.hostedRepositoryLabel, title: record.hostedRepositoryTitle};
   if (dimension === 'branch') return {key: record.branchKey, label: record.branchLabel, title: record.branchTitle};
   if (dimension === 'pr') return {key: record.prKey, label: record.prTitle || record.prLabel, title: record.prTitle, sortValue: infoRecordNumericSortValue(record, 'pr')};
   if (dimension === 'linear') return {key: record.linearKey, label: record.linearTitle || record.linearLabel, title: record.linearTitle, sortValue: infoRecordNumericSortValue(record, 'linear')};
@@ -61054,7 +61187,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const tmuxWindowKey = tmuxWindowIndex
         ? `${session || 'no-tab'}:${tmuxWindowIndex}:${aiLabel}`
         : '__no_tmux_window__';
-      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxSubWindow') : aiLabel;
+      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxWindow') : aiLabel;
       const path = String(row?.path || '');
       const branch = String(row?.branch || '');
       const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
@@ -61064,12 +61197,29 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const prDisplayLabel = String(row?.prDescriptionTitle || row?.prTitle || row?.prSort || row?.prLabel || '').trim();
       const prNumber = infoRowPrNumber(row);
       const prCompactLabel = Number.isFinite(prNumber) ? `#${prNumber}` : prKeyLabel;
+      const tmuxSessionKey = String(agent?.tmux_session_id || session || '__no_tmux_session__');
+      const tmuxSessionLabel = String(agent?.tmux_session_name || session || t('info.group.none'));
+      const tmuxPaneKey = String(agent?.tmux_pane_id || agent?.pane_target || (session && agent?.pane !== undefined ? `${session}:${agent?.window || '0'}.${agent.pane}` : '__no_tmux_pane__'));
+      const tmuxPaneLabel = String(agent?.tmux_pane_label || (agent?.pane !== undefined && agent?.pane !== '' ? `${agent?.window || '0'}.${agent.pane}` : t('info.group.none')));
+      const tmuxPaneTarget = String(agent?.tmux_pane_target || agent?.pane_target || '');
+      const gitWorktreeKey = String(row?.gitWorktreeId || row?.git_worktree_id || row?.pathKey || '__no_git_worktree__');
+      const gitWorktreeLabel = String(row?.gitWorktreeLabel || row?.git_worktree_label || row?.pathLabel || t('info.missing.path'));
+      const gitWorktreeTitle = String(row?.gitWorktreeTitle || row?.git_worktree_title || row?.pathTitle || gitWorktreeLabel);
+      const localRepositoryKey = String(row?.localRepositoryId || row?.local_repository_id || gitWorktreeKey || '__no_local_repository__');
+      const localRepositoryLabel = String(row?.localRepositoryLabel || row?.local_repository_label || gitWorktreeLabel);
+      const localRepositoryTitle = String(row?.localRepositoryTitle || row?.local_repository_title || localRepositoryLabel);
+      const hostedRepositoryKey = String(row?.hostedRepositoryId || row?.hosted_repository_id || '__no_hosted_repository__');
+      const hostedRepositoryLabel = String(row?.hostedRepositoryLabel || row?.hosted_repository_label || t('info.group.none'));
+      const hostedRepositoryTitle = String(row?.hostedRepositoryTitle || row?.hosted_repository_title || hostedRepositoryLabel);
       records.push({
         id: [path, branch, session || 'no-tab', aiKind || 'no-ai', tmuxWindowIndex, prCompactLabel || prKeyLabel, linearLabel].join('\n'),
         tabKey: session || '__no_tab__',
         tabSession: session,
         tabLabel,
         tabTitle: String(agent?.title || tabLabel),
+        tmuxSessionKey,
+        tmuxSessionLabel,
+        tmuxSessionTitle: tmuxSessionLabel,
         aiKey: `${agent?.kind || 'no-ai'}:${agent?.window || ''}:${aiLabel}`,
         aiKind,
         aiAgentKey: aiKind || '__no_ai__',
@@ -61080,6 +61230,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         aiState: String(agent?.state || ''),
         aiPane: String(agent?.pane || ''),
         aiPaneTarget: String(agent?.pane_target || ''),
+        tmuxPaneTarget,
         aiCurrent: agent?.current === true,
         aiWindowActive: agent?.window_active === true,
         aiPid: tmuxWindowProcessPid(agent),
@@ -61091,11 +61242,24 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tmuxWindowKey,
         tmuxWindowLabel,
         tmuxWindowTitle: String(agent?.title || tmuxWindowLabel),
+        tmuxPaneKey,
+        tmuxPaneLabel,
+        tmuxPaneTitle: tmuxPaneTarget || tmuxPaneLabel,
         pathKey: infoNormalizedPath(path) || '__no_path__',
         pathLabel: String(row?.pathLabel || compactHomePath(path) || t('info.missing.path')),
         pathTitle: String(row?.pathTitle || path || t('info.missing.path')),
         pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
         pathActivitySource: String(row?.pathActivitySource || ''),
+        pathObservations: Array.isArray(row?.pathObservations) ? row.pathObservations.slice(0, 100) : [],
+        gitWorktreeKey,
+        gitWorktreeLabel,
+        gitWorktreeTitle,
+        localRepositoryKey,
+        localRepositoryLabel,
+        localRepositoryTitle,
+        hostedRepositoryKey,
+        hostedRepositoryLabel,
+        hostedRepositoryTitle,
         branchKey: branch || '__no_branch__',
         branchLabel: branch || t('info.missing.branch'),
         branchTitle: branch || t('info.missing.branch'),
@@ -61173,7 +61337,9 @@ function infoRecordNumericSortValue(record = {}, dimension = '') {
   if (dimension === 'pr') return infoRecordPrNumber(record);
   if (dimension === 'linear') return infoRecordLinearNumber(record);
   if (dimension === 'tab') return infoFirstRecordNumber(record, [record.tabKey, record.tabLabel, record.tabTitle, record.tabSession]);
+  if (dimension === 'tmux-session') return infoFirstRecordNumber(record, [record.tmuxSessionLabel, record.tmuxSessionKey]);
   if (dimension === 'tmux-window') return infoFirstRecordNumber(record, [infoRecordTmuxWindowIndex(record), infoRecordTmuxWindowLabel(record), record.aiLabel, record.aiKey, record.aiTitle]);
+  if (dimension === 'tmux-pane') return infoFirstRecordNumber(record, [record.tmuxPaneLabel, record.tmuxPaneKey]);
   return NaN;
 }
 
@@ -61200,11 +61366,16 @@ function infoCompareRecordNumberThenLabel(left = {}, right = {}, dimension = '',
 
 function infoRecordLabel(record = {}, dimension = '') {
   if (dimension === 'tab') return record.tabLabel;
+  if (dimension === 'tmux-session') return record.tmuxSessionLabel;
   if (dimension === 'tmux-window') return infoRecordTmuxWindowLabel(record);
+  if (dimension === 'tmux-pane') return record.tmuxPaneLabel;
   if (dimension === 'ai') return infoRecordAiAgentLabel(record);
   if (dimension === 'linear') return record.linearLabel || record.linearTitle;
   if (dimension === 'pr') return record.prLabel || record.prTitle;
   if (dimension === 'path') return record.pathLabel;
+  if (dimension === 'git-worktree') return record.gitWorktreeLabel;
+  if (dimension === 'local-repository') return record.localRepositoryLabel;
+  if (dimension === 'hosted-repository') return record.hostedRepositoryLabel;
   if (dimension === 'branch') return record.branchLabel;
   return '';
 }
@@ -61256,25 +61427,38 @@ function infoLinearSearchFields(record = {}) {
 }
 
 function infoRecordSearchFields(record = {}) {
+  const observations = Array.isArray(record?.pathObservations) ? record.pathObservations : [];
+  const observationFields = observations.flatMap(observation => [
+    infoSearchField('path', observation?.path),
+    infoSearchField('ai', observation?.actorKind),
+    infoSearchField('observation-source', observation?.source),
+  ]).filter(Boolean);
   return [
-    ...(infoRecordHasTab(record) ? infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession) : []),
-    ...(infoRecordHasAi(record) ? infoSearchFields('tmux-window', infoRecordTmuxWindowLabel(record)) : []),
+    ...infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession),
+    infoSearchField('tmux-session', record.tmuxSessionLabel, record.tmuxSessionKey, record.tabSession),
+    ...infoSearchFields('tmux-window', infoRecordTmuxWindowLabel(record), record.aiWindowIndex, record.aiPaneTarget),
+    infoSearchField('tmux-pane', record.tmuxPaneLabel, record.tmuxPaneKey, record.tmuxPaneTarget, record.aiPaneTarget, record.aiPane),
     ...(infoRecordHasAi(record) ? infoSearchFields('ai', infoRecordAiAgentLabel(record), infoRecordAiKind(record)) : []),
     !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__'
       ? infoSearchField('path', record.pathTitle || record.pathLabel)
       : null,
+    infoSearchField('git-worktree', record.gitWorktreeLabel, record.gitWorktreeTitle),
+    infoSearchField('local-repository', record.localRepositoryLabel, record.localRepositoryTitle),
+    infoSearchField('hosted-repository', record.hostedRepositoryLabel, record.hostedRepositoryTitle),
     !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__'
       ? infoSearchField('branch', record.branchTitle || record.branchLabel)
       : null,
     infoSearchField('pr', infoPrSearchText(record)),
     ...infoLinearSearchFields(record),
+    ...observationFields,
     !infoRecordMissingValue(record?.updated) ? infoSearchField('updated', record.updated) : null,
   ].filter(Boolean);
 }
 
 function infoSearchFieldMatches(field = {}, query = infoSearch) {
   const text = String(query || '').trim();
-  return Boolean(text && Number.isFinite(fuzzySearchScore(text, [field.text])));
+  const value = String(field?.text || '');
+  return Boolean(text && (value.toLocaleLowerCase().includes(text.toLocaleLowerCase()) || Number.isFinite(fuzzySearchScore(text, [value]))));
 }
 
 function infoRecordSearchKindMatches(record = {}, kind = '', query = infoSearch) {
@@ -61286,7 +61470,10 @@ function infoRecordSearchKindMatches(record = {}, kind = '', query = infoSearch)
 function infoRecordMatchesSearch(record = {}, query = infoSearch) {
   const text = String(query || '').trim();
   if (!text) return true;
-  return infoRecordSearchFields(record).some(field => infoSearchFieldMatches(field, text));
+  // The fuzzy scorer ranks a query inside one field. Relationship search instead allows terms
+  // to traverse canonical edges: e.g. a worktree path plus its RuntimeActor or Tmux target.
+  const fields = infoRecordSearchFields(record);
+  return String(text).split(/\s+/).filter(Boolean).every(token => fields.some(field => infoSearchFieldMatches(field, token)));
 }
 
 function infoFilteredRecords(records = [], query = infoSearch) {
@@ -61463,10 +61650,41 @@ function infoRecordPrStatusHtml(record) {
   return parts.filter(Boolean).join(' ');
 }
 
+function infoRecordPrLookupStateHtml(record) {
+  const state = String(record?.prLookupState || '').trim();
+  if (!['loading', 'none', 'stale', 'error', 'not-requested'].includes(state)) return '';
+  const labels = {
+    loading: t('common.loading'),
+    none: t('info.group.none'),
+    stale: t('dialog.staleStatus'),
+    error: t('common.unknown'),
+    'not-requested': t('notify.permission.default'),
+  };
+  return `<span class="info-tree-pr-lookup-state info-tree-pr-lookup-state-${esc(state)}">${esc(labels[state])}</span>`;
+}
+
 function infoRecordPrDescHtml(record) {
-  if (String(record?.prKey || '') === '__no_pr__') return '';
+  const values = Array.isArray(record?.prValues) ? record.prValues.filter(Boolean) : [];
+  if (values.length) {
+    const highlight = infoRecordSearchKindMatches(record, 'pr');
+    return values.map(value => {
+      const number = Number(value?.number);
+      const numberText = Number.isFinite(number) ? `#${number}` : String(value?.title || '').trim();
+      const title = String(value?.title || value?.description || '').trim();
+      const href = String(value?.url || '').trim();
+      const lifecycle = pullRequestLifecycleStatus(value);
+      const ci = pullRequestCiStatus(value);
+      return [
+        infoHighlightedLinkHtml(href, numberText, href || title || numberText, pullRequestStatusClass(value), highlight),
+        title ? (highlight ? infoSearchHighlightHtml(title) : esc(title)) : '',
+        lifecycle?.text ? infoStatusBadgeHtml(record, lifecycle.text, lifecycle.className, {highlight}) : '',
+        ci?.text ? infoStatusBadgeHtml(record, ci.text, ci.className, {highlight}) : '',
+      ].filter(Boolean).join(' ');
+    }).join('<br>');
+  }
+  if (String(record?.prKey || '') === '__no_pr__') return infoRecordPrLookupStateHtml(record);
   const text = String(record?.prTitle || record?.prLabel || '').trim();
-  if (infoRecordMissingValue(text)) return '';
+  if (infoRecordMissingValue(text)) return infoRecordPrLookupStateHtml(record);
   const label = String(record?.prLabel || '').trim();
   const numberText = Number.isFinite(record?.prNumber)
     ? `#${record.prNumber}`
@@ -61481,6 +61699,16 @@ function infoRecordPrDescHtml(record) {
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+function infoRecordPrCount(record = {}) {
+  return Array.isArray(record?.prValues) ? new Set(record.prValues.map(value => String(value?.id || value?.url || value?.number || '')).filter(Boolean)).size : 0;
+}
+
+function infoRecordPrCountHtml(record = {}) {
+  const count = infoRecordPrCount(record);
+  if (count <= 1) return '';
+  return `<span class="info-tree-pr-count">${esc(tPlural('info.count.pr', count))}</span>`;
 }
 
 function infoLinearItemDescHtml(item = {}, options = {}) {
@@ -61528,12 +61756,16 @@ function infoRecordLinearDescHtml(record) {
 function infoFieldLabel(kind) {
   const labels = {
     path: 'common.field.path',
+    'git-worktree': 'common.pathLabel',
+    'local-repository': 'common.pathLabel',
+    'hosted-repository': 'common.pathLabel',
     branch: 'info.field.gitBranch',
     pr: 'info.field.githubPr',
     linear: 'info.field.linear',
     tab: 'info.field.tabTmuxSession',
-    ai: 'info.field.tmuxSubWindow',
-    'tmux-window': 'info.field.tmuxSubWindow',
+    ai: 'info.dimension.ai',
+    'tmux-window': 'info.field.tmuxWindow',
+    'tmux-pane': 'info.field.tmuxWindow',
     updated: 'common.updated',
   };
   return t(labels[kind] || kind);
@@ -61714,7 +61946,7 @@ function infoRecordMainChipsHtml(record, options = {}) {
   const linearDesc = infoRecordLinearDescHtml(record);
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   const prDesc = infoRecordPrDescHtml(record);
-  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
+  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', `${prDesc}${infoRecordPrCountHtml(record)}`, record.prTitle));
   if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
     fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
   }
@@ -61723,11 +61955,14 @@ function infoRecordMainChipsHtml(record, options = {}) {
   }
   if (pathVisible) {
     const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
-    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}`, record.pathTitle));
+    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}${infoPathObservationEvidenceHtml(record)}`, record.pathTitle));
   }
   if (branchVisible) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
+    const state = String(record?.branchState || 'available');
+    const stateLabel = state === 'current' ? t('branch.current') : state;
+    const stateHtml = `<span class="info-tree-branch-state info-tree-branch-state-${esc(state)}">${esc(stateLabel)}</span>`;
+    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${stateHtml}${updatedMeta}`, record.branchTitle));
   }
   return fields.join('');
 }
@@ -61744,9 +61979,14 @@ function infoTreeHiddenDimensions(ancestors, dimension) {
 
 const infoDimensionCountKeys = Object.freeze({
   tab: 'common.tabs',
+  'tmux-session': 'common.tabs',
   'tmux-window': 'info.count.tmuxWindow',
+  'tmux-pane': 'info.count.tmuxWindow',
   ai: 'info.count.ai',
   path: 'common.pathCount',
+  'git-worktree': 'common.pathCount',
+  'local-repository': 'common.pathCount',
+  'hosted-repository': 'common.pathCount',
   branch: 'info.count.branch',
   pr: 'info.count.pr',
   linear: 'info.count.linear',
@@ -61837,7 +62077,10 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
   const tree = infoGroupTree(records, grouping, normalizedSort);
   const activeGroupKeys = new Set();
   const childrenHtml = infoTreeChildrenHtml(tree.children || [], 0, [], [], activeGroupKeys);
-  pruneInfoTreeCollapsedGroups(activeGroupKeys);
+  // Host-owned YO!share state can legitimately carry a collapsed group that is currently
+  // filtered out. Preserve it until the host changes the snapshot; pruning it during a readonly
+  // render loses that state before the user clears the host search.
+  if (!shareViewMode) pruneInfoTreeCollapsedGroups(activeGroupKeys);
   return `<div class="info-tree" data-info-grouping="${esc(normalizeInfoGrouping(grouping).join(','))}" data-info-sort="${esc(`${normalizedSort.key}:${normalizedSort.dir}`)}" data-info-search="${esc(infoSearch.trim())}">${childrenHtml}</div>`;
 }
 
@@ -61971,43 +62214,134 @@ function infoPathIsWithin(path, root) {
   return Boolean(normalizedPath && normalizedRoot && (normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`)));
 }
 
+function infoHasWorkGraph(info = {}) {
+  const graph = info?.work_graph;
+  // A schema-valid graph is the source of truth even while it is empty. Falling back to the
+  // compatibility projection here would resurrect stale paths from a prior metadata generation.
+  return graph?.version === 1
+    && ['git_worktrees', 'local_repositories', 'local_branches', 'hosted_repositories', 'pull_requests', 'linear_issues', 'path_observations', 'runtime_actors', 'tmux_sessions', 'tmux_windows', 'tmux_panes', 'worktree_branch_activity']
+      .every(key => graph[key] && typeof graph[key] === 'object');
+}
+
+function infoSourceRoot(source = {}) {
+  return source?.workGraph ? String(source?.worktree?.root || '') : infoGitRoot(source?.git);
+}
+
+function infoSourcePathLabel(source = {}) {
+  if (!source?.workGraph) return infoPathLabel(source?.git);
+  const root = infoSourceRoot(source);
+  const parent = String(source?.worktree?.parent_root || '');
+  return parent
+    ? worktreeDisplayText({name: compactHomePath(root) || root, parent_root: compactHomePath(parent) || parent})
+    : (compactHomePath(root) || root);
+}
+
+function infoSourcePathTitle(source = {}) {
+  if (!source?.workGraph) return infoPathTitle(source?.git);
+  const root = infoSourceRoot(source);
+  const parent = String(source?.worktree?.parent_root || '');
+  return parent ? worktreeDisplayText({name: root, parent_root: parent}) : root;
+}
+
+function infoSourceBranches(source = {}) {
+  if (!source?.workGraph) return Array.isArray(source?.git?.other_branches?.branches) ? source.git.other_branches.branches : [];
+  const graph = source.workGraph;
+  return (source?.localRepository?.local_branch_ids || []).map(branchId => {
+    const branch = graph.local_branches?.[branchId];
+    if (!branch) return null;
+    const pullRequests = (branch.pull_request_ids || []).map(prId => graph.pull_requests?.[prId]).filter(Boolean);
+    const linear = (branch.linear_issue_ids || []).map(issueId => graph.linear_issues?.[issueId]).filter(Boolean);
+    return {...branch, current: branch.id === source?.worktree?.current_branch_id, pull_requests: pullRequests, linear};
+  }).filter(Boolean);
+}
+
+function infoSourceOwnsBranch(source = {}, branch = {}) {
+  if (source?.workGraph) return String(branch?.id || '') === String(source?.worktree?.current_branch_id || '');
+  return infoBranchOwnedBySource(source?.git, branch);
+}
+
+function infoSourceRepositoryUrl(source = {}) {
+  return source?.workGraph
+    ? String(source?.hostedRepository?.url || '')
+    : String(source?.git?.github_repo?.url || '');
+}
+
 function infoBranchSourcesForSession(session, info) {
-  const project = info?.project || {};
-  const primaryGit = project.git;
-  const primaryKey = infoGitPathKey(primaryGit);
+  const workGraph = info?.work_graph;
+  if (!infoHasWorkGraph(info)) return [];
   const sources = [];
-  const seenSources = new Set();
-  const addSource = (git, primary) => {
-    const sourceKey = infoGitPathKey(git);
-    const branches = git?.other_branches?.branches;
-    if (!sourceKey || !Array.isArray(branches) || !branches.length || seenSources.has(sourceKey)) return;
-    seenSources.add(sourceKey);
-    sources.push({session, info, project, git, primary: primary === true});
-  };
-  addSource(primaryGit, true);
-  for (const repo of Array.isArray(project.repos) ? project.repos : []) {
-    addSource(repo, Boolean(primaryKey && infoGitPathKey(repo) === primaryKey));
-  }
-  for (const row of Array.isArray(info?.window_metadata) ? info.window_metadata : []) {
-    addSource(row?.git, Boolean(primaryKey && infoGitPathKey(row?.git) === primaryKey));
-  }
-  const agents = typeof sessionAgentWindowStatusPayloads === 'function'
-    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
-    : [];
-  for (const agent of agents) {
-    addSource(agent?.git, Boolean(primaryKey && infoGitPathKey(agent?.git) === primaryKey));
-    for (const entry of typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : []) {
-      addSource(entry?.git, Boolean(primaryKey && infoGitPathKey(entry?.git) === primaryKey));
-    }
+  for (const worktree of Object.values(workGraph.git_worktrees)) {
+    const localRepository = workGraph.local_repositories?.[worktree?.local_repository_id];
+    if (!localRepository) continue;
+    const hostedRepositoryId = String(worktree.hosted_repository_id || localRepository.hosted_repository_id || '');
+    const hostedRepository = workGraph.hosted_repositories?.[hostedRepositoryId] || null;
+    sources.push({
+      session,
+      info,
+      workGraph,
+      sourceKey: String(worktree.id || ''),
+      worktree,
+      localRepository,
+      hostedRepository,
+      worktreeId: String(worktree.id || ''),
+      localRepositoryId: String(localRepository.id || ''),
+      hostedRepositoryId,
+        gitWorktreeLabel: worktree.parent_root ? worktreeDisplayText({name: worktree.root, parent_root: worktree.parent_root}) : (compactHomePath(worktree.root) || worktree.root),
+        gitWorktreeTitle: worktree.parent_root ? worktreeDisplayText({name: worktree.root, parent_root: worktree.parent_root}) : String(worktree.root || ''),
+      localRepositoryLabel: compactHomePath(worktree.root) || worktree.root,
+      localRepositoryTitle: String(localRepository.common_git_dir || worktree.root || ''),
+      hostedRepositoryLabel: String(hostedRepository?.url || ''),
+      hostedRepositoryTitle: String(hostedRepository?.url || ''),
+      primary: worktree.id === Object.keys(workGraph.git_worktrees)[0],
+    });
   }
   return sources;
+}
+
+function infoGraphTabAgentsForSource(source = {}) {
+  const workGraph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (!workGraph || !worktreeId) return [];
+  const actors = Object.values(workGraph.runtime_actors || {});
+  const result = [];
+  for (const actor of actors) {
+    if (!String(actor?.kind || '').trim()) continue;
+    const observationIds = Array.isArray(actor?.path_observation_ids) ? actor.path_observation_ids : [];
+    if (!observationIds.some(id => workGraph.path_observations?.[id]?.git_worktree_id === worktreeId)) continue;
+    const pane = workGraph.tmux_panes?.[actor.tmux_pane_id] || {};
+    const window = workGraph.tmux_windows?.[pane.tmux_window_id] || {};
+    const displayPane = Array.isArray(source.info?.panes)
+      ? source.info.panes.find(candidate => String(candidate?.target || '') === String(pane?.target || ''))
+      : null;
+    result.push({
+      id: String(actor?.id || ''),
+      tmux_session_id: String(window?.tmux_session_id || ''),
+      tmux_session_name: String(workGraph.tmux_sessions?.[window?.tmux_session_id]?.name || ''),
+      tmux_pane_id: String(pane?.id || ''),
+      tmux_pane_label: String(pane?.index === undefined ? '' : `${window?.index || '0'}.${pane.index}`),
+      tmux_pane_target: String(pane?.target || ''),
+      kind: String(actor?.kind || ''),
+      state: String(actor?.status || ''),
+      window: String(window?.index || ''),
+      window_index: String(window?.index || ''),
+      window_label: String(window?.name || ''),
+      pane: String(pane?.index || ''),
+      pane_target: String(pane?.target || ''),
+      path: String(actor?.cwd || pane?.current_path || ''),
+      path_observation_ids: Array.isArray(actor?.path_observation_ids) ? [...actor.path_observation_ids] : [],
+      current: displayPane?.active === true || (!displayPane && pane?.active === true),
+      window_active: displayPane?.window_active === true || (!displayPane && pane?.window_active === true),
+      pid: actor?.pid,
+    });
+  }
+  return result;
 }
 
 function infoBranchSourcesForIndexedRepos() {
   const repos = Array.isArray(transcriptMetadataState.payload?.indexed_repos) ? transcriptMetadataState.payload.indexed_repos : [];
   return repos
     .filter(git => infoGitPathKey(git) && Array.isArray(git?.other_branches?.branches) && git.other_branches.branches.length)
-    .map(git => ({session: '', info: {}, project: {}, git, primary: false, indexed: true}));
+    .map(git => ({session: '', info: {}, git, primary: false, indexed: true}));
 }
 
 function infoBranchOwnedBySource(git, branch) {
@@ -62059,18 +62393,6 @@ function infoAgentWindowMatchesPathRoot(agent, sourceRoot) {
   return paths.some(path => infoPathIsWithin(path, sourceRoot));
 }
 
-function infoSourceWindowRowsForBranch(source, branch, options = {}) {
-  if (!source.session) return [];
-  const root = infoGitPathKey(source.git);
-  const branchName = String(branch?.name || source.git?.branch || '');
-  return (Array.isArray(source.info?.window_metadata) ? source.info.window_metadata : [])
-    .filter(row => {
-      const git = row?.git || {};
-      return infoGitPathKey(git) === root
-        && infoBranchGitMatches(git, branchName, options);
-    });
-}
-
 function infoTabAgentLabel(session, agent = null) {
   const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
   if (!agent) return t('info.tabAgent.withoutAi', {tab: tabLabel});
@@ -62099,9 +62421,11 @@ function infoTabAgentEntry(session, agent = null) {
   const label = infoTabAgentLabel(session, agent);
   const title = agent
     ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
-    : `${label} · ${t('info.missing.tmuxSubWindow')}`;
+    : `${label} · ${t('info.missing.tmuxWindow')}`;
   return {
     session: String(session || ''),
+    tmux_session_id: String(agent?.tmux_session_id || ''),
+    tmux_session_name: String(agent?.tmux_session_name || ''),
     label,
     title,
     tabLabel,
@@ -62113,6 +62437,9 @@ function infoTabAgentEntry(session, agent = null) {
     state: String(agent?.state || ''),
     pane: String(agent?.pane || ''),
     pane_target: String(agent?.pane_target || ''),
+    tmux_pane_id: String(agent?.tmux_pane_id || ''),
+    tmux_pane_label: String(agent?.tmux_pane_label || ''),
+    tmux_pane_target: String(agent?.tmux_pane_target || ''),
     current: agentWindowPayloadCurrent(agent) === true,
     window_active: agent?.window_active === true,
     pid: tmuxWindowProcessPid(agent),
@@ -62124,6 +62451,29 @@ function infoTabAgentEntry(session, agent = null) {
 
 function infoBranchTabAgentsForSource(source, branch) {
   if (!source.session) return [];
+  const graphAgents = infoGraphTabAgentsForSource(source);
+  if (source.workGraph) {
+    const ownsBranch = infoSourceOwnsBranch(source, branch);
+    const branchName = String(branch?.name || '');
+    const branchOwners = graphAgents.filter(agent => {
+      const worktree = source.workGraph?.git_worktrees?.[source.worktreeId] || {};
+      const branchId = String(worktree.current_branch_id || '');
+      // The canonical graph has no mutable actor-level Git projection. An actor can own the
+      // checked-out branch directly; non-current branch ownership is represented by a durable
+      // branch-activity edge, not by assigning every actor observing the worktree to every branch.
+      if (ownsBranch) return true;
+      return Object.values(source.workGraph?.worktree_branch_activity || {}).some(activity => {
+        if (!(activity?.git_worktree_id === source.worktreeId
+          && (activity?.local_branch_id === branch?.id || activity?.branch_name_snapshot === branchName))) return false;
+        const observationIds = new Set(activity?.path_observation_ids || []);
+        return (agent?.path_observation_ids || []).some(id => observationIds.has(id));
+      });
+    });
+    if (branchOwners.length) return branchOwners.map(agent => infoTabAgentEntry(source.session, agent));
+    // A session which observes a secondary worktree has no inferred owner for that worktree's
+    // current branch. Keep the branch available in YO!info without fabricating a "No AI" row.
+    return ownsBranch && source.primary === true ? [infoTabAgentEntry(source.session, null)] : [];
+  }
   const owned = infoBranchOwnedBySource(source.git, branch);
   const root = infoGitRoot(source.git);
   const branchName = String(branch?.name || source.git?.branch || '');
@@ -62132,18 +62482,18 @@ function infoBranchTabAgentsForSource(source, branch) {
     : [];
   const matchingAgents = agents.filter(agent => infoAgentWindowMatchesBranchGit(agent, root, branchName, {requireBranch: !owned}));
   if (matchingAgents.length) return matchingAgents.map(agent => infoTabAgentEntry(source.session, agent));
-  const matchingWindows = infoSourceWindowRowsForBranch(source, branch, {requireBranch: !owned});
   if (!owned) {
-    if (matchingWindows.length) return [infoTabAgentEntry(source.session, null)];
     return [];
   }
   if (source.primary === true && agents.length) return agents.map(agent => infoTabAgentEntry(source.session, agent));
-  if (matchingWindows.length || source.primary === true || !agents.length) return [infoTabAgentEntry(source.session, null)];
+  if (source.primary === true || !agents.length) return [infoTabAgentEntry(source.session, null)];
   return [];
 }
 
 function infoPathTabAgentsForSource(source) {
   if (!source.session) return [];
+  const graphAgents = infoGraphTabAgentsForSource(source);
+  if (source.workGraph) return graphAgents.map(agent => infoTabAgentEntry(source.session, agent));
   const root = infoGitRoot(source.git);
   if (!root) return [];
   const agents = typeof sessionAgentWindowStatusPayloads === 'function'
@@ -62166,6 +62516,8 @@ function mergedInfoTabAgents(...groups) {
       seen.add(key);
       result.push({
         session,
+        tmux_session_id: String(item?.tmux_session_id || ''),
+        tmux_session_name: String(item?.tmux_session_name || ''),
         label,
         title: String(item?.title || label),
         tabLabel: String(item?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || ''),
@@ -62176,6 +62528,9 @@ function mergedInfoTabAgents(...groups) {
         state: String(item?.state || ''),
         pane: String(item?.pane || ''),
         pane_target: String(item?.pane_target || ''),
+        tmux_pane_id: String(item?.tmux_pane_id || ''),
+        tmux_pane_label: String(item?.tmux_pane_label || ''),
+        tmux_pane_target: String(item?.tmux_pane_target || ''),
         current: item?.current === true,
         window_active: item?.window_active === true,
         working_stopped_ts: Number.isFinite(Number(item?.working_stopped_ts)) ? Number(item.working_stopped_ts) : 0,
@@ -62207,24 +62562,64 @@ function rowWithInfoTabAgents(row, tabAgents) {
 }
 
 function infoPathActivityForSource(source = {}) {
-  const root = infoGitRoot(source.git);
-  const repos = Array.isArray(source?.project?.repos) ? source.project.repos : [];
-  const repo = repos.find(item => infoNormalizedPath(item?.root) === infoNormalizedPath(root));
-  const timestamp = Number(repo?.activity_ts ?? source?.git?.activity_ts ?? 0);
-  return {
-    timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
-    source: String(repo?.activity_source || source?.git?.activity_source || ''),
-  };
+  const graph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (graph && worktreeId) {
+    const observations = Object.values(graph.path_observations || {})
+      .filter(observation => observation?.git_worktree_id === worktreeId);
+    const timestamp = Math.max(0, ...observations.map(observation => Number(observation?.last_observed_at || 0)));
+    return {timestamp, source: String(observations.find(observation => Number(observation?.last_observed_at || 0) === timestamp)?.source || '')};
+  }
+  return {timestamp: 0, source: ''};
+}
+
+function infoPathObservationsForSource(source = {}) {
+  const graph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (!graph || !worktreeId) return [];
+  const actors = graph.runtime_actors || {};
+  return Object.values(graph.path_observations || {})
+    .filter(observation => observation?.git_worktree_id === worktreeId)
+    .map(observation => {
+      const actor = actors[observation.runtime_actor_id] || null;
+      return {
+        id: String(observation?.id || ''),
+        path: String(observation?.path || observation?.path_snapshot || ''),
+        source: String(observation?.source || ''),
+        lastObservedAt: Number(observation?.last_observed_at || 0),
+        actorId: String(actor?.id || ''),
+        actorKind: String(actor?.kind || ''),
+      };
+    })
+    .sort((left, right) => right.lastObservedAt - left.lastObservedAt || left.path.localeCompare(right.path) || left.id.localeCompare(right.id));
+}
+
+function infoPathObservationEvidenceHtml(record = {}) {
+  const observations = Array.isArray(record?.pathObservations) ? record.pathObservations : [];
+  if (observations.length <= 1) return '';
+  const summary = observations.map(observation => {
+    const path = compactHomePath(observation.path) || observation.path;
+    const actor = observation.actorKind || t('info.missing.ai');
+    const source = observation.source || t('info.group.none');
+    const recency = Number.isFinite(observation.lastObservedAt) && observation.lastObservedAt > 0
+      ? relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - observation.lastObservedAt))
+      : '';
+    return `<li><code>${esc(path)}</code> · ${esc(actor)} · ${esc(source)}${recency ? ` · ${esc(recency)}` : ''}</li>`;
+  }).join('');
+  return `<details class="info-tree-path-observations"><summary>${esc(tPlural('common.pathCount', observations.length))}</summary><ul>${summary}</ul></details>`;
 }
 
 function infoBranchRowForSource(source, branch, ownsSession) {
-  const {session, info, project, git, primary} = source;
-  const useCurrentProjectMetadata = ownsSession && primary;
-  const currentPr = useCurrentProjectMetadata ? displayPullRequest(info) : null;
-  const currentLinear = useCurrentProjectMetadata ? project.linear || [] : [];
+  const {session, info, git, primary} = source;
+  const useCurrentWorkMetadata = ownsSession && primary && Boolean(source.workGraph);
+  const currentPr = useCurrentWorkMetadata ? displayPullRequest(info) : null;
+  const currentLinear = useCurrentWorkMetadata ? sessionWorkSummary(session, info).linearIssues || [] : [];
   const branchLinear = Array.isArray(branch.linear) ? branch.linear : [];
   const branchLinearIds = Array.isArray(branch.linear_ids) ? branch.linear_ids : [];
-  const prLinearIds = Array.isArray(branch.pull_request?.linear_ids) ? branch.pull_request.linear_ids : [];
+  const branchPullRequests = Array.isArray(branch.pull_requests)
+    ? branch.pull_requests.filter(Boolean)
+    : (branch.pull_request ? [branch.pull_request] : []);
+  const prLinearIds = branchPullRequests.flatMap(pullRequest => Array.isArray(pullRequest?.linear_ids) ? pullRequest.linear_ids : []);
   const linearSourceItems = currentLinear.length ? currentLinear : branchLinear;
   const fallbackLinearIds = Array.from(new Set([...branchLinearIds, ...prLinearIds].map(item => String(item || '').trim()).filter(Boolean)));
   const linearIds = linearSourceItems.length
@@ -62233,14 +62628,15 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const linearHtml = linearSourceItems.length
     ? linearSourceItems.map(issue => linearIssueHtml(issue)).join(' ')
     : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-  const prHtml = currentPr?.number ? pullRequestLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
-  const prValue = currentPr?.number ? currentPr : branch.pull_request;
+  const prValues = currentPr?.number ? [currentPr] : branchPullRequests;
+  const prValue = prValues[0] || null;
+  const prHtml = prValues.map(pullRequestLinkHtml).filter(Boolean).join(' ');
   const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
   const prNumber = infoPrNumberFromValue(prValue?.number);
-  const prDescriptionTitle = prValue?.number
-    ? [`#${prValue.number}`, prValue.title || prValue.description || branch.subject || ''].filter(Boolean).join(' ')
-    : '';
-  const repoUrl = git?.github_repo?.url || '';
+  const prDescriptionTitle = prValues.map(value => value?.number
+    ? [`#${value.number}`, value.title || value.description || branch.subject || ''].filter(Boolean).join(' ')
+    : '').filter(Boolean).join(' · ');
+  const repoUrl = infoSourceRepositoryUrl(source);
   const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
   const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
@@ -62270,15 +62666,44 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     180,
   );
   const pathActivity = infoPathActivityForSource(source);
+  const pathObservations = infoPathObservationsForSource(source);
+  const workGraph = source?.workGraph;
+  const branchId = String(branch?.id || '');
+  const worktreeId = String(source?.worktreeId || '');
+  const branchActivities = Object.values(workGraph?.worktree_branch_activity || {}).filter(activity => (
+    activity?.git_worktree_id === worktreeId
+      && (activity?.local_branch_id === branchId || activity?.branch_name_snapshot === branch?.name)
+  ));
+  const current = branch?.current === true;
+  const missing = branch?.missing === true;
+  const worked = !current && branchActivities.length > 0;
+  const branchState = current ? 'current' : (missing ? 'missing' : (worked ? 'worked' : 'available'));
+  const branchStateLabel = branchState === 'current'
+    ? t('branch.current')
+    : branchState;
   return {
     session: '',
-    path: infoGitRoot(git),
-    pathLabel: infoPathLabel(git),
-    pathTitle: infoPathTitle(git),
+    path: infoSourceRoot(source),
+    pathLabel: infoSourcePathLabel(source),
+    pathTitle: infoSourcePathTitle(source),
     pathActivityTs: pathActivity.timestamp,
     pathActivitySource: pathActivity.source,
+    pathObservations,
+    gitWorktreeId: String(source?.worktreeId || ''),
+    gitWorktreeLabel: String(source?.gitWorktreeLabel || infoSourcePathLabel(source)),
+    gitWorktreeTitle: String(source?.gitWorktreeTitle || infoSourcePathTitle(source)),
+    localRepositoryId: String(source?.localRepositoryId || git?.local_repository?.id || ''),
+    localRepositoryLabel: String(source?.localRepositoryLabel || infoSourcePathLabel(source)),
+    localRepositoryTitle: String(source?.localRepositoryTitle || infoSourcePathTitle(source)),
+    hostedRepositoryId: String(source?.hostedRepositoryId || ''),
+    hostedRepositoryLabel: String(source?.hostedRepositoryLabel || git?.github_repo?.url || ''),
+    hostedRepositoryTitle: String(source?.hostedRepositoryTitle || git?.github_repo?.url || ''),
     branch: branch.name || '',
-    branchHtml: branchLinkHtml(git, branch.name),
+    branchId,
+    branchState,
+    branchStateLabel,
+    branchActivityIds: branchActivities.map(activity => String(activity?.id || '')).filter(Boolean),
+    branchHtml: branchLinkHtml(git || {}, branch.name),
     desc,
     updated: branch.updated || '',
     updatedText: branchUpdatedText(branch),
@@ -62290,6 +62715,8 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     prDescriptionTitle,
     prUrl,
     prLabel,
+    prValues,
+    prLookupState: String(branch.pull_request_lookup_state || 'not-requested'),
     prNumber: Number.isFinite(prNumber) ? prNumber : null,
     prClass,
     prLifecycleText,
@@ -62300,7 +62727,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     linearHtml,
     linearItems,
     linearTitle,
-    current: false,
+    current,
     sourcePrimary: primary,
     tabAgents: infoBranchTabAgentsForSource(source, branch),
     pathTabAgents: infoPathTabAgentsForSource(source),
@@ -62319,7 +62746,12 @@ function mergeInfoBranchRow(existing, next) {
   const preferred = preferInfoBranchMetadataRow(existing, next);
   const mergedAgents = mergedInfoTabAgents(existing.tabAgents, next.tabAgents);
   const mergedPathAgents = mergedInfoTabAgents(existing.pathTabAgents, next.pathTabAgents);
-  return rowWithInfoTabAgents({...preferred, pathTabAgents: mergedPathAgents}, mergedAgents);
+  const branchState = preferred.branchState === 'current' || next.branchState === 'current'
+    ? 'current'
+    : (preferred.branchState === 'worked' || next.branchState === 'worked'
+      ? 'worked'
+      : (preferred.branchState === 'missing' || next.branchState === 'missing' ? 'missing' : 'available'));
+  return rowWithInfoTabAgents({...preferred, pathTabAgents: mergedPathAgents, branchState}, mergedAgents);
 }
 
 function rawInfoBranchRows() {
@@ -62328,9 +62760,11 @@ function rawInfoBranchRows() {
   for (const session of infoSessions) {
     const info = transcriptMetadataState.payload.sessions?.[session];
     for (const source of infoBranchSourcesForSession(session, info)) {
-      for (const branch of source.git?.other_branches?.branches || []) {
-        const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
-        const row = infoBranchRowForSource(source, branch, infoBranchOwnedBySource(source.git, branch));
+      for (const branch of infoSourceBranches(source)) {
+        const key = source.workGraph
+          ? `${source.localRepositoryId}\n${branch.id || branch.name || ''}`
+          : `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
+        const row = infoBranchRowForSource(source, branch, infoSourceOwnsBranch(source, branch));
         rowsByKey.set(key, mergeInfoBranchRow(rowsByKey.get(key), row));
       }
     }
@@ -62414,6 +62848,7 @@ function shareInfoStateSnapshot(options = {}) {
     grouping: currentInfoGrouping(),
     sort: currentInfoSort(),
     search: currentInfoSearch(),
+    collapsedGroupKeys: [...infoCollapsedGroupKeys].slice(0, 1000),
   };
   if (options.includeRows !== false) snapshot.branchRows = infoBranchRows().map(shareInfoRowSnapshot);
   return snapshot;
@@ -62429,6 +62864,13 @@ function applyShareInfoState(info = {}) {
   }
   if ('search' in info || 'infoSearch' in info || 'info2Search' in info) {
     setInfoSearch(info.search ?? info.infoSearch ?? info.info2Search, {publish: false, render: false});
+  }
+  if (Array.isArray(info.collapsedGroupKeys)) {
+    infoCollapsedGroupKeys.clear();
+    info.collapsedGroupKeys.slice(0, 1000).forEach(key => {
+      const value = String(key || '');
+      if (value) infoCollapsedGroupKeys.add(value);
+    });
   }
   if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
   refreshInfoGroupingControls();
@@ -64496,6 +64938,13 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
   if (!requestIsCurrent()) return false;
+  const nextPayload = transcriptPayloadWithTmuxWindowOverrides(payload);
+  const currentSessions = transcriptMetadataState.payload?.sessions || {};
+  for (const [session, nextInfo] of Object.entries(nextPayload?.sessions || {})) {
+    const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
+    const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
+    if (nextGeneration > 0 && currentGeneration > nextGeneration) return false;
+  }
   setTranscriptMetadataPayload(transcriptPayloadWithTmuxWindowOverrides(payload), {invalidateRequest: options.source !== 'request'});
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
@@ -64915,6 +65364,13 @@ function relocalizeTranscriptPanelStatus(session) {
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
     const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    if (payload?.pending === true) {
+      preview.textContent = t('transcript.loadingRecentContext');
+      setTimeout(() => {
+        if (transcriptPreviewPaneIsActive(session)) refreshTranscriptPreview(session, preview, options);
+      }, 200);
+      return;
+    }
     if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }

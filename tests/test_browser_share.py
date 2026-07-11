@@ -723,6 +723,8 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = dict(app_english_strings())
+    alpha_graph = fixture_work_graph("alpha", "/repo/client-alpha", branch="local-alpha")
+    beta_graph = fixture_work_graph("beta", "/repo/client-beta", branch="local-beta")
     bootstrap = json.dumps(
         {
             "sessions": ["alpha", "beta"],
@@ -765,8 +767,8 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
               transcriptMetadataState.payload = {{
                 session_order: ['beta', 'alpha'],
                 sessions: {{
-                  alpha: {{session: 'alpha', project: {{git: {{root: '/repo/client-alpha', cwd: '/repo/client-alpha', branch: 'local-alpha', other_branches: {{branches: [{{name: 'local-alpha', updated: 'later', updated_ts: 200, current: true, subject: 'client alpha row'}}]}}}}, linear: []}}}},
-                  beta: {{session: 'beta', project: {{git: {{root: '/repo/client-beta', cwd: '/repo/client-beta', branch: 'local-beta', other_branches: {{branches: [{{name: 'local-beta', updated: 'earlier', updated_ts: 100, current: true, subject: 'client beta row'}}]}}}}, linear: []}}}},
+                  alpha: {{session: 'alpha', work_graph: {json.dumps(alpha_graph, separators=(',', ':'))}}},
+                  beta: {{session: 'beta', work_graph: {json.dumps(beta_graph, separators=(',', ':'))}}},
                 }},
               }};
               const hostBranchRows = [
@@ -827,6 +829,8 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     strings = dict(app_english_strings())
+    session_five_graph = fixture_work_graph("5", "/home/test/yolomux.dev1/src", root="/home/test/yolomux.dev1")
+    session_six_graph = fixture_work_graph("6", "/home/test/other.dev/src", root="/home/test/other.dev")
     bootstrap = json.dumps(
         {
             "sessions": ["5", "6"],
@@ -893,8 +897,8 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
               transcriptMetadataState.payload = {{
                 session_order: ['5', '6'],
                 sessions: {{
-                  '5': {{session: '5', project: {{git: {{root: '/home/test/yolomux.dev1', cwd: '/home/test/yolomux.dev1/src'}}}}, selected_pane: {{current_path: '/home/test/yolomux.dev1/src'}}}},
-                  '6': {{session: '6', project: {{git: {{root: '/home/test/other.dev', cwd: '/home/test/other.dev/src'}}}}, selected_pane: {{current_path: '/home/test/other.dev/src'}}}},
+                  '5': {{session: '5', work_graph: {json.dumps(session_five_graph, separators=(',', ':'))}, selected_pane: {{target: '5:0.0', current_path: '/home/test/yolomux.dev1/src'}}}},
+                  '6': {{session: '6', work_graph: {json.dumps(session_six_graph, separators=(',', ':'))}, selected_pane: {{target: '6:0.0', current_path: '/home/test/other.dev/src'}}}},
                 }},
               }};
               const initial = fileExplorerSessionFilesTargetSession();
@@ -996,19 +1000,30 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
         seen_tokens.append(token)
         return record if token == "valid-share-token" else None
 
+    git_payload = {
+        "root": root_path,
+        "cwd": root_path,
+        "branch": "fix/share-parity",
+        "dirty_count": 3,
+    }
+    worktree_id = "worktree:share"
+    local_repository_id = "local:share"
+    branch_id = "branch:share:fix/share-parity"
     transcript_payload = {
         "server_version": "test",
         "session_order": ["6"],
         "sessions": {
             "6": {
                 "session": "6",
-                "project": {
-                    "git": {
-                        "root": root_path,
-                        "cwd": root_path,
-                        "branch": "fix/share-parity",
-                        "dirty_count": 3,
-                    },
+                "work_graph": {
+                    "version": 1,
+                    "generation": 1,
+                    "tmux_sessions": {}, "tmux_windows": {}, "tmux_panes": {}, "runtime_actors": {}, "path_observations": {},
+                    "git_worktrees": {worktree_id: {"id": worktree_id, "root": root_path, "git_dir": f"{root_path}/.git", "kind": "primary", "local_repository_id": local_repository_id, "current_branch_id": branch_id, "path_observation_ids": [], "branch_activity_ids": [], "git": git_payload}},
+                    "local_repositories": {local_repository_id: {"id": local_repository_id, "common_git_dir": f"{root_path}/.git", "git_worktree_ids": [worktree_id], "local_branch_ids": [branch_id]}},
+                    "hosted_repositories": {},
+                    "local_branches": {branch_id: {"id": branch_id, "local_repository_id": local_repository_id, "name": "fix/share-parity", "current": True, "pull_request_ids": [], "linear_issue_ids": []}},
+                    "pull_requests": {}, "linear_issues": {}, "worktree_branch_activity": {},
                 },
                 "selected_pane": {"current_path": root_path},
                 "panes": [
@@ -1084,9 +1099,9 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
                         "window_label": "1:codex",
                         "pid": 0,
                         "active": True,
-                        "path_entries": [{"path": root_path, "mtime": 200, "git": transcript_payload["sessions"]["6"]["project"]["git"]}],
+                        "path_entries": [{"path": root_path, "mtime": 200, "git": git_payload}],
                         "paths": [root_path],
-                        "git": transcript_payload["sessions"]["6"]["project"]["git"],
+                        "git": git_payload,
                     }],
                 },
             }, HTTPStatus.OK),

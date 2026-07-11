@@ -18,11 +18,70 @@ def make_metadata_app():
 
 
 def session_payload(pr, branch="feature"):
+    session_id = "tmux-session:s"
+    window_id = "tmux-window:s:0"
+    pane_id = "tmux-pane:s:0.0"
+    actor_id = "runtime-actor:s:0"
+    observation_id = "path-observation:s:0"
+    worktree_id = "git-worktree:s"
+    local_repository_id = "local-repository:s"
+    branch_id = f"local-branch:s:{branch}"
+    pull_request_id = f"pull-request:s:{pr['number']}"
     return {
         "s": {
-            "project": {
-                "git": {"branch": branch, "head": "abc123 example"},
-                "pull_request": copy.deepcopy(pr),
+            "work_graph": {
+                "version": 1,
+                "generation": 1,
+                "loading": False,
+                "tmux_sessions": {
+                    session_id: {
+                        "id": session_id,
+                        "tmux_window_ids": [window_id],
+                        "tmux_pane_ids": [pane_id],
+                        "runtime_actor_ids": [actor_id],
+                        "path_observation_ids": [observation_id],
+                    }
+                },
+                "tmux_windows": {window_id: {"id": window_id, "tmux_session_id": session_id, "tmux_pane_ids": [pane_id]}},
+                "tmux_panes": {pane_id: {"id": pane_id, "tmux_window_id": window_id, "runtime_actor_ids": [actor_id], "path_observation_ids": [observation_id]}},
+                "runtime_actors": {actor_id: {"id": actor_id, "tmux_pane_id": pane_id, "path_observation_ids": [observation_id]}},
+                "path_observations": {observation_id: {"id": observation_id, "tmux_pane_id": pane_id, "runtime_actor_id": actor_id, "git_worktree_id": worktree_id}},
+                "git_worktrees": {
+                    worktree_id: {
+                        "id": worktree_id,
+                        "root": "/fixture/repository",
+                        "git_dir": "/fixture/repository/.git",
+                        "kind": "primary",
+                        "local_repository_id": local_repository_id,
+                        "current_branch_id": branch_id,
+                        "activity_priority": 0,
+                        "activity_ts": 1.0,
+                        "activity_source": "fixture",
+                        "git": {"root": "/fixture/repository", "branch": branch, "head": "abc123 example"},
+                    }
+                },
+                "local_repositories": {
+                    local_repository_id: {
+                        "id": local_repository_id,
+                        "common_git_dir": "/fixture/repository/.git",
+                        "git_worktree_ids": [worktree_id],
+                        "local_branch_ids": [branch_id],
+                    }
+                },
+                "hosted_repositories": {},
+                "local_branches": {
+                    branch_id: {
+                        "id": branch_id,
+                        "local_repository_id": local_repository_id,
+                        "name": branch,
+                        "current": True,
+                        "pull_request_ids": [pull_request_id],
+                    }
+                },
+                "pull_requests": {
+                    pull_request_id: {"id": pull_request_id, **copy.deepcopy(pr), "local_branch_ids": [branch_id], "linear_issue_ids": []}
+                },
+                "linear_issues": {},
             }
         }
     }

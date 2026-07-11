@@ -13,6 +13,131 @@ const BUNDLE_BOOT_START = BUNDLE_SOURCE.indexOf("if (refreshMeta) {");
 assert.ok(BUNDLE_BOOT_START > 0, 'could not find browser boot section');
 let bundleScript = null;
 const FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST = 'yolomux.fileExplorerOpen.v1';
+
+// Historical renderer fixtures describe the retired compact `project` payload. Keep that format
+// at the test boundary only: production receives and selects the normalized graph exclusively.
+function canonicalWorkGraphFixture(session, info = {}) {
+  if (!info || typeof info !== 'object') return info;
+  if (info.work_graph || !info.project || typeof info.project !== 'object') return info;
+  const project = info.project;
+  const repoInputs = [project.git, ...(Array.isArray(project.repos) ? project.repos : [])].filter(repo => repo?.root);
+  if (!repoInputs.length) return {...info, work_graph: {version: 1, generation: 1, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {}, local_repositories: {}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}}};
+  const graph = {version: 1, generation: 1, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {}, local_repositories: {}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}};
+  const sessionId = `tmux-session:${session}`;
+  graph.tmux_sessions[sessionId] = {id: sessionId, name: String(session), tmux_window_ids: [], tmux_pane_ids: [], runtime_actor_ids: [], path_observation_ids: []};
+  const worktreeIds = new Map();
+  const branchActivityByWorktreeAndBranch = new Map();
+  const ensureIssue = issue => {
+    const identifier = String(issue?.identifier || issue || '').trim();
+    if (!identifier) return '';
+    const id = `linear:${identifier}`;
+    graph.linear_issues[id] ||= {id, identifier, title: issue?.title || '', url: issue?.url || '', state: issue?.state || ''};
+    return id;
+  };
+  for (const repo of repoInputs) {
+    const root = String(repo?.worktree?.path || repo?.root || '').replace(/\/+$/, '');
+    if (!root || worktreeIds.has(root)) continue;
+    const localId = `local:${root}`;
+    const worktreeId = `worktree:${root}`;
+    worktreeIds.set(root, worktreeId);
+    const sourceBranches = Array.isArray(repo.other_branches?.branches) ? [...repo.other_branches.branches] : [];
+    const currentName = String(repo.branch || sourceBranches.find(branch => branch?.current)?.name || '');
+    if (currentName && !sourceBranches.some(branch => String(branch?.name || '') === currentName)) {
+      sourceBranches.unshift({name: currentName, current: true});
+    }
+    const hosted = repo.github_repo || null;
+    const hostedId = hosted?.url ? `hosted:${hosted.url}` : '';
+    if (hostedId) graph.hosted_repositories[hostedId] ||= {id: hostedId, url: hosted.url, pull_request_ids: []};
+    const branchIds = [];
+    for (const source of sourceBranches.length ? sourceBranches : (currentName ? [{name: currentName, current: true}] : [])) {
+      const name = String(source?.name || '');
+      if (!name) continue;
+      const branchId = `branch:${localId}:${name}`;
+      const prs = [...(Array.isArray(source.pull_requests) ? source.pull_requests : [source.pull_request].filter(Boolean))];
+      if (source.current && root === String(project.git?.root || '').replace(/\/+$/, '') && project.pull_request) prs.push(project.pull_request);
+      const prIds = [];
+      for (const value of prs) {
+        const number = Number(value?.number);
+        if (!Number.isFinite(number)) continue;
+        const prId = `pr:${hostedId || localId}:${number}`;
+        const linearIds = (value.linear || value.linear_ids || []).map(ensureIssue).filter(Boolean);
+        graph.pull_requests[prId] ||= {id: prId, hosted_repository_id: hostedId || null, number, title: value.title || value.description || '', description: value.description || '', url: value.url || '', state: value.state, status_label: value.status_label || '', draft: value.draft === true, merged: value.merged === true, checks: value.checks, review_decision: value.review_decision || '', linear_issue_ids: linearIds, local_branch_ids: []};
+        if (!graph.pull_requests[prId].local_branch_ids.includes(branchId)) graph.pull_requests[prId].local_branch_ids.push(branchId);
+        if (hostedId && !graph.hosted_repositories[hostedId].pull_request_ids.includes(prId)) graph.hosted_repositories[hostedId].pull_request_ids.push(prId);
+        prIds.push(prId);
+      }
+      const currentProjectLinear = source.current && root === String(project.git?.root || '').replace(/\/+$/, '')
+        ? (project.linear || [])
+        : [];
+      const linearIds = [...(source.linear || source.linear_ids || []), ...prs.flatMap(value => value?.linear || value?.linear_ids || []), ...currentProjectLinear]
+        .map(ensureIssue)
+        .filter(Boolean);
+      graph.local_branches[branchId] = {id: branchId, local_repository_id: localId, name, current: source.current === true || name === currentName, updated: source.updated, updated_ts: source.updated_ts, subject: source.subject, pull_request_ids: [...new Set(prIds)], linear_issue_ids: [...new Set(linearIds)]};
+      branchIds.push(branchId);
+    }
+    const currentBranchId = branchIds.find(id => graph.local_branches[id].current) || branchIds[0] || null;
+    graph.local_repositories[localId] = {id: localId, common_git_dir: String(repo.worktree?.parent_root || root) + '/.git', git_worktree_ids: [worktreeId], local_branch_ids: branchIds, hosted_repository_id: hostedId || null};
+    graph.git_worktrees[worktreeId] = {id: worktreeId, root, git_dir: root + '/.git', kind: repo.worktree?.parent_root ? 'linked' : 'primary', parent_root: repo.worktree?.parent_root || '', local_repository_id: localId, hosted_repository_id: hostedId || null, current_branch_id: currentBranchId, branch_activity_ids: [], path_observation_ids: [], git: {root, branch: currentName, head: repo.head || '', upstream: repo.upstream || '', ahead: repo.ahead, behind: repo.behind, dirty_count: repo.dirty_count || 0, github_repo: hosted, worktree: repo.worktree}};
+  }
+  const paneRows = Array.isArray(info.panes) && info.panes.length ? info.panes : [info.selected_pane || {}];
+  // Fixtures that predate WorkGraph used `agents` or `agent_windows` for the same RuntimeActor
+  // concept. Convert either explicitly; do not infer one actor from unrelated pane display rows.
+  const fixtureActors = Array.isArray(info.agents) && info.agents.length
+    ? info.agents
+    : (Array.isArray(info.agent_windows) && info.agent_windows.length ? info.agent_windows : [{kind: '', fixture: true}]);
+  const actorRows = fixtureActors.map(actor => ({
+    ...actor,
+    path: actor?.path || '',
+  }));
+  actorRows.forEach((actor, index) => {
+    const pane = paneRows.find(row => String(row?.target || '') === String(actor?.pane_target || '')) || paneRows[index] || paneRows[0] || {};
+    const windowIndex = String(actor.window_index ?? actor.window ?? pane.window ?? index);
+    const paneIndex = String(actor.pane ?? pane.pane ?? '0');
+    const windowId = `tmux-window:${session}:${windowIndex}`;
+    const target = String(actor.pane_target || pane.target || `%${session}-${index}`);
+    const existingPaneId = `tmux-pane:${session}:${windowIndex}.${paneIndex}`;
+    const paneId = graph.tmux_panes[existingPaneId] && graph.tmux_panes[existingPaneId].target !== target
+      ? `${existingPaneId}:${target.replace(/[^a-zA-Z0-9_.-]/g, '_')}`
+      : existingPaneId;
+    const actorId = `actor:${session}:${index}`;
+    graph.tmux_windows[windowId] ||= {id: windowId, tmux_session_id: sessionId, index: windowIndex, name: actor.window_name || actor.kind || '', tmux_pane_ids: []};
+    if (!graph.tmux_windows[windowId].tmux_pane_ids.includes(paneId)) graph.tmux_windows[windowId].tmux_pane_ids.push(paneId);
+    const explicitGit = actor.git?.root ? actor.git : null;
+    const path = String(actor.path || explicitGit?.root || pane.current_path || project.git?.cwd || project.git?.root || '').replace(/\/+$/, '');
+    const root = String(explicitGit?.root || [...worktreeIds.keys()].find(candidate => path === candidate || path.startsWith(`${candidate}/`)) || project.git?.root || '').replace(/\/+$/, '');
+    const worktreeId = worktreeIds.get(root) || [...worktreeIds.values()][0] || null;
+    graph.tmux_panes[paneId] = {id: paneId, tmux_window_id: windowId, target, index: paneIndex, current_path: path, active: pane.active === true || index === 0, window_active: pane.window_active === true || index === 0, runtime_actor_ids: [actorId], path_observation_ids: []};
+    graph.runtime_actors[actorId] = {id: actorId, tmux_pane_id: paneId, kind: actor.fixture ? '' : (actor.kind || 'shell'), cwd: path, status: actor.state || '', path_observation_ids: []};
+    if (worktreeId) {
+      const observationId = `observation:${session}:${index}`;
+      graph.path_observations[observationId] = {id: observationId, tmux_pane_id: paneId, runtime_actor_id: actorId, git_worktree_id: worktreeId, path, source: 'fixture', priority: 0, last_observed_at: index + 1};
+      graph.tmux_panes[paneId].path_observation_ids.push(observationId);
+      graph.runtime_actors[actorId].path_observation_ids.push(observationId);
+      graph.git_worktrees[worktreeId].path_observation_ids.push(observationId);
+      graph.tmux_sessions[sessionId].path_observation_ids.push(observationId);
+      const worktree = graph.git_worktrees[worktreeId];
+      const branchId = String(explicitGit?.branch || '')
+        ? `branch:${worktree.local_repository_id}:${String(explicitGit.branch)}`
+        : worktree.current_branch_id;
+      if (branchId && graph.local_branches[branchId]) {
+        const key = `${worktreeId}\n${branchId}`;
+        const activityId = `activity:${worktreeId}:${branchId}`;
+        if (!branchActivityByWorktreeAndBranch.has(key)) {
+          graph.worktree_branch_activity[activityId] = {id: activityId, git_worktree_id: worktreeId, local_branch_id: branchId, branch_name_snapshot: graph.local_branches[branchId].name, current: branchId === worktree.current_branch_id, first_observed_at: index + 1, last_observed_at: index + 1, path_observation_ids: []};
+          worktree.branch_activity_ids.push(activityId);
+          branchActivityByWorktreeAndBranch.set(key, activityId);
+        }
+        const activity = graph.worktree_branch_activity[branchActivityByWorktreeAndBranch.get(key)];
+        if (activity && !activity.path_observation_ids.includes(observationId)) activity.path_observation_ids.push(observationId);
+      }
+    }
+    if (!graph.tmux_sessions[sessionId].tmux_window_ids.includes(windowId)) graph.tmux_sessions[sessionId].tmux_window_ids.push(windowId);
+    if (!graph.tmux_sessions[sessionId].tmux_pane_ids.includes(paneId)) graph.tmux_sessions[sessionId].tmux_pane_ids.push(paneId);
+    graph.tmux_sessions[sessionId].runtime_actor_ids.push(actorId);
+  });
+  return {...info, work_graph: graph, project: undefined, window_metadata: (info.window_metadata || []).map(({git, ...row}) => row)};
+}
+
 const DEFAULT_TEST_SETTINGS = Object.freeze({
   appearance: Object.freeze({}),
   editor: Object.freeze({
@@ -478,6 +603,7 @@ function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
 
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
   const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort', 'coarsePointer', 'hoverCapable', 'viewport'].includes(key)));
+  if (options.share && !bootstrapOverrides.share) bootstrapOverrides.share = options.share;
   const fireAllTimeouts = options.fireAllTimeouts === true;
   const coarsePointer = options.coarsePointer === true;
   const hoverCapable = options.hoverCapable === undefined ? !coarsePointer : options.hoverCapable === true;
@@ -1877,6 +2003,7 @@ globalThis.__layoutTestApi = {
   recordTabActivation,
   setTabLastActivatedForTest(item, ts) { tabLastActivatedAt.set(item, ts); },
   infoBranchRows,
+  applyTmuxWindowActiveIndexToTranscriptInfoForTest: applyTmuxWindowActiveIndexToTranscriptInfo,
   fileContextMenuState,
   fileExplorerIndexContextAction,
   fileEditorItemFor,
@@ -2150,6 +2277,14 @@ globalThis.__layoutTestApi = {
   stopCustomDragPreview,
   syncInitialLayoutUrl,
   tabMenuDetailText,
+  sessionWorkGraphForTest: sessionWorkGraph,
+  focusedRepositoryIdsForTmuxTargetForTest: focusedRepositoryIdsForTmuxTarget,
+  branchIdsForGitWorktreeForTest: branchIdsForGitWorktree,
+  pullRequestIdsForTmuxTargetForTest: pullRequestIdsForTmuxTarget,
+  sessionWorkSummaryForTest: sessionWorkSummary,
+  sessionTabDescriptionForTest: sessionTabDescription,
+  sessionWorkDescriptionForTest: sessionWorkDescription,
+  displayPullRequestForTest: displayPullRequest,
   tabSearchFields,
   tabSearchScore,
   TAB_TYPES,
@@ -2401,6 +2536,7 @@ globalThis.__layoutTestApi = {
   shareReplayFeatureEnabledForTest: shareReplayFeatureEnabled,
   shareReplaySemanticEscapeEnabledForTest() { return shareReplaySemanticEscapeEnabled === true; },
   shareReadOnlyReplayModeEnabledForTest: shareReadOnlyReplayModeEnabled,
+  shareViewModeForTest() { return shareViewMode; },
   shareSemanticReadOnlyMirrorEnabledForTest: shareSemanticReadOnlyMirrorEnabled,
   shareReplayShellEnabledForTest: shareReplayShellEnabled,
   installShareReplayShellForTest: installShareReplayShell,
@@ -2809,6 +2945,30 @@ globalThis.__layoutTestApi = {
   try {
     api.i18nSetCatalogForTest('en', EN_CATALOG);
   } catch (_) {}
+  const setTranscriptInfoForTest = api.setTranscriptInfoForTest;
+  api.setTranscriptInfoForTest = (session, info) => setTranscriptInfoForTest(session, canonicalWorkGraphFixture(session, info));
+  // Payload-level refresh tests bypass setTranscriptInfoForTest. Normalize their historical fixture
+  // rows at the harness boundary too, so lightweight refresh keeps the previous canonical graph.
+  for (const name of ['applyTranscriptsPayloadForTest', 'applySessionMetadataPayloadForTest']) {
+    const applyPayload = api[name];
+    if (typeof applyPayload !== 'function') continue;
+    api[name] = (payload, ...args) => {
+      if (!payload?.sessions || typeof payload.sessions !== 'object') return applyPayload(payload, ...args);
+      const sessions = Object.fromEntries(Object.entries(payload.sessions).map(([session, info]) => [session, canonicalWorkGraphFixture(session, info)]));
+      return applyPayload({...payload, sessions}, ...args);
+    };
+  }
+  // Only wrap helpers whose second parameter is transcript metadata.  Tab/popover helpers take
+  // different positional arguments, and coercing those values here hid real call-shape bugs.
+  for (const name of ['projectMetaHtml', 'paneInfoBarMetaHtml', 'paneInfoBarMetaPartsForTest']) {
+    const render = api[name];
+    if (typeof render === 'function') api[name] = (session, info, ...args) => {
+      const graphInfo = canonicalWorkGraphFixture(session, info);
+      return render(session, graphInfo, ...args);
+    };
+  }
+  const cycleSessionRepoDisplayForTest = api.cycleSessionRepoDisplayForTest;
+  if (typeof cycleSessionRepoDisplayForTest === 'function') api.cycleSessionRepoDisplayForTest = (session, info, direction) => cycleSessionRepoDisplayForTest(session, canonicalWorkGraphFixture(session, info), direction);
   api.vmConsoleErrorsForTest = () => [...vmConsoleErrors];
   return api;
 }

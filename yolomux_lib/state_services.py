@@ -56,20 +56,6 @@ class StatsSampleRecord:
 
 
 @dataclass
-class StatsProcessHistoryWriteRecord:
-    pending_samples: list[dict[str, Any]] = field(default_factory=list)
-    next_write_at: float = 0.0
-    retry_requires_reload: bool = False
-
-
-@dataclass
-class StatsClientHistoryMergeRecord:
-    shared_rev: int = -1
-    shared_signature: tuple[int, int, int, int] | None = None
-    migrated_versions: set[int] = field(default_factory=set)
-
-
-@dataclass
 class TranscriptsPayloadCacheRecord:
     stored_at: float | None = None
     payload: dict[str, Any] | None = None
@@ -118,43 +104,17 @@ class TabberActivityWarmerRecord:
 
 
 @dataclass
-class StatsHistorySamplerRecord:
-    thread: threading.Thread | None = None
-    stop_event: threading.Event = field(default_factory=threading.Event)
-    running: bool = False
-
-
-@dataclass
 class StatsHistoryService:
-    """Own the complete in-memory history/sample state; callers supply I/O and tmux orchestration."""
+    """Own the HTTP-process stats sample cache and token sampling cadence."""
 
     sample_lock: threading.Lock = field(default_factory=threading.Lock)
     sample_record: StatsSampleRecord = field(default_factory=StatsSampleRecord)
-    process_history_lock: threading.Lock = field(default_factory=threading.Lock)
-    process_history_write_record: StatsProcessHistoryWriteRecord = field(default_factory=StatsProcessHistoryWriteRecord)
-    sampler_lock: threading.Lock = field(default_factory=threading.Lock)
-    sampler_record: StatsHistorySamplerRecord = field(default_factory=StatsHistorySamplerRecord)
-    lock: threading.RLock = field(default_factory=threading.RLock)
-    raw_buckets: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict)
-    rollup_buckets: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict)
-    sequence: int = 0
-    shared_rev: int = -1
-    shared_loaded: bool = False
-    shared_host_metrics_available: bool = False
-    shared_write_lock: threading.Lock = field(default_factory=threading.Lock)
-    shared_next_write_at: float = 0.0
-    client_merge_lock: threading.Lock = field(default_factory=threading.Lock)
-    client_merge_record: StatsClientHistoryMergeRecord = field(default_factory=StatsClientHistoryMergeRecord)
     agent_token_lock: threading.Lock = field(default_factory=threading.Lock)
     agent_token_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_activity_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_token_next_sample_at: float = 0.0
     agent_token_consumer_until: float = 0.0
     agent_token_bootstrap_pending: bool = True
-
-    def next_sequence_locked(self) -> int:
-        self.sequence += 1
-        return self.sequence
 
 
 @dataclass
@@ -215,6 +175,11 @@ class ActivityTranscriptService:
     transcript_tail_cache: dict[tuple[Any, ...], tuple[float, str]] = field(default_factory=dict)
     context_items_cache_lock: threading.RLock = field(default_factory=threading.RLock)
     context_items_cache: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = field(default_factory=dict)
+    transcript_job_cache_lock: threading.RLock = field(default_factory=threading.RLock)
+    # Parsed, bounded worker facts only.  Do not retain transcript text here:
+    # large JSONL belongs in jobd, never in the HTTP process cache.
+    transcript_job_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
+    transcript_job_records: dict[tuple[Any, ...], str] = field(default_factory=dict)
 
 
 @dataclass

@@ -230,6 +230,31 @@ def test_write_json_preserves_error_and_head_http_semantics_with_gzip():
     assert head_handler.wfile.getvalue() == b""
 
 
+def test_write_json_bytes_preserves_json_response_semantics_without_reencoding(monkeypatch):
+    payload_bytes = b'{"history":{"records":[{"sequence":7,"value":"' + b"x" * 6000 + b'"}]}}'
+    get_handler = static_handler("/api/stats-sample", "gzip")
+    head_handler = static_handler("/api/stats-sample", "gzip", command="HEAD")
+
+    def unexpected_json_encoding(*_args, **_kwargs):
+        raise AssertionError("pre-encoded JSON response was encoded again")
+
+    monkeypatch.setattr(server_module.json, "dumps", unexpected_json_encoding)
+    get_handler.write_json_bytes(payload_bytes, status=HTTPStatus.ACCEPTED, json_encode_ms=12.5)
+    head_handler.write_json_bytes(payload_bytes)
+
+    get_headers = response_headers(get_handler)
+    head_headers = response_headers(head_handler)
+    assert get_handler.sent_status == HTTPStatus.ACCEPTED
+    assert get_headers["content-type"] == "application/json; charset=utf-8"
+    assert get_headers["content-encoding"] == "gzip"
+    assert get_headers["vary"] == "Accept-Encoding"
+    assert int(get_headers["content-length"]) == len(get_handler.wfile.getvalue())
+    assert gzip.decompress(get_handler.wfile.getvalue()) == payload_bytes
+    assert head_headers["content-encoding"] == "gzip"
+    assert int(head_headers["content-length"]) == len(get_handler.wfile.getvalue())
+    assert head_handler.wfile.getvalue() == b""
+
+
 def test_response_writers_record_endpoint_response_bytes():
     records = []
     app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)))

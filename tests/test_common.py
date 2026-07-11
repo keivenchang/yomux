@@ -18,7 +18,6 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
     root = Path(common.PROJECT_ROOT)
     owners = {
         "yolomux_lib/app.py": {
-            "start_stats_history_sampler",
             "start_client_event_watcher",
             "start_client_directory_poll",
             "request_session_files_disk_cache_prune",
@@ -57,25 +56,74 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
     assert rolled_back == [True]
 
 
-def test_project_git_normalizes_missing_and_malformed_git_payloads():
-    git = {"root": "/repo", "branch": "main"}
-
-    assert common.project_git({"git": git}) is git
-    assert common.project_git({"git": None}) == {}
-    assert common.project_git({"git": "not-a-dict"}) == {}
-    assert common.project_git({}) == {}
-    assert common.project_git(None) == {}
-
-
-def test_project_git_helper_owns_project_git_extraction_sites():
+def test_main_process_cpu_work_has_named_allowlist():
     root = Path(common.PROJECT_ROOT)
-    offenders = []
-    for relative in ("yolomux_lib/activity_summary.py", "yolomux_lib/app.py"):
-        source = (root / relative).read_text(encoding="utf-8")
-        if 'project.get("git")' in source or "project.get('git')" in source:
-            offenders.append(relative)
+    app_path = root / "yolomux_lib" / "app.py"
+    source = app_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(app_path))
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
 
-    assert offenders == []
+    def owner_name(node):
+        parent = node
+        while parent in parents:
+            parent = parents[parent]
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return parent.name
+        return "<module>"
+
+    threadpool_owners = {
+        owner_name(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "ThreadPoolExecutor"
+    }
+    assert threadpool_owners == set()
+
+    thread_owners = {
+        owner_name(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "threading"
+        and node.func.attr in {"Thread", "Timer"}
+    }
+    assert thread_owners == {
+        "chat_yoagent",
+        "start_auto_approve_cache_refresh",
+        "start_client_directory_poll",
+        "start_client_event_watcher",
+        "start_client_watch_snapshot_publish",
+        "start_input_heartbeat_worker",
+        "start_native_filesystem_watcher",
+        "start_session_files_cache_refresh",
+        "start_tabber_activity_cache_refresh",
+        "start_tabber_activity_cache_warmer",
+        "start_transcripts_payload_refresh",
+        "start_update_check_thread",
+        "warm_metadata_cache_async",
+        "request_session_files_disk_cache_prune",
+    }
+
+    retired_patterns = (
+        "AutoApproveWorker(",
+        "AutoApproveWorkerRecord",
+        "auto_worker_records",
+        "record_stats_process_sample",
+        "stats_history_encode_records_locked",
+        "stats_history_bucket_seconds",
+        "merge_shared_stats_history",
+        "write_shared_stats_history",
+    )
+    for pattern in retired_patterns:
+        assert pattern not in source
+
+    jobd_source = (root / "yolomux_lib" / "jobd.py").read_text(encoding="utf-8")
+    assert '"transcript_view": _transcript_view' in jobd_source
+    assert "write_json_bytes(encoded)" in (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
 
 
 def test_positive_finite_number_normalizes_counter_inputs():

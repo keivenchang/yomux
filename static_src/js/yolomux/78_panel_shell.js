@@ -978,7 +978,13 @@ function fileEditorPaneTabHtml(item, options = {}) {
 }
 
 function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
-  const pr = options.showBadges === false ? null : displayPullRequest(info);
+  // Callers such as tests and layout previews can pass a fresh metadata payload before it has
+  // entered transcriptMetadataState. Always use the same graph-backed input for badges and detail
+  // instead of silently reading an unrelated cached session record.
+  const summary = sessionWorkSummary(session, info);
+  const pr = options.showBadges === false
+    ? null
+    : (summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info));
   const desc = options.showDetail === false
     ? ''
     : (options.detail !== undefined ? String(options.detail || '') : sessionTabDescription(session, info));
@@ -989,7 +995,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     ? ''
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
-  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
+  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestSummaryBadgesHtml(session, info)}`;
   return `<span class="pane-tab-core"><span class="session-tab-leading-activity">${leadingHtml}</span><span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
@@ -1736,18 +1742,15 @@ function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, option
 function sessionMetadataIsLightweight(info) {
   if (!info || typeof info !== 'object') return false;
   if (info.metadata_loading === true) return true;
-  const project = info.project;
-  return Boolean(project && typeof project === 'object' && project.loading === true);
+  const workGraph = info.work_graph;
+  return Boolean(workGraph && typeof workGraph === 'object' && workGraph.loading === true);
 }
 
 function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
   if (!sessionMetadataIsLightweight(nextInfo) || !previousInfo || typeof previousInfo !== 'object') return nextInfo;
   return {
     ...nextInfo,
-    project: previousInfo.project || nextInfo.project,
-    window_metadata: Array.isArray(previousInfo.window_metadata) && previousInfo.window_metadata.length
-      ? previousInfo.window_metadata
-      : nextInfo.window_metadata,
+    work_graph: previousInfo.work_graph || nextInfo.work_graph,
     metadata_loading: true,
   };
 }

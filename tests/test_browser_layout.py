@@ -5999,11 +5999,43 @@ def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp
           dirty_count: index,
           primary: index === 1,
         }));
+        const graph = {
+          version: 1,
+          generation: 1,
+          tmux_sessions: {},
+          tmux_windows: {},
+          tmux_panes: {},
+          runtime_actors: {},
+          path_observations: {},
+          git_worktrees: {},
+          local_repositories: {},
+          hosted_repositories: {},
+          local_branches: {},
+          pull_requests: {},
+          linear_issues: {},
+          worktree_branch_activity: {},
+        };
+        const sessionId = 'tmux-session:1';
+        const windowId = 'tmux-window:1:0';
+        const paneId = 'tmux-pane:1:0.0';
+        const observationId = 'path-observation:1:0';
+        graph.tmux_sessions[sessionId] = {id: sessionId, name: '1', tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]};
+        graph.tmux_windows[windowId] = {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]};
+        graph.tmux_panes[paneId] = {id: paneId, tmux_window_id: windowId, target: '1:0.0', index: 0, current_path: repos[0].root, active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]};
+        repos.forEach((repo, index) => {
+          const worktreeId = `git-worktree:${repo.root}`;
+          const repositoryId = `local-repository:${repo.root}`;
+          const branchId = `local-branch:${repositoryId}:${repo.branch}`;
+          graph.local_branches[branchId] = {id: branchId, local_repository_id: repositoryId, name: repo.branch, current: true, pull_request_ids: [], linear_issue_ids: [], updated_ts: 0};
+          graph.local_repositories[repositoryId] = {id: repositoryId, common_git_dir: `${repo.root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: [branchId]};
+          graph.git_worktrees[worktreeId] = {id: worktreeId, root: repo.root, git_dir: `${repo.root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchId, path_observation_ids: index === 0 ? [observationId] : [], branch_activity_ids: [], git: repo};
+        });
+        graph.path_observations[observationId] = {id: observationId, path: repos[0].root, path_snapshot: repos[0].root, exists: true, source: 'fixture', priority: 1, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: `git-worktree:${repos[0].root}`};
         const info = {
           session: '1',
           selected_pane: {current_path: repos[0].root},
           panes: [],
-          project: {git: {...repos[0]}, repos},
+          work_graph: graph,
         };
         transcriptMetadataState.payload.sessions['1'] = info;
         cycleSessionRepoDisplay('1', info, 1);
@@ -8462,12 +8494,35 @@ def test_yoinfo_tab_values_match_shared_tab_detail(browser, tmp_path):
     )
     metrics = browser.execute_script(
         """
+        const root = '/home/test/shared-tab-detail';
+        const sessionId = 'tmux-session:8003';
+        const windowId = 'tmux-window:8003:0';
+        const paneId = 'tmux-pane:8003:0.0';
+        const observationId = 'path-observation:8003:0';
+        const worktreeId = `git-worktree:${root}`;
+        const repositoryId = `local-repository:${root}`;
+        const branchId = `local-branch:${repositoryId}:feature/shared-tab-detail`;
+        const pullRequestId = 'pull-request:11112';
+        const graph = {
+          version: 1,
+          generation: 1,
+          tmux_sessions: {[sessionId]: {id: sessionId, name: '8003', tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]}},
+          tmux_windows: {[windowId]: {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]}},
+          tmux_panes: {[paneId]: {id: paneId, tmux_window_id: windowId, target: '8003:0.0', index: 0, current_path: root, active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]}},
+          runtime_actors: {},
+          path_observations: {[observationId]: {id: observationId, path: root, path_snapshot: root, exists: true, source: 'fixture', priority: 1, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: worktreeId}},
+          git_worktrees: {[worktreeId]: {id: worktreeId, root, git_dir: `${root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchId, path_observation_ids: [observationId], branch_activity_ids: [], git: {root, cwd: root, branch: 'feature/shared-tab-detail'}}},
+          local_repositories: {[repositoryId]: {id: repositoryId, common_git_dir: `${root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: [branchId]}},
+          hosted_repositories: {},
+          local_branches: {[branchId]: {id: branchId, local_repository_id: repositoryId, name: 'feature/shared-tab-detail', current: true, pull_request_ids: [pullRequestId], linear_issue_ids: [], updated_ts: 0}},
+          pull_requests: {[pullRequestId]: {id: pullRequestId, number: 11112, draft: true, title: 'Refactor agent status ownership'}},
+          linear_issues: {},
+          worktree_branch_activity: {},
+        };
         transcriptMetadataState.payload = {sessions: {
           '8003': {
-            project: {
-              git: {branch: 'feature/shared-tab-detail'},
-              pull_request: {number: 11112, draft: true, title: 'Refactor agent status ownership'},
-            },
+            selected_pane: {target: '8003:0.0', current_path: root},
+            work_graph: graph,
           },
         }};
         const record = {
@@ -10443,9 +10498,25 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
             text: popover?.textContent || '',
             requested: typeof resolveMetadata === 'function',
           };
+          const workGraph = {
+            version: 1,
+            generation: 1,
+            tmux_sessions: {'tmux-session:1': {id: 'tmux-session:1', name: '1', tmux_window_ids: ['tmux-window:1:0'], tmux_pane_ids: ['tmux-pane:1:0.0'], runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
+            tmux_windows: {'tmux-window:1:0': {id: 'tmux-window:1:0', tmux_session_id: 'tmux-session:1', index: '0', name: '', tmux_pane_ids: ['tmux-pane:1:0.0']}},
+            tmux_panes: {'tmux-pane:1:0.0': {id: 'tmux-pane:1:0.0', tmux_window_id: 'tmux-window:1:0', target: '%1-0', index: '0', current_path: '/tmp/menu-live-branch', active: true, window_active: true, runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
+            runtime_actors: {'actor:1:0': {id: 'actor:1:0', tmux_pane_id: 'tmux-pane:1:0.0', kind: 'shell', cwd: '/tmp/menu-live-branch', status: '', path_observation_ids: ['observation:1:0']}},
+            path_observations: {'observation:1:0': {id: 'observation:1:0', tmux_pane_id: 'tmux-pane:1:0.0', runtime_actor_id: 'actor:1:0', git_worktree_id: 'worktree:/tmp/menu-live-branch', path: '/tmp/menu-live-branch', source: 'fixture', priority: 0, last_observed_at: 1}},
+            git_worktrees: {'worktree:/tmp/menu-live-branch': {id: 'worktree:/tmp/menu-live-branch', root: '/tmp/menu-live-branch', git_dir: '/tmp/menu-live-branch/.git', kind: 'primary', parent_root: '', local_repository_id: 'local:/tmp/menu-live-branch', hosted_repository_id: null, current_branch_id: 'branch:local:/tmp/menu-live-branch:menu-live-branch', branch_activity_ids: [], path_observation_ids: ['observation:1:0'], git: {root: '/tmp/menu-live-branch', branch: 'menu-live-branch'}}},
+            local_repositories: {'local:/tmp/menu-live-branch': {id: 'local:/tmp/menu-live-branch', common_git_dir: '/tmp/menu-live-branch/.git', git_worktree_ids: ['worktree:/tmp/menu-live-branch'], local_branch_ids: ['branch:local:/tmp/menu-live-branch:menu-live-branch'], hosted_repository_id: null}},
+            hosted_repositories: {},
+            local_branches: {'branch:local:/tmp/menu-live-branch:menu-live-branch': {id: 'branch:local:/tmp/menu-live-branch:menu-live-branch', local_repository_id: 'local:/tmp/menu-live-branch', name: 'menu-live-branch', current: true, pull_request_ids: [], linear_issue_ids: []}},
+            pull_requests: {},
+            linear_issues: {},
+            worktree_branch_activity: {},
+          };
           resolveMetadata?.(new Response(JSON.stringify({
             session_order: ['1'],
-            sessions: {'1': {panes: [], agents: [], project: {git: {branch: 'menu-live-branch'}}}},
+            sessions: {'1': {panes: [], agents: [], work_graph: workGraph}},
           }), {status: 200, headers: {'Content-Type': 'application/json'}}));
           window.__yolomuxTestWaitFor(
             () => (popover?.textContent || '').includes('menu-live-branch'),
@@ -12864,20 +12935,44 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
             current: index === 0,
             linear_ids: [`YOLO-${index + 1}`],
           }));
+          const root = '/home/test/repo';
+          const sessionId = 'tmux-session:1';
+          const windowId = 'tmux-window:1:0';
+          const paneId = 'tmux-pane:1:0.0';
+          const observationId = 'path-observation:1:0';
+          const worktreeId = `git-worktree:${root}`;
+          const repositoryId = `local-repository:${root}`;
+          const branchIds = branches.map(branch => `local-branch:${repositoryId}:${branch.name}`);
+          const linearIssues = {};
+          const localBranches = Object.fromEntries(branches.map((branch, index) => {
+            const issueId = `linear-issue:${branch.linear_ids[0]}`;
+            linearIssues[issueId] = {id: issueId, identifier: branch.linear_ids[0], title: '', state: '', url: ''};
+            const branchId = branchIds[index];
+            return [branchId, {id: branchId, local_repository_id: repositoryId, name: branch.name, subject: branch.subject, updated: branch.updated, updated_ts: branch.updated_ts, current: branch.current === true, pull_request_ids: [], linear_issue_ids: [issueId]}];
+          }));
+          const graph = {
+            version: 1,
+            generation: 1,
+            tmux_sessions: {[sessionId]: {id: sessionId, name: '1', tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]}},
+            tmux_windows: {[windowId]: {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]}},
+            tmux_panes: {[paneId]: {id: paneId, tmux_window_id: windowId, target: '1:0.0', index: 0, current_path: root, active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]}},
+            runtime_actors: {},
+            path_observations: {[observationId]: {id: observationId, path: root, path_snapshot: root, exists: true, source: 'fixture', priority: 1, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: worktreeId}},
+            git_worktrees: {[worktreeId]: {id: worktreeId, root, git_dir: `${root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchIds[0], path_observation_ids: [observationId], branch_activity_ids: [], git: {root, cwd: root, branch: branches[0].name}}},
+            local_repositories: {[repositoryId]: {id: repositoryId, common_git_dir: `${root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: branchIds}},
+            hosted_repositories: {},
+            local_branches: localBranches,
+            pull_requests: {},
+            linear_issues: linearIssues,
+            worktree_branch_activity: {},
+          };
           transcriptMetadataState.payload = {
             session_order: ['1'],
             sessions: {
               '1': {
                 session: '1',
-                project: {
-                  git: {
-                    root: '/home/test/repo',
-                    cwd: '/home/test/repo',
-                    branch: 'feature/long-info-row-1',
-                    other_branches: {branches},
-                  },
-                  linear: [],
-                },
+                selected_pane: {target: '1:0.0', current_path: root},
+                work_graph: graph,
               },
             },
           };
@@ -12981,6 +13076,115 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
     )
     assert restored["active"] == setup["item"], restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
+
+
+def test_yoinfo_canonical_work_graph_refresh_keeps_session3_rows_and_scroll(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applySessionMetadataPayload === 'function' && typeof renderInfoPanel === 'function';"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const branches = {};
+          const branchIds = [];
+          for (let index = 0; index < 120; index += 1) {
+            const id = `branch:frontend:${index}`;
+            branchIds.push(id);
+            branches[id] = {
+              id,
+              local_repository_id: 'local:frontend',
+              name: `feature/session-3-${String(index).padStart(3, '0')}`,
+              current: index === 0,
+              pull_request_ids: index === 0 ? ['pr:80'] : [],
+              linear_issue_ids: [],
+            };
+          }
+          branches['branch:dynamo'] = {
+            id: 'branch:dynamo', local_repository_id: 'local:dynamo', name: 'feature/dynamo-history',
+            pull_request_ids: ['pr:11251'], linear_issue_ids: [],
+          };
+          const graph = generation => ({
+            version: 1,
+            generation,
+            tmux_sessions: {'tmux-session:3': {id: 'tmux-session:3', name: '3', tmux_window_ids: ['tmux-window:3:0', 'tmux-window:3:1'], tmux_pane_ids: ['tmux-pane:3:0.0', 'tmux-pane:3:1.0'], runtime_actor_ids: ['actor:claude', 'actor:shell'], path_observation_ids: ['observation:frontend', 'observation:dynamo']}},
+            tmux_windows: {
+              'tmux-window:3:0': {id: 'tmux-window:3:0', tmux_session_id: 'tmux-session:3', index: '0', name: 'claude', tmux_pane_ids: ['tmux-pane:3:0.0']},
+              'tmux-window:3:1': {id: 'tmux-window:3:1', tmux_session_id: 'tmux-session:3', index: '1', name: 'bash', tmux_pane_ids: ['tmux-pane:3:1.0']},
+            },
+            tmux_panes: {
+              'tmux-pane:3:0.0': {id: 'tmux-pane:3:0.0', tmux_window_id: 'tmux-window:3:0', index: '0', target: '%claude', active: true, window_active: true, runtime_actor_ids: ['actor:claude'], path_observation_ids: ['observation:frontend']},
+              'tmux-pane:3:1.0': {id: 'tmux-pane:3:1.0', tmux_window_id: 'tmux-window:3:1', index: '0', target: '%shell', active: true, window_active: false, runtime_actor_ids: ['actor:shell'], path_observation_ids: ['observation:dynamo']},
+            },
+            runtime_actors: {
+              'actor:claude': {id: 'actor:claude', tmux_pane_id: 'tmux-pane:3:0.0', kind: 'claude', cwd: '/home/test/frontend-crates3', status: 'working', path_observation_ids: ['observation:frontend']},
+              'actor:shell': {id: 'actor:shell', tmux_pane_id: 'tmux-pane:3:1.0', kind: 'shell', cwd: '/home/test/dynamo', status: 'running', path_observation_ids: ['observation:dynamo']},
+            },
+            path_observations: {
+              'observation:frontend': {id: 'observation:frontend', tmux_pane_id: 'tmux-pane:3:0.0', runtime_actor_id: 'actor:claude', git_worktree_id: 'worktree:frontend', path: '/home/test/frontend-crates3/src', source: 'edit', last_observed_at: 2},
+              'observation:dynamo': {id: 'observation:dynamo', tmux_pane_id: 'tmux-pane:3:1.0', runtime_actor_id: 'actor:shell', git_worktree_id: 'worktree:dynamo', path: '/home/test/dynamo', source: 'cwd', last_observed_at: 1},
+            },
+            git_worktrees: {
+              'worktree:frontend': {id: 'worktree:frontend', root: '/home/test/frontend-crates3', local_repository_id: 'local:frontend', hosted_repository_id: 'hosted:frontend', current_branch_id: 'branch:frontend:0'},
+              'worktree:dynamo': {id: 'worktree:dynamo', root: '/home/test/dynamo', local_repository_id: 'local:dynamo', hosted_repository_id: 'hosted:dynamo', current_branch_id: 'branch:dynamo'},
+            },
+            local_repositories: {
+              'local:frontend': {id: 'local:frontend', local_branch_ids: branchIds},
+              'local:dynamo': {id: 'local:dynamo', local_branch_ids: ['branch:dynamo']},
+            },
+            hosted_repositories: {
+              'hosted:frontend': {id: 'hosted:frontend', url: 'https://github.com/ai-dynamo/frontend-crates', pull_request_ids: ['pr:80']},
+              'hosted:dynamo': {id: 'hosted:dynamo', url: 'https://github.com/ai-dynamo/dynamo', pull_request_ids: ['pr:11251']},
+            },
+            local_branches: branches,
+            pull_requests: {
+              'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:frontend', number: 80, title: 'frontend-crates draft'},
+              'pr:11251': {id: 'pr:11251', hosted_repository_id: 'hosted:dynamo', number: 11251, title: 'Dynamo history'},
+            },
+            linear_issues: {},
+            worktree_branch_activity: {},
+          });
+          autoFocusEnabled = false;
+          infoPanelSubTab = 'info';
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([infoItemId], infoItemId);
+          applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
+          await applySessionMetadataPayload({session_order: ['3'], sessions: {'3': {session: '3', work_graph: graph(1), selected_pane: {target: '%claude'}, panes: [{target: '%claude', window: '0', pane: '0', active: true, window_active: true}]}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+          setInfoGrouping(['git-worktree', 'branch']);
+          renderInfoPanel({force: true});
+          const waitFor = window.__yolomuxTestWaitFor;
+          const scroller = await waitFor(() => {
+            const candidate = document.getElementById('info-content');
+            return candidate?.textContent.includes('#80') && candidate.textContent.includes('#11251') && candidate.scrollHeight > candidate.clientHeight * 2 ? candidate : null;
+          }, {description: 'canonical Session 3 YO!info graph'});
+          const details = scroller.querySelector('details[data-info-group-key]');
+          const groupKey = details?.dataset.infoGroupKey || '';
+          setInfoTreeGroupCollapsed(groupKey, true);
+          renderInfoPanel({force: true});
+          scroller.scrollTop = Math.min(scroller.scrollHeight - scroller.clientHeight - 8, 1100);
+          const savedTop = scroller.scrollTop;
+          await applySessionMetadataPayload({session_order: ['3'], sessions: {'3': {session: '3', work_graph: graph(2), selected_pane: {target: '%claude'}, panes: [{target: '%claude', window: '0', pane: '0', active: true, window_active: true}]}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+          const refreshed = await waitFor(() => {
+            const candidate = document.getElementById('info-content');
+            const collapsed = candidate?.querySelector(`details[data-info-group-key="${CSS.escape(groupKey)}"]`);
+            return candidate?.textContent.includes('#80')
+              && candidate.textContent.includes('#11251')
+              && candidate.textContent.includes('feature/session-3-119')
+              && collapsed && !collapsed.open
+              && Math.abs(candidate.scrollTop - savedTop) < 40
+              ? {top: candidate.scrollTop, text: candidate.textContent, collapsed: !collapsed.open} : null;
+          }, {description: 'canonical Session 3 refresh without tree jump'});
+          return {savedTop, ...refreshed};
+        })().then(done, error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["collapsed"] is True, result
+    assert abs(result["top"] - result["savedTop"]) < 40, result
 
 
 def test_yoinfo_external_links_survive_panel_focus_pointerdown(browser, tmp_path):

@@ -3,8 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from http import HTTPStatus
-
-
+from types import SimpleNamespace
 
 import yolomux_lib.app as app_module
 import yolomux_lib.sessions as sessions_module
@@ -25,8 +24,7 @@ class FakeTmuxResult:
 def make_app(sessions: list[str]) -> TmuxWebtermApp:
     app = object.__new__(TmuxWebtermApp)
     app.sessions = sessions
-    app.auto_worker_records = {}
-    app.auto_workers_lock = threading.RLock()
+    app.approval_client = SimpleNamespace(status_session=lambda _session: [], stop_session=lambda _session: {"ok": True})
     app.share_tokens = {}
     app.share_tokens_lock = threading.RLock()
     app.refresh_sessions = lambda *args, **kwargs: []

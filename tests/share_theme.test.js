@@ -849,7 +849,8 @@ async function runShareThemeSuite() {
     // C9: the per-session detail bar shows a repo carousel when the session touches more than one repo,
     // starts on the backend-provided first repo, and no control appears for a single-repo session.
     const multiRepoInfo = {
-      agents: [], selected_pane: {current_path: '/repo/app'},
+      agents: [{kind: 'shell', pane_target: '%repo-cycle'}], selected_pane: {target: '%repo-cycle', window: '0', pane: '0', current_path: '/repo/lib'},
+      panes: [{target: '%repo-cycle', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/lib'}],
       project: {
         git: {root: '/repo/app', branch: 'main', dirty_count: 0}, pull_request: null, linear: [],
         repos: [
@@ -861,16 +862,18 @@ async function runShareThemeSuite() {
     const multiMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
     assert.ok(/data-repo-cycle="repo-cycle"/.test(multiMetaHtml), 'C9: a multi-repo session shows repo cycle arrows');
     assert.ok(/data-repo-chip="repo-cycle"/.test(multiMetaHtml), 'C9: the repo count still opens the repo menu');
-    assert.ok(multiMetaHtml.includes('/repo/lib'), 'C9: the first displayed repo is the first backend-ordered repo');
-    assert.ok(multiMetaHtml.includes('>1/2</button>'), 'C9: the repo control shows only the current repo position');
+    assert.ok(multiMetaHtml.includes('/repo/lib'), 'C9: the active TmuxPane selects its observed checkout');
+    assert.ok(multiMetaHtml.includes('>2/2</button>'), 'C9: the repo control shows the active checkout position in backend order');
     assert.equal(multiMetaHtml.includes('1/2 repos'), false, 'C9: the repo control omits the repo label');
     assert.ok(multiMetaHtml.indexOf('data-repo-cycle="repo-cycle"') < multiMetaHtml.indexOf('/repo/lib'), 'C9: the repo carousel is the leftmost metadata control before path/description text');
     api.cycleSessionRepoDisplayForTest('repo-cycle', multiRepoInfo, 1);
     const cycledMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
-    assert.ok(cycledMetaHtml.includes('/repo/app'), 'C9: the next arrow cycles the informational row to the next repo');
+    assert.ok(cycledMetaHtml.includes('/repo/lib'), 'C9: the next arrow cycles from the active checkout to the next backend-ordered repo');
     assert.ok(cycledMetaHtml.includes('>2/2</button>'), 'C9: the repo control updates the current repo position');
     const secondaryPrInfo = {
-      selected_pane: {current_path: '/home/test/dynamo/dynamo4'},
+      agents: [{kind: 'shell', pane_target: '%secondary-pr'}],
+      selected_pane: {target: '%secondary-pr', window: '0', pane: '0', current_path: '/home/test/dynamo/dynamo4'},
+      panes: [{target: '%secondary-pr', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/dynamo/dynamo4'}],
       project: {
         git: {root: '/home/test/ai-config', cwd: '/home/test/ai-config', branch: 'master', dirty_count: 1},
         pull_request: null,
@@ -900,13 +903,16 @@ async function runShareThemeSuite() {
     assert.ok(secondaryPrHtml.includes('#10853'), 'Info Bar shows a current-branch PR from the selected secondary repo');
     assert.ok(secondaryPrHtml.includes('feat: gate Qwen3-Coder tool calls'), 'Info Bar uses the selected secondary repo PR title');
     assert.equal(secondaryPrHtml.includes('CFG-1'), false, 'secondary repo Info Bar does not inherit primary repo Linear metadata');
-    const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, repos: [multiRepoInfo.project.repos[0]]}};
+    const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, git: multiRepoInfo.project.repos[0], repos: [multiRepoInfo.project.repos[0]]}};
     assert.equal(api.projectMetaHtml('single-repo-cycle', singleRepoInfo).includes('meta-repo-switch'), false, 'C9: a single-repo session shows no carousel');
     const windowScopedInfo = {
       agents: [{kind: 'codex', pane_target: '5:0.0'}],
-      selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/home/u'},
+      // The active TmuxPane and its RuntimeActor observe the same checkout.  Keeping this
+      // fixture internally consistent is important: a pane CWD outside the checkout must not
+      // inherit a different actor's repository merely because that actor is in the session.
+      selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/repo/agent/src'},
       panes: [
-        {target: '5:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u'},
+        {target: '5:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/agent/src'},
         {target: '5:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp/shell'},
       ],
       project: {
@@ -921,7 +927,7 @@ async function runShareThemeSuite() {
       panes: windowScopedInfo.panes.map(pane => ({...pane, window_active: pane.window === '1'})),
     };
     const bashMetaHtml = api.projectMetaHtml('window-scope', bashWindowInfo);
-    assert.ok(codexMetaHtml.includes('/repo/agent/src') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps transcript-derived repo metadata');
+    assert.ok(codexMetaHtml.includes('/repo/agent') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps its canonical checkout metadata');
     assert.equal(bashMetaHtml.includes('/repo/agent'), false, 'non-agent active window outside the repo does not inherit the agent touched repo');
     assert.ok(bashMetaHtml.includes('/tmp/shell'), 'non-agent active window shows its own cwd in the Info Bar');
     const transcriptPrGit = {
@@ -940,8 +946,12 @@ async function runShareThemeSuite() {
     };
     const transcriptPrInfo = {
       agents: [{kind: 'claude', pane_target: '3:0.0'}],
-      selected_pane: {target: '3:0.0', window: '0', pane: '0', current_path: staleWindowGit.root},
-      panes: [{target: '3:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: staleWindowGit.root}],
+      // A TmuxPane's canonical PathObservation owns its repository context.  The historical
+      // fixture used a stale Tabber CWD to contradict the actor's transcript checkout; model
+      // the real, coherent observation instead and keep the stale value only in auto-approve
+      // presentation data below.
+      selected_pane: {target: '3:0.0', window: '0', pane: '0', current_path: transcriptPrGit.cwd},
+      panes: [{target: '3:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: transcriptPrGit.cwd}],
       project: {
         git: transcriptPrGit,
         pull_request: {number: 11251, title: 'reasoning: force nonempty content', url: 'https://github.com/ai-dynamo/dynamo/pull/11251'},

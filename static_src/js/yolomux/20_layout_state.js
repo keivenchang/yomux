@@ -2194,7 +2194,7 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
     .map(pane => `${pane.command || ''} ${pane.title || ''}`)
     .join(' ')
     .toLowerCase();
-  const pr = info?.project?.pull_request;
+  const pr = displayPullRequest(info);
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
   const checksState = pullRequestCiState(pr);
 

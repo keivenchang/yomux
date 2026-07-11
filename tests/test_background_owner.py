@@ -653,9 +653,13 @@ def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch
     second_started = threading.Event()
     second_release = threading.Event()
     calls = []
+    no_network_after_demote = []
 
-    def metadata(info, _cache, allow_network=False):
-        assert allow_network is True
+    def graph(info, _cache, allow_network=False):
+        if not allow_network:
+            if not owner.allowed:
+                no_network_after_demote.append(info.session)
+            return {}
         calls.append(info.session)
         if info.session == "first":
             first_started.set()
@@ -665,7 +669,7 @@ def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch
             second_release.wait(timeout=2.0)
         return {}
 
-    monkeypatch.setattr(app_module, "session_project_metadata", metadata)
+    monkeypatch.setattr(app_module, "session_work_graph", graph)
     sessions = {
         name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
         for name in ("first", "second")
@@ -685,6 +689,7 @@ def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch
         first_worker.join(timeout=1.0)
 
         assert calls == ["first"]
+        assert no_network_after_demote == []
         with webapp.metadata_warm_lock:
             assert webapp.metadata_warm_record.worker is None
         assert not hasattr(webapp, "metadata_warm_running")
@@ -766,10 +771,7 @@ def test_follower_batch_session_files_does_not_spawn_warm_threads(monkeypatch, n
         "2": SessionInfo(session="2", panes=[], selected_pane=None, agents=[]),
     }
 
-    def fail_executor(*_args, **_kwargs):
-        raise AssertionError("followers must not spawn session-files-warm workers")
-
-    monkeypatch.setattr(app_module, "ThreadPoolExecutor", fail_executor)
+    assert not hasattr(app_module, "ThreadPoolExecutor")
     monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not compute missing session-files payloads")))
     try:
         payloads = webapp.cached_session_files_payloads_for_infos(infos)

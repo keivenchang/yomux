@@ -35,7 +35,10 @@ dev = [
 yolomux = "yolomux_lib.cli:main"
 
 [tool.setuptools]
-packages = ["yolomux_lib"]
+py-modules = ["auto_approve_tmux", "tmux_wall", "yolomux"]
+
+[tool.setuptools.packages.find]
+include = ["yolomux_lib*"]
 
 # Single source of truth for the version: read YOLOMUX_VERSION from yolomux_lib/common.py
 # (a plain string literal, so setuptools extracts it statically without importing the module).

@@ -88,6 +88,7 @@ def _load_golden_page(browser, tmp_path, page):
     raise ValueError(f"unknown golden page: {page}")
 
 
+@pytest.mark.visual_golden
 @pytest.mark.parametrize("theme,dpr", GOLDEN_PROFILES, ids=lambda value: str(value))
 @pytest.mark.parametrize("page", GOLDEN_PAGES)
 def test_local_canonical_visual_goldens(browser, tmp_path, page, theme, dpr):

@@ -1596,6 +1596,48 @@ def app_bundle_before_boot_script():
     return source[:boot_start].replace("</script", "<\\/script")
 
 
+def fixture_work_graph(session: str, path: str, *, root: str | None = None, branch: str = "main") -> dict:
+    """Return a schema-valid small graph for browser fixtures that bypass the live metadata API."""
+    root = root or path
+    session_id = f"tmux-session:{session}"
+    window_id = f"tmux-window:{session}:0"
+    pane_id = f"tmux-pane:{session}:0.0"
+    observation_id = f"path-observation:{session}:1"
+    worktree_id = f"git-worktree:{root}"
+    repository_id = f"local-repository:{root}"
+    branch_id = f"local-branch:{repository_id}:{branch}"
+    return {
+        "version": 1,
+        "generation": 1,
+        "tmux_sessions": {
+            session_id: {"id": session_id, "name": session, "tmux_window_ids": [window_id], "tmux_pane_ids": [pane_id], "runtime_actor_ids": [], "path_observation_ids": [observation_id]},
+        },
+        "tmux_windows": {
+            window_id: {"id": window_id, "tmux_session_id": session_id, "index": 0, "name": "0", "tmux_pane_ids": [pane_id]},
+        },
+        "tmux_panes": {
+            pane_id: {"id": pane_id, "tmux_window_id": window_id, "target": f"{session}:0.0", "pane_id": "0", "index": 0, "current_path": path, "command": "", "active": True, "window_active": True, "runtime_actor_ids": [], "path_observation_ids": [observation_id]},
+        },
+        "runtime_actors": {},
+        "path_observations": {
+            observation_id: {"id": observation_id, "path": path, "path_snapshot": path, "exists": True, "source": "fixture", "priority": 10, "first_observed_at": 1, "last_observed_at": 1, "tmux_pane_id": pane_id, "runtime_actor_id": None, "git_worktree_id": worktree_id},
+        },
+        "git_worktrees": {
+            worktree_id: {"id": worktree_id, "root": root, "git_dir": f"{root}/.git", "kind": "primary", "local_repository_id": repository_id, "current_branch_id": branch_id, "path_observation_ids": [observation_id], "branch_activity_ids": [], "git": {"root": root, "cwd": root, "branch": branch, "dirty_count": 0, "ahead": 0, "behind": 0}, "activity_priority": 10, "activity_ts": 0, "activity_source": "", "has_current_pull_request": False},
+        },
+        "local_repositories": {
+            repository_id: {"id": repository_id, "common_git_dir": f"{root}/.git", "git_worktree_ids": [worktree_id], "local_branch_ids": [branch_id]},
+        },
+        "hosted_repositories": {},
+        "local_branches": {
+            branch_id: {"id": branch_id, "local_repository_id": repository_id, "name": branch, "current": True, "pull_request_ids": [], "linear_issue_ids": [], "updated_ts": 0},
+        },
+        "pull_requests": {},
+        "linear_issues": {},
+        "worktree_branch_activity": {},
+    }
+
+
 def codemirror_wrap_toggle_fixture_html():
     css = app_css()
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
@@ -2376,14 +2418,46 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           const transcriptSessions = window.__fixtureTranscriptSessions || {};
           const currentPath = window.__fixtureTranscriptCurrentPath || '/home/test/yolomux.dev';
           const gitRoot = window.__fixtureTranscriptGitRoot || '/home/test/yolomux.dev';
+          // The production metadata contract has one owner for Git associations: work_graph. Keep
+          // the browser fixture on that contract too, so Finder sync tests cannot accidentally
+          // keep a retired session.project compatibility path alive.
+          const fixtureWorkGraph = (session, info, path, root) => {
+            const sessionId = `tmux-session:${session}`;
+            const windowId = `tmux-window:${session}:0`;
+            const paneId = `tmux-pane:${session}:0.0`;
+            const observationId = `path-observation:${session}:1`;
+            const worktreeId = `git-worktree:${root}`;
+            const repositoryId = `local-repository:${root}`;
+            const branchName = String(info.branch || 'main');
+            const branchId = `local-branch:${repositoryId}:${encodeURIComponent(branchName)}`;
+            const git = {root, cwd: root, branch: branchName, dirty_count: 0, ahead: 0, behind: 0};
+            return {
+              version: 1,
+              generation: 1,
+              tmux_sessions: {[sessionId]: {id: sessionId, name: String(session), tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]}},
+              tmux_windows: {[windowId]: {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]}},
+              tmux_panes: {[paneId]: {id: paneId, tmux_window_id: windowId, target: `${session}:0.0`, pane_id: '0', index: 0, current_path: path, command: '', active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]}},
+              runtime_actors: {},
+              path_observations: {[observationId]: {id: observationId, path, path_snapshot: path, exists: true, source: 'selected-pane-cwd', priority: 10, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: worktreeId}},
+              git_worktrees: {[worktreeId]: {id: worktreeId, root, git_dir: `${root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchId, path_observation_ids: [observationId], branch_activity_ids: [], git, activity_priority: 10, activity_ts: 0, activity_source: '', has_current_pull_request: false}},
+              local_repositories: {[repositoryId]: {id: repositoryId, common_git_dir: `${root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: [branchId]}},
+              hosted_repositories: {},
+              local_branches: {[branchId]: {id: branchId, local_repository_id: repositoryId, name: branchName, current: true, pull_request_ids: [], linear_issue_ids: [], updated_ts: 0}},
+              pull_requests: {},
+              linear_issues: {},
+              worktree_branch_activity: {},
+            };
+          };
           return jsonResponse({
             session_order: window.__fixtureSessions,
             sessions: Object.fromEntries(window.__fixtureSessions.map(session => {
               const info = transcriptSessions[session] || {};
+              const path = info.current_path || currentPath;
+              const root = info.git_root || gitRoot;
               return [session, {
                 session,
-                selected_pane: {current_path: info.current_path || currentPath},
-                project: {git: {root: info.git_root || gitRoot, branch: info.branch || 'main'}},
+                selected_pane: {target: `${session}:0.0`, current_path: path},
+                work_graph: fixtureWorkGraph(session, info, path, root),
                 agents: info.agents || [],
                 panes: info.panes || [],
               }];

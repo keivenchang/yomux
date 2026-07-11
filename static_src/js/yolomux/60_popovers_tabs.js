@@ -741,23 +741,18 @@ function pullRequestWithUrl(git, pr) {
 }
 
 function defaultBranchHeadPullRequestForGit(info, git) {
-  const project = info?.project || {};
   if (!isDefaultBranch(git)) return null;
   const subject = gitHeadSubject(git);
   const number = pullRequestNumberFromSubject(subject);
   if (!number) return null;
-  const projectGitRoot = repoRootKey(project.git?.root);
-  const showingPrimaryGit = !projectGitRoot || projectGitRoot === repoRootKey(git?.root);
-  const existing = showingPrimaryGit && project.pull_request?.number === number ? project.pull_request : {};
-  const title = subjectWithoutPullRequestNumber(existing.title || subject);
-  const description = subjectWithoutPullRequestNumber(existing.description || subject);
+  const title = subjectWithoutPullRequestNumber(subject);
+  const description = subjectWithoutPullRequestNumber(subject);
   return {
-    ...existing,
     number,
     title,
     description,
-    url: existing.url || githubPullRequestUrlFromGit(git, number),
-    checks: existing.checks || {state: 'unknown'},
+    url: githubPullRequestUrlFromGit(git, number),
+    checks: {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
     // (it is in main's history). Keep that fact semantic; shared lifecycle rendering localizes it.
     merged: true,
@@ -766,7 +761,7 @@ function defaultBranchHeadPullRequestForGit(info, git) {
 }
 
 function defaultBranchHeadPullRequest(info) {
-  return defaultBranchHeadPullRequestForGit(info, info?.project?.git);
+  return defaultBranchHeadPullRequestForGit(info, sessionWorkSummary('', info).git);
 }
 
 function currentBranchInventoryPullRequestForGit(git) {
@@ -775,21 +770,37 @@ function currentBranchInventoryPullRequestForGit(git) {
 }
 
 function currentBranchInventoryPullRequest(info) {
-  return currentBranchInventoryPullRequestForGit(info?.project?.git);
+  return currentBranchInventoryPullRequestForGit(sessionWorkSummary('', info).git);
 }
 
 function displayPullRequestForGit(info, git) {
-  const project = info?.project || {};
-  const targetGit = git || project.git;
-  const projectGitRoot = repoRootKey(project.git?.root);
-  const showingPrimaryGit = !targetGit || !projectGitRoot || projectGitRoot === repoRootKey(targetGit.root);
-  return defaultBranchHeadPullRequestForGit(info, targetGit)
-    || (showingPrimaryGit ? project.pull_request : null)
-    || currentBranchInventoryPullRequestForGit(targetGit);
+  const summary = sessionWorkSummary('', info);
+  if (summary.graphBacked) {
+    const root = repoRootKey(git?.root);
+    const repo = summary.repositories.find(item => repoRootKey(item.root) === root) || summary.selectedRepo;
+    const branch = repo?.other_branches?.branches?.find(item => item.current) || null;
+    return branch?.pull_requests?.[0] || null;
+  }
+  return null;
 }
 
 function displayPullRequest(info) {
-  return displayPullRequestForGit(info, info?.project?.git);
+  const summary = sessionWorkSummary('', info);
+  return summary.graphBacked ? summary.focusedPullRequest : displayPullRequestForGit(info, summary.git);
+}
+
+function pullRequestAggregateLabel(pullRequests = []) {
+  const count = Array.isArray(pullRequests) ? pullRequests.length : 0;
+  return count > 1 ? tPlural('info.count.pr', count) : '';
+}
+
+function pullRequestSummaryBadgesHtml(session, info) {
+  const summary = sessionWorkSummary(session, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) {
+    return `<span class="${metadataBadgeClasses(session, 'pr', 'pr-number-indicator tab-symbol pr-aggregate-indicator')}">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`;
+  }
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
+  return pullRequestCompactBadgesHtml(session, pr);
 }
 
 function metadataBadgePulseClass(session, badge) {
@@ -824,20 +835,21 @@ function updateMetadataBadgePulses(meta) {
 }
 
 function defaultBranchBadgeHtml(session, info) {
-  if (!isDefaultBranch(info?.project?.git)) return '';
+  if (!isDefaultBranch(sessionWorkSummary(session, info).git)) return '';
   return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
 }
 
 function sessionWorkDescriptionSource(session, info) {
-  const project = info?.project || {};
-  const git = project.git;
-  const pr = displayPullRequest(info);
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
+  if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, git)) : displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     const prefix = pullRequestLinkLabel(pr);
     return title ? `${prefix}: ${title}` : prefix;
   }
-  const linear = project.linear || [];
+  const linear = summary.linearIssues;
   const issue = linear.find(item => item.title);
   if (issue) return `${issue.identifier}: ${issue.title}`;
   const subject = currentBranchSubject(git);
@@ -856,7 +868,9 @@ function sessionTabDescription(session, info) {
   // already identifies the session and tmux window, so a generic "Loading..." description implies
   // the terminal itself is blocked. Omit only this tab-local metadata until a real description arrives.
   if (!info) return '';
-  const pr = displayPullRequest(info);
+  const summary = sessionWorkSummary(session, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     if (title) return shortText(title, 72);
@@ -866,16 +880,17 @@ function sessionTabDescription(session, info) {
 
 function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item]) {
   if (isInfoItem(item)) return t('tab.info.detail');
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(item, info);
+  const git = summary.git;
   const parts = [];
   if (git?.branch) parts.push(git.branch);
   const path = panelFullPath(item, info);
   if (path) parts.push(compactHomePath(path));
   const pr = displayPullRequest(info);
-  const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
+  const linear = summary.linearIssues.map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
-  if (pr?.number) {
+  if (summary.graphBacked && summary.pullRequests.length > 1) parts.push(pullRequestAggregateLabel(summary.pullRequests));
+  else if (pr?.number) {
     parts.push(pullRequestLinkLabel(pr));
   }
   const desc = sessionWorkDescription(item, info, 180);
@@ -946,12 +961,13 @@ function filePopoverPathHtml(path) {
 }
 
 function sessionPopoverSubtitleHtml(session, info, fallback = '') {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const pr = pullRequestWithUrl(git, displayPullRequest(info));
   const chips = [];
   if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
-  if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
+  if (summary.graphBacked && summary.pullRequests.length > 1) chips.push(`<span class="popover-chip">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`);
+  else if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
   const text = pr?.number
     ? shortText(pr.title || pr.description || '', 220)
     : String(fallback || '');
@@ -960,7 +976,7 @@ function sessionPopoverSubtitleHtml(session, info, fallback = '') {
 }
 
 function sessionBranchValueHtml(session, info) {
-  const git = info?.project?.git;
+  const git = sessionWorkSummary(session, info).git;
   if (!git?.branch) return '';
   const branchHtml = isDefaultBranch(git)
     ? defaultBranchBadgeHtml(session, info)
@@ -1191,10 +1207,10 @@ function agentTranscriptRowsHtml(agent) {
 }
 
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const pr = pullRequestWithUrl(git, displayPullRequest(info));
-  const linear = project.linear || [];
+  const linear = summary.linearIssues;
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
   const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
@@ -1358,7 +1374,13 @@ function branchListSubjectHtml(branch, pr) {
   const subject = subjectWithoutPullRequestNumber(branch?.subject || '');
   if (!subject) return '';
   if (branch?.current) {
-    const currentTitles = [pr?.title, pr?.description].map(normalizeBranchSubjectText).filter(Boolean);
+    // A default-branch merge commit title retains its SHA in canonical PR data while the local
+    // branch subject does not. Treat the SHA-free title as the same description.
+    const currentTitles = [pr?.title, pr?.description]
+      .flatMap(value => {
+        const normalized = normalizeBranchSubjectText(value);
+        return [normalized, normalized.replace(/^[0-9a-f]{7,40}\s+/i, '')].filter(Boolean);
+      });
     if (currentTitles.includes(normalizeBranchSubjectText(subject))) return '';
   }
   return `<div class="branch-subject">${esc(shortText(subject, 240))}</div>`;
@@ -1387,7 +1409,7 @@ function branchUpdatedText(branch) {
 }
 
 function otherBranchesHtml(session, info) {
-  const git = info?.project?.git;
+  const git = sessionWorkSummary(session, info).git;
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
   if (!branches.length) {

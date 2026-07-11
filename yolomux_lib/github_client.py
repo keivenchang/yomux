@@ -80,6 +80,12 @@ def github_pull_requests_by_branch_payload(repo: dict[str, str], branch: str) ->
     return github_api_get(path)
 
 
+def github_pull_request_branch_lookup_state(repo: dict[str, str], branch: str, cache: Any) -> str | None:
+    """Return the last bounded branch-lookup outcome without exposing cache internals to callers."""
+    value = cache.get(f"github-pr-branch-state:{repo['owner']}/{repo['name']}:{branch}")
+    return value if isinstance(value, str) else None
+
+
 def github_graphql(query: str, variables: dict[str, Any]) -> Any:
     """POST a GraphQL query. Returns None without a token (GraphQL always requires auth)."""
     token = github_token()
@@ -213,23 +219,39 @@ def github_pull_request_by_branch(
     cache: Any,
     allow_network: bool = True,
 ) -> dict[str, Any] | None:
+    pull_requests = github_pull_requests_by_branch(repo, branch, cache, allow_network=allow_network)
+    return pull_requests[0] if pull_requests else None
+
+
+def github_pull_requests_by_branch(
+    repo: dict[str, str],
+    branch: str,
+    cache: Any,
+    allow_network: bool = True,
+) -> list[dict[str, Any]]:
+    """Return every cached canonical PR for a branch, preferring open PRs for compact callers."""
     key = f"github-pr-branch:{repo['owner']}/{repo['name']}:{branch}"
+    state_key = f"github-pr-branch-state:{repo['owner']}/{repo['name']}:{branch}"
 
-    def load() -> dict[str, Any] | None:
+    def load() -> list[dict[str, Any]]:
         payload = github_pull_requests_by_branch_payload(repo, branch)
-        value = None
-        if isinstance(payload, list):
-            pull_requests = [item for item in payload if isinstance(item, dict)]
-            selected = next((item for item in pull_requests if item.get("state") == "open"), None)
-            if selected is None and pull_requests:
-                selected = pull_requests[0]
-            if selected is not None:
-                value = normalize_github_pull_request(selected, repo, "github-api")
-                if value is not None:
-                    enrich_github_pull_request(value, repo, cache)
-        return value
+        if not isinstance(payload, list):
+            # [] is a successful no-PR answer, while a non-list response is transport/API failure.
+            # Keep that distinction separately so graph consumers never paint an outage as "no PR".
+            cache.set(state_key, "error", ttl=NEGATIVE_METADATA_TTL_SECONDS)
+            return []
+        values = [normalize_github_pull_request(item, repo, "github-api") for item in payload if isinstance(item, dict)]
+        result = [value for value in values if value is not None]
+        for value in result:
+            enrich_github_pull_request(value, repo, cache)
+        # A caller showing only one PR should retain the existing open-first behavior, while graph
+        # consumers preserve the full historical list.
+        result = sorted(result, key=lambda value: (value.get("state") != "open", value.get("number", 0)))
+        cache.set(state_key, "ready" if result else "none", ttl=NEGATIVE_METADATA_TTL_SECONDS if not result else None)
+        return result
 
-    return cached_metadata(cache, key, allow_network, load)
+    cached = cached_metadata(cache, key, allow_network, load)
+    return list(cached) if isinstance(cached, list) else []
 
 
 def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str], source: str) -> dict[str, Any] | None:
@@ -244,6 +266,10 @@ def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str],
     draft = payload.get("draft") is True
     head = payload.get("head") if isinstance(payload.get("head"), dict) else {}
     head_sha = head.get("sha") if isinstance(head.get("sha"), str) else None
+    head_ref = head.get("ref") if isinstance(head.get("ref"), str) else None
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    head_full_name = head_repo.get("full_name") if isinstance(head_repo.get("full_name"), str) else None
+    head_url = head_repo.get("html_url") if isinstance(head_repo.get("html_url"), str) else None
     user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
     author_login = user.get("login") if isinstance(user.get("login"), str) else None
     url = payload.get("html_url") if isinstance(payload.get("html_url"), str) else github_pull_request_url(repo, number)
@@ -256,6 +282,8 @@ def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str],
         "draft": draft,
         "author_login": author_login,
         "head_sha": head_sha,
+        "head_branch_name": head_ref,
+        "head_repository": {"full_name": head_full_name, "url": head_url} if head_full_name else None,
         "url": url,
         "description": compact_description(body),
         "linear_ids": extract_linear_ids(title, body),

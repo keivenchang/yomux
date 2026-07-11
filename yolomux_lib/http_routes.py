@@ -338,7 +338,7 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
         request_error = token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
         request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
-    payload = request.server.app.stats_sample_payload(
+    app_profile, encoded = request.server.app.stats_sample_encoded_payload(
         since=since or 0,
         client_id=client_id,
         token_consumer=token_consumer,
@@ -351,14 +351,13 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
         history_resolution_seconds=history_resolution or 0,
         history_max_points=history_max_points or 0,
     )
-    app_profile = payload.pop("_endpoint_profile", None)
     build_ms = (time.perf_counter() - started) * 1000
     setattr(request, "_http_response_compute_ms", build_ms)
     details = {"stats_build_ms": round(build_ms, 3)}
     if isinstance(app_profile, dict):
         details.update(app_profile)
     setattr(request, "_http_response_performance_details", details)
-    request.write_json(payload)
+    request.write_json_bytes(encoded)
 
 
 def post_stats_history(request: Any, parsed: Any, route: Route) -> None:

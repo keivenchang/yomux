@@ -1570,109 +1570,49 @@ function repoSummaryAsGit(repo) {
   return gitFromRepoSummary(repo);
 }
 
-function activeAgentWindowMetadataItemForProjectMeta(session, info) {
-  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof windowViewModel !== 'function') return null;
-  const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
-  if (activeWindowIndex === null) return null;
-  const agent = windowViewModel(session, activeWindowIndex, info, autoApproveStates.get(session));
-  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : String(agent?.kind || '').trim().toLowerCase();
-  if (!['claude', 'codex'].includes(kind)) return null;
-  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
-  const paths = pathEntries.map(item => item.path).filter(Boolean);
-  const meta = {
-    window: String(agent?.window ?? ''),
-    window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
-    window_name: String(agent?.window_name || ''),
-    path: paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || '')),
-    paths,
-    path_entries: pathEntries,
-    git: typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null),
-  };
-  return {agent, meta};
-}
-
-function projectMetaPathFromWindowMetadata(meta) {
-  const pathEntries = Array.isArray(meta?.path_entries) ? meta.path_entries.map(item => String(item?.path || '').trim()).filter(Boolean) : [];
-  if (pathEntries.length) return pathEntries[0];
-  const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
-  if (paths.length) return paths[0];
-  const path = String(meta?.path || '').trim();
-  if (path) return path;
-  return String(meta?.git?.root || '').trim();
-}
-
 function projectMetaContextOverridesPrimaryPullRequest(info, contextGit) {
-  const projectGit = info?.project?.git;
-  const primaryPullRequest = displayPullRequest(info);
-  if (!primaryPullRequest?.number) return true;
-  const primaryRoot = repoRootKey(projectGit?.root);
-  const contextRoot = repoRootKey(contextGit?.root);
-  // The selected project is transcript-derived and carries an open PR. A raw pane cwd or a
-  // Tabber activity-cache path is weaker evidence, so it must not hide that PR. A different
-  // active window with its own resolved PR remains an equally strong, more local context.
-  if (!primaryRoot || !contextRoot || primaryRoot === contextRoot) return contextRoot === primaryRoot;
   return Boolean(displayPullRequestForGit(info, contextGit)?.number);
 }
 
 function projectMetaSelection(session, info) {
-  const project = info?.project || {};
-  const repos = sessionRepoSummaries(info);
   const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
-  const primaryRoot = repoRootKey(project.git?.root);
-  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   const activePane = activeWindowPaneForProjectMeta(session, info);
-  const activePath = normalizeDirectoryPath(activePane?.current_path || '');
-  const activeAgent = activePane ? agentForPane(info, activePane) : null;
-  const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
-  const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
-  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info) : null;
-  const activeWindowMeta = activeWindowMetadataItem?.meta || null;
-  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || Boolean(projectMetaPathFromWindowMetadata(activeWindowMeta));
-  const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
+  const activeTarget = String(activePane?.target || '');
+  // The active TmuxWindow's PathObservation owns the Info Bar context. Browser-selected terminal
+  // state and auto-approve status are presentation inputs only; neither may recreate a parallel
+  // per-window Git owner or displace the active tmux window's canonical worktree.
+  const workSummary = sessionWorkSummary(session, info, {tmuxTarget: explicitRoot ? '' : activeTarget});
+  const repos = workSummary.repositories;
+  const activePath = normalizeDirectoryPath(activePane?.current_path || workSummary.selectedPath || '');
+  const hasActiveTmuxTarget = Boolean(activeTarget);
+  const primaryRoot = repoRootKey(workSummary.git?.root);
+  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   let repoIndex = selectedSessionRepoIndex(session, info);
-  if (!explicitRoot && activePath && repos.length) {
+  const hasPinnedRepoSelection = selectedSessionRepoIndex(session, info) >= 0 && Boolean(sessionRepoDisplayRoot.get(session));
+  if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && primaryRepoIndex >= 0) {
+    repoIndex = primaryRepoIndex;
+  } else if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && activePath && repos.length) {
     const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
     const activeRepoGit = activeRepoIndex >= 0 ? repoSummaryAsGit(repos[activeRepoIndex]) : null;
     if (activeRepoIndex >= 0 && projectMetaContextOverridesPrimaryPullRequest(info, activeRepoGit)) repoIndex = activeRepoIndex;
-  }
-  if (!explicitRoot && primaryRepoIndex >= 0 && !projectMetaContextOverridesPrimaryPullRequest(info, repoSummaryAsGit(repos[repoIndex]))) {
-    repoIndex = primaryRepoIndex;
   }
   let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
   let repoSwitchRepos = repos;
   let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
-  if (!explicitRoot && activeWindowMetaHasSharedData) {
-    const activeMetaRoot = repoRootKey(activeWindowMeta.git?.root || '');
-    const activeMetaRepoIndex = activeMetaRoot
-      ? repos.findIndex(repo => repoRootKey(repo.root) === activeMetaRoot)
-      : activeWindowMetaPath
-        ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
-        : -1;
-    const activeMetaGit = activeWindowMeta.git || (activeMetaRepoIndex >= 0 ? repoSummaryAsGit(repos[activeMetaRepoIndex]) : null);
-    if (projectMetaContextOverridesPrimaryPullRequest(info, activeMetaGit)) {
-      if (activeMetaRepoIndex >= 0) {
-        repoIndex = activeMetaRepoIndex;
-        selectedRepo = repos[repoIndex];
-      }
-      if (activeWindowMeta.git) git = activeWindowMeta.git;
-      else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
-      if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
-    }
-  }
-  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
+  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root)) {
     git = null;
     selectedRepo = null;
     repoIndex = -1;
     repoSwitchRepos = [];
     fullPath = activePath;
   }
-  return {project, repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
+  return {repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
 }
 
 function panelFullPath(session, info) {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
@@ -1680,6 +1620,7 @@ function panelFullPath(session, info) {
   if (nonHomePane?.current_path) return nonHomePane.current_path;
   if (git?.cwd) return git.cwd;
   if (git?.root) return git.root;
+  if (summary.selectedPath) return summary.selectedPath;
   if (info?.selected_pane?.current_path) return info.selected_pane.current_path;
   return '';
 }
@@ -1694,8 +1635,9 @@ function compactHomePath(path) {
 }
 
 function projectMetaParts(session, info, options = {}) {
-  const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
-  const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
+  const summary = sessionWorkSummary(session, info);
+  const {repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
+  const showingPrimaryGit = !selectedRepo || repoRootKey(git?.root) === repoRootKey(selectedRepo.root);
   const metadataParts = [];
   const fullText = options.fullText === true;
   const repoSwitchHtml = repos.length > 1 ? (() => {
@@ -1712,11 +1654,11 @@ function projectMetaParts(session, info, options = {}) {
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
-  const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
+  const prGit = selectedRepo ? gitFromRepoSummary(selectedRepo) : git;
   const pr = displayPullRequestForGit(info, prGit);
   if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
-  if (showingPrimaryGit) {
-    for (const issue of project.linear || []) {
+  if (showingPrimaryGit && (!selectedRepo || repoRootKey(selectedRepo.root) === repoRootKey(summary.git?.root))) {
+    for (const issue of summary.linearIssues) {
       const state = issue.state ? ` ${issue.state}` : '';
       metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
@@ -1730,7 +1672,7 @@ function projectMetaParts(session, info, options = {}) {
     const ci = pullRequestCiStatus(pr);
     if (ci) metadataParts.push(pullRequestStatusBadgeHtml('', ci.text, ci.className, {variant: 'meta'}));
   }
-  const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
+  const desc = pr?.title || pr?.description || (showingPrimaryGit ? summary.linearIssues.find(issue => issue.title)?.title : '');
   if (desc) {
     const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
     if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
@@ -1844,8 +1786,8 @@ function summaryContextHtml(session, info, agent) {
     })));
   }
 
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   if (git) {
     lines.push(summaryContextLine(t('common.field.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine(t('popover.repo'), git.root));
@@ -1860,7 +1802,7 @@ function summaryContextHtml(session, info, agent) {
     const label = pullRequestLinkLabel(pr);
     lines.push(summaryContextLine(t('pref.section.github'), `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
   }
-  for (const issue of project.linear || []) {
+  for (const issue of summary.linearIssues) {
     const label = `${issue.identifier}${issue.state ? ` ${issue.state}` : ''}`;
     lines.push(summaryContextLine(t('info.field.linear'), `${label} ${issue.title || ''}`, issue.url, issue.identifier));
   }

@@ -13,11 +13,53 @@ def test_contention_benchmark_isolated_fixture_and_acceptance_budgets(tmp_path):
     assert len(list((tmp_path / "home").iterdir())) == benchmark.HOME_ENTRY_COUNT
     assert len([path for path in tmp_path.glob("repo-*") if (path / ".git").is_dir()]) == benchmark.REPO_COUNT
     assert summary["resources"]["activity"]["transcript_bytes_decoded"]["max"] == benchmark.TRANSCRIPT_COUNT * 4096
-    for resource in ("stats", "activity", "activity_warm", "auto_approve", "background_status", "watch_roots", "ping", "follower_stats", "terminal_miss"):
+    for resource in (
+        "stats",
+        "stats_24h",
+        "activity",
+        "activity_warm",
+        "index_rebuild",
+        "transcript_job",
+        "metadata_job",
+        "auto_approve",
+        "yo_targets",
+        "background_status",
+        "watch_roots",
+        "ping",
+        "terminal_echo",
+        "terminal_echo_idle",
+        "browser_client",
+        "follower_stats",
+        "terminal_miss",
+    ):
         metrics = summary["resources"][resource]
-        for metric in ("queue_ms", "handler_ms", "serialization_ms", "wire_bytes", "subprocess_count", "transcript_bytes_decoded", "client_long_task_ms", "event_loop_ms"):
+        for metric in (
+            "queue_ms",
+            "handler_ms",
+            "serialization_ms",
+            "wire_bytes",
+            "subprocess_count",
+            "transcript_bytes_decoded",
+            "client_long_task_ms",
+            "event_loop_ms",
+            "main_cpu_percent",
+            "worker_cpu_percent",
+            "combined_cpu_percent",
+            "main_rss_bytes",
+            "worker_rss_bytes",
+            "combined_rss_bytes",
+            "queue_depth",
+            "restart_count",
+            "parity_mismatch_count",
+            "gil_heavy_stack_samples",
+        ):
             assert set(metrics[metric]) == {"p50", "p95", "max"}
     assert summary["resources"]["follower_stats"]["transcript_bytes_decoded"]["max"] == 0
+    assert summary["resources"]["browser_client"]["requests"] == 4
+    assert summary["resource_totals"]["main_cpu_percent_avg"] <= benchmark.MAIN_CPU_AVG_MAX_PERCENT
+    assert summary["resource_totals"]["main_cpu_percent"]["p95"] <= benchmark.MAIN_CPU_P95_MAX_PERCENT
+    assert summary["resources"]["terminal_echo"]["handler_ms"]["max"] < benchmark.TERMINAL_ECHO_MAX_MS
+    assert summary["resource_totals"]["gil_heavy_stack_samples"]["max"] == 0
     assert summary["stats_timeouts"] == 0
     assert summary["stats_retries"] == 0
     worker_matrix = summary["session_files_worker_matrix"]

@@ -3,6 +3,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from yolomux_lib import github_client
 from yolomux_lib import linear_client
 from yolomux_lib import metadata
@@ -10,28 +12,37 @@ from yolomux_lib.common import _CACHE_MISS
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
+from yolomux_lib.common import TmuxPaneInfo
 from yolomux_lib.common import tail_file_lines
 from yolomux_lib.metadata import MetadataCache
 from yolomux_lib.metadata import extract_linear_ids
 from yolomux_lib.metadata import github_checks_unknown
 from yolomux_lib.metadata import linear_issue_metadata
 from yolomux_lib.metadata import parse_pull_request_ref
-from yolomux_lib.metadata import project_pull_request
-from yolomux_lib.metadata import session_git_inventory
-from yolomux_lib.metadata import session_repo_summaries
+from yolomux_lib.metadata import current_branch_pull_request
 from yolomux_lib.metadata import summarize_github_checks
 from yolomux_lib.metadata import WATCHED_PR_LIMIT
 from yolomux_lib.metadata import watched_pr_metadata
+from yolomux_lib.sessions import discover_sessions
 
 from _git_helpers import git as _git
 
 
 def _pane(session, index, path):
-    return PaneInfo(
+    return TmuxPaneInfo(
         session=session, window="0", pane=str(index), pane_id=f"%{index}",
         target=f"{session}:0.{index}", current_path=str(path), command="zsh",
         active=index == 0, window_active=True, title="", pid=10 + index,
     )
+
+
+def test_tmux_pane_info_is_the_explicit_backend_type_with_compatibility_alias():
+    assert PaneInfo is TmuxPaneInfo
+    backend_sources = [
+        path for path in Path("yolomux_lib").glob("*.py")
+        if path.name != "common.py"
+    ]
+    assert all(" PaneInfo" not in path.read_text(encoding="utf-8") for path in backend_sources)
 
 
 def _init_repo(repo: Path) -> None:
@@ -44,9 +55,9 @@ def _init_repo(repo: Path) -> None:
     _git(repo, "commit", "-m", "init")
 
 
-def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
-    # C9: a session whose panes sit in two repos surfaces BOTH (light local summaries), with the focused
-    # repo flagged primary and dirty state reported — the data the detail-bar "+N repos" chip needs.
+def test_session_work_graph_lists_every_touched_repo(tmp_path):
+    # Every observed repository belongs to the one canonical graph; the compact activity projection
+    # may rank one, but must not suppress the other.
     made = []
     for name in ("repoA", "repoB"):
         repo = tmp_path / name
@@ -70,20 +81,25 @@ def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
     panes = [_pane("s1", 0, made[0]), _pane("s1", 1, made[1])]
     info = SessionInfo(session="s1", panes=panes, selected_pane=panes[0], agents=[])
 
-    summaries = session_repo_summaries(info, rootA)
-    by_root = {s["root"]: s for s in summaries}
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+    work = metadata.activity_work_summary_from_graph(graph)
+    by_root = {s["root"]: s for s in work["repos"]}
 
     assert rootA in by_root and rootB in by_root
-    assert by_root[rootA]["primary"] is True
-    assert by_root[rootB]["primary"] is False
+    assert work["git"]["root"] in {rootA, rootB}
     assert by_root[rootB]["dirty_count"] == 1
-    branches = {branch["name"]: branch for branch in by_root[rootB]["other_branches"]["branches"]}
+    worktree = next(item for item in graph["git_worktrees"].values() if item["root"] == rootB)
+    local_repository = graph["local_repositories"][worktree["local_repository_id"]]
+    branches = {
+        graph["local_branches"][branch_id]["name"]: graph["local_branches"][branch_id]
+        for branch_id in local_repository["local_branch_ids"]
+    }
     assert f"feature/{made[1].name}" in branches
     assert branches[f"feature/{made[1].name}"]["updated_ts"] > 0
 
 
-def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
-    # C9: a single-repo session lists exactly that one repo (so the UI shows no chip).
+def test_session_work_graph_single_repo_has_no_extra(tmp_path):
+    # A single-repository session projects exactly one worktree.
     repo = tmp_path / "solo"
     repo.mkdir()
     _git(repo, "init")
@@ -96,7 +112,8 @@ def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
     panes = [_pane("s9", 0, repo)]
     info = SessionInfo(session="s9", panes=panes, selected_pane=panes[0], agents=[])
 
-    roots = {s["root"] for s in session_repo_summaries(info, root)}
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+    roots = {s["root"] for s in metadata.activity_work_summary_from_graph(graph)["repos"]}
     assert roots == {root}
 
 
@@ -168,7 +185,7 @@ def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):
     assert remote_branch not in branches
 
 
-def test_indexed_repo_summaries_includes_linked_worktree_current_branch(tmp_path):
+def test_indexed_repo_summaries_includes_linked_worktree_complete_branch_inventory(tmp_path):
     main = tmp_path / "main"
     wt = tmp_path / "wt"
     _init_repo(main)
@@ -177,53 +194,28 @@ def test_indexed_repo_summaries_includes_linked_worktree_current_branch(tmp_path
     summaries = metadata.indexed_repo_summaries([str(tmp_path)], cache=MetadataCache(), allow_network=False)
     by_root = {summary["root"]: summary for summary in summaries}
     wt_root = str(wt.resolve())
-    wt_branch_names = [branch["name"] for branch in by_root[wt_root]["other_branches"]["branches"]]
+    wt_branches = {branch["name"]: branch for branch in by_root[wt_root]["other_branches"]["branches"]}
 
     assert wt_root in by_root
-    assert wt_branch_names == ["feature-linked"]
+    assert set(wt_branches) == {"master", "feature-linked"}
+    assert wt_branches["feature-linked"]["current"] is True
+    assert wt_branches["master"]["current"] is False
 
 
-def test_session_repo_summaries_dedupes_same_repo_candidates_before_summary(monkeypatch):
-    info = SessionInfo(session="s9", panes=[], selected_pane=None, agents=[])
-    calls = []
-    candidates = [
-        ("/repo/src", 0),
-        ("/repo/tests", 0),
-        ("/repo", 10),
-        ("/other", 10),
-    ]
-
-    monkeypatch.setattr(metadata, "candidate_session_cwd_entries", lambda _info: candidates)
-    monkeypatch.setattr(metadata, "git_root_for_cwd", lambda cwd: "/repo" if str(cwd).startswith("/repo") else str(cwd))
-
-    def fake_repo_summary(cwd):
-        calls.append(cwd)
-        root = "/repo" if str(cwd).startswith("/repo") else str(cwd)
-        return {"root": root, "cwd": cwd, "activity_ts": 1, "activity_source": "dirty"}
-
-    monkeypatch.setattr(metadata, "repo_summary", fake_repo_summary)
-
-    summaries = session_repo_summaries(info, "/repo")
-
-    assert [summary["root"] for summary in summaries] == ["/repo", "/other"]
-    assert calls == ["/repo/src", "/other"]
-
-
-def test_session_project_metadata_empty_shape_has_repos_and_loading(monkeypatch):
+def test_activity_work_summary_empty_shape_has_repositories_and_loading():
     info = SessionInfo(session="empty", panes=[], selected_pane=None, agents=[])
-    monkeypatch.setattr(metadata, "session_git_inventory", lambda _info: None)
+    work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
 
-    project = metadata.session_project_metadata(info, MetadataCache(), allow_network=False)
-
-    assert project == {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": False}
+    assert work == {"git": {}, "pull_request": None, "linear": [], "repos": [], "loading": False}
 
 
-def test_session_to_json_loading_project_uses_empty_metadata_shape():
+def test_session_to_json_loading_uses_empty_work_graph_without_project_projection():
     info = SessionInfo(session="loading", panes=[], selected_pane=None, agents=[])
 
     payload = metadata.session_to_json(info, MetadataCache(), allow_network=False, include_metadata=False)
 
-    assert payload["project"] == {"git": None, "pull_request": None, "linear": [], "repos": [], "loading": True}
+    assert payload["work_graph"]["loading"] is True
+    assert "project" not in payload
     assert payload["metadata_loading"] is True
 
 
@@ -266,13 +258,12 @@ def test_session_to_json_includes_window_metadata(tmp_path):
     rows = {row["window"]: row for row in payload["window_metadata"]}
 
     assert rows["0"]["path"] == str(repo_a)
-    assert rows["0"]["git"]["root"] == str(repo_a.resolve())
+    assert "git" not in rows["0"]
     assert rows["1"]["path"] == str(repo_b)
-    assert rows["1"]["git"]["root"] == str(repo_b.resolve())
-    assert rows["1"]["git"]["branch"] == "feature/repo-b"
+    assert "git" not in rows["1"]
 
 
-def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
+def test_activity_work_summary_prefers_recent_dirty_repo(tmp_path):
     repos = []
     for name in ("old", "recent"):
         repo = tmp_path / name
@@ -289,20 +280,18 @@ def test_session_git_inventory_prefers_recent_dirty_repo(tmp_path):
     panes = [_pane("s3", 0, repos[0]), _pane("s3", 1, repos[1])]
     info = SessionInfo(session="s3", panes=panes, selected_pane=panes[0], agents=[])
 
-    git_data = session_git_inventory(info)
-    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+    work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
 
-    assert git_data is not None
-    assert git_data["root"] == str(repos[1].resolve())
-    assert summaries[0]["root"] == str(repos[1].resolve())
-    assert summaries[0]["activity_source"] == "dirty"
+    assert work["git"]["root"] == str(repos[1].resolve())
+    assert work["repos"][0]["root"] == str(repos[1].resolve())
 
 
-def test_session_git_inventory_prefers_current_branch_pr_within_same_signal(monkeypatch, tmp_path):
+def test_activity_work_summary_prefers_current_branch_pr_within_same_signal(monkeypatch, tmp_path):
     config_repo = tmp_path / "ai-config"
     work_repo = tmp_path / "dynamo4"
     _init_repo(config_repo)
     _init_repo(work_repo)
+    _git(work_repo, "remote", "add", "origin", "git@github.com:ai-dynamo/dynamo.git")
     _git(work_repo, "checkout", "-b", "keivenchang/DIS-2228__qwen3-coder-tool-calls-v2")
     _git(work_repo, "update-ref", "refs/remotes/origin/pull-request/10853", "HEAD")
     (config_repo / "f.txt").write_text("newer config edit\n", encoding="utf-8")
@@ -316,14 +305,11 @@ def test_session_git_inventory_prefers_current_branch_pr_within_same_signal(monk
         lambda _info: [(str(config_repo), 0), (str(work_repo), 0)],
     )
 
-    git_data = session_git_inventory(info)
-    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
+    work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
 
-    assert git_data is not None
-    assert git_data["root"] == str(work_repo.resolve())
-    assert summaries[0]["root"] == str(work_repo.resolve())
-    assert summaries[0]["primary"] is True
-    assert metadata.summary_current_branch_pull_request(summaries[0])["number"] == 10853
+    assert work["git"]["root"] == str(work_repo.resolve())
+    assert work["repos"][0]["root"] == str(work_repo.resolve())
+    assert work["pull_request"]["number"] == 10853
 
 
 def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tmp_path):
@@ -369,14 +355,13 @@ def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tm
     candidates = metadata.candidate_session_cwds(info)
     assert repo_root in candidates, "the transcript-touched repo dir is a candidate cwd"
 
-    git_data = session_git_inventory(info)
-    assert git_data is not None, "repo detected from the transcript even though the pane cwd is a non-repo"
-    assert git_data["root"] == repo_root
-    roots = {s["root"] for s in session_repo_summaries(info, repo_root)}
+    work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
+    assert work["git"]["root"] == repo_root, "repo detected from the transcript even though the pane cwd is a non-repo"
+    roots = {entry["root"] for entry in work["repos"]}
     assert repo_root in roots
 
 
-def test_session_git_inventory_prefers_transcript_edit_over_recent_live_repo(monkeypatch, tmp_path):
+def test_activity_work_summary_prefers_transcript_edit_over_recent_live_repo(monkeypatch, tmp_path):
     edited_repo = tmp_path / "edited"
     live_repo = tmp_path / "live"
     _init_repo(edited_repo)
@@ -412,13 +397,10 @@ def test_session_git_inventory_prefers_transcript_edit_over_recent_live_repo(mon
     candidates = metadata.candidate_session_cwds(info)
     assert candidates.index(edited_root) < candidates.index(live_root)
 
-    git_data = session_git_inventory(info)
-    summaries = session_repo_summaries(info, git_data["root"] if git_data else None)
-    assert git_data is not None
-    assert git_data["root"] == edited_root
-    assert summaries[0]["root"] == edited_root
-    assert summaries[1]["root"] == live_root
-    assert summaries[1]["activity_source"] == "dirty"
+    work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
+    assert work["git"]["root"] == edited_root
+    assert work["repos"][0]["root"] == edited_root
+    assert work["repos"][1]["root"] == live_root
 
 
 REPO = {
@@ -436,7 +418,7 @@ def test_main_branch_does_not_inherit_merged_pr_from_head_subject():
         "head_sha": "747c3fd0c66278bb324c9106dac21dfc1eab44aa",
     }
 
-    assert project_pull_request(git_data, MetadataCache(), allow_network=False) is None
+    assert current_branch_pull_request(git_data, MetadataCache(), allow_network=False) is None
 
 
 def test_feature_branch_can_use_head_subject_pr_hint():
@@ -447,7 +429,7 @@ def test_feature_branch_can_use_head_subject_pr_hint():
         "head_sha": "abc123456789",
     }
 
-    pr = project_pull_request(git_data, MetadataCache(), allow_network=False)
+    pr = current_branch_pull_request(git_data, MetadataCache(), allow_network=False)
 
     assert pr is not None
     assert pr["number"] == 9981
@@ -478,7 +460,7 @@ def test_git_inventory_uses_github_upstream_when_origin_is_local(monkeypatch, tm
     monkeypatch.setattr(metadata, "github_pull_request_by_branch", fake_by_branch)
 
     git_data = metadata.git_inventory(str(repo))
-    pr = metadata.project_pull_request(git_data, MetadataCache(), allow_network=True)
+    pr = metadata.current_branch_pull_request(git_data, MetadataCache(), allow_network=True)
 
     assert git_data["github_repo"] == {
         "owner": "ai-dynamo",
@@ -865,7 +847,7 @@ def test_git_worktree_identity_names_linked_worktree_vs_parent(tmp_path):
     assert ident["path"] == str(wt)
 
 
-def test_linked_worktree_inventory_only_reports_checked_out_branch(tmp_path):
+def test_linked_worktrees_share_complete_local_branch_inventory(tmp_path):
     main = tmp_path / "main"
     wt = tmp_path / "wt"
     main.mkdir()
@@ -878,13 +860,557 @@ def test_linked_worktree_inventory_only_reports_checked_out_branch(tmp_path):
     _git(main, "branch", "spare")
     _git(main, "worktree", "add", "-q", str(wt), "-b", "feature")
 
-    main_names = [branch["name"] for branch in metadata.git_inventory(str(main))["other_branches"]["branches"]]
-    wt_names = [branch["name"] for branch in metadata.git_inventory(str(wt))["other_branches"]["branches"]]
+    main_inventory = metadata.git_inventory(str(main))
+    wt_inventory = metadata.git_inventory(str(wt))
+    assert main_inventory is not None and wt_inventory is not None
 
-    assert "main" in main_names
-    assert "spare" in main_names
-    assert "feature" not in main_names
-    assert wt_names == ["feature"]
+    main_branches = {branch["name"]: branch for branch in main_inventory["other_branches"]["branches"]}
+    wt_branches = {branch["name"]: branch for branch in wt_inventory["other_branches"]["branches"]}
+
+    assert set(main_branches) == {"main", "spare", "feature"}
+    assert set(wt_branches) == {"main", "spare", "feature"}
+    assert main_branches["main"]["current"] is True
+    assert all(main_branches[name]["current"] is False for name in {"spare", "feature"})
+    assert wt_branches["feature"]["current"] is True
+    assert all(wt_branches[name]["current"] is False for name in {"main", "spare"})
+    assert main_inventory["local_repository"]["id"] == wt_inventory["local_repository"]["id"]
+    assert main_inventory["local_repository"]["worktree_id"] != wt_inventory["local_repository"]["worktree_id"]
+
+
+def test_session_work_graph_dedupes_shared_worktree_and_preserves_actor_observations(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "branch", "feature/shared")
+    pane = _pane("s-graph", 0, repo)
+    transcript = tmp_path / "agent.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    agents = [
+        AgentInfo("s-graph", "claude", 101, pane.target, "claude", str(repo), "running", "a", str(transcript), None),
+        AgentInfo("s-graph", "codex", 102, pane.target, "codex", str(repo), "running", "b", str(transcript), None),
+    ]
+    info = SessionInfo(session="s-graph", panes=[pane], selected_pane=pane, agents=agents)
+    monkeypatch.setattr(
+        metadata,
+        "scan_agent_changes",
+        lambda agent: {str(repo / ("claude.txt" if agent.kind == "claude" else "codex.txt")): {"M"}},
+    )
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    assert graph["version"] == metadata.WORK_GRAPH_VERSION
+    assert len(graph["runtime_actors"]) == 2
+    assert len(graph["git_worktrees"]) == 1
+    assert len(graph["local_repositories"]) == 1
+    assert len(graph["path_observations"]) >= 4
+    worktree = next(iter(graph["git_worktrees"].values()))
+    local_repository = graph["local_repositories"][worktree["local_repository_id"]]
+    assert worktree["local_repository_id"] == local_repository["id"]
+    assert {graph["local_branches"][branch_id]["name"] for branch_id in local_repository["local_branch_ids"]} == {"master", "feature/shared"}
+    edit_actors = {
+        observation["runtime_actor_id"]
+        for observation in graph["path_observations"].values()
+        if observation["source"] == "edit"
+    }
+    assert edit_actors == set(graph["runtime_actors"])
+    metadata.validate_work_graph(graph)
+
+
+def test_session_work_graph_shared_worktree_keeps_claude_and_shell_observations_and_one_pr(tmp_path, monkeypatch):
+    repo = tmp_path / "frontend-crates3"
+    _init_repo(repo)
+    _git(repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(repo, "checkout", "-b", "feature/session-3")
+    claude_pane = _pane("3", 0, repo)
+    claude_pane = TmuxPaneInfo(**{**claude_pane.__dict__, "window_name": "claude", "command": "claude"})
+    shell_pane = _pane("3", 1, repo)
+    shell_pane = TmuxPaneInfo(**{**shell_pane.__dict__, "window": "1", "window_name": "bash", "command": "bash", "active": False, "window_active": False})
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    claude = AgentInfo("3", "claude", 101, claude_pane.target, "claude", str(repo), "running", "claude-session", str(transcript), None)
+    info = SessionInfo(session="3", panes=[claude_pane, shell_pane], selected_pane=claude_pane, agents=[claude])
+    changed_paths = {
+        str(repo / "src" / "parser.py"): {"M"},
+        str(repo / "tests" / "parser_test.py"): {"M"},
+    }
+    monkeypatch.setattr(metadata, "scan_agent_changes", lambda _agent: changed_paths)
+    monkeypatch.setattr(
+        metadata,
+        "github_pull_requests_by_branch",
+        lambda _repo, branch, _cache, allow_network=True: [
+            {"number": 80, "state": "open", "draft": True, "title": "frontend PR", "linear_ids": []}
+        ] if branch == "feature/session-3" else [],
+    )
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", lambda _repo, branch, cache, allow_network=True: (
+        {"number": 80, "state": "open", "draft": True, "title": "frontend PR", "linear_ids": []}
+        if branch == "feature/session-3" else None
+    ))
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=True)
+
+    assert len(graph["git_worktrees"]) == 1
+    assert len(graph["local_repositories"]) == 1
+    assert len(graph["pull_requests"]) == 1
+    worktree = next(iter(graph["git_worktrees"].values()))
+    repository = graph["local_repositories"][worktree["local_repository_id"]]
+    assert {graph["local_branches"][branch_id]["name"] for branch_id in repository["local_branch_ids"]} == {"master", "feature/session-3"}
+    actors_by_kind = {actor["kind"]: actor for actor in graph["runtime_actors"].values()}
+    assert {"claude", "shell"}.issubset(actors_by_kind)
+    claude_observations = [
+        observation for observation in graph["path_observations"].values()
+        if observation["runtime_actor_id"] == actors_by_kind["claude"]["id"]
+    ]
+    shell_observations = [
+        observation for observation in graph["path_observations"].values()
+        if observation["tmux_pane_id"] == f"tmux-pane:3:1:1" and observation["runtime_actor_id"] is None
+    ]
+    assert {observation["path"] for observation in claude_observations}.issuperset(changed_paths)
+    assert {observation["path"] for observation in shell_observations} == {str(repo.resolve())}
+    assert {pr["number"] for pr in graph["pull_requests"].values()} == {80}
+    metadata.validate_work_graph(graph)
+
+
+def test_session_work_graph_linked_worktrees_share_branch_inventory_but_keep_current_state(tmp_path):
+    main = tmp_path / "frontend-crates"
+    worktree3 = tmp_path / "frontend-crates3"
+    worktree4 = tmp_path / "frontend-crates4"
+    main.mkdir()
+    _git(main, "init", "-b", "main")
+    _git(main, "config", "user.email", "t@example.com")
+    _git(main, "config", "user.name", "T")
+    (main / "f.txt").write_text("initial\n", encoding="utf-8")
+    _git(main, "add", "f.txt")
+    _git(main, "commit", "-m", "init")
+    _git(main, "branch", "available")
+    _git(main, "worktree", "add", "-q", str(worktree3), "-b", "feature/three")
+    _git(main, "worktree", "add", "-q", str(worktree4), "-b", "feature/four")
+    (worktree3 / "f.txt").write_text("three dirty\n", encoding="utf-8")
+    (worktree4 / "f.txt").write_text("four dirty\n", encoding="utf-8")
+    panes = [_pane("linked", 0, main), _pane("linked", 1, worktree3), _pane("linked", 2, worktree4)]
+    info = SessionInfo(session="linked", panes=panes, selected_pane=panes[1], agents=[])
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    assert len(graph["git_worktrees"]) == 3
+    assert len(graph["local_repositories"]) == 1
+    repository = next(iter(graph["local_repositories"].values()))
+    assert {graph["local_branches"][branch_id]["name"] for branch_id in repository["local_branch_ids"]} == {"main", "available", "feature/three", "feature/four"}
+    current_by_root = {
+        worktree["root"]: graph["local_branches"][worktree["current_branch_id"]]["name"]
+        for worktree in graph["git_worktrees"].values()
+    }
+    assert current_by_root == {
+        str(main.resolve()): "main",
+        str(worktree3.resolve()): "feature/three",
+        str(worktree4.resolve()): "feature/four",
+    }
+    dirty_by_root = {worktree["root"]: worktree["git"]["dirty_count"] for worktree in graph["git_worktrees"].values()}
+    assert dirty_by_root == {
+        str(main.resolve()): 0,
+        str(worktree3.resolve()): 1,
+        str(worktree4.resolve()): 1,
+    }
+    metadata.validate_work_graph(graph)
+
+
+def test_session_work_graph_branch_activity_keeps_available_branch_without_worktree_activity(tmp_path):
+    main = tmp_path / "repo"
+    worktree1 = tmp_path / "worktree-1"
+    worktree2 = tmp_path / "worktree-2"
+    main.mkdir()
+    _git(main, "init", "-b", "main")
+    _git(main, "config", "user.email", "t@example.com")
+    _git(main, "config", "user.name", "T")
+    (main / "f.txt").write_text("initial\n", encoding="utf-8")
+    _git(main, "add", "f.txt")
+    _git(main, "commit", "-m", "init")
+    _git(main, "branch", "B3")
+    _git(main, "worktree", "add", "-q", str(worktree1), "-b", "B1")
+    _git(main, "worktree", "add", "-q", str(worktree2), "-b", "B2")
+    panes = [_pane("activity", 0, worktree1), _pane("activity", 1, worktree2)]
+    info = SessionInfo(session="activity", panes=panes, selected_pane=panes[0], agents=[])
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    worktrees = {worktree["root"]: worktree for worktree in graph["git_worktrees"].values()}
+    repository = next(iter(graph["local_repositories"].values()))
+    branches = {
+        graph["local_branches"][branch_id]["name"]: graph["local_branches"][branch_id]
+        for branch_id in repository["local_branch_ids"]
+    }
+    activities_by_branch = {
+        branch_name: [
+            activity
+            for activity in graph["worktree_branch_activity"].values()
+            if activity["branch_name_snapshot"] == branch_name
+        ]
+        for branch_name in branches
+    }
+
+    assert branches.keys() >= {"main", "B1", "B2", "B3"}
+    assert {activity["git_worktree_id"] for activity in activities_by_branch["B1"]} == {worktrees[str(worktree1.resolve())]["id"]}
+    assert {activity["git_worktree_id"] for activity in activities_by_branch["B2"]} == {worktrees[str(worktree2.resolve())]["id"]}
+    assert activities_by_branch["B3"] == []
+    metadata.validate_work_graph(graph)
+
+
+def test_session_to_json_emits_only_work_graph_for_git_metadata(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "checkout", "-b", "feature/projected")
+    pane = _pane("s-projection", 0, repo)
+    info = SessionInfo(session="s-projection", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
+
+    assert payload["work_graph"]["version"] == metadata.WORK_GRAPH_VERSION
+    assert "project" not in payload
+    assert "git" not in payload["window_metadata"][0]
+    worktree = next(worktree for worktree in payload["work_graph"]["git_worktrees"].values() if worktree["root"] == str(repo.resolve()))
+    local_repository = payload["work_graph"]["local_repositories"][worktree["local_repository_id"]]
+    assert local_repository["local_branch_ids"]
+
+
+def test_session_to_json_builds_one_canonical_graph_without_legacy_projection(tmp_path, monkeypatch):
+    repo = tmp_path / "frontend-crates3"
+    _init_repo(repo)
+    _git(repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(repo, "checkout", "-b", "feature/session-3")
+    pane = TmuxPaneInfo(
+        session="3", window="0", pane="0", pane_id="%0", target="3:0.0", current_path=str(repo),
+        command="claude", active=True, window_active=True, title="", pid=10, window_name="claude",
+    )
+    info = SessionInfo(session="3", panes=[pane], selected_pane=pane, agents=[])
+    original_graph = metadata.session_work_graph
+    original_inventory = metadata.git_inventory
+    graph_builds = []
+    inventory_calls = []
+
+    def counted_inventory(path, **kwargs):
+        inventory_calls.append((str(path), dict(kwargs)))
+        return original_inventory(path, **kwargs)
+
+    def counted_graph(*args, **kwargs):
+        graph = original_graph(*args, **kwargs)
+        graph_builds.append(graph)
+        return graph
+
+    monkeypatch.setattr(metadata, "git_inventory", counted_inventory)
+    monkeypatch.setattr(metadata, "session_work_graph", counted_graph)
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
+
+    assert len(graph_builds) == 1
+    graph = graph_builds[0]
+    assert payload["work_graph"] is graph
+    worktree = next(item for item in graph["git_worktrees"].values() if item["root"] == str(repo.resolve()))
+    local_repository = graph["local_repositories"][worktree["local_repository_id"]]
+    graph_branch_names = [graph["local_branches"][branch_id]["name"] for branch_id in local_repository["local_branch_ids"]]
+    assert "feature/session-3" in graph_branch_names
+    assert "project" not in payload
+    assert "git" not in payload["window_metadata"][0]
+    assert len(inventory_calls) == 1
+
+
+def test_session_metadata_retirement_guards_keep_git_ownership_in_work_graph_only(tmp_path):
+    repo = tmp_path / "canonical-owner"
+    _init_repo(repo)
+    pane = _pane("canonical-owner", 0, repo)
+    payload = metadata.session_to_json(
+        SessionInfo(session="canonical-owner", panes=[pane], selected_pane=pane, agents=[]),
+        MetadataCache(),
+        allow_network=False,
+    )
+
+    assert "project" not in payload
+    assert all("git" not in row for row in payload["window_metadata"])
+    metadata_source = Path(metadata.__file__).read_text(encoding="utf-8")
+    assert "def project_pull_request" not in metadata_source
+    frontend_sources = "\n".join(path.read_text(encoding="utf-8") for path in Path("static_src/js/yolomux").glob("*.js"))
+    assert "info.project" not in frontend_sources
+    assert "window_metadata.git" not in frontend_sources
+
+
+def test_session_work_graph_keeps_independent_clones_separate_and_hosted_identity_shared(tmp_path, monkeypatch):
+    clone_a = tmp_path / "clone-a"
+    clone_b = tmp_path / "clone-b"
+    _init_repo(clone_a)
+    _init_repo(clone_b)
+    for repo in (clone_a, clone_b):
+        _git(repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(clone_a, "branch", "feature/a")
+    _git(clone_b, "branch", "feature/b")
+    panes = [_pane("s-clones", 0, clone_a), _pane("s-clones", 1, clone_b)]
+    info = SessionInfo(session="s-clones", panes=panes, selected_pane=panes[0], agents=[])
+    def fake_prs(_repo, branch, _cache, allow_network=True):
+        if branch in {"feature/a", "feature/b"}:
+            return [{"number": 80, "state": "open", "title": "shared hosted PR", "linear_ids": []}]
+        return []
+
+    monkeypatch.setattr(metadata, "github_pull_requests_by_branch", fake_prs)
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", lambda *_args, **_kwargs: None)
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=True)
+
+    assert len(graph["git_worktrees"]) == 2
+    assert len(graph["local_repositories"]) == 2
+    assert len(graph["hosted_repositories"]) == 1
+    hosted = next(iter(graph["hosted_repositories"].values()))
+    assert len(hosted["local_repository_ids"]) == 2
+    branch_sets = [
+        {graph["local_branches"][branch_id]["name"] for branch_id in repository["local_branch_ids"]}
+        for repository in graph["local_repositories"].values()
+    ]
+    assert {"master", "feature/a"} in branch_sets
+    assert {"master", "feature/b"} in branch_sets
+    shared_pr_ids = {
+        pr_id
+        for branch in graph["local_branches"].values()
+        if branch["name"] in {"feature/a", "feature/b"}
+        for pr_id in branch["pull_request_ids"]
+    }
+    assert shared_pr_ids == {"pull-request:hosted-repository:github.com/ai-dynamo/frontend-crates:80"}
+    assert len(graph["pull_requests"]) == 1
+    assert graph["pull_requests"][next(iter(shared_pr_ids))]["local_branch_ids"]
+
+
+def test_session_work_graph_keeps_missing_historical_edit_observation(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pane = _pane("s-missing", 0, repo)
+    agent = AgentInfo("s-missing", "codex", 101, pane.target, "codex", str(repo), "running", "a", None, None)
+    info = SessionInfo(session="s-missing", panes=[pane], selected_pane=pane, agents=[agent])
+    missing_path = repo / "removed" / "history.txt"
+    monkeypatch.setattr(metadata, "scan_agent_changes", lambda _agent: {str(missing_path): {"D"}})
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    observation = next(item for item in graph["path_observations"].values() if item["path_snapshot"] == str(missing_path))
+    assert observation["source"] == "edit"
+    assert observation["exists"] is False
+    assert observation["runtime_actor_id"] in graph["runtime_actors"]
+    assert observation["git_worktree_id"] is not None
+
+
+def test_resolve_path_observation_uses_nearest_nested_repository(tmp_path):
+    parent = tmp_path / "parent"
+    nested = parent / "nested"
+    _init_repo(parent)
+    _init_repo(nested)
+    resolved = metadata.resolve_path_observation(str(nested / "f.txt"))
+
+    assert resolved["git_root"] == str(nested.resolve())
+    assert resolved["git_worktree_id"] == f"git-worktree:{nested.resolve()}"
+    assert resolved["local_repository_id"] == f"local-git:{nested.resolve() / '.git'}"
+
+
+def test_session_work_graph_generation_is_monotonic(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pane = _pane("s-generation", 0, repo)
+    info = SessionInfo(session="s-generation", panes=[pane], selected_pane=pane, agents=[])
+    first = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+    second = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+    assert second["generation"] > first["generation"]
+
+
+def test_session_work_graph_retains_worktree_branch_history_after_switch(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "checkout", "-b", "feature/first")
+    pane = _pane("s-history", 0, repo)
+    info = SessionInfo(session="s-history", panes=[pane], selected_pane=pane, agents=[])
+    first = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+    _git(repo, "checkout", "-b", "feature/second")
+    second = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    worktree = next(iter(second["git_worktrees"].values()))
+    branches = {branch["name"]: branch for branch in second["local_branches"].values()}
+    assert second["local_branches"][worktree["current_branch_id"]]["name"] == "feature/second"
+    assert "feature/first" in branches
+    historical_activity = [
+        activity
+        for activity in second["worktree_branch_activity"].values()
+        if second["local_branches"][activity["local_branch_id"]]["name"] == "feature/first"
+    ]
+    assert historical_activity and historical_activity[0]["current"] is False
+    assert first["generation"] < second["generation"]
+
+
+def test_session_work_graph_preserves_deleted_branch_activity_snapshot_and_sha(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "checkout", "-b", "feature/renamed-away")
+    (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "feature.txt")
+    _git(repo, "commit", "-m", "feature activity")
+    feature_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    pane = _pane("s-history-deleted", 0, repo)
+    info = SessionInfo(session="s-history-deleted", panes=[pane], selected_pane=pane, agents=[])
+    metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    _git(repo, "checkout", "master")
+    _git(repo, "branch", "-D", "feature/renamed-away")
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    worktree = next(iter(graph["git_worktrees"].values()))
+    activities = [
+        graph["worktree_branch_activity"][activity_id]
+        for activity_id in worktree["branch_activity_ids"]
+    ]
+    historical = next(activity for activity in activities if activity["branch_name_snapshot"] == "feature/renamed-away")
+    historical_branch = graph["local_branches"][historical["local_branch_id"]]
+    assert historical["current"] is False
+    assert historical["observed_head_sha"] == feature_sha
+    assert historical_branch["missing"] is True
+    assert historical_branch["head_sha"] == feature_sha
+    current = [activity for activity in activities if activity["current"]]
+    assert len(current) == 1
+    assert graph["local_branches"][current[0]["local_branch_id"]]["name"] == "master"
+
+
+def test_session_work_graph_keeps_detached_head_branchless_and_unborn_branch_with_null_sha(tmp_path):
+    detached = tmp_path / "detached"
+    _init_repo(detached)
+    detached_sha = _git(detached, "rev-parse", "HEAD").stdout.strip()
+    _git(detached, "checkout", "--detach")
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    _git(unborn, "init", "-b", "main")
+    _git(unborn, "config", "user.email", "t@example.com")
+    _git(unborn, "config", "user.name", "T")
+    panes = [_pane("s-detached-unborn", 0, detached), _pane("s-detached-unborn", 1, unborn)]
+    info = SessionInfo(session="s-detached-unborn", panes=panes, selected_pane=panes[0], agents=[])
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+    worktrees = {worktree["root"]: worktree for worktree in graph["git_worktrees"].values()}
+    branches_by_repository = {
+        repository_id: [graph["local_branches"][branch_id] for branch_id in repository["local_branch_ids"]]
+        for repository_id, repository in graph["local_repositories"].items()
+    }
+    detached_worktree = worktrees[str(detached.resolve())]
+    unborn_worktree = worktrees[str(unborn.resolve())]
+
+    assert detached_worktree["current_branch_id"] is None
+    assert detached_worktree["git"]["head_sha"] == detached_sha
+    assert branches_by_repository[detached_worktree["local_repository_id"]]
+    assert all(branch["name"] != "HEAD" for branch in branches_by_repository[detached_worktree["local_repository_id"]])
+    unborn_branch = graph["local_branches"][unborn_worktree["current_branch_id"]]
+    assert unborn_branch["name"] == "main"
+    assert unborn_branch["unborn"] is True
+    assert unborn_branch["head_sha"] is None
+    metadata.validate_work_graph(graph)
+
+
+def test_session_work_graph_associates_current_and_other_branch_prs_once(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(repo, "checkout", "-b", "feature/current")
+    _git(repo, "branch", "feature/other")
+    pane = _pane("s-prs", 0, repo)
+    info = SessionInfo(session="s-prs", panes=[pane], selected_pane=pane, agents=[])
+
+    def fake_pr(_repo, branch, _cache, allow_network=True):
+        number = {"feature/current": 80, "feature/other": 81}.get(branch)
+        return {"number": number, "title": branch, "description": "", "linear_ids": []} if number else None
+
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", fake_pr)
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
+
+    assert {pr["number"] for pr in graph["pull_requests"].values()} == {80, 81}
+    by_name = {branch["name"]: branch for branch in graph["local_branches"].values()}
+    assert len(by_name["feature/current"]["pull_request_ids"]) == 1
+    assert len(by_name["feature/other"]["pull_request_ids"]) == 1
+
+
+def test_session_work_graph_pr_lookup_states_distinguish_not_requested_and_none(tmp_path, monkeypatch):
+    local_repo = tmp_path / "local"
+    hosted_repo = tmp_path / "hosted"
+    _init_repo(local_repo)
+    _init_repo(hosted_repo)
+    _git(hosted_repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(hosted_repo, "checkout", "-b", "feature/no-pr")
+    panes = [_pane("s-pr-state", 0, local_repo), _pane("s-pr-state", 1, hosted_repo)]
+    info = SessionInfo(session="s-pr-state", panes=panes, selected_pane=panes[0], agents=[])
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", lambda *_args, **_kwargs: None)
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=True)
+    branches = {branch["name"]: branch for branch in graph["local_branches"].values()}
+
+    assert branches["feature/no-pr"]["pull_request_lookup_state"] == "none"
+    local_branch = next(branch for branch in graph["local_branches"].values() if branch["local_repository_id"] != branches["feature/no-pr"]["local_repository_id"])
+    assert local_branch["pull_request_lookup_state"] == "not-requested"
+
+
+def test_session_work_graph_keeps_non_git_paths_and_labels_local_and_failed_pr_lookups(tmp_path, monkeypatch):
+    non_git = tmp_path / "notes"
+    non_git.mkdir()
+    (non_git / "readme.txt").write_text("not a repository\n", encoding="utf-8")
+    local_repo = tmp_path / "local"
+    hosted_repo = tmp_path / "hosted"
+    _init_repo(local_repo)
+    _init_repo(hosted_repo)
+    _git(hosted_repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(hosted_repo, "branch", "feature/failing-lookup")
+    panes = [
+        _pane("s-no-git", 0, non_git),
+        _pane("s-no-git", 1, local_repo),
+        _pane("s-no-git", 2, hosted_repo),
+    ]
+    info = SessionInfo(session="s-no-git", panes=panes, selected_pane=panes[0], agents=[])
+    monkeypatch.setattr(metadata, "github_pull_requests_by_branch", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(metadata, "github_pull_request_branch_lookup_state", lambda *_args, **_kwargs: "error")
+
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=True)
+    observations = {observation["path"]: observation for observation in graph["path_observations"].values()}
+    local_worktree = next(worktree for worktree in graph["git_worktrees"].values() if worktree["root"] == str(local_repo.resolve()))
+    hosted_worktree = next(worktree for worktree in graph["git_worktrees"].values() if worktree["root"] == str(hosted_repo.resolve()))
+    local_branch = graph["local_branches"][local_worktree["current_branch_id"]]
+    failed_branch = next(branch for branch in graph["local_branches"].values() if branch["name"] == "feature/failing-lookup")
+
+    assert observations[str(non_git.resolve())]["git_worktree_id"] is None
+    assert local_branch["pull_request_ids"] == []
+    assert local_branch["pull_request_lookup_state"] == "not-requested"
+    assert failed_branch["pull_request_ids"] == []
+    assert failed_branch["pull_request_lookup_state"] == "error"
+    metadata.validate_work_graph(graph)
+
+
+def test_live_session_3_frontend_crates_graph_when_available():
+    sessions, errors = discover_sessions(["3"])
+    if errors or "3" not in sessions:
+        pytest.skip("live tmux session 3 is not available in this test environment")
+    info = sessions["3"]
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=True)
+    worktree = next(
+        (item for item in graph["git_worktrees"].values() if item["root"].endswith("/frontend-crates3")),
+        None,
+    )
+    if worktree is None:
+        pytest.skip("live session 3 is not currently associated with frontend-crates3")
+    local_repository = graph["local_repositories"][worktree["local_repository_id"]]
+    branch_names = {graph["local_branches"][branch_id]["name"] for branch_id in local_repository["local_branch_ids"]}
+    actual_names = {
+        line.strip().removeprefix("*").strip()
+        for line in _git(Path(worktree["root"]), "branch", "--format=%(refname:short)").stdout.splitlines()
+        if line.strip()
+    }
+    assert branch_names == actual_names
+    claude_pane = next((pane for pane in info.panes if pane.window == "0" and pane.window_name == "claude"), None)
+    assert claude_pane is not None
+    assert claude_pane.target in {
+        pane["target"]
+        for pane in graph["tmux_panes"].values()
+        if pane["current_path"] == str(Path(worktree["root"]).resolve())
+    }
+    hosted = graph["hosted_repositories"][worktree["hosted_repository_id"]]
+    assert 80 in {graph["pull_requests"][pr_id]["number"] for pr_id in hosted["pull_request_ids"]}
+    dynamo_prs = {
+        pr["number"]
+        for pr in graph["pull_requests"].values()
+        if pr.get("hosted_repository_id") == "hosted-repository:github.com/ai-dynamo/dynamo"
+    }
+    assert 11251 in dynamo_prs
 
 
 def test_local_branch_inventory_excludes_remote_only_pr_branch(tmp_path):
@@ -1046,6 +1572,173 @@ def test_other_branch_with_local_pr_number_still_uses_by_number(monkeypatch):
     pr = git_data["other_branches"]["branches"][0]["pull_request"]
     assert pr["number"] == 9981
     assert branch_queries == []  # by-number path used; no by-branch fallback
+
+
+def test_session_work_graph_keeps_multiple_branch_prs_and_fork_head_identity(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(repo, "checkout", "-b", "feature/current")
+    _git(repo, "branch", "feature/reused")
+    pane = _pane("s-multi-pr", 0, repo)
+    info = SessionInfo(session="s-multi-pr", panes=[pane], selected_pane=pane, agents=[])
+
+    def fake_prs(_repo, branch, _cache, allow_network=True):
+        if branch != "feature/reused":
+            return []
+        return [
+            {"number": 90, "state": "closed", "title": "old", "linear_ids": []},
+            {
+                "number": 91,
+                "state": "open",
+                "title": "current",
+                "linear_ids": [],
+                "head_repository": {"full_name": "contributor/frontend-crates", "url": "https://github.com/contributor/frontend-crates"},
+                "head_branch_name": "feature/reused",
+            },
+            {
+                "number": 91,
+                "state": "open",
+                "title": "current duplicate lookup evidence",
+                "linear_ids": [],
+                "head_repository": {"full_name": "contributor/frontend-crates", "url": "https://github.com/contributor/frontend-crates"},
+                "head_branch_name": "feature/reused",
+            },
+        ]
+
+    monkeypatch.setattr(metadata, "github_pull_requests_by_branch", fake_prs)
+    graph = metadata.session_work_graph(info, MetadataCache(), allow_network=True)
+
+    branch = next(branch for branch in graph["local_branches"].values() if branch["name"] == "feature/reused")
+    assert branch["pull_request_lookup_state"] == "ready"
+    assert {graph["pull_requests"][pr_id]["number"] for pr_id in branch["pull_request_ids"]} == {90, 91}
+    assert len(branch["pull_request_ids"]) == 2
+    base_hosted = next(hosted for hosted in graph["hosted_repositories"].values() if hosted["owner"] == "ai-dynamo")
+    assert len(base_hosted["pull_request_ids"]) == 2
+    fork_id = "hosted-repository:github.com/contributor/frontend-crates"
+    assert graph["pull_requests"][next(pr_id for pr_id in branch["pull_request_ids"] if graph["pull_requests"][pr_id]["number"] == 91)]["head_hosted_repository_id"] == fork_id
+    assert fork_id in graph["hosted_repositories"]
+
+
+def test_branch_pr_lookup_state_preserves_error_and_stale_evidence(monkeypatch):
+    repo = {"owner": "ai-dynamo", "name": "frontend-crates", "url": "https://github.com/ai-dynamo/frontend-crates"}
+    monkeypatch.setattr(metadata, "github_pull_requests_by_branch", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(metadata, "github_pull_request_branch_lookup_state", lambda *_args, **_kwargs: "error")
+    monkeypatch.setattr(metadata, "github_pull_request_by_branch", lambda *_args, **_kwargs: None)
+
+    no_evidence, no_evidence_state = metadata.branch_pull_requests(repo, "feature/error", MetadataCache(), allow_network=True)
+    stale_evidence, stale_state = metadata.branch_pull_requests(
+        repo,
+        "feature/stale",
+        MetadataCache(),
+        allow_network=True,
+        known=[{"number": 92, "state": "open"}],
+    )
+
+    assert no_evidence == []
+    assert no_evidence_state == "error"
+    assert stale_evidence == [{"number": 92, "state": "open"}]
+    assert stale_state == "stale"
+
+
+def test_graph_keeps_fork_pr_when_no_local_branch_survives(monkeypatch):
+    graph = metadata.empty_work_graph()
+    hosted_id = "hosted-repository:github.com/ai-dynamo/frontend-crates"
+    graph["hosted_repositories"][hosted_id] = {
+        "id": hosted_id,
+        "provider": "github",
+        "owner": "ai-dynamo",
+        "name": "frontend-crates",
+        "url": "https://github.com/ai-dynamo/frontend-crates",
+        "local_repository_ids": [],
+        "pull_request_ids": [],
+    }
+    monkeypatch.setattr(metadata, "linear_issue_metadata", lambda identifier, _cache, allow_network=True: {"identifier": identifier})
+
+    metadata.associate_branch_pull_request(
+        graph,
+        hosted_repository_id=hosted_id,
+        local_branch_id=None,
+        pull_request={
+            "number": 93,
+            "title": "fork branch deleted locally",
+            "description": "",
+            "linear_ids": [],
+            "head_repository": {"full_name": "contributor/frontend-crates", "url": "https://github.com/contributor/frontend-crates"},
+            "head_branch_name": "deleted-feature",
+        },
+        cache=MetadataCache(),
+        allow_network=False,
+    )
+
+    pr = graph["pull_requests"]["pull-request:hosted-repository:github.com/ai-dynamo/frontend-crates:93"]
+    assert pr["local_branch_ids"] == []
+    assert pr["head_hosted_repository_id"] == "hosted-repository:github.com/contributor/frontend-crates"
+    assert graph["hosted_repositories"][hosted_id]["pull_request_ids"] == [pr["id"]]
+    metadata.validate_work_graph(graph)
+
+
+def test_session_work_graph_deduplicates_linear_issue_across_branch_and_multiple_prs(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(repo, "checkout", "-b", "feature/DIS-4000")
+    _git(repo, "branch", "feature/other")
+    pane = _pane("s-linear-graph", 0, repo)
+    info = SessionInfo(session="s-linear-graph", panes=[pane], selected_pane=pane, agents=[])
+    metadata_cache = MetadataCache()
+    calls = []
+
+    monkeypatch.setattr(metadata, "github_pull_requests_by_branch", lambda _repo, branch, _cache, allow_network=True: [
+        {"number": 94, "title": "DIS-4000 old", "description": "DIS-4001", "linear_ids": ["DIS-4000", "DIS-4001"]},
+        {"number": 95, "title": "DIS-4000 current", "description": "DIS-4002", "linear_ids": ["DIS-4000", "DIS-4002"]},
+    ] if branch == "feature/other" else [])
+    monkeypatch.setattr(metadata, "linear_issue_metadata", lambda identifier, _cache, allow_network=True: calls.append(identifier) or {"identifier": identifier})
+
+    graph = metadata.session_work_graph(info, metadata_cache, allow_network=True)
+    branch = next(branch for branch in graph["local_branches"].values() if branch["name"] == "feature/other")
+    assert branch["linear_issue_ids"] == ["DIS-4000", "DIS-4001", "DIS-4002"]
+    assert set(graph["linear_issues"]) == {"DIS-4000", "DIS-4001", "DIS-4002"}
+    assert calls.count("DIS-4000") == 1
+    assert {issue_id for pr in graph["pull_requests"].values() for issue_id in pr["linear_issue_ids"]} == {"DIS-4000", "DIS-4001", "DIS-4002"}
+
+
+def test_session_work_graph_many_observations_reuse_one_git_inventory_and_compact_entities(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    pane = _pane("s-observation-pressure", 0, repo)
+    agent = AgentInfo("s-observation-pressure", "codex", 101, pane.target, "codex", str(repo), "running", "a", None, None)
+    info = SessionInfo(session="s-observation-pressure", panes=[pane], selected_pane=pane, agents=[agent])
+    changed_paths = {str(repo / f"nested/{index}/file.py"): {"M"} for index in range(40)}
+    for path in changed_paths:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text("x\n", encoding="utf-8")
+    original_inventory = metadata.git_inventory
+    calls = []
+
+    def counted_inventory(path, **kwargs):
+        calls.append(path)
+        return original_inventory(path, **kwargs)
+
+    monkeypatch.setattr(metadata, "scan_agent_changes", lambda _agent: changed_paths)
+    monkeypatch.setattr(metadata, "git_inventory", counted_inventory)
+    # Exercise the actual session-metadata API projection: repeated observed
+    # files must not cause a fresh Git inventory or a repeated entity graph.
+    payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
+    graph = payload["work_graph"]
+    serialized = json.dumps(graph, sort_keys=True)
+    payload_bytes = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
+
+    assert len(graph["path_observations"]) >= 40
+    assert len(graph["git_worktrees"]) == 1
+    assert len(graph["local_repositories"]) == 1
+    assert len(calls) == 1
+    assert serialized.count('"common_git_dir"') == 1
+    assert len(serialized) < 110_000
+    # This is the JSON body served by `/api/session-metadata`, including its
+    # temporary graph-derived compatibility projections. The cap proves that
+    # 40 observations do not multiply branch inventories in the wire payload.
+    assert payload_bytes < 140_000
 
 
 def test_branch_linear_metadata_includes_pr_and_branch_ids(monkeypatch):

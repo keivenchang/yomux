@@ -12,7 +12,7 @@ from typing import Any
 
 from .common import AGENT_COMMANDS
 from .common import AgentInfo
-from .common import PaneInfo
+from .common import TmuxPaneInfo
 from .common import ProcessInfo
 from .common import SessionInfo
 from .cache import TtlCache
@@ -54,7 +54,7 @@ def set_cached_transcript_lookup(
     return path
 
 
-def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
+def list_tmux_panes() -> tuple[list[TmuxPaneInfo], str | None]:
     fmt = "\t".join(
         [
             "#{session_name}",
@@ -75,7 +75,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
         error = cmd_error(result, "tmux list-panes failed")
         return [], error
 
-    panes: list[PaneInfo] = []
+    panes: list[TmuxPaneInfo] = []
     for line in result.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) != 11:
@@ -86,7 +86,7 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
         except ValueError:
             continue
         panes.append(
-            PaneInfo(
+            TmuxPaneInfo(
                 session=session,
                 window=window,
                 window_name=window_name,
@@ -194,7 +194,7 @@ def agent_model_from_metadata(metadata: dict[str, Any]) -> str | None:
     return None
 
 
-def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> tuple[str, int]:
+def pane_process_label(pane: TmuxPaneInfo, candidates: list[ProcessInfo]) -> tuple[str, int]:
     for process in candidates:
         label = process_display_label(process.command)
         if label in AGENT_COMMANDS or (label.startswith("mock_") and label.endswith(".py")):
@@ -311,7 +311,7 @@ def codex_transcript_family_paths(path: Path, candidates: list[Path] | None = No
 
 def read_claude_agent(
     session: str,
-    pane: PaneInfo,
+    pane: TmuxPaneInfo,
     process: ProcessInfo,
     *,
     sessions_root: Path | None = None,
@@ -364,7 +364,7 @@ def read_claude_agent(
 
 def select_claude_agent(
     session: str,
-    pane: PaneInfo,
+    pane: TmuxPaneInfo,
     processes: list[ProcessInfo],
     *,
     sessions_root: Path | None = None,
@@ -404,7 +404,7 @@ def select_claude_agent(
     return max(with_transcript, key=active_session_rank)
 
 
-def agent_error(session: str, kind: str, pane: PaneInfo, process: ProcessInfo, error: str) -> AgentInfo:
+def agent_error(session: str, kind: str, pane: TmuxPaneInfo, process: ProcessInfo, error: str) -> AgentInfo:
     return AgentInfo(
         session=session,
         kind=kind,
@@ -644,7 +644,7 @@ def codex_transcript_from_process_fd(
     return newest_codex_transcript(codex_rollout_paths(targets, root))
 
 
-def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
+def read_codex_agent(session: str, pane: TmuxPaneInfo, process: ProcessInfo) -> AgentInfo:
     proc_cwd = process_cwd(process.pid) or pane.current_path
     transcript_path = codex_transcript_from_process_fd(process.pid) or find_recent_codex_transcript(proc_cwd)
     session_id = codex_transcript_session_id(transcript_path)
@@ -663,7 +663,7 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
     )
 
 
-def select_codex_agent(session: str, pane: PaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+def select_codex_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
     candidates = [process for process in processes if classify_agent(process.command) == "codex"]
     if not candidates:
         return None
@@ -676,7 +676,7 @@ def select_codex_agent(session: str, pane: PaneInfo, processes: list[ProcessInfo
     return read_codex_agent(session, pane, process)
 
 
-def select_pane_agent(session: str, pane: PaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
     kinds = [kind for process in processes if (kind := classify_agent(process.command)) in {"claude", "codex"}]
     if not kinds:
         return None
@@ -698,13 +698,13 @@ def process_cwd(pid: int, lsof_runner: Any = None) -> str | None:
         return paths[0] if paths else None
 
 
-def pane_sort_key(pane: PaneInfo) -> tuple[str, int, int]:
+def pane_sort_key(pane: TmuxPaneInfo) -> tuple[str, int, int]:
     return (pane.session, int(pane.window), int(pane.pane))
 
 
-def active_window_for_panes(panes: list[PaneInfo] | list[dict[str, Any]]) -> str | None:
+def active_window_for_panes(panes: list[TmuxPaneInfo] | list[dict[str, Any]]) -> str | None:
     for pane in panes:
-        if isinstance(pane, PaneInfo):
+        if isinstance(pane, TmuxPaneInfo):
             if pane.window_active and pane.window not in (None, ""):
                 return str(pane.window)
         elif isinstance(pane, dict) and pane.get("window_active") and pane.get("window") not in (None, ""):
@@ -712,7 +712,7 @@ def active_window_for_panes(panes: list[PaneInfo] | list[dict[str, Any]]) -> str
     return None
 
 
-def preferred_pane(panes: list[PaneInfo], agents: list[AgentInfo]) -> PaneInfo | None:
+def preferred_pane(panes: list[TmuxPaneInfo], agents: list[AgentInfo]) -> TmuxPaneInfo | None:
     if not panes:
         return None
     agent_targets = {agent.pane_target for agent in agents}
@@ -747,7 +747,7 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
         errors.append(ps_error)
     children = child_index(processes)
 
-    by_session: dict[str, list[PaneInfo]] = {session: [] for session in sessions}
+    by_session: dict[str, list[TmuxPaneInfo]] = {session: [] for session in sessions}
     for pane in panes:
         if pane.session in by_session:
             by_session[pane.session].append(pane)
@@ -755,7 +755,7 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
     result: dict[str, SessionInfo] = {}
     for session in sessions:
         raw_session_panes = sorted(by_session.get(session, []), key=pane_sort_key)
-        session_panes: list[PaneInfo] = []
+        session_panes: list[TmuxPaneInfo] = []
         agents: list[AgentInfo] = []
         seen_pids: set[int] = set()
         for raw_pane in raw_session_panes:

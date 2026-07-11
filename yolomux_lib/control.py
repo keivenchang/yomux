@@ -1,21 +1,26 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 import socket
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 from typing import Callable
 
 from .common import CONTROL_SOCKET_DIR
+from .local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
+from .local_services.rpc import LocalRpcError
+from .local_services.rpc import LocalRpcEnvelope
+from .local_services.rpc import new_envelope
+from .local_services.rpc import read_message
+from .local_services.rpc import request as local_service_request
+from .local_services.rpc import safe_socket_path
+from .local_services.rpc import write_message
 
 
-CONTROL_MAX_BYTES = 65536
-CONTROL_SOCKET_PATH_LIMIT = 100
+CONTROL_MAX_BYTES = LOCAL_RPC_MAX_METADATA_BYTES
+CONTROL_SOCKET_PATH_LIMIT = 96
 LOGGER = logging.getLogger(__name__)
 
 
@@ -26,13 +31,7 @@ class ControlRequestError(Exception):
 def control_socket_path(token: str | None = None, pid: int | None = None) -> Path:
     suffix = f"-{token}" if token else ""
     filename = f"yolomux-{pid or os.getpid()}{suffix}.sock"
-    path = CONTROL_SOCKET_DIR / filename
-    if len(os.fsencode(str(path))) < CONTROL_SOCKET_PATH_LIMIT:
-        return path
-    digest = hashlib.sha1(os.fsencode(str(CONTROL_SOCKET_DIR))).hexdigest()[:12]
-    uid = getattr(os, "getuid", lambda: "nouid")()
-    root = Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())
-    return root / f"ycs-{uid}-{digest}" / filename
+    return safe_socket_path(CONTROL_SOCKET_DIR / filename, prefix="ycs", fallback_name=filename)
 
 
 def send_yolomux_control_request(owner: dict[str, Any] | None, request: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
@@ -40,24 +39,10 @@ def send_yolomux_control_request(owner: dict[str, Any] | None, request: dict[str
     if not isinstance(socket_path, str) or not socket_path:
         return {"ok": False, "error": "owner has no control socket"}
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(timeout)
-            client.connect(socket_path)
-            client.sendall((json.dumps(request, sort_keys=True) + "\n").encode("utf-8"))
-            chunks: list[bytes] = []
-            while sum(len(chunk) for chunk in chunks) < CONTROL_MAX_BYTES:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                if b"\n" in chunk:
-                    break
-    except OSError as exc:
+        envelope = new_envelope("control", str(request.get("action") or "request"), request, timeout_seconds=timeout)
+        payload, _binary = local_service_request(socket_path, envelope, timeout_seconds=timeout, fallback_legacy=True)
+    except (OSError, LocalRpcError) as exc:
         return {"ok": False, "error": str(exc)}
-    try:
-        payload = json.loads(b"".join(chunks).decode("utf-8").splitlines()[0])
-    except (IndexError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return {"ok": False, "error": f"invalid control response: {exc}"}
     return payload if isinstance(payload, dict) else {"ok": False, "error": "invalid control response"}
 
 
@@ -127,9 +112,10 @@ class YolomuxControlServer:
                 self.serve_connection(conn)
 
     def serve_connection(self, conn: socket.socket) -> None:
-        request = self.read_request(conn)
-        if request is None:
-            self.write_response(conn, {"ok": False, "error": "invalid control request"})
+        try:
+            envelope, request, _binary, legacy = read_message(conn)
+        except LocalRpcError:
+            self.write_response(conn, None, {"ok": False, "error": "invalid control request"}, legacy=True)
             return
         try:
             response = self.handler(request)
@@ -138,25 +124,28 @@ class YolomuxControlServer:
         except Exception:
             LOGGER.exception("yolomux control handler failed")
             response = {"ok": False, "error": "internal control handler error"}
-        self.write_response(conn, response)
+        response_envelope = None if legacy or envelope is None else LocalRpcEnvelope(
+            service="control",
+            method=envelope.method,
+            request_id=envelope.request_id,
+            trace_id=envelope.trace_id,
+            deadline_ms=envelope.deadline_ms,
+            priority=envelope.priority,
+            owner_generation=envelope.owner_generation,
+            config_generation=envelope.config_generation,
+            payload=response,
+        )
+        self.write_response(conn, response_envelope, response, legacy=legacy)
 
-    def read_request(self, conn: socket.socket) -> dict[str, Any] | None:
-        chunks: list[bytes] = []
-        while sum(len(chunk) for chunk in chunks) < CONTROL_MAX_BYTES:
-            chunk = conn.recv(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if b"\n" in chunk:
-                break
+    def write_response(
+        self,
+        conn: socket.socket,
+        envelope: LocalRpcEnvelope | None,
+        response: dict[str, Any],
+        *,
+        legacy: bool,
+    ) -> None:
         try:
-            payload = json.loads(b"".join(chunks).decode("utf-8").splitlines()[0])
-        except (IndexError, UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    def write_response(self, conn: socket.socket, response: dict[str, Any]) -> None:
-        try:
-            conn.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
-        except BrokenPipeError:
+            write_message(conn, envelope, response, legacy=legacy)
+        except (BrokenPipeError, LocalRpcError):
             return

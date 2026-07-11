@@ -192,7 +192,13 @@ function menuTabDetail(item) {
 
 function commandPaletteTabDetail(item) {
   const detail = menuTabDetail(item);
-  const pr = displayPullRequest(transcriptMetadataState.payload.sessions?.[item]);
+  const info = transcriptMetadataState.payload.sessions?.[item];
+  const summary = sessionWorkSummary(item, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) {
+    const aggregate = pullRequestAggregateLabel(summary.pullRequests);
+    return detail.includes(aggregate) ? detail : [aggregate, detail].filter(Boolean).join(' · ');
+  }
+  const pr = displayPullRequest(info);
   if (!pr?.number) return detail;
   const bareNumber = `#${pr.number}`;
   const visibleNumber = `PR ${bareNumber}`;
@@ -215,7 +221,7 @@ function menuTabRowHtml(item, options = {}) {
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
   return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestSummaryBadgesHtml(item, info)}${detailHtml}</span></span>`;
 }
 
 function menuTabCommand(item, options = {}) {
@@ -596,7 +602,11 @@ function pullRequestSearchFields(pr) {
     pr.author_login,
     pr.number ? 'PR' : '',
     ...prNumberSearchForms(pr.number),
-    ...linearSearchFields(pr.linear_ids),
+    // Normalized graph PRs own canonical `linear_issue_ids`; older view models exposed the
+    // same relationship as `linear_ids`. Search must index both shapes while metadata is
+    // rendered directly from the graph, otherwise an other-branch PR becomes invisible to
+    // Cmd-P despite being visible in YO!info.
+    ...linearSearchFields(pr.linear_issue_ids || pr.linear_ids),
   ].filter(Boolean);
 }
 
@@ -610,17 +620,19 @@ function finderSearchAliases(item) {
 
 function tabSearchFields(item) {
   const info = transcriptMetadataState.payload.sessions?.[item] || {};
+  const summary = sessionWorkSummary(item, info);
   const filePath = fileItemPath(item) || '';
   // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
   // session is findable by any related branch even when it is not the currently checked-out branch.
-  const primaryRoot = info.project?.git?.root || info.project?.git?.cwd || '';
+  const primaryRoot = summary.git?.root || summary.git?.cwd || '';
+  const repositories = summary.graphBacked ? summary.repositories : [
+    ...(summary.git ? [{...summary.git, root: summary.git.root || summary.git.cwd || ''}] : []),
+    ...summary.repositories,
+  ];
   const branchSources = [
-    ...(info.project?.git?.other_branches?.branches || []),
-    ...(Array.isArray(info.project?.repos)
-      ? info.project.repos
-        .filter(repo => (repo?.root || repo?.cwd || '') !== primaryRoot)
-        .flatMap(repo => repo?.other_branches?.branches || [])
-      : []),
+    ...repositories
+      .filter(repo => (repo?.root || repo?.cwd || '') === primaryRoot || !primaryRoot || summary.graphBacked)
+      .flatMap(repo => repo?.other_branches?.branches || []),
   ];
   const pr = displayPullRequest(info);
   return [
@@ -638,12 +650,14 @@ function tabSearchFields(item) {
     ...finderSearchAliases(item),
     ...pullRequestSearchFields(pr),
     ...linearSearchFields(info.linear),
-    ...linearSearchFields(info.project?.linear),
+    ...linearSearchFields(summary.linearIssues),
     ...branchSources.flatMap(branch => [
       branch.name,
       branch.subject,
-      ...pullRequestSearchFields(branch.pull_request),
+      ...pullRequestSearchFields(branch.pull_request || branch.pull_requests?.[0]),
+      ...(branch.pull_requests || []).flatMap(pullRequestSearchFields),
       ...linearSearchFields(branch.linear_ids),
+      ...linearSearchFields(branch.linear),
     ]),
   ].filter(Boolean);
 }

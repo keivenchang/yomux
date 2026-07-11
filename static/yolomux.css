@@ -11108,6 +11108,27 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-field-ai .info-tree-field-value {
   min-width: 0;
 }
+.info-tree-path-observations {
+  width: 100%;
+  margin-block-start: var(--space-2);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+}
+.info-tree-path-observations > summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--info-tree-dimension-hover);
+}
+.info-tree-path-observations ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding-inline-start: var(--space-12);
+}
+.info-tree-path-observations code {
+  color: var(--text);
+  font: inherit;
+}
 .info-tree-ai-value {
   min-width: 0;
   flex-wrap: wrap;
@@ -11174,6 +11195,20 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-field-ai .info-tree-action-link {
   color: var(--info-tree-field-color);
 }
+.info-tree-branch-state {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-start: var(--space-4);
+  padding: 0 var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--info-tree-field-color) 58%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--info-tree-field-color);
+  font: 700 var(--ui-font-size-2xs)/1.35 var(--mono-font);
+  text-transform: lowercase;
+}
+.info-tree-branch-state-current { color: var(--good); border-color: color-mix(in srgb, var(--good) 70%, transparent); }
+.info-tree-branch-state-worked { color: var(--warning-border-strong); border-color: color-mix(in srgb, var(--warning-border-strong) 70%, transparent); }
+.info-tree-branch-state-missing { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 70%, transparent); }
 .info-tree-chip {
   padding: var(--space-1) var(--space-6);
   background: var(--info-tree-chip-bg);

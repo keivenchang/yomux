@@ -61,10 +61,6 @@ EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 RUN_HISTORY_PATH = STATE_DIR / "run-history.json"
 ACTIVITY_PATH = STATE_DIR / "activity.json"
 TMUX_AI_STATUS_PATH = STATE_DIR / "tmux-AI-status.json"
-# Bucket layouts are not losslessly interchangeable during a rolling restart: an older process can
-# otherwise downsample a newer coarse bucket and make the next process count the same data again.
-STATS_CLIENT_HISTORY_VERSION = 4
-STATS_CLIENT_HISTORY_PATH = STATE_DIR / f"stats-client-history-v{STATS_CLIENT_HISTORY_VERSION}.json"
 LEGACY_ATTENTION_ACKS_PATH = STATE_DIR / "attention-acks.json"
 ACTIVITY_HEARTBEATS_PATH = STATE_DIR / "activity-heartbeats.jsonl"
 WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"
@@ -218,10 +214,6 @@ def path_mtime_or_zero(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
-
-
-def project_git(project: Any) -> dict[str, Any]:
-    return as_dict(as_dict(project).get("git"))
 
 
 def codex_exec_argv(
@@ -458,7 +450,7 @@ def is_generated_upload_name(path: str | Path) -> bool:
 
 
 @dataclass(frozen=True)
-class PaneInfo:
+class TmuxPaneInfo:
     session: str
     window: str
     pane: str
@@ -473,6 +465,11 @@ class PaneInfo:
     process_label: str | None = None
     process_label_pid: int | None = None
     window_name: str = ""
+
+
+# Compatibility import for third-party callers during the terminology migration. New backend code
+# must use TmuxPaneInfo so it cannot be confused with a physical YOLOmux YOPane.
+PaneInfo = TmuxPaneInfo
 
 
 @dataclass(frozen=True)
@@ -500,8 +497,8 @@ class AgentInfo:
 @dataclass(frozen=True)
 class SessionInfo:
     session: str
-    panes: list[PaneInfo]
-    selected_pane: PaneInfo | None
+    panes: list[TmuxPaneInfo]
+    selected_pane: TmuxPaneInfo | None
     agents: list[AgentInfo]
 
 

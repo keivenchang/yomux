@@ -693,8 +693,8 @@ def test_work_next_ranking_uses_prompt_and_metadata_signals():
             },
         },
         "session_info": {
-            "3": {"project": {"git": {"dirty_count": 2}}},
-            "4": {"project": {"pull_request": {"checks": {"state": "failing", "summary": "CI failing: unit"}}}},
+            "3": {"work": {"git": {"dirty_count": 2}}},
+            "4": {"work": {"pull_request": {"checks": {"state": "failing", "summary": "CI failing: unit"}}}},
         },
         "errors": [],
     }
@@ -797,8 +797,8 @@ def test_work_next_ranking_covers_blockers_tests_reviews_local_priorities_and_st
             },
         },
         "session_info": {
-            "3": {"project": {"pull_request": {"review_decision": "CHANGES_REQUESTED"}}},
-            "5": {"project": {"git": {"dirty_count": 4}}},
+            "3": {"work": {"pull_request": {"review_decision": "CHANGES_REQUESTED"}}},
+            "5": {"work": {"git": {"dirty_count": 4}}},
         },
         "yoagent_skills": {
             "context_lines": [

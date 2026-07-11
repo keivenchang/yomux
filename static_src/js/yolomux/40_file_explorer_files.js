@@ -757,7 +757,8 @@ function tmuxDirectoryForItem(item) {
 
 function tmuxGitRootForItem(item) {
   if (!isTmuxSession(item)) return '';
-  const root = transcriptMetadataState.payload.sessions?.[item]?.project?.git?.root || '';
+  const info = transcriptMetadataState.payload.sessions?.[item] || {};
+  const root = sessionWorkSummary(item, info).git?.root || '';
   return root ? normalizeDirectoryPath(root) : '';
 }
 
@@ -4023,7 +4024,7 @@ function buildTabberTree() {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const sessionName = `s_${tabberPathToken(session)}`;
     const sessionPath = `/${sessionName}`;
-    const git = info?.project?.git;
+    const git = sessionWorkSummary(session, info).git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const fallbackSessionRecency = tabberRecency(session);
     const sessionWork = sessionWorkDescription(session, info, 0);

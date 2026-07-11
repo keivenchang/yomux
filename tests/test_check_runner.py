@@ -96,7 +96,8 @@ def test_default_check_lanes_keep_full_pytest_gate():
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
     assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
+    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", "tests", "-m", "visual_golden", "-q"]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]
@@ -146,7 +147,16 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "--dist",
         "worksteal",
         "-m",
-        "browser and not e2e and not boot",
+        "browser and not e2e and not boot and not visual_golden",
+        "-q",
+    ]
+    assert lanes["pytest-browser"].steps[2].args == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-m",
+        "visual_golden",
         "-q",
     ]
     assert lanes["pytest-boot"].steps[0].args == [

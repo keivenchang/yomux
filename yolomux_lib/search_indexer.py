@@ -8,14 +8,7 @@ servers use read-only SQLite snapshots for queries.
 from __future__ import annotations
 
 import argparse
-import fcntl
-import hashlib
-import json
 import os
-import socket
-import subprocess
-import sys
-import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -24,6 +17,16 @@ from typing import Any
 
 from . import file_index
 from .filesystem import search
+from .local_services.rpc import LocalRpcError
+from .local_services.rpc import new_envelope
+from .local_services.rpc import request as local_service_request
+from .local_services.rpc import safe_socket_path
+from .local_services.registry import LocalServiceRegistry
+from .local_services.registry import LocalServiceSpec
+from .local_services.runtime import acquire_client_lease
+from .local_services.runtime import redact_local_service_text
+from .local_services.runtime import release_client_lease
+from .local_services.runtime import run_local_rpc_service
 
 
 INDEXER_PROTOCOL_VERSION = 1
@@ -33,71 +36,33 @@ INDEXER_PROTOCOL_VERSION = 1
 # replaced only when a caller actually needs one.
 INDEXER_CAPABILITIES = frozenset({"search"})
 INDEXER_DEBOUNCE_SECONDS = 2.0
-INDEXER_MAX_DEBOUNCE_SECONDS = 15.0
-INDEXER_CHURN_BACKOFF_MAX_SECONDS = 30.0
-INDEXER_CHURN_WINDOW_SECONDS = 60.0
-INDEXER_MAINTENANCE_SECONDS = 2.0
-INDEXER_MAX_REQUEST_BYTES = 256 * 1024
+INDEXER_DEFAULT_IDLE_SECONDS = 60.0
 INDEXER_SOCKET_NAME = "indexer.sock"
 INDEXER_LOCK_NAME = "indexer.lock"
-# macOS permits roughly 104 bytes for a Unix-domain socket path. Leave room
-# below that ceiling because Python and platform C libraries differ slightly.
-UNIX_SOCKET_SAFE_PATH_BYTES = 96
-_ACTIVE_SOCKET_PATHS: set[str] = set()
-_ACTIVE_SOCKET_PATHS_LOCK = threading.Lock()
-
-
-def _safe_socket_path(path: Path) -> Path:
-    """Return a deterministic socket path that fits Unix-domain limits."""
-    candidate = path.expanduser()
-    if len(os.fsencode(str(candidate))) <= UNIX_SOCKET_SAFE_PATH_BYTES:
-        return candidate
-    digest = hashlib.sha256(str(candidate).encode("utf-8", errors="surrogateescape")).hexdigest()[:20]
-    return Path(tempfile.gettempdir()) / f"yolomux-indexer-{os.getuid()}-{digest}.sock"
 
 
 def default_socket_path() -> Path:
-    return _safe_socket_path(file_index.INDEX_DIR / INDEXER_SOCKET_NAME)
+    return safe_socket_path(file_index.INDEX_DIR / INDEXER_SOCKET_NAME, prefix="yolomux-indexer")
 
 
 def default_lock_path() -> Path:
     return default_socket_path().with_suffix(".lock")
 
 
-def _read_request(connection: socket.socket) -> dict[str, Any] | None:
-    chunks: list[bytes] = []
-    while sum(len(chunk) for chunk in chunks) < INDEXER_MAX_REQUEST_BYTES:
-        chunk = connection.recv(4096)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        if b"\n" in chunk:
-            break
-    try:
-        value = json.loads(b"".join(chunks).decode("utf-8").splitlines()[0])
-    except (IndexError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _write_response(connection: socket.socket, payload: dict[str, Any]) -> None:
-    connection.sendall((json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-
-
 class PersistentSearchIndexer:
     """One long-lived, local SQLite writer with a bounded dirty-path queue."""
 
-    def __init__(self, socket_path: Path):
-        self.socket_path = _safe_socket_path(socket_path)
+    def __init__(self, socket_path: Path, idle_seconds: float = INDEXER_DEFAULT_IDLE_SECONDS):
+        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-indexer")
         self.lock_path = self.socket_path.with_suffix(".lock")
         self.stop_event = threading.Event()
         self.pending_paths: dict[str, set[str]] = defaultdict(set)
         self.pending_due_at: dict[str, float] = {}
-        self.pending_first_at: dict[str, float] = {}
         self.pending_reasons: dict[str, set[str]] = defaultdict(set)
-        self.root_last_processed_at: dict[str, float] = {}
-        self.root_churn_level: dict[str, int] = defaultdict(int)
-        self.next_maintenance_at = 0.0
+        self.idle_seconds = max(1.0, float(idle_seconds))
+        self.started_at = time.time()
+        self.last_client_at = time.monotonic()
+        self.leases: dict[str, int] = {}
 
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         clean_root = str(Path(root).expanduser().resolve(strict=False))
@@ -108,15 +73,9 @@ class PersistentSearchIndexer:
             for path in paths
             if isinstance(path, str) and path.startswith("/")
         }
-        now = time.monotonic()
         self.pending_paths[clean_root].update(clean_paths)
         self.pending_reasons[clean_root].add(str(reason or "index-request"))
-        first_at = self.pending_first_at.setdefault(clean_root, now)
-        churn_level = self.root_churn_level.get(clean_root, 0)
-        delay = min(INDEXER_CHURN_BACKOFF_MAX_SECONDS, INDEXER_DEBOUNCE_SECONDS * (2 ** churn_level))
-        # Use a trailing debounce to batch a save storm, but impose a maximum
-        # wait so an actively changing repository is not starved indefinitely.
-        self.pending_due_at[clean_root] = min(first_at + INDEXER_MAX_DEBOUNCE_SECONDS, now + delay)
+        self.pending_due_at.setdefault(clean_root, time.monotonic() + INDEXER_DEBOUNCE_SECONDS)
         return {"ok": True, "accepted": True, "root": clean_root, "queued_paths": len(self.pending_paths[clean_root])}
 
     def unindex(self, root: str) -> dict[str, Any]:
@@ -125,36 +84,21 @@ class PersistentSearchIndexer:
             return {"ok": False, "error": "root must be absolute"}
         self.pending_paths.pop(clean_root, None)
         self.pending_due_at.pop(clean_root, None)
-        self.pending_first_at.pop(clean_root, None)
         self.pending_reasons.pop(clean_root, None)
         file_index.unindex(Path(clean_root))
         return {"ok": True, "accepted": True, "root": clean_root}
-
-    def schedule_maintenance_if_due(self, now: float) -> int:
-        if now < self.next_maintenance_at:
-            return 0
-        started = file_index.schedule_refreshes(now=time.time())
-        self.next_maintenance_at = now + INDEXER_MAINTENANCE_SECONDS
-        return started
 
     def process_due(self) -> int:
         now = time.monotonic()
         roots = [root for root, due_at in self.pending_due_at.items() if due_at <= now]
         if not roots:
-            self.schedule_maintenance_if_due(now)
+            file_index.schedule_refreshes()
             return 0
         processed = 0
         for root_text in sorted(roots):
             paths = sorted(self.pending_paths.pop(root_text, set()))
             self.pending_due_at.pop(root_text, None)
-            self.pending_first_at.pop(root_text, None)
             self.pending_reasons.pop(root_text, None)
-            previous = self.root_last_processed_at.get(root_text, 0.0)
-            if previous and now - previous <= INDEXER_CHURN_WINDOW_SECONDS:
-                self.root_churn_level[root_text] = min(self.root_churn_level.get(root_text, 0) + 1, 4)
-            else:
-                self.root_churn_level[root_text] = 0
-            self.root_last_processed_at[root_text] = now
             root = Path(root_text)
             if not root.is_dir():
                 continue
@@ -163,9 +107,38 @@ class PersistentSearchIndexer:
             if paths:
                 search.reindex_roots_for_paths(paths, reason="persistent-indexer")
             else:
-                self.schedule_maintenance_if_due(now)
+                file_index.schedule_refreshes()
             processed += 1
         return processed
+
+    def common_status(self) -> dict[str, Any]:
+        diagnostics = file_index.runtime_diagnostics()
+        active_task = "index-refresh" if any(self.pending_due_at.values()) else ""
+        return {
+            "ok": True,
+            "version": INDEXER_PROTOCOL_VERSION,
+            "pid": os.getpid(),
+            "started_at": self.started_at,
+            "socket": str(self.socket_path),
+            "clients": len(self.leases),
+            "queues": {
+                "interactive": 0,
+                "normal": len(self.pending_due_at),
+                "maintenance": 0,
+            },
+            "active_task": active_task,
+            "cache": {
+                "roots": int(diagnostics.get("root_count") or 0),
+                "bytes": int(diagnostics.get("cache_bytes") or 0),
+                "write_bytes": int(diagnostics.get("write_bytes") or 0),
+            },
+            "last_success": self.last_client_at,
+            "last_failure": "",
+            "restart_backoff_seconds": 0.0,
+            "generation": 0,
+            "idle_seconds": self.idle_seconds,
+            "status": diagnostics,
+        }
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "")
@@ -174,10 +147,26 @@ class PersistentSearchIndexer:
                 "ok": True,
                 "version": INDEXER_PROTOCOL_VERSION,
                 "pid": os.getpid(),
+                "started_at": self.started_at,
                 "capabilities": sorted(INDEXER_CAPABILITIES),
             }
         if action == "status":
-            return {"ok": True, "status": file_index.runtime_diagnostics()}
+            return self.common_status()
+        if action == "profile":
+            return {"ok": True, "profile": self.common_status()}
+        if action == "drain":
+            processed = self.process_due()
+            return {"ok": True, "processed": processed, "status": self.common_status()}
+        if action == "lease":
+            response = acquire_client_lease(self.leases, request.get("client_pid"))
+            return {**response, "version": INDEXER_PROTOCOL_VERSION}
+        if action == "release":
+            return release_client_lease(self.leases, request.get("lease_id"))
+        if action == "shutdown_if_idle":
+            if self.leases:
+                return {"ok": True, "shutdown": False, "leases": len(self.leases)}
+            self.stop_event.set()
+            return {"ok": True, "shutdown": True}
         if action == "enqueue":
             raw_paths = request.get("paths", [])
             paths = raw_paths if isinstance(raw_paths, list) else []
@@ -197,88 +186,47 @@ class PersistentSearchIndexer:
         return {"ok": False, "error": f"unknown indexer action: {action}"}
 
     def run(self) -> int:
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.socket_path.parent, 0o700)
-        except OSError:
-            pass
-        socket_key = str(self.socket_path)
-        with _ACTIVE_SOCKET_PATHS_LOCK:
-            # macOS permits a second thread in this process to acquire a separate
-            # flock(2) descriptor. Keep the cross-process advisory lock below,
-            # but also prevent a local contender from unlinking this owner's
-            # socket before it gets there.
-            if socket_key in _ACTIVE_SOCKET_PATHS:
-                return 0
-            _ACTIVE_SOCKET_PATHS.add(socket_key)
-        lock_fd = -1
-        owns_lock = False
-        try:
-            lock_fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                return 0
-            owns_lock = True
-            try:
-                self.socket_path.unlink()
-            except FileNotFoundError:
-                pass
-            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                server.bind(str(self.socket_path))
-                os.chmod(self.socket_path, 0o600)
-                server.listen(16)
-                server.settimeout(0.1)
-                while not self.stop_event.is_set():
-                    try:
-                        connection, _address = server.accept()
-                    except TimeoutError:
-                        self.process_due()
-                        continue
-                    with connection:
-                        request = _read_request(connection)
-                        _write_response(connection, self.handle(request) if request is not None else {"ok": False, "error": "invalid request"})
-                    self.process_due()
-            finally:
-                server.close()
-        finally:
-            # A losing contender must leave the owner's socket name intact.  It may
-            # see the same pathname, but it never owned the advisory lock or bound
-            # the socket behind it.
-            if owns_lock:
-                try:
-                    self.socket_path.unlink()
-                except FileNotFoundError:
-                    pass
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
-            if lock_fd >= 0:
-                os.close(lock_fd)
-            with _ACTIVE_SOCKET_PATHS_LOCK:
-                _ACTIVE_SOCKET_PATHS.discard(socket_key)
-        return 0
+        def handle(request: dict[str, object]) -> tuple[dict[str, object], bytes]:
+            return self.handle(request), b""
+
+        def idle() -> bool:
+            self.process_due()
+            return not self.leases and time.monotonic() - self.last_client_at >= self.idle_seconds
+
+        return run_local_rpc_service(
+            socket_path=self.socket_path,
+            lock_path=self.lock_path,
+            service_name="indexd",
+            stop_event=self.stop_event,
+            handle=handle,
+            on_idle=idle,
+            on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+        )
 
 
 class SearchIndexerClient:
     """Starts or reaches the one persistent indexer without exposing SQLite writes."""
 
     def __init__(self, socket_path: Path | None = None):
-        self.socket_path = _safe_socket_path(socket_path or default_socket_path())
-        self.lock = threading.Lock()
-        self.process: subprocess.Popen[Any] | None = None
+        self.socket_path = safe_socket_path(socket_path or default_socket_path(), prefix="yolomux-indexer")
+        self.registry = LocalServiceRegistry(
+            self.socket_path.parent,
+            LocalServiceSpec(
+                name="indexd",
+                module="yolomux_lib.search_indexer",
+                socket_name=self.socket_path.name,
+                protocol_version=INDEXER_PROTOCOL_VERSION,
+                idle_seconds=INDEXER_DEFAULT_IDLE_SECONDS,
+            ),
+            socket_path=self.socket_path,
+        )
 
     def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:
         try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.settimeout(timeout)
-                client.connect(str(self.socket_path))
-                _write_response(client, payload)
-                response = _read_request(client)
-        except OSError as exc:
-            return {"ok": False, "error": str(exc)}
+            envelope = new_envelope("indexd", str(payload.get("action") or "request"), payload, timeout_seconds=timeout)
+            response, _binary = local_service_request(self.socket_path, envelope, timeout_seconds=timeout, fallback_legacy=True)
+        except (OSError, LocalRpcError) as exc:
+            return {"ok": False, "error": redact_local_service_text(exc)}
         return response if isinstance(response, dict) else {"ok": False, "error": "invalid indexer response"}
 
     def healthy(self) -> bool:
@@ -319,34 +267,42 @@ class SearchIndexerClient:
     def _start_until(self, predicate: callable) -> bool:
         if predicate():
             return True
-        with self.lock:
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                if predicate():
-                    return True
-                try:
-                    process = subprocess.Popen(
-                        [sys.executable, "-m", "yolomux_lib.search_indexer", "--serve", "--socket", str(self.socket_path)],
-                        close_fds=True,
-                        start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except OSError:
-                    return False
-                self.process = process
-                attempt_deadline = min(deadline, time.monotonic() + 0.35)
-                while time.monotonic() < attempt_deadline:
-                    if predicate():
-                        return True
-                    if process.poll() is not None:
-                        break
-                    time.sleep(0.03)
-                time.sleep(0.03)
+        if not self.registry.ensure_started():
+            return False
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.03)
         return False
 
     def ensure_started(self) -> bool:
-        return self._start_until(self.healthy)
+        return self.registry.ensure_started()
+
+    def service_status(self) -> dict[str, Any]:
+        return self.registry.status()
+
+    def runtime_status(self) -> dict[str, Any]:
+        status = self.service_status()
+        payload = status.get("status") if isinstance(status.get("status"), dict) else {}
+        return {
+            "service": "indexd",
+            "pid": int(payload.get("pid") or 0),
+            "started_at": float(payload.get("started_at") or 0.0),
+            "version": int(payload.get("version") or 0),
+            "socket": str(payload.get("socket") or self.socket_path),
+            "healthy": bool(status.get("healthy")),
+            "clients": int(payload.get("clients") or 0),
+            "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
+            "active_task": str(payload.get("active_task") or ""),
+            "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
+            "last_success": float(payload.get("last_success") or 0.0),
+            "last_failure": str(payload.get("last_failure") or ""),
+            "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - time.monotonic()),
+            "generation": int(payload.get("generation") or 0),
+            "record": status.get("record") if isinstance(status.get("record"), dict) else {},
+            "resources": self.registry.resources(int(payload.get("pid") or 0)),
+        }
 
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         if not self.ensure_started():
@@ -376,10 +332,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="YOLOmux persistent Quick Open indexer")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--socket", default=str(default_socket_path()))
+    parser.add_argument("--idle-seconds", type=float, default=INDEXER_DEFAULT_IDLE_SECONDS)
     args = parser.parse_args(argv)
     if not args.serve:
         parser.error("--serve is required")
-    return PersistentSearchIndexer(Path(args.socket)).run()
+    return PersistentSearchIndexer(Path(args.socket), idle_seconds=args.idle_seconds).run()
 
 
 if __name__ == "__main__":

@@ -10,17 +10,12 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
-from pathlib import Path
 from typing import Any
 
-from ..common import MAX_TRANSCRIPT_TAIL_LINES
 from ..common import SUMMARY_MAX_PROMPT_CHARS
 from ..common import SessionInfo
-from ..common import tail_file_lines
 from ..common import truncate_text
-from ..transcripts import compact_transcript_items_since
 from ..transcripts import format_transcript_item
-from ..transcripts import newest_transcript_timestamp
 from ..transcripts import trim_prompt_text
 
 
@@ -137,27 +132,37 @@ class YoagentSessionSummariesMixin:
         agent = next((item for item in info.agents if item.transcript), None)
         if agent is None or not agent.transcript:
             return {"session": session, "updated": False, "reason": "no transcript"}
-        transcript_path = Path(agent.transcript)
-        try:
-            text = tail_file_lines(transcript_path, MAX_TRANSCRIPT_TAIL_LINES)
-        except OSError as exc:
-            return {"session": session, "updated": False, "reason": str(exc)}
-        if not force and self.deps.transcript_activity_is_recent(transcript_path, text, recency_seconds=YOAGENT_SESSION_SUMMARY_QUIET_SECONDS):
-            return {"session": session, "updated": False, "reason": "transcript still active"}
         with self.yoagent_session_summary_lock:
             previous = dict(self.yoagent_session_summaries.get(session) or {})
         last_processed_ts = self.float_value(previous.get("last_processed_ts"), 0.0)
         since = datetime.fromtimestamp(last_processed_ts + 0.000001, timezone.utc) if last_processed_ts > 0 else datetime.fromtimestamp(0, timezone.utc)
-        items, stats = compact_transcript_items_since(text, since)
+        view, status = self.deps.transcript_compact_view(session, YOAGENT_SESSION_SUMMARY_MAX_ITEMS, since=since, info=info, agent_override=agent)
+        if int(status) != 200:
+            return {"session": session, "updated": False, "reason": "transcript unavailable"}
+        if view.get("pending"):
+            return {"session": session, "updated": False, "reason": "transcript parsing pending"}
+        activity_text = str(view.get("activity_timestamp") or "")
+        try:
+            activity = datetime.fromisoformat(activity_text.replace("Z", "+00:00")) if activity_text else None
+        except ValueError:
+            activity = None
+        if not force and activity is not None and abs((datetime.now(timezone.utc) - activity).total_seconds()) <= YOAGENT_SESSION_SUMMARY_QUIET_SECONDS:
+            return {"session": session, "updated": False, "reason": "transcript still active"}
+        items = list(view.get("since_items") or [])
+        stats = dict(view.get("since_stats") or {})
         items = items[-YOAGENT_SESSION_SUMMARY_MAX_ITEMS:]
-        newest = newest_transcript_timestamp(text)
+        newest_text = str(view.get("newest_timestamp") or "")
+        try:
+            newest = datetime.fromisoformat(newest_text.replace("Z", "+00:00")) if newest_text else None
+        except ValueError:
+            newest = None
         if not items or newest is None:
             return {"session": session, "updated": False, "reason": "no new transcript lines", "stats": stats}
         transcript_text = "\n\n".join(format_transcript_item(item) for item in items)
         transcript_text, truncated = trim_prompt_text(transcript_text, SUMMARY_MAX_PROMPT_CHARS)
         prompt = self.build_yoagent_session_summary_update_prompt(
             session,
-            str(transcript_path),
+            str(agent.transcript),
             str(previous.get("rolling_summary") or ""),
             transcript_text,
         )

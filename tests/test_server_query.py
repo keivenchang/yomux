@@ -279,11 +279,12 @@ def test_generic_route_profile_uses_this_request_dispatch_timer(monkeypatch):
     assert kwargs["details"]["request_total_ms"] == pytest.approx(35.0)
 
 
-def test_get_stats_sample_uses_app_payload():
+def test_get_stats_sample_writes_statsd_encoded_payload_without_reencoding():
     writes = []
     calls = []
-    app = SimpleNamespace(stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds, token_history_start, token_history_end, history_start, history_end, history_resolution_seconds, history_max_points)) or {"ok": True, "cpu_percent": 12.5, "pid": 123})
-    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
+    encoded = b'{"ok":true,"cpu_percent":12.5,"pid":123}'
+    app = SimpleNamespace(stats_sample_encoded_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: (calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds, token_history_start, token_history_end, history_start, history_end, history_resolution_seconds, history_max_points)) or {}, encoded))
+    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append(("json", status, payload)), write_json_bytes=lambda payload, status=HTTPStatus.OK: writes.append(("bytes", status, payload)))
 
     http_routes.get_stats_sample(request, SimpleNamespace(query="since=9&client_id=client-a"), None)
     http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120&token_history_start=800&token_history_end=1300&history_start=900&history_end=1200&history_resolution=10&history_max_points=60"), None)
@@ -293,8 +294,8 @@ def test_get_stats_sample_uses_app_payload():
         (10, "client-a", True, 7, 120, 800, 1300, 900, 1200, 10, 60),
     ]
     assert writes == [
-        (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
-        (HTTPStatus.OK, {"ok": True, "cpu_percent": 12.5, "pid": 123}),
+        ("bytes", HTTPStatus.OK, encoded),
+        ("bytes", HTTPStatus.OK, encoded),
     ]
 
 
@@ -302,16 +303,13 @@ def test_get_stats_sample_promotes_backend_phase_profile_without_exposing_privat
     writes = []
     clock = iter([100.0, 100.025])
     monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
-    app = SimpleNamespace(stats_sample_payload=lambda **_kwargs: {
-        "ok": True,
-        "history": {"records": []},
-        "_endpoint_profile": {"stats_history_encode_ms": 7.5, "stats_history_compact_ms": 1.25},
-    })
-    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
+    encoded = b'{"ok":true,"history":{"records":[]}}'
+    app = SimpleNamespace(stats_sample_encoded_payload=lambda **_kwargs: ({"stats_history_encode_ms": 7.5, "stats_history_compact_ms": 1.25}, encoded))
+    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json_bytes=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
 
     http_routes.get_stats_sample(request, SimpleNamespace(query="history_start=900&history_end=1200"), None)
 
-    assert writes == [(HTTPStatus.OK, {"ok": True, "history": {"records": []}})]
+    assert writes == [(HTTPStatus.OK, encoded)]
     assert request._http_response_compute_ms == pytest.approx(25.0)
     assert request._http_response_performance_details == {
         "stats_build_ms": 25.0,
@@ -817,6 +815,7 @@ def route_handler(path, app=None, readonly=False):
     handler.share_token_text = lambda: ""
     handler.share_token = lambda: ""
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
+    handler.write_json_bytes = lambda value, status=HTTPStatus.OK: writes.append(("json_bytes", status, value))
     handler.write_text = lambda value, status=HTTPStatus.OK, content_type="text/plain; charset=utf-8": writes.append(("text", status, value, content_type))
     handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
     handler.write_app_result = lambda result: handler.write_json(result[0], status=result[1])
@@ -936,14 +935,14 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         session_metadata_payload=lambda force=False: {"sessions": {}, "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
         activity_payload=lambda hours=24.0, visible=True: ({"hours": hours, "visible": visible}, HTTPStatus.OK),
-        stats_sample_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: {"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds, "token_history_start": token_history_start, "token_history_end": token_history_end, "history_start": history_start, "history_end": history_end, "history_resolution_seconds": history_resolution_seconds, "history_max_points": history_max_points},
+        stats_sample_encoded_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0: ({}, json.dumps({"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds, "token_history_start": token_history_start, "token_history_end": token_history_end, "history_start": history_start, "history_end": history_end, "history_resolution_seconds": history_resolution_seconds, "history_max_points": history_max_points}, separators=(",", ":")).encode("utf-8")),
         tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
 
     handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1&token_since=3&token_resolution=120", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "cpu_percent": 1.25, "since": 2, "client_id": "client-a", "token_consumer": True, "token_since": 3, "token_resolution_seconds": 120, "token_history_start": None, "token_history_end": None, "history_start": 0, "history_end": 0, "history_resolution_seconds": 0, "history_max_points": 0})]
+    assert writes == [("json_bytes", HTTPStatus.OK, b'{"ok":true,"cpu_percent":1.25,"since":2,"client_id":"client-a","token_consumer":true,"token_since":3,"token_resolution_seconds":120,"token_history_start":null,"token_history_end":null,"history_start":0,"history_end":0,"history_resolution_seconds":0,"history_max_points":0}')]
 
     handler, calls, writes = route_handler("/api/session-metadata?force=1", app)
     Handler.do_GET(handler)

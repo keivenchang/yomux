@@ -36,6 +36,362 @@ const {
 const DEBUG_AGENT_STATUS_SERIES = ['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'];
 const DEBUG_AGENT_STATUS_LEGEND_SERIES = ['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'];
 
+registerTest('YO!info prefers the normalized work graph without duplicating a shared worktree branch inventory', () => {
+  const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  assert.ok(source.includes('function infoHasWorkGraph(info = {})'), 'YO!info recognizes a schema-valid canonical graph explicitly');
+  assert.ok(source.includes('if (!infoHasWorkGraph(info)) return [];'), 'YO!info returns no Git sources without a normalized graph');
+  assert.equal(source.includes('info?.project'), false, 'YO!info has no legacy project projection fallback');
+  assert.ok(source.includes('function infoSourceBranches(source = {})'), 'graph branches use a shared graph-native selector');
+  assert.ok(source.includes('source.workGraph\n          ? `${source.localRepositoryId}'), 'graph rows deduplicate using canonical local repository and branch IDs');
+  assert.ok(source.includes('function infoGraphTabAgentsForSource(source = {})'), 'YO!info derives tab/actor attribution from graph associations');
+  assert.ok(source.includes('workGraph.path_observations?.[id]?.git_worktree_id === worktreeId'), 'actor attribution uses canonical observation-to-worktree edges');
+});
+
+registerTest('YO!info canonical relationship records ignore conflicting legacy projections and keep an empty graph empty', () => {
+  const api = loadYolomux('', ['graph-session']);
+  const graph = {
+    version: 1,
+    generation: 7,
+    tmux_sessions: {'tmux-session:graph-session': {id: 'tmux-session:graph-session', name: 'graph-session'}},
+    tmux_windows: {'tmux-window:graph-session:0': {id: 'tmux-window:graph-session:0', tmux_session_id: 'tmux-session:graph-session', index: '0', name: 'claude'}},
+    tmux_panes: {'tmux-pane:graph-session:0.0': {id: 'tmux-pane:graph-session:0.0', tmux_window_id: 'tmux-window:graph-session:0', index: '0', target: '%graph', active: true, window_active: true}},
+    runtime_actors: {'actor:graph': {id: 'actor:graph', tmux_pane_id: 'tmux-pane:graph-session:0.0', kind: 'claude', cwd: '/canonical/right', status: 'working', path_observation_ids: ['observation:graph']}},
+    path_observations: {'observation:graph': {id: 'observation:graph', runtime_actor_id: 'actor:graph', git_worktree_id: 'worktree:graph', path: '/canonical/right', source: 'transcript', last_observed_at: 42}},
+    git_worktrees: {'worktree:graph': {id: 'worktree:graph', root: '/canonical/right', git_dir: '/canonical/right/.git', local_repository_id: 'local:graph', hosted_repository_id: 'hosted:graph', current_branch_id: 'branch:graph'}},
+    local_repositories: {'local:graph': {id: 'local:graph', common_git_dir: '/canonical/.git', local_branch_ids: ['branch:graph']}},
+    hosted_repositories: {'hosted:graph': {id: 'hosted:graph', url: 'https://github.test/canonical/right'}},
+    local_branches: {'branch:graph': {id: 'branch:graph', local_repository_id: 'local:graph', name: 'canonical-branch', subject: 'canonical subject', pull_request_ids: ['pr:80'], linear_issue_ids: ['linear:CAN-1'], pull_request_lookup_state: 'ready'}},
+    pull_requests: {'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:graph', number: 80, title: 'canonical PR', state: 'open', url: 'https://github.test/canonical/right/pull/80', linear_ids: ['CAN-1'], local_branch_ids: ['branch:graph']}},
+    linear_issues: {'linear:CAN-1': {id: 'linear:CAN-1', identifier: 'CAN-1', title: 'canonical issue', url: 'https://linear.test/CAN-1'}},
+    worktree_branch_activity: {},
+  };
+  const legacyProject = {
+    git: {root: '/legacy/wrong', branch: 'legacy-branch', other_branches: {branches: [{name: 'legacy-branch', current: true, pull_request: {number: 999, url: 'https://legacy.test/pull/999'}}]}},
+    repos: [],
+  };
+  api.setTranscriptInfoForTest('graph-session', {work_graph: graph, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
+  api.setTranscriptSessionOrderForTest(['graph-session']);
+  const records = api.infoRelationshipRecords();
+  assert.equal(records.length, 1, 'one canonical graph branch creates one relationship record');
+  const [record] = records;
+  assert.equal(record.pathKey, '/canonical/right');
+  assert.equal(record.branchKey, 'canonical-branch');
+  assert.equal(record.prNumber, 80);
+  assert.equal(record.gitWorktreeKey, 'worktree:graph');
+  assert.equal(record.localRepositoryKey, 'local:graph');
+  assert.equal(record.hostedRepositoryKey, 'hosted:graph');
+  assert.equal(JSON.stringify(records).includes('/legacy/wrong'), false, 'legacy path projection cannot leak into a graph-backed result');
+  assert.equal(JSON.stringify(records).includes('legacy-branch'), false, 'legacy branch projection cannot leak into a graph-backed result');
+  assert.equal(JSON.stringify(records).includes('#999'), false, 'legacy PR projection cannot leak into a graph-backed result');
+
+  const empty = {...graph, git_worktrees: {}, local_repositories: {}, local_branches: {}, hosted_repositories: {}, pull_requests: {}, linear_issues: {}, path_observations: {}, runtime_actors: {}, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, worktree_branch_activity: {}};
+  api.setTranscriptInfoForTest('graph-session', {work_graph: empty, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
+  assert.deepStrictEqual(canonical(api.infoRelationshipRecords()), [], 'a schema-valid empty graph does not revive stale legacy rows');
+});
+
+registerTestAsync('metadata refresh retains a complete graph during lightweight payloads and rejects an older graph generation', async () => {
+  const api = loadYolomux('', ['graph-refresh']);
+  const completeGraph = {version: 1, generation: 20, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {'worktree:complete': {id: 'worktree:complete', root: '/complete', local_repository_id: 'repo:complete'}}, local_repositories: {'repo:complete': {id: 'repo:complete', local_branch_ids: []}}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}};
+  await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: completeGraph, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+  await api.applySessionMetadataPayloadForTest({metadata_loading: true, session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {version: 1, generation: 0, loading: true}, metadata_loading: true}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'a lightweight refresh retains the last complete canonical graph instead of reviving a legacy projection');
+  const accepted = await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {...completeGraph, generation: 19}, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+  assert.equal(accepted, false, 'a late older graph generation cannot overwrite the newer canonical session graph');
+  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'the newer graph remains active after stale delivery');
+});
+
+registerTest('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
+  const api = loadYolomux('', ['focus-graph']);
+  const graph = {
+    version: 1,
+    generation: 21,
+    tmux_sessions: {'tmux-session:focus-graph': {id: 'tmux-session:focus-graph', name: 'focus-graph'}},
+    tmux_windows: {
+      'tmux-window:focus-graph:0': {id: 'tmux-window:focus-graph:0', tmux_session_id: 'tmux-session:focus-graph', index: '0', name: 'claude'},
+      'tmux-window:focus-graph:1': {id: 'tmux-window:focus-graph:1', tmux_session_id: 'tmux-session:focus-graph', index: '1', name: 'bash'},
+    },
+    tmux_panes: {
+      'tmux-pane:focus-graph:0.0': {id: 'tmux-pane:focus-graph:0.0', tmux_window_id: 'tmux-window:focus-graph:0', index: '0', target: '%focus-a', active: true, window_active: true, runtime_actor_ids: ['actor:a'], path_observation_ids: ['observation:a']},
+      'tmux-pane:focus-graph:1.0': {id: 'tmux-pane:focus-graph:1.0', tmux_window_id: 'tmux-window:focus-graph:1', index: '0', target: '%focus-b', active: true, window_active: false, runtime_actor_ids: ['actor:b'], path_observation_ids: ['observation:b']},
+    },
+    runtime_actors: {'actor:a': {id: 'actor:a', tmux_pane_id: 'tmux-pane:focus-graph:0.0', kind: 'claude', path_observation_ids: ['observation:a']}, 'actor:b': {id: 'actor:b', tmux_pane_id: 'tmux-pane:focus-graph:1.0', kind: 'shell', path_observation_ids: ['observation:b']}},
+    path_observations: {'observation:a': {id: 'observation:a', tmux_pane_id: 'tmux-pane:focus-graph:0.0', runtime_actor_id: 'actor:a', git_worktree_id: 'worktree:a', path: '/repo/a', source: 'cwd', last_observed_at: 1}, 'observation:b': {id: 'observation:b', tmux_pane_id: 'tmux-pane:focus-graph:1.0', runtime_actor_id: 'actor:b', git_worktree_id: 'worktree:b', path: '/repo/b', source: 'cwd', last_observed_at: 2}},
+    git_worktrees: {'worktree:a': {id: 'worktree:a', root: '/repo/a', local_repository_id: 'local:a', current_branch_id: 'branch:a'}, 'worktree:b': {id: 'worktree:b', root: '/repo/b', local_repository_id: 'local:b', current_branch_id: 'branch:b'}},
+    local_repositories: {'local:a': {id: 'local:a', local_branch_ids: ['branch:a']}, 'local:b': {id: 'local:b', local_branch_ids: ['branch:b']}},
+    hosted_repositories: {},
+    local_branches: {'branch:a': {id: 'branch:a', local_repository_id: 'local:a', name: 'feature/a', pull_request_ids: ['pr:a'], linear_issue_ids: []}, 'branch:b': {id: 'branch:b', local_repository_id: 'local:b', name: 'feature/b', pull_request_ids: ['pr:b'], linear_issue_ids: []}},
+    pull_requests: {'pr:a': {id: 'pr:a', number: 80}, 'pr:b': {id: 'pr:b', number: 81}}, linear_issues: {}, worktree_branch_activity: {},
+  };
+  const info = {work_graph: graph, selected_pane: {target: '%focus-a'}, panes: [{target: '%focus-a', window: '0', pane: '0', active: true, window_active: true}, {target: '%focus-b', window: '1', pane: '0', active: true, window_active: false}]};
+  api.setTranscriptInfoForTest('focus-graph', info);
+  api.setTranscriptSessionOrderForTest(['focus-graph']);
+  const beforeGraph = JSON.stringify(graph);
+  assert.equal(api.sessionWorkSummaryForTest('focus-graph', info).selectedRepo.root, '/repo/a');
+  const switched = api.applyTmuxWindowActiveIndexToTranscriptInfoForTest('focus-graph', '1', {render: false});
+  assert.equal(switched, true);
+  const nextInfo = api.transcriptMetadataStateForTest().payload.sessions['focus-graph'];
+  assert.equal(api.sessionWorkSummaryForTest('focus-graph', nextInfo).selectedRepo.root, '/repo/b', 'focus follows the other TmuxWindow/TmuxPane observation edge');
+  assert.equal(JSON.stringify(nextInfo.work_graph), beforeGraph, 'focus changes browser selection only; it does not alter canonical graph entities, PRs, or branches');
+});
+
+registerTest('shared work-graph selectors keep tabs, popovers, and metadata on the focused canonical PR', () => {
+  const api = loadYolomux('', ['graph-session']);
+  const graph = {
+    version: 1,
+    generation: 9,
+    tmux_sessions: {'tmux-session:graph-session': {id: 'tmux-session:graph-session', name: 'graph-session'}},
+    tmux_windows: {'tmux-window:graph-session:0': {id: 'tmux-window:graph-session:0', tmux_session_id: 'tmux-session:graph-session', index: '0', name: 'claude', tmux_pane_ids: ['tmux-pane:graph-session:0.0']}},
+    tmux_panes: {'tmux-pane:graph-session:0.0': {id: 'tmux-pane:graph-session:0.0', tmux_window_id: 'tmux-window:graph-session:0', index: '0', target: '%focused', active: true, window_active: true, runtime_actor_ids: ['actor:focused'], path_observation_ids: ['observation:focused']}},
+    runtime_actors: {'actor:focused': {id: 'actor:focused', tmux_pane_id: 'tmux-pane:graph-session:0.0', kind: 'claude', path_observation_ids: ['observation:focused']}},
+    path_observations: {'observation:focused': {id: 'observation:focused', tmux_pane_id: 'tmux-pane:graph-session:0.0', runtime_actor_id: 'actor:focused', git_worktree_id: 'worktree:focused', path: '/canonical/focused/src', source: 'cwd', last_observed_at: 100}},
+    git_worktrees: {'worktree:focused': {id: 'worktree:focused', root: '/canonical/focused', local_repository_id: 'local:focused', hosted_repository_id: 'hosted:focused', current_branch_id: 'branch:focused'}},
+    local_repositories: {'local:focused': {id: 'local:focused', common_git_dir: '/canonical/focused/.git', local_branch_ids: ['branch:focused', 'branch:other']}},
+    hosted_repositories: {'hosted:focused': {id: 'hosted:focused', url: 'https://github.test/canonical/focused'}},
+    local_branches: {
+      'branch:focused': {id: 'branch:focused', local_repository_id: 'local:focused', name: 'feature/canonical', subject: 'canonical branch subject', pull_request_ids: ['pr:80'], linear_issue_ids: ['linear:CAN-80']},
+      'branch:other': {id: 'branch:other', local_repository_id: 'local:focused', name: 'other', pull_request_ids: [], linear_issue_ids: []},
+    },
+    pull_requests: {'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:focused', number: 80, title: 'Canonical graph PR', url: 'https://github.test/canonical/focused/pull/80', state: 'open'}},
+    linear_issues: {'linear:CAN-80': {id: 'linear:CAN-80', identifier: 'CAN-80', title: 'Canonical graph issue', url: 'https://linear.test/CAN-80'}},
+    worktree_branch_activity: {},
+  };
+  api.setTranscriptInfoForTest('graph-session', {
+    work_graph: graph,
+    selected_pane: {target: '%focused', current_path: '/legacy/stale'},
+    panes: [{target: '%focused', window: '0', pane: '0', active: true, window_active: true, current_path: '/canonical/focused/src'}],
+    project: {git: {root: '/legacy/stale', branch: 'legacy', other_branches: {branches: [{name: 'legacy', current: true, pull_request: {number: 999, title: 'Wrong legacy PR'}}]}}, pull_request: {number: 999, title: 'Wrong legacy PR'}, linear: [{identifier: 'LEG-999', title: 'Wrong legacy issue'}], repos: []},
+  });
+  api.setTranscriptSessionOrderForTest(['graph-session']);
+  assert.deepStrictEqual(canonical(api.focusedRepositoryIdsForTmuxTargetForTest(graph && {work_graph: graph, selected_pane: {target: '%focused'}}, '%focused')), ['local:focused'], 'focused repository selector follows TmuxPane -> observation -> worktree edges');
+  assert.deepStrictEqual(canonical(api.branchIdsForGitWorktreeForTest({work_graph: graph}, 'worktree:focused')), ['branch:focused', 'branch:other'], 'worktree branch selector exposes the LocalGitRepository inventory once');
+  assert.deepStrictEqual(canonical(api.pullRequestIdsForTmuxTargetForTest({work_graph: graph, selected_pane: {target: '%focused'}}, '%focused')), ['pr:80'], 'focused PR selector never uses a singular legacy session PR');
+  const summary = canonical(api.sessionWorkSummaryForTest('graph-session', {work_graph: graph, selected_pane: {target: '%focused'}}));
+  assert.equal(summary.git.root, '/canonical/focused');
+  assert.equal(summary.pullRequests[0].number, 80);
+  assert.equal(api.displayPullRequestForTest({work_graph: graph, selected_pane: {target: '%focused'}}).number, 80);
+  assert.ok(api.sessionTabDescriptionForTest('graph-session', {work_graph: graph, selected_pane: {target: '%focused'}}).includes('Canonical graph PR'), 'tab description uses the graph PR rather than project.pull_request');
+  assert.ok(api.tabMenuDetailText('graph-session').includes('feature/canonical'), 'tab menu metadata uses the graph branch rather than the stale project branch');
+  assert.equal(api.tabMenuDetailText('graph-session').includes('LEG-999'), false, 'legacy Linear metadata cannot leak into graph-backed tab details');
+  const tabberTree = api.buildTabberTreeForTest();
+  assert.equal(JSON.stringify(tabberTree).includes('feature/canonical'), true, 'Tabber session metadata uses the canonical focused branch');
+  assert.equal(JSON.stringify(tabberTree).includes('legacy'), false, 'Tabber does not show a conflicting legacy project branch');
+});
+
+registerTest('graph-backed TmuxSession PR decoration aggregates ambiguous focused PRs', () => {
+  const api = loadYolomux('', ['aggregate-session']);
+  const graph = {
+    version: 1,
+    generation: 10,
+    tmux_sessions: {'tmux-session:aggregate-session': {id: 'tmux-session:aggregate-session', name: 'aggregate-session'}},
+    tmux_windows: {'tmux-window:aggregate-session:0': {id: 'tmux-window:aggregate-session:0', tmux_session_id: 'tmux-session:aggregate-session', index: '0', name: 'bash', tmux_pane_ids: ['tmux-pane:aggregate-session:0.0']}},
+    tmux_panes: {'tmux-pane:aggregate-session:0.0': {id: 'tmux-pane:aggregate-session:0.0', tmux_window_id: 'tmux-window:aggregate-session:0', index: '0', target: '%aggregate', active: true, window_active: true, runtime_actor_ids: ['actor:aggregate'], path_observation_ids: ['observation:one', 'observation:two']}},
+    runtime_actors: {'actor:aggregate': {id: 'actor:aggregate', tmux_pane_id: 'tmux-pane:aggregate-session:0.0', kind: 'bash', path_observation_ids: ['observation:one', 'observation:two']}},
+    path_observations: {
+      'observation:one': {id: 'observation:one', tmux_pane_id: 'tmux-pane:aggregate-session:0.0', runtime_actor_id: 'actor:aggregate', git_worktree_id: 'worktree:one', path: '/repo/one', source: 'cwd', last_observed_at: 10},
+      'observation:two': {id: 'observation:two', tmux_pane_id: 'tmux-pane:aggregate-session:0.0', runtime_actor_id: 'actor:aggregate', git_worktree_id: 'worktree:two', path: '/repo/two', source: 'cwd', last_observed_at: 11},
+    },
+    git_worktrees: {
+      'worktree:one': {id: 'worktree:one', root: '/repo/one', local_repository_id: 'local:one', hosted_repository_id: 'hosted:one', current_branch_id: 'branch:one'},
+      'worktree:two': {id: 'worktree:two', root: '/repo/two', local_repository_id: 'local:two', hosted_repository_id: 'hosted:two', current_branch_id: 'branch:two'},
+    },
+    local_repositories: {'local:one': {id: 'local:one', local_branch_ids: ['branch:one']}, 'local:two': {id: 'local:two', local_branch_ids: ['branch:two']}},
+    hosted_repositories: {'hosted:one': {id: 'hosted:one', url: 'https://github.test/one'}, 'hosted:two': {id: 'hosted:two', url: 'https://github.test/two'}},
+    local_branches: {'branch:one': {id: 'branch:one', local_repository_id: 'local:one', name: 'one', pull_request_ids: ['pr:1'], linear_issue_ids: []}, 'branch:two': {id: 'branch:two', local_repository_id: 'local:two', name: 'two', pull_request_ids: ['pr:2'], linear_issue_ids: []}},
+    pull_requests: {'pr:1': {id: 'pr:1', hosted_repository_id: 'hosted:one', number: 1, title: 'First PR'}, 'pr:2': {id: 'pr:2', hosted_repository_id: 'hosted:two', number: 2, title: 'Second PR'}},
+    linear_issues: {}, worktree_branch_activity: {},
+  };
+  const info = {work_graph: graph, selected_pane: {target: '%aggregate'}, panes: [{target: '%aggregate', window: '0', pane: '0', active: true, window_active: true}]};
+  api.setTranscriptInfoForTest('aggregate-session', info);
+  const summary = canonical(api.sessionWorkSummaryForTest('aggregate-session', info));
+  assert.deepStrictEqual(summary.pullRequests.map(pr => pr.number), [1, 2], 'both focused worktree PRs remain in the summary');
+  assert.equal(summary.focusedPullRequest, null, 'an ambiguous TmuxSession does not elect one PR as session-wide');
+  assert.equal(api.displayPullRequestForTest(info), null, 'singular PR rendering is disabled for an ambiguous graph target');
+  assert.equal(api.sessionTabDescriptionForTest('aggregate-session', info), '2 PRs', 'tab description reports an explicit aggregate');
+  assert.ok(api.tabMenuDetailText('aggregate-session', info).includes('2 PRs'), 'menu detail keeps the aggregate rather than a random PR number');
+});
+
+registerTestAsync('moving terminal and YO!info YOTabs changes only YOPane layout state, not the canonical work graph', async () => {
+  const api = loadYolomux('', ['1']);
+  const graph = {
+    version: 1,
+    generation: 22,
+    tmux_sessions: {'tmux-session:1': {id: 'tmux-session:1', name: '1', tmux_window_ids: ['tmux-window:1:0'], tmux_pane_ids: ['tmux-pane:1:0.0'], runtime_actor_ids: [], path_observation_ids: ['observation:1']}},
+    tmux_windows: {'tmux-window:1:0': {id: 'tmux-window:1:0', tmux_session_id: 'tmux-session:1', index: '0', name: 'bash', tmux_pane_ids: ['tmux-pane:1:0.0']}},
+    tmux_panes: {'tmux-pane:1:0.0': {id: 'tmux-pane:1:0.0', tmux_window_id: 'tmux-window:1:0', index: '0', target: '%one', active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: ['observation:1']}},
+    runtime_actors: {},
+    path_observations: {'observation:1': {id: 'observation:1', tmux_pane_id: 'tmux-pane:1:0.0', runtime_actor_id: null, git_worktree_id: 'worktree:1', path: '/repo/one', source: 'cwd', last_observed_at: 1}},
+    git_worktrees: {'worktree:1': {id: 'worktree:1', root: '/repo/one', local_repository_id: 'local:1', current_branch_id: 'branch:1'}},
+    local_repositories: {'local:1': {id: 'local:1', local_branch_ids: ['branch:1']}},
+    hosted_repositories: {'hosted:1': {id: 'hosted:1', url: 'https://github.test/one'}},
+    local_branches: {'branch:1': {id: 'branch:1', local_repository_id: 'local:1', name: 'feature/one', pull_request_ids: ['pr:1'], linear_issue_ids: []}},
+    pull_requests: {'pr:1': {id: 'pr:1', hosted_repository_id: 'hosted:1', number: 80, title: 'Canonical graph PR'}},
+    linear_issues: {},
+    worktree_branch_activity: {},
+  };
+  const info = {work_graph: graph, selected_pane: {target: '%one'}, panes: [{target: '%one', window: '0', pane: '0', active: true, window_active: true}]};
+  api.setTranscriptInfoForTest('1', info);
+  const beforeGraph = JSON.stringify(graph);
+  api.setLayoutSlotsForTest({
+    __tree: {dir: 'row', a: {slot: 'left'}, b: {slot: 'right'}, pct: 50},
+    left: {tabs: ['1', api.infoItemId], active: '1'},
+    right: {tabs: [], active: null},
+  });
+
+  assert.equal(await api.moveSessionToSlot('1', 'right', 'left', 0), true, 'terminal YOTab moves between YOPanes');
+  assert.equal(await api.moveSessionToSlot(api.infoItemId, 'right', 'left', 1), true, 'YO!info YOTab moves between YOPanes');
+  const layout = canonical(api.serialize(api.layoutSlotsForTest()));
+  assert.deepStrictEqual(layout, {
+    tree: {slot: 'right'},
+    panes: {
+      right: {tabs: ['1', api.infoItemId], active: api.infoItemId},
+    },
+  }, 'both browser tabs move between YOPanes, while layout compaction remains a browser-only YOPane concern');
+  assert.equal(JSON.stringify(info.work_graph), beforeGraph, 'YOPane/YOTab movement cannot mutate TmuxSession graph edges');
+  assert.equal(api.sessionWorkSummaryForTest('1', info).pullRequests[0].number, 80, 'canonical graph selectors remain intact after layout-only movement');
+});
+
+registerTest('YO!info deduplicates graph worktree rows but exposes observed-path evidence', () => {
+  const api = loadYolomux('', ['observation-session']);
+  const graph = {
+    version: 1,
+    generation: 8,
+    tmux_sessions: {'tmux-session:observation-session': {id: 'tmux-session:observation-session', name: 'observation-session'}},
+    tmux_windows: {'tmux-window:observation-session:0': {id: 'tmux-window:observation-session:0', tmux_session_id: 'tmux-session:observation-session', index: '0', name: 'codex'}},
+    tmux_panes: {'tmux-pane:observation-session:0.0': {id: 'tmux-pane:observation-session:0.0', tmux_window_id: 'tmux-window:observation-session:0', index: '0', target: '%observation', active: true, window_active: true}},
+    runtime_actors: {'actor:claude': {id: 'actor:claude', tmux_pane_id: 'tmux-pane:observation-session:0.0', kind: 'claude', path_observation_ids: ['observation:root', 'observation:src']}, 'actor:bash': {id: 'actor:bash', tmux_pane_id: 'tmux-pane:observation-session:0.0', kind: 'bash', path_observation_ids: ['observation:test']}},
+    path_observations: {
+      'observation:root': {id: 'observation:root', runtime_actor_id: 'actor:claude', git_worktree_id: 'worktree:shared', path: '/repo/shared', source: 'actor-cwd', last_observed_at: 101},
+      'observation:src': {id: 'observation:src', runtime_actor_id: 'actor:claude', git_worktree_id: 'worktree:shared', path: '/repo/shared/src/app.js', source: 'edit', last_observed_at: 103},
+      'observation:test': {id: 'observation:test', runtime_actor_id: 'actor:bash', git_worktree_id: 'worktree:shared', path: '/repo/shared/tests/app.test.js', source: 'pane-cwd', last_observed_at: 102},
+    },
+    git_worktrees: {'worktree:shared': {id: 'worktree:shared', root: '/repo/shared', local_repository_id: 'local:shared', current_branch_id: 'branch:shared'}},
+    local_repositories: {'local:shared': {id: 'local:shared', common_git_dir: '/repo/.git', local_branch_ids: ['branch:shared']}},
+    hosted_repositories: {},
+    local_branches: {'branch:shared': {id: 'branch:shared', local_repository_id: 'local:shared', name: 'shared-work', pull_request_ids: [], linear_issue_ids: [], pull_request_lookup_state: 'none'}},
+    pull_requests: {},
+    linear_issues: {},
+    worktree_branch_activity: {},
+  };
+  api.setTranscriptInfoForTest('observation-session', {work_graph: graph});
+  api.setTranscriptSessionOrderForTest(['observation-session']);
+  const rows = api.infoBranchRows();
+  assert.equal(rows.length, 1, 'three observed paths under one worktree still create one default branch row');
+  assert.deepStrictEqual(canonical(rows[0].pathObservations.map(item => [item.path, item.actorKind, item.source])), [
+    ['/repo/shared/src/app.js', 'claude', 'edit'],
+    ['/repo/shared/tests/app.test.js', 'bash', 'pane-cwd'],
+    ['/repo/shared', 'claude', 'actor-cwd'],
+  ], 'the row retains each canonical observation with actor and source evidence in recency order');
+  const html = api.infoRecordHtmlForTest(rows[0]);
+  assert.ok(html.includes('3 paths') && html.includes('/repo/shared/src/app.js') && html.includes('claude') && html.includes('edit'), 'the expandable path evidence exposes the observed path, actor, and source');
+  const records = api.infoRelationshipRecords(rows);
+  assert.equal(records.length, 2, 'two RuntimeActors produce two relationship records for the same deduplicated branch row');
+  assert.ok(records.every(record => record.branchLabel === 'shared-work'), 'the graph branch survives every relationship-record projection');
+  const searchFields = records.flatMap(record => api.infoRecordSearchFieldsForTest(record));
+  assert.ok(searchFields.some(field => field.kind === 'path' && field.text === '/repo/shared/src/app.js'), 'relationship search indexes each canonical observed subpath');
+  assert.ok(searchFields.some(field => field.kind === 'ai' && field.text === 'claude'), 'relationship search indexes the RuntimeActor kind');
+  assert.ok(searchFields.some(field => field.kind === 'tmux-pane' && field.text.includes('%observation')), 'relationship search indexes the canonical TmuxPane target');
+  for (const query of ['shared', 'app.js', 'claude', 'bash', 'observation-session']) {
+    api.setInfoSearchForTest(query, {publish: false, render: false});
+    assert.ok(api.infoFilteredRecordsForTest(records).length >= 1, `canonical relationship search resolves ${query}`);
+  }
+});
+
+registerTest('YO!info graph rows preserve collapse, search, keyboard controls, and narrow Side Pane CSS contracts', () => {
+  const api = loadYolomux('', ['graph-ui']);
+  const rows = [{
+    id: 'graph-ui-row',
+    path: '/repo/graph-ui', pathKey: '/repo/graph-ui', pathLabel: '/repo/graph-ui', pathTitle: '/repo/graph-ui',
+    gitWorktreeId: 'worktree:graph-ui', gitWorktreeLabel: '/repo/graph-ui', gitWorktreeTitle: '/repo/graph-ui',
+    localRepositoryId: 'local:graph-ui', localRepositoryLabel: '/repo/graph-ui', localRepositoryTitle: '/repo/.git',
+    hostedRepositoryId: 'hosted:graph-ui', hostedRepositoryLabel: 'https://github.test/graph-ui', hostedRepositoryTitle: 'https://github.test/graph-ui',
+    branch: 'feature/graph-ui', branchId: 'branch:graph-ui', branchState: 'current', branchStateLabel: 'Current',
+    tabAgents: [{session: 'graph-ui', label: 'graph-ui / 0:codex', tabLabel: 'graph-ui', aiLabel: '0:codex', kind: 'codex', window: '0', windowIndex: '0', pane: '0', tmux_pane_id: 'tmux-pane:graph-ui:0.0', tmux_pane_label: '0.0', tmux_pane_target: '%graph-ui'}],
+    pathTabAgents: [], pathObservations: [{id: 'observation:graph-ui', path: '/repo/graph-ui/src/main.py', source: 'edit', actorKind: 'codex', lastObservedAt: 1}],
+  }];
+  const records = api.infoRelationshipRecords(rows);
+  const tree = api.infoGroupTree(records, ['git-worktree', 'branch']);
+  const groupKey = api.infoTreeGroupCollapseKeyForTest(tree.children[0]);
+  api.setInfoTreeGroupCollapsedForTest(groupKey, true);
+  assert.ok(!api.infoTreeHtmlForTest(records, ['git-worktree', 'branch']).match(new RegExp(`data-info-group-key="${groupKey}"[^>]* open`)), 'a canonical GitWorktree group remains collapsed after its graph-backed tree rerenders');
+  api.setInfoSearchForTest('main.py', {publish: false, render: false});
+  assert.equal(api.infoFilteredRecordsForTest(records).length, 1, 'graph-backed observed path remains searchable after collapse state changes');
+  const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+  const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+  assert.ok(/delegate\(panel, 'keydown', '\[data-info-search\]'/.test(infoPanelSource) || /panel\.addEventListener\('keydown'/.test(infoPanelSource), 'YO!info keeps keyboard handling on the persistent panel owner');
+  assert.ok(/data-pane-role="side"[\s\S]*\.info-tree-field[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(css), 'narrow Vertical Side Panes use one readable field column for graph rows');
+});
+
+registerTest('YO!info exposes canonical work-graph dimensions and migration-safe grouping depth', () => {
+  const api = loadYolomux('', ['1']);
+  const keys = api.infoGroupDimensions().map(dimension => dimension.key);
+  assert.deepStrictEqual(canonical(keys), [
+    'tab', 'tmux-session', 'tmux-window', 'tmux-pane', 'ai', 'path',
+    'git-worktree', 'local-repository', 'hosted-repository', 'branch', 'pr', 'linear',
+  ], 'each normalized graph entity has an explicit YO!info grouping dimension');
+  api.setInfoGroupingForTest([
+    'tmux-session', 'tmux-window', 'tmux-pane', 'ai', 'git-worktree', 'branch', 'pr',
+  ]);
+  assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), [
+    'tmux-session', 'tmux-window', 'tmux-pane', 'ai', 'git-worktree', 'branch',
+  ], 'saved grouping retains the canonical six-level chain and safely caps longer legacy state');
+});
+
+registerTest('YO!info makes normalized branch activity state visible without hiding the branch name', () => {
+  const api = loadYolomux('', ['1']);
+  for (const state of ['current', 'worked', 'available', 'missing']) {
+    const html = api.infoRecordHtmlForTest({
+      id: `branch-${state}`,
+      branchKey: `feature/${state}`,
+      branchLabel: `feature/${state}`,
+      branchTitle: `feature/${state}`,
+      branchState: state,
+      updated: '',
+    });
+    assert.ok(html.includes(`feature/${state}`), `${state} branch keeps its canonical name visible`);
+    assert.ok(html.includes(`info-tree-branch-state-${state}`), `${state} branch renders an explicit normalized state`);
+  }
+});
+
+registerTest('YO!info retains every canonical branch PR and renders explicit unresolved lookup states', () => {
+  const api = loadYolomux('', ['1']);
+  const html = api.infoRecordHtmlForTest({
+    id: 'branch-multiple-prs',
+    prKey: '#91',
+    prValues: [
+      {number: 90, title: 'closed historical PR', state: 'closed', url: 'https://example.test/pull/90'},
+      {number: 91, title: 'open current PR', state: 'open', url: 'https://example.test/pull/91'},
+    ],
+  });
+  assert.ok(html.includes('pull/90') && html.includes('#90') && html.includes('closed historical PR'), 'YO!info keeps the historical PR instead of projecting only the first branch PR');
+  assert.ok(html.includes('pull/91') && html.includes('#91') && html.includes('open current PR'), 'YO!info keeps the current PR in the same canonical branch context');
+  const staleHtml = api.infoRecordHtmlForTest({id: 'branch-stale-pr', prKey: '__no_pr__', prLookupState: 'stale'});
+  const errorHtml = api.infoRecordHtmlForTest({id: 'branch-error-pr', prKey: '__no_pr__', prLookupState: 'error'});
+  assert.ok(staleHtml.includes('info-tree-pr-lookup-state-stale'), 'YO!info distinguishes retained stale PR evidence from no PR');
+  assert.ok(errorHtml.includes('info-tree-pr-lookup-state-error'), 'YO!info distinguishes a lookup failure from a successful no-PR result');
+});
+
+registerTest('YO!info aggregates canonical PR count without collapsing branch-context PRs', () => {
+  const api = loadYolomux('', ['1']);
+  const record = {
+    id: 'branch-two-prs',
+    prKey: '#91',
+    prTitle: '#91 current PR',
+    prValues: [
+      {id: 'pr:90', number: 90, title: 'closed historical PR', state: 'closed', url: 'https://example.test/pull/90'},
+      {id: 'pr:91', number: 91, title: 'open current PR', state: 'open', url: 'https://example.test/pull/91'},
+    ],
+  };
+  const html = api.infoRecordHtmlForTest(record);
+  assert.ok(html.includes('2 PRs'), 'a branch context visibly reports the number of distinct canonical PRs');
+  assert.ok(html.includes('pull/90') && html.includes('pull/91'), 'the aggregate leaves both canonical PR links visible rather than choosing one session PR');
+  const group = api.infoGroupTree([record, {...record, id: 'same-pr-again'}], ['pr']);
+  assert.equal(group.children.length, 1, 'higher-level grouping uses the focused canonical PR identity rather than multiplying identical PR rows');
+  for (const state of ['loading', 'none', 'stale', 'error']) {
+    const stateHtml = api.infoRecordHtmlForTest({id: `pr-${state}`, prKey: '__no_pr__', prLookupState: state});
+    assert.ok(stateHtml.includes(`info-tree-pr-lookup-state-${state}`), `${state} remains visibly distinct when no PR object is available`);
+  }
+});
+
 function statsHistoryCoverageForRequest(url, overrides = {}) {
   const requestUrl = new URL(String(url), 'http://localhost');
   const requestedStart = Number(requestUrl.searchParams.get('history_start'));
@@ -2875,6 +3231,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('session tabs render shared metadata and status chips', () => {
     const api = loadYolomux();
     const info = {
+      selected_pane: {target: '%4', window: '0', pane: '0', current_path: '/home/test/project'},
+      panes: [{target: '%4', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/project'}],
       project: {
         git: {
           branch: 'main',
@@ -2891,6 +3249,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
                 current: true,
                 subject: 'ci: Update the dep for the whl publish to be automated (#9961)',
                 updated: '13 hours ago',
+                pull_request: {number: 9961, title: 'ci: Update the dep for the whl publish to be automated', description: 'ci: Update the dep for the whl publish to be automated', merged: true, source_only: true, url: 'https://github.com/ai-project/project/pull/9961'},
               },
               {
                 name: 'keivenc/DIS-2141__internlm-tool-parser-parity',
@@ -2909,9 +3268,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         },
         pull_request: null,
       },
-      selected_pane: {current_path: '/home/test/project'},
     };
-    const html = api.tmuxPaneTabHtml('4', info, null, true);
+    api.setTranscriptInfoForTest('4', info);
+    const graphInfo = api.transcriptInfoForTest('4');
+    const html = api.tmuxPaneTabHtml('4', graphInfo, null, true);
     const tabBadgeSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const tabActivityMarkerHtml = value => value.match(/<span class="session-agent-activity-marker[^"]*">[\s\S]*?<\/span><\/span>/)?.[0] || '';
     assert.ok(tabBadgeSource.includes('function pullRequestNumberIndicatorHtml'), 'tab renders the PR number chip helper');
@@ -2923,10 +3283,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.session-button-identifier\s*\{\s*font-weight:\s*700/.test(fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8')), 'shared session identifiers render bold across every tab surface');
     assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
     assertNoStandalonePrBadge(html, 'merged default-branch tab');
-    const noStatusBallHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
+    const noStatusBallHtml = api.tmuxPaneTabHtml('4', graphInfo, {key: 'idle'}, false);
     assert.ok(/session-agent-activity-marker--placeholder[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot/.test(noStatusBallHtml), 'a tab without a status keeps the invisible canonical ball column');
     assert.equal(noStatusBallHtml.includes('pane-tab-core--without-status-ball'), false, 'all session tabs use one shared status-ball layout path');
-    const statusBallHtml = api.tmuxPaneTabHtml('4', info, {key: 'working'}, true, {leadingHtml: '<span class="agent-window-status-dot"></span>'});
+    const statusBallHtml = api.tmuxPaneTabHtml('4', graphInfo, {key: 'working'}, true, {leadingHtml: '<span class="agent-window-status-dot"></span>'});
     assert.equal(statusBallHtml.includes('pane-tab-core--without-status-ball'), false, 'a tab with a status ball uses the shared status-ball layout path');
     // #42: a source-inferred PR with no explicit status_label still reports no status (we don't trust a
     // raw merged flag on an inferred PR)...
@@ -2951,7 +3311,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         },
       },
     });
-    const popover = api.sessionPopoverHtml('4', info, 'claude', true);
+    const popover = api.sessionPopoverHtml('4', graphInfo, 'claude', true);
     assert.ok(/popover-title">tmux session 4 ·/.test(popover), 'session popover title labels the header as a tmux session');
     assert.ok(/popover-subtitle[\s\S]*branch-indicator[^>]*>MAIN<[\s\S]*href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<[\s\S]*ci: Update the dep/.test(popover), 'merged PR popover header links the purple #number chip using the shared inferred GitHub URL');
     assert.equal(popover.includes('#9961:'), false, 'merged PR popover header omits the old #number text prefix');
@@ -2959,14 +3319,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/popover-label">PR<\/div><div class="popover-value"><a href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*<span class="ci-indicator tab-symbol pr-number-chip pr-status-merged[^"]*">#9961<\/span><\/a>/.test(popover), 'merged PR popover PR row links the same purple #number chip as the header');
     assert.equal(popover.includes('#9961 MERGED'), false, 'merged PR popover omits redundant MERGED text');
     assert.equal(popover.includes('PR #9961'), false, 'merged PR popover avoids repeating PR before the #number value');
-    const worktreePopover = api.sessionPopoverHtml('4', {
-      selected_pane: {current_path: '/home/test/yolomux.dev8001'},
+    const worktreeInfo = {
+      selected_pane: {target: '%wt', window: '0', pane: '0', current_path: '/home/test/yolomux.dev8001'},
+      panes: [{target: '%wt', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/yolomux.dev8001'}],
       project: {git: {
         root: '/home/test/yolomux.dev8001',
         branch: 'main',
         worktree: {name: 'yolomux.dev8001', path: '/home/test/yolomux.dev8001', parent_root: '/home/test/yolomux'},
       }},
-    }, '', false);
+    };
+    api.setTranscriptInfoForTest('worktree-popover', worktreeInfo);
+    const worktreePopover = api.sessionPopoverHtml('worktree-popover', api.transcriptInfoForTest('worktree-popover'), '', false);
     assert.ok(worktreePopover.includes(api.t('popover.worktreeOf', {name: 'yolomux.dev8001', root: '/home/test/yolomux'})), 'linked-worktree session popovers use the shared formatter without an Info Bar render error');
     assert.equal(popover.includes('popover-label">desc'), false, 'merged PR popover omits the desc row because the header already carries the PR title');
     assert.equal(popover.includes('Status check:'), false, 'merged PR popover removes the YO!agent status sentence when the dedicated git row is present');
@@ -3046,18 +3409,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(externalHtml.includes('YOLO on elsewhere'), 'external YO marker title explains ownership is elsewhere');
 
     api.applyServerMetadataPulsesForTest('4', {main: 20000, pr: 20000});
-    const metadataPulseHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
+    const metadataPulseHtml = api.tmuxPaneTabHtml('4', graphInfo, {key: 'idle'}, true);
     assert.ok(metadataPulseHtml.includes('branch-indicator metadata-pulse'), 'MAIN badge pulses after metadata change');
     assert.equal(metadataPulseHtml.includes('pr-number-chip metadata-pulse'), false, 'open PR number chip is not pulsed by PR metadata changes');
 
     const mergedInfo = {
-      project: {
-        git: {branch: 'feature'},
-        pull_request: {number: 12, merged: true, checks: {state: 'success'}},
-      },
+      selected_pane: {target: '%8', window: '0', pane: '0', current_path: '/repo/8'},
+      panes: [{target: '%8', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/8'}],
+      project: {git: {root: '/repo/8', branch: 'feature'}, pull_request: {number: 12, merged: true, checks: {state: 'success'}}},
     };
+    api.setTranscriptInfoForTest('8', mergedInfo);
     api.applyServerMetadataPulsesForTest('8', {status: 20000});
-    const mergedPulseHtml = api.tmuxPaneTabHtml('8', mergedInfo, {key: 'idle'}, true);
+    const mergedPulseHtml = api.tmuxPaneTabHtml('8', api.transcriptInfoForTest('8'), {key: 'idle'}, true);
     assert.ok(mergedPulseHtml.includes('pr-number-chip pr-status-merged metadata-pulse'), 'merged #number chip pulses after status change');
     const mergedComposite = {number: 120, merged: true, status_label: 'open · CI failing', checks: {state: 'failure'}};
     assert.equal(api.pullRequestCiState(mergedComposite), '', 'merged PR facts suppress stale composite CI labels');
@@ -3076,12 +3439,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {session: '12', number: 16, state: 'unknown', statusLabel: 'open', statusClass: '', pulse: false, label: 'unknown open PR'},
     ].forEach(({session, number, state, statusLabel, statusClass, pulse, label}) => {
       if (pulse) api.applyServerMetadataPulsesForTest(session, {ci: 20000});
-      const ciHtml = api.tmuxPaneTabHtml(session, {
+      const ciInfo = {
+        selected_pane: {target: `%${session}`, window: '0', pane: '0', current_path: `/repo/${session}`},
+        panes: [{target: `%${session}`, window: '0', pane: '0', active: true, window_active: true, current_path: `/repo/${session}`}],
         project: {
-          git: {branch: 'feature'},
+          git: {root: `/repo/${session}`, branch: 'feature'},
           pull_request: {number, status_label: statusLabel, checks: {state}},
         },
-      }, {key: 'idle'}, true);
+      };
+      api.setTranscriptInfoForTest(session, ciInfo);
+      const ciHtml = api.tmuxPaneTabHtml(session, api.transcriptInfoForTest(session), {key: 'idle'}, true);
       assertNoStandalonePrBadge(ciHtml, label);
       if (statusClass) assert.ok(ciHtml.includes(statusClass), `${label} renders ${statusClass}`);
       if (pulse) assert.ok(ciHtml.includes('metadata-pulse'), `${label} CI badge is marked after CI change`);
@@ -3114,9 +3481,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.pullRequestCiStatus(mergedCompositeCi), null, 'merged PRs expose no shared CI status');
     assert.equal(api.pullRequestStatusDisplay(mergedCompositeCi), api.t('pr.status.merged'), 'merged lifecycle facts win over stale composite status text');
     assert.equal(api.pullRequestChecksHtml(mergedCompositeCi), '', 'merged PR popovers omit stale CI checks');
-    const mergedCompositeHtml = api.tmuxPaneTabHtml('13', {
-      project: {git: {branch: 'feature'}, pull_request: mergedCompositeCi},
-    }, {key: 'idle'}, true);
+    const mergedCompositeInfo = {
+      selected_pane: {target: '%13', window: '0', pane: '0', current_path: '/repo/13'},
+      panes: [{target: '%13', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/13'}],
+      project: {git: {root: '/repo/13', branch: 'feature'}, pull_request: mergedCompositeCi},
+    };
+    api.setTranscriptInfoForTest('13', mergedCompositeInfo);
+    const mergedCompositeHtml = api.tmuxPaneTabHtml('13', api.transcriptInfoForTest('13'), {key: 'idle'}, true);
     assert.ok(mergedCompositeHtml.includes('pr-number-chip pr-status-merged'), 'merged PR number chips retain the merged class with stale composite status text');
     assert.equal(mergedCompositeHtml.includes('pr-status-failing'), false, 'merged PR tabs do not leak the stale failing CI class');
     for (const [state, key, className] of [
@@ -5704,7 +6075,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('tab search fields index PR and Linear metadata', () => {
     const api = loadYolomux();
     const info = {
-      selected_pane: {current_path: '/home/test/project/project3'},
+      selected_pane: {target: '%4', window: '0', pane: '0', current_path: '/home/test/project/project3'},
+      panes: [{target: '%4', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/project/project3'}],
       project: {
         git: {branch: 'keivenc/GH-2132__reasoning-dangling-end-marker', root: '/home/test/project/project3'},
         pull_request: {
@@ -5718,8 +6090,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       },
     };
     api.setTranscriptInfoForTest('4', info);
+    const graphInfo = api.transcriptInfoForTest('4');
 
-    const detail = api.tabMenuDetailText('4', info);
+    const detail = api.tabMenuDetailText('4', graphInfo);
     const searchFields = api.tabSearchFields('4');
     assert.ok(searchFields.includes('PR'), 'tab search fields include the literal PR token');
     assert.ok(searchFields.includes('PR#9981'), 'tab search fields include PR#number');
@@ -5745,7 +6118,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(command.html.includes('fix(parser): parse dangling reasoning end markers'), 'tab menu row includes long PR title');
     assert.ok(command.html.includes('pane-tab-core'), 'tab menu row uses pane tab markup');
 
-    const popover = api.sessionPopoverHtml('4', info, 'codex', true);
+    const popover = api.sessionPopoverHtml('4', graphInfo, 'codex', true);
     assert.ok(popover.indexOf('popover-label">Linear') < popover.indexOf('popover-label">PR'), 'tab popover lists Linear before PR');
   });
 
@@ -5939,6 +6312,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('YO!info builds branch records from the repository inventory', () => {
     const api = loadYolomux('', ['s1']);
     api.setTranscriptInfoForTest('s1', {
+      selected_pane: {target: '%s1', window: '0', pane: '0', current_path: '/repo/app'},
+      panes: [{target: '%s1', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/app'}],
+      agents: [{kind: 'shell', pane_target: '%s1'}],
       project: {
         git: {
           root: '/repo/app',
@@ -5977,9 +6353,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     const rowKey = row => `${row.path}\n${row.branch}`;
     const rows = new Map(api.infoBranchRows().map(row => [rowKey(row), row]));
-    assert.deepStrictEqual(canonical(rows.get('/repo/app\nmain').tabAgents.map(item => item.label)), ['s1 / no AI'], 'YO!info lists the Tab/AI entry for the primary checked-out branch');
+    assert.deepStrictEqual(canonical(rows.get('/repo/app\nmain').tabAgents.map(item => item.label)), ['s1 / shell'], 'YO!info lists the Tab/RuntimeActor entry for the primary checked-out branch');
     assert.equal(rows.get('/repo/app\nfeature/app').session, '', 'YO!info leaves non-current primary repo branches unassigned');
-    assert.deepStrictEqual(canonical(rows.get('/repo/lib\nlib-main').tabAgents.map(item => item.label)), ['s1 / no AI'], 'YO!info assigns the tab to a checked-out branch in a secondary touched repo');
+    assert.deepStrictEqual(canonical(rows.get('/repo/lib\nlib-main').tabAgents.map(item => item.label)), [], 'YO!info keeps a secondary checked-out worktree visible without fabricating an actor ownership edge');
     assert.equal(rows.get('/repo/lib\nfeature/lib').session, '', 'YO!info shows secondary repo branches without pretending the session owns them');
     assert.equal(rows.get('/repo/lib\nfeature/lib').updatedTs, 100, 'YO!info keeps the branch last-modified timestamp from the touched repo inventory');
     assert.equal(rows.get('/repo/lib\nfeature/lib').pathLabel, '/repo/lib', 'YO!info shows the secondary touched repo path');
@@ -6006,8 +6382,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       },
     });
     api.setTranscriptInfoForTest('shell', {
-      window_metadata: [{
-        window_index: '2',
+      selected_pane: {target: '%shell', window: '2', pane: '0', current_path: '/repo/app'},
+      panes: [{target: '%shell', window: '2', pane: '0', current_path: '/repo/app', active: true, window_active: true}],
+      project: {
         git: {
           root: '/repo/app',
           branch: 'feature/shell',
@@ -6017,40 +6394,34 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             ],
           },
         },
-      }],
-      project: {
-        git: null,
         repos: [],
         pull_request: null,
         linear: [],
       },
     });
     api.setTranscriptInfoForTest('activity', {
+      selected_pane: {target: '%activity', window: '0', pane: '0', current_path: '/repo/activity'},
+      panes: [{target: '%activity', window: '0', pane: '0', current_path: '/repo/activity', active: true, window_active: true}],
+      agent_windows: [{
+        kind: 'claude',
+        state: 'working',
+        window_index: 0,
+        pane_target: '%activity',
+        git: {root: '/repo/activity', branch: 'feature/activity'},
+      }],
       project: {
-        git: null,
+        git: {
+          root: '/repo/activity',
+          branch: 'feature/activity',
+          other_branches: {
+            branches: [
+              {name: 'feature/activity', current: true, updated: 'now', updated_ts: 600, subject: 'activity window branch'},
+            ],
+          },
+        },
         repos: [],
         pull_request: null,
         linear: [],
-      },
-    });
-    api.setTabberActivityForTest({
-      activity: {},
-      agents: [],
-      agent_windows: {
-        activity: [{
-          kind: 'claude',
-          state: 'working',
-          window_index: 0,
-          git: {
-            root: '/repo/activity',
-            branch: 'feature/activity',
-            other_branches: {
-              branches: [
-                {name: 'feature/activity', current: true, updated: 'now', updated_ts: 600, subject: 'activity window branch'},
-              ],
-            },
-          },
-        }],
       },
     });
 
@@ -6185,7 +6556,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [
       'tab-a|0:codex|/repo/lib',
     ], 'YO!info search can match branch text inside the Branch field');
-    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'codx lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [], 'YO!info search does not combine one query across different field types');
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'codx lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [
+      'tab-a|0:codex|/repo/lib',
+    ], 'YO!info relationship search combines terms across canonical RuntimeActor and Branch fields');
     const visibleSearchRecords = [
       {id: 'tab-7777', tabKey: '7777', tabLabel: '7777', tabTitle: '7777', tabSession: '7777', aiKey: 'ai-0', aiKind: 'codex', aiWindow: '0', aiWindowIndex: 0, aiLabel: '0:codex', pathKey: '/repo/no-match', pathLabel: '/repo/no-match', pathTitle: '/repo/no-match', branchKey: 'main', branchLabel: 'main', branchTitle: 'main'},
       {id: 'split-seven', tabKey: '7', tabLabel: '7', tabTitle: '7', tabSession: '7', aiKey: 'ai-7', aiKind: 'codex', aiWindow: '7', aiWindowIndex: 7, aiLabel: '7:codex', pathKey: '/repo/7-path', pathLabel: '/repo/7-path', pathTitle: '/repo/7-path', branchKey: 'branch-7', branchLabel: 'branch-7', branchTitle: 'branch-7', prKey: '#70', prLabel: '#70', prTitle: '#70 one seven only', prNumber: 70, linearKey: 'DIS-7', linearLabel: 'DIS-7', linearTitle: 'DIS-7 one seven only'},
@@ -6315,9 +6688,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    assert.deepStrictEqual(canonical(api.infoGroupingPresetsForTest().map(preset => `${preset.key}:${preset.label}:${preset.grouping.join('>')}`)), [
 	      'tab-tmux-window:Tab > tmux-window:tab>tmux-window',
 	      'tab-path:Tab > Path > tmux-window:tab>path>tmux-window',
-	      'path-branch:Path > Branch:path>branch',
+      'path-branch:Path > Branch:git-worktree>local-repository>branch',
 	      'linear-pr:Linear > PR:linear>pr',
-	      'pr-branch:PR > Branch:pr>branch',
+      'pr-branch:PR > Branch:hosted-repository>pr>branch',
 	    ], 'YO!info quick preset buttons abbreviate tmux sub-window as tmux-window');
 	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info defaults to Tab > Path > tmux sub-window');
 	    api.setInfoGroupingPresetForTest('tab-tmux-window');
@@ -6327,7 +6700,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    api.setInfoGroupingPresetForTest('linear-pr');
     assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['linear', 'pr'], 'YO!info Linear > PR quick preset selects Linear then PR');
     api.setInfoGroupingPresetForTest('pr-branch');
-    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['pr', 'branch'], 'YO!info PR > Branch quick preset selects PR then Branch');
+    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['hosted-repository', 'pr', 'branch'], 'YO!info PR > Branch quick preset preserves hosted repository ownership before PR then Branch');
     const storedGroupingFor = grouping => loadYolomux('', ['stored'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {'yolomux.info2.grouping.v1': JSON.stringify(grouping)},
     }).currentInfoGroupingForTest();
@@ -6393,7 +6766,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(pathOnlyHtml.includes('data-info-open-tab="tab-a"') && pathOnlyHtml.includes('data-info-open-ai-window="0"'), 'YO!info Tab and AI fields are actionable links to the owning tab/window');
     assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && !/\bA(?:S)K\b/.test(pathOnlyHtml), 'YO!info AI rows show shared working/attention activity indicators without a text attention label');
     assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
-    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">tmux sub-window:</span>'), 'YO!info leaf rows label Tab session and window actions');
+    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">AI:</span>'), 'YO!info leaf rows keep legacy Tab actions and explicitly label the RuntimeActor view as AI');
     assert.ok(/info-tree-field-tab[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">App main PR full description<\/span>/.test(pathOnlyHtml), 'YO!info Tab leaf values use the shared tab detail without repeating the PR badge');
     assert.ok(/info-tree-field-branch[\s\S]*?info-tree-meta-updated/.test(pathOnlyHtml) && !pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows attach branch recency to the Git branch instead of rendering a detached Updated row');
     const pathBranchHtml = api.infoTreeHtmlForTest(records, ['path', 'branch']);
@@ -6545,7 +6918,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    const editorCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
 	    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 	    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
-	    assert.ok(/function infoFieldLabel\(kind\)[\s\S]*path:\s*'common\.field\.path'[\s\S]*branch:\s*'info\.field\.gitBranch'[\s\S]*pr:\s*'info\.field\.githubPr'[\s\S]*'tmux-window':\s*'info\.field\.tmuxSubWindow'[\s\S]*return t\(labels\[kind\] \|\| kind\)/.test(infoSource), 'YO!info field and group labels route through one localized label owner');
+	    assert.ok(/function infoFieldLabel\(kind\)[\s\S]*path:\s*'common\.field\.path'[\s\S]*branch:\s*'info\.field\.gitBranch'[\s\S]*pr:\s*'info\.field\.githubPr'[\s\S]*'tmux-window':\s*'info\.field\.tmuxWindow'[\s\S]*return t\(labels\[kind\] \|\| kind\)/.test(infoSource), 'YO!info field and group labels route through one localized label owner');
 	    assert.ok(/function infoGroupDimensionLabel\(key\)[\s\S]*infoFieldLabel\(key\)/.test(infoSource), 'YO!info group dimension labels reuse the same localized field label owner as leaf rows');
 	    assert.ok(/\.info-tree-group\[data-info-dimension="tmux-window"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info tmux sub-window group labels preserve lowercase text');
 	    assert.ok(/\.info-tree-group\[data-info-dimension="branch"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info Git branch group labels preserve the mixed-case Git prefix');
@@ -7114,11 +7487,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setInfoGroupingForTest(['pr', 'tab', 'path', 'branch']);
     api.setInfoSortForTest({key: 'name', dir: 'desc'});
     api.setInfoSearchForTest('alpha pr', {publish: false});
+    api.setInfoTreeGroupCollapsedForTest('group:host-collapsed', true);
     const shareInfoSnapshot = api.shareUiStateSnapshotForTest().info;
     assert.equal('branchSort' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table branch-sort state');
     assert.deepStrictEqual(canonical(shareInfoSnapshot.grouping), ['pr', 'tab', 'path', 'branch'], 'YO!share snapshots the host YO!info grouping order');
     assert.deepStrictEqual(canonical(shareInfoSnapshot.sort), {dir: 'desc', key: 'name'}, 'YO!share snapshots the host YO!info sort mode');
     assert.equal(shareInfoSnapshot.search, 'alpha pr', 'YO!share snapshots the host YO!info search query');
+    assert.deepStrictEqual(canonical(shareInfoSnapshot.collapsedGroupKeys), ['group:host-collapsed'], 'YO!share snapshots host-owned YO!info collapse state');
     assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'YO!share snapshots host-owned YO!info rows');
     assert.equal('columnWidths' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table column widths');
     const shareApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
@@ -7141,11 +7516,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       },
     });
     assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['1 / no AI'], 'share client starts with local YO!info rows before a host snapshot arrives');
-    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, grouping: shareInfoSnapshot.grouping, sort: shareInfoSnapshot.sort, search: shareInfoSnapshot.search, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
+    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, grouping: shareInfoSnapshot.grouping, sort: shareInfoSnapshot.sort, search: shareInfoSnapshot.search, collapsedGroupKeys: shareInfoSnapshot.collapsedGroupKeys, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
     assert.equal('branchSort' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table sort snapshots');
     assert.deepStrictEqual(canonical(shareApi.currentInfoGroupingForTest()), ['pr', 'tab', 'path', 'branch'], 'share viewers apply host YO!info grouping state');
     assert.deepStrictEqual(canonical(shareApi.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'share viewers apply host YO!info sort state');
     assert.equal(shareApi.currentInfoSearchForTest(), 'alpha pr', 'share viewers apply host YO!info search state');
+    assert.deepStrictEqual(canonical(shareApi.infoCollapsedGroupKeysForTest()), ['group:host-collapsed'], 'share viewers preserve host YO!info collapse state');
     assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
     assert.equal('columnWidths' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table column widths');
     shareApi.applyShareScrollStateForTest({target: 'info', kind: 'info', top: 88, left: 144});
@@ -7170,8 +7546,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(terminalBootSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
     assert.equal(/function setInfoColumnWidth/.test(source), false, 'deleted YO!info table column width code is not retained');
     assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*options\.includeRows !== false[\s\S]*snapshot\.branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows when full state is requested');
-    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, and search state');
-    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info rows without persisting or echo-publishing');
+    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)[\s\S]*collapsedGroupKeys/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, search, and collapse state');
+    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*collapsedGroupKeys[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info collapse state and rows without persisting or echo-publishing');
   });
 
   await testAsync('YO!agent chat queue waits for pending target-agent waits before sending', async () => {
