@@ -44359,6 +44359,22 @@ function debugGraphSetInteractionLines(panel, ratio) {
   });
 }
 
+function debugGraphSetHoverLegendItems(chart, timestamp) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  const items = chart?.querySelectorAll?.('[data-js-debug-legend]') || [];
+  if (!data || data.group.dynamicAgentTokens !== true) {
+    items.forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
+    return;
+  }
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  const activeKeys = new Set(index < 0 ? [] : data.groupSeries
+    .filter(series => series.agentTokenSeries === true)
+    .filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true)
+    .map(series => series.key));
+  items.forEach(item => item.classList.toggle('js-debug-legend-item--hovered', activeKeys.has(String(item.dataset.jsDebugLegend || ''))));
+}
+
 function debugGraphSetHoverTooltip(panel, event, ratio) {
   const svg = event?.target?.closest?.('.js-debug-line-chart');
   const chart = svg?.closest?.('[data-js-debug-chart]');
@@ -44370,6 +44386,7 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
   tooltip.querySelector('[data-js-debug-hover-max]').textContent = debugGraphHoverValueAtTime(chart, timestamp);
   tooltip.querySelector('[data-js-debug-hover-time]').textContent = debugGraphExactTimeLabel(timestamp);
+  debugGraphSetHoverLegendItems(chart, timestamp);
   for (const item of panel.querySelectorAll('[data-js-debug-hover-tooltip]')) item.hidden = item !== tooltip;
   tooltip.hidden = false;
   tooltip.style.left = '0px';
@@ -44387,6 +44404,7 @@ function debugGraphClearInteractionLines(panel) {
   const graph = panel?.querySelector?.('[data-js-debug-graph]');
   if (graph) graph.classList.remove('js-debug-graph--hovering');
   panel?.querySelectorAll?.('[data-js-debug-hover-tooltip]').forEach(tooltip => { tooltip.hidden = true; });
+  panel?.querySelectorAll?.('[data-js-debug-legend-item--hovered]').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
 }
 
 function debugGraphSetSelectionRects(panel, startRatio, endRatio) {

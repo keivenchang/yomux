@@ -696,6 +696,9 @@
   color: var(--muted);
   font: 600 var(--js-debug-legend-font-size)/1 var(--ui-font);
 }
+.js-debug-legend-item--hovered {
+  color: var(--text);
+}
 .js-debug-legend-swatch {
   width: 10px;
   height: 10px;

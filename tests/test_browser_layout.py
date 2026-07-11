@@ -2045,6 +2045,19 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
             const rect = [...(swatch?.children || [])].find(node => node.tagName?.toLowerCase() === 'rect');
             return {pattern: item.dataset.jsDebugTokenPattern, fill: getComputedStyle(rect).fill, fillAttr: rect?.getAttribute('fill') || '', definition: pattern?.innerHTML || ''};
           }),
+          hover: (() => {
+            const svg = chart.querySelector('.js-debug-line-chart');
+            const rect = bars[0].getBoundingClientRect();
+            bars[0].dispatchEvent(new PointerEvent('pointermove', {bubbles: true, clientX: rect.left + (rect.width / 2), clientY: rect.top + (rect.height / 2)}));
+            const dark = legends.map(item => ({
+              hovered: item.classList.contains('js-debug-legend-item--hovered'),
+              color: getComputedStyle(item).color,
+            }));
+            document.body.classList.add('theme-light');
+            const light = legends.map(item => getComputedStyle(item).color);
+            document.body.classList.remove('theme-light');
+            return {dark, light};
+          })(),
         };
         """
     )
@@ -2058,6 +2071,9 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
     assert [item["pattern"] for item in metrics["legends"]] == [str(index) for index in range(7)], metrics
     assert all(item["fillAttr"].startswith("url(") for item in metrics["legends"]), metrics
     assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
+    assert all(item["hovered"] for item in metrics["hover"]["dark"]), metrics
+    assert all(item["color"] == "rgb(228, 232, 238)" for item in metrics["hover"]["dark"]), metrics
+    assert all(color == "rgb(23, 32, 44)" for color in metrics["hover"]["light"]), metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
@@ -4708,6 +4724,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
           visibleNameDisplays: Array.from(document.querySelectorAll('.tmux-window-name-label')).map(node => getComputedStyle(node).display),
           visibleNumberDisplays: Array.from(document.querySelectorAll('.tmux-window-number-label')).map(node => getComputedStyle(node).display),
           statusToggle: rect('status-toggle'),
+          meta: rect('meta'),
         };
         """
     )
@@ -4717,6 +4734,7 @@ def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser
     assert metrics["controlsInsideViewport"] is False
     assert metrics["controls"]["left"] >= metrics["bar"]["right"] - 1
     assert metrics["controls"]["right"] <= metrics["viewport"]["left"] + 2
+    assert metrics["meta"]["left"] <= metrics["controls"]["right"] + 2
     if not metrics["reduced"]:
         assert metrics["scrollAnimation"] == "pane-info-bar-scroll"
         assert metrics["scrollDelay"] == "0s"
