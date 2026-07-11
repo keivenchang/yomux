@@ -151,6 +151,47 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
     assert metrics["errors"] == [], metrics
 
 
+def test_dockview_quick_open_highlights_contiguous_path_match(browser, tmp_path):
+    """A contiguous directory match must not highlight an earlier scattered subsequence."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
+    wait_for_dockview(browser, min_tabs=1)
+    path = "/home/test/dynamo/notes/t5t/2026.md"
+    metrics = browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname === '/api/fs/search') {
+            return new Response(JSON.stringify({
+              root: '/home/test/dynamo/notes',
+              files: [{name: '2026.md', path, relative_path: 't5t/2026.md', size: 1, mtime_ns: 1}],
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        (async () => {
+          openFileQuickOpen();
+          const input = document.querySelector('.command-palette-input');
+          input.value = 't5t';
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+          await waitFor(() => commandPaletteState.items.some(item => item.path === path), {description: 'contiguous Quick Open path result'});
+          const row = Array.from(document.querySelectorAll('.command-palette-row')).find(node => Number(node.dataset.commandIndex) === commandPaletteState.items.findIndex(item => item.path === path));
+          done({
+            detailHtml: row?.querySelector('.command-palette-detail')?.innerHTML || '',
+            errors: window.__bootErrors || [],
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """,
+        path,
+    )
+    assert metrics.get("error") is None, metrics
+    assert 'notes/<mark class="fuzzy-match">t5t</mark>/2026.md' in metrics["detailHtml"], metrics
+    assert metrics["errors"] == [], metrics
+
+
 def test_dockview_empty_tab_strip_context_menu_uses_active_session(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"])
     wait_for_dockview(browser, min_tabs=1)

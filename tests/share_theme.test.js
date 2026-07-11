@@ -5033,6 +5033,9 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
     assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy').includes('<mark class="fuzzy-match">X</mark>'), 'palette results highlight matched characters');
     assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy', {markClass: 'info-tree-search-match'}).includes('<mark class="info-tree-search-match">X</mark>'), 'shared fuzzy highlighter supports the Info tree mark class without a second matcher');
+    const t5tPath = '~/dynamo/notes/t5t/2026.md';
+    assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('t5t', t5tPath).indexes), [15, 16, 17], 'fuzzy matcher selects the actual contiguous path occurrence instead of an earlier scattered subsequence');
+    assert.ok(api.fuzzyHighlightHtml('t5t', t5tPath).includes('notes/<mark class="fuzzy-match">t5t</mark>/2026.md'), 'Quick Open highlights the contiguous t5t directory match rather than the t in notes');
     const stableId = api.sessionScopedIdForTest('test.stable-id', () => 'created-id');
     assert.equal(stableId, 'created-id', 'shared ID helper creates a missing session ID');
     assert.equal(api.sessionScopedIdForTest('test.stable-id', () => 'other-id'), 'created-id', 'shared ID helper preserves the existing ID');

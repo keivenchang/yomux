@@ -4550,6 +4550,26 @@ function fuzzySubsequenceMatch(query, text) {
   const needle = String(query || '').toLowerCase().replace(/\s+/g, '');
   const haystack = String(text || '').toLowerCase();
   if (!needle) return {score: 0, indexes: []};
+  // A contiguous occurrence is the strongest fuzzy match. Select its actual indexes
+  // before the greedy subsequence walk so result highlighting points at the same
+  // evidence that receives the contiguous-substring rank bonus. Without this, a
+  // query such as "t5t" could rank a path for `/t5t/` but highlight the earlier
+  // `t` in `/notes/` plus `5t` in the matching directory.
+  const contiguousStart = haystack.indexOf(needle);
+  if (contiguousStart >= 0) {
+    const indexes = Array.from({length: needle.length}, (_, offset) => contiguousStart + offset);
+    let score = needle.length * searchRankWeights.perChar;
+    for (const index of indexes) {
+      const previousChar = haystack[index - 1] || '';
+      if (index === contiguousStart && (index === 0 || /[\s/_:.-]/.test(previousChar))) {
+        score += searchRankWeights.wordStart;
+      } else if (index > contiguousStart) {
+        score += searchRankWeights.contiguous;
+      }
+    }
+    score += searchRankWeights.contiguousSubstring;
+    return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
+  }
   let position = 0;
   let previousIndex = -1;
   let score = 0;
@@ -4568,7 +4588,6 @@ function fuzzySubsequenceMatch(query, text) {
     position = index + 1;
     indexes.push(index);
   }
-  if (needle.length >= 3 && haystack.includes(needle)) score += searchRankWeights.contiguousSubstring;
   return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
 }
 
