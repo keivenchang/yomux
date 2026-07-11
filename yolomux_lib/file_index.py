@@ -55,6 +55,7 @@ INDEX_TTL_SECONDS = 30.0 * 60.0
 INDEX_FORMAT_VERSION = 4
 _BACKGROUND_OWNER_CHECKER: Callable[[str], bool] | None = None
 _BACKGROUND_OWNER_REFRESH_REQUESTER: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
+_BACKGROUND_INDEX_SEARCH_REQUESTER: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 _BACKGROUND_OWNER_BYTES_RECORDER: Callable[[int], None] | None = None
 _BACKGROUND_OWNER_DONE_NOTIFIER: Callable[[str, dict[str, Any]], None] | None = None
 SEARCH_INDEX_ROLE = "search-index"
@@ -166,6 +167,17 @@ def set_background_owner_refresh_requester(requester: Callable[[str, dict[str, A
     _BACKGROUND_OWNER_REFRESH_REQUESTER = requester
 
 
+def set_background_index_search_requester(requester: Callable[[dict[str, Any]], dict[str, Any]] | None) -> None:
+    global _BACKGROUND_INDEX_SEARCH_REQUESTER
+    _BACKGROUND_INDEX_SEARCH_REQUESTER = requester
+
+
+def request_background_index_search(payload: dict[str, Any]) -> dict[str, Any]:
+    if _BACKGROUND_INDEX_SEARCH_REQUESTER is None:
+        return {"ok": False, "error": "no persistent index search requester"}
+    return _BACKGROUND_INDEX_SEARCH_REQUESTER(payload)
+
+
 def set_background_owner_bytes_recorder(recorder: Callable[[int], None] | None) -> None:
     global _BACKGROUND_OWNER_BYTES_RECORDER
     _BACKGROUND_OWNER_BYTES_RECORDER = recorder
@@ -201,6 +213,29 @@ def notify_background_owner_done(payload: dict[str, Any]) -> None:
 def _index_disk_path(root: Path) -> Path:
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
     return INDEX_DIR / f"{digest}.sqlite3"
+
+
+def persisted_index_roots_within(root: Path) -> list[Path]:
+    """Return persisted child-index roots without trusting their metadata yet.
+
+    Search validates every candidate's manifest/schema before reading rows.  A
+    filename scan is only a bounded discovery step that lets a warming parent
+    root serve exact files from an already-persisted child root.
+    """
+    try:
+        manifests = list(INDEX_DIR.glob("*.manifest.json"))
+    except OSError:
+        return []
+    roots: list[Path] = []
+    for manifest_path in manifests:
+        try:
+            metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+            candidate = Path(str(metadata.get("root") or "")).expanduser().resolve(strict=False)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if candidate != root and _path_is_within(candidate, root):
+            roots.append(candidate)
+    return sorted(set(roots), key=lambda candidate: (-len(str(candidate)), str(candidate)))
 
 
 def _legacy_index_json_path(root: Path) -> Path:

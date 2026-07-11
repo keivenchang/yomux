@@ -424,9 +424,9 @@ function renderEmptyPane(slot) {
   const add = makeButton({
     className: 'empty-pane-add control-active-hover',
     label: t('pane.addTab'),
-    title: `${t('common.commandPalette')} (${appShortcutText('P', {shift: true})})`,
-    ariaLabel: t('common.commandPalette'),
-    onClick: () => openCommandPalette({mode: 'command', targetSlot: slot}),
+    title: `${t('palette.quickOpen')} (${appShortcutText('P')})`,
+    ariaLabel: t('palette.quickOpen'),
+    onClick: () => openCommandPalette({mode: 'files', targetSlot: slot}),
   });
   fill.append(title, hint, add);
   panel.appendChild(fill);

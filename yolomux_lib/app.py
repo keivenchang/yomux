@@ -1733,6 +1733,7 @@ class TmuxWebtermApp:
         # HTTP/WebSocket processes remain read-only index consumers.
         file_index.set_background_owner_checker(self.search_index_can_build)
         file_index.set_background_owner_refresh_requester(self.request_background_refresh)
+        file_index.set_background_index_search_requester(self.request_background_index_search)
         file_index.set_background_owner_bytes_recorder(self.record_background_search_index_bytes_written)
         file_index.set_background_owner_done_notifier(self.publish_background_refresh_done)
 
@@ -4203,6 +4204,12 @@ class TmuxWebtermApp:
     def search_index_can_build(self, role: str) -> bool:
         """Only the persistent indexer child may mutate Quick Open indexes."""
         return False if role == BACKGROUND_ROLE_SEARCH_INDEX else self.background_can_run(role)
+
+    def request_background_index_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        root = str(payload.get("root") or "").strip()
+        if not root:
+            return {"ok": False, "error": "missing index search root"}
+        return self.search_indexer.search(root, str(payload.get("query") or ""), int(payload.get("limit") or 400))
 
     def background_owner_status_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         # This path is polled by the topbar.  Diagnostics have a bounded, explicit admin

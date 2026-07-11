@@ -413,6 +413,42 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     payload["refreshing_elsewhere"] = True
                 return payload
             if not index.ready and not can_build_index:
+                # A follower can always read a persisted snapshot.  Ask the
+                # writer only when that snapshot is missing; rolling worktrees
+                # can otherwise use different local-RPC framing and turn an
+                # exact filename lookup into a socket retry storm.
+                fallback_indexed = file_index.search_disk_index(
+                    root,
+                    skip_dirs,
+                    index_policy["exclude_signature"],
+                    _match,
+                    max_results,
+                    [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
+                )
+                if fallback_indexed is not None:
+                    fallback_results, fallback_truncated = fallback_indexed
+                    for entry in fallback_results:
+                        entry.pop("_sort_key", None)
+                        _annotate_search_dedupe_fields(entry)
+                    return {
+                        "root": str(root),
+                        "root_realpath": os.path.realpath(root),
+                        "query": str(query or ""),
+                        "limit": max_results,
+                        "truncated": fallback_truncated,
+                        "index_state": "follower-ready",
+                        "index_coverage": "full",
+                        "refreshing_elsewhere": True,
+                        "files": fallback_results,
+                    }
+                persistent_response = file_index.request_background_index_search({
+                    "root": str(root),
+                    "query": str(query or ""),
+                    "limit": max_results,
+                })
+                persistent_payload = persistent_response.get("payload")
+                if persistent_response.get("ok") and isinstance(persistent_payload, dict):
+                    return persistent_payload
                 refresh_result = file_index.request_background_owner_refresh({"root": str(root), "query": str(query or ""), "reason": "search-index-missing"})
                 if not refresh_result.get("fallback"):
                     return {
@@ -424,6 +460,59 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                         "files": [],
                         "index_state": "follower",
                         "refreshing_elsewhere": True,
+                    }
+            if not index.ready and can_build_index:
+                # The first query for a large root must not return an empty
+                # palette while its dedicated writer warms.  Child indexes are
+                # independent persisted snapshots, so use the deepest ones
+                # already under this root before reporting the parent warm.
+                child_indexes = []
+                for candidate in file_index.persisted_index_roots_within(root):
+                    if candidate == root:
+                        continue
+                    child_policy = _search_index_policy(candidate)
+                    child_indexes.append((candidate, child_policy))
+                child_results: list[dict[str, Any]] = []
+                child_truncated = False
+                for candidate, child_policy in child_indexes:
+                    child_indexed = file_index.search_disk_index(
+                        candidate,
+                        child_policy["skip_dirs"],
+                        child_policy["exclude_signature"],
+                        _match,
+                        max_results,
+                        [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
+                    )
+                    if child_indexed is None:
+                        continue
+                    rows, truncated = child_indexed
+                    child_results.extend(rows)
+                    child_truncated = child_truncated or truncated
+                if child_results:
+                    child_results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))
+                    unique_rows: list[dict[str, Any]] = []
+                    seen_paths: set[str] = set()
+                    for entry in child_results:
+                        path_text = str(entry.get("path") or "")
+                        if not path_text or path_text in seen_paths:
+                            continue
+                        seen_paths.add(path_text)
+                        entry.pop("_sort_key", None)
+                        _annotate_search_dedupe_fields(entry)
+                        unique_rows.append(entry)
+                        if len(unique_rows) >= max_results:
+                            child_truncated = True
+                            break
+                    return {
+                        "root": str(root),
+                        "root_realpath": os.path.realpath(root),
+                        "query": str(query or ""),
+                        "limit": max_results,
+                        "truncated": child_truncated,
+                        "index_state": "warming",
+                        "index_coverage": "partial",
+                        "refreshing_elsewhere": True,
+                        "files": unique_rows,
                     }
         if not tokens:
             # C11: an EMPTY query on a full-tree root used to fall through to a cold recursive walk just to
@@ -515,6 +604,21 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         results = results[:max_results]
     for entry in results:
         entry.pop("_sort_key", None)
+    # A capped walk is not a complete Quick Open answer.  In a large tree it can
+    # return a few fuzzy early-directory hits while missing an exact basename that
+    # appears later.  The persistent index is the complete source for full-tree
+    # search; while it warms, report that state rather than presenting a false list.
+    if full_tree and truncated:
+        return {
+            "root": str(root),
+            "root_realpath": os.path.realpath(root),
+            "query": str(query or ""),
+            "limit": max_results,
+            "truncated": True,
+            "index_state": "warming",
+            "index_coverage": "pending",
+            "files": [],
+        }
     return {
         "root": str(root),
         "root_realpath": os.path.realpath(root),
