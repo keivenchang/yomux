@@ -868,6 +868,8 @@ function debugGraphNewHostMetrics() {
     systemMemoryUsedTotalBytes: 0,
     systemMemoryCapacityTotalBytes: 0,
     systemMemoryCount: 0,
+    cpuLabel: '',
+    systemMemoryLabel: '',
     cpuProcesses: new Map(),
     memoryProcesses: new Map(),
     gpuUtilProcesses: new Map(),
@@ -1162,6 +1164,8 @@ function debugGraphMergeBucket(target, source) {
     targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0);
     targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0);
     targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0);
+    if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
+    if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
       [targetHost.cpuProcesses, sourceHost.cpuProcesses, 'totalPercent'],
       [targetHost.memoryProcesses, sourceHost.memoryProcesses, 'totalBytes'],
@@ -1450,6 +1454,8 @@ function debugGraphApplyHostMetrics(bucket, source) {
   target.systemMemoryUsedTotalBytes = Math.max(target.systemMemoryUsedTotalBytes, Number(source.system_memory_used_total_bytes || 0));
   target.systemMemoryCapacityTotalBytes = Math.max(target.systemMemoryCapacityTotalBytes, Number(source.system_memory_capacity_total_bytes || 0));
   target.systemMemoryCount = Math.max(target.systemMemoryCount, Number(source.system_memory_count || 0));
+  if (source.cpu_label) target.cpuLabel = String(source.cpu_label);
+  if (source.system_memory_label) target.systemMemoryLabel = String(source.system_memory_label);
   debugGraphApplyHostMetricProcesses(target.cpuProcesses, source.cpu_processes);
   debugGraphApplyHostMetricProcesses(target.memoryProcesses, source.memory_processes, 'totalBytes');
   debugGraphApplyHostMetricProcesses(target.gpuUtilProcesses, source.gpu_util_processes);
@@ -2447,7 +2453,7 @@ function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues
   return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
 }
 
-function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0) {
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false) {
   const segments = [];
   let current = [];
   let previousDataEndMs = NaN;
@@ -2465,14 +2471,14 @@ function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDat
       segments.push(current);
       current = [];
     }
-    current.push(debugGraphPointForValue(value, timeMs, chartMax, domain).join(','));
+    current.push(debugGraphPointForValue(value, timeMs, chartMax, domain, logScale).join(','));
     previousDataEndMs = Number.isFinite(timeMs) ? timeMs + durationMs : NaN;
   });
   if (current.length) segments.push(current);
   return segments;
 }
 
-function debugGraphPointForValue(value, timeMs, chartMax, domain) {
+function debugGraphPointForValue(value, timeMs, chartMax, domain, logScale = false) {
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   const spanMs = Math.max(1, endMs - startMs);
@@ -2480,13 +2486,16 @@ function debugGraphPointForValue(value, timeMs, chartMax, domain) {
     ? ((Number(timeMs) - startMs) / spanMs) * jsDebugGraphGeometry.width
     : jsDebugGraphGeometry.width;
   const x = Math.max(0, Math.min(jsDebugGraphGeometry.width, rawX));
-  const y = debugGraphPlotYForValue(value, chartMax);
+  const y = debugGraphPlotYForValue(value, chartMax, logScale);
   return [x.toFixed(1), y.toFixed(1)];
 }
 
-function debugGraphPlotYForValue(value, chartMax) {
+function debugGraphPlotYForValue(value, chartMax, logScale = false) {
   const max = Math.max(Number(chartMax) || 0, 1);
-  const normalized = Math.max(0, Math.min(1, (Number(value) || 0) / max));
+  const rawValue = Math.max(0, Number(value) || 0);
+  const normalized = logScale === true
+    ? Math.max(0, Math.min(1, Math.log1p(rawValue) / Math.log1p(max)))
+    : Math.max(0, Math.min(1, rawValue / max));
   return jsDebugGraphGeometry.plotTop + ((1 - normalized) * jsDebugGraphGeometry.plotHeight);
 }
 
@@ -2724,7 +2733,7 @@ function debugGraphSeriesTokenAgentAttrs(series) {
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
-function debugGraphPolylineHtml(series, chartMax, domain) {
+function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
   const gapThresholdMs = series?.clientMetric === true ? debugGraphCommunicationGapThresholdMs([series]) : 0;
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
@@ -2734,6 +2743,7 @@ function debugGraphPolylineHtml(series, chartMax, domain) {
     debugGraphSeriesPlotHasDataValues(series),
     series.durations || [],
     gapThresholdMs,
+    logScale,
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
@@ -2766,7 +2776,7 @@ function debugGraphAreaPathHtml(series, chartMax, domain) {
   return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></path>`;
 }
 
-function debugGraphBarRectsHtml(series, chartMax, domain) {
+function debugGraphBarRectsHtml(series, chartMax, domain, logScale = false) {
   const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
@@ -2785,15 +2795,15 @@ function debugGraphBarRectsHtml(series, chartMax, domain) {
     const gap = jsDebugAgentStatusSeriesKeys.includes(series.key) ? 0 : Math.min(0.15, slotWidth * 0.05);
     const x = x1 + gap / 2;
     const width = Math.max(0, slotWidth - gap);
-    const vertical = debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, series.zeroBar === true);
+    const vertical = debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, series.zeroBar === true, logScale);
     const stacked = lowerValues ? ` data-js-debug-bar-stacked="${esc(series.key)}"` : '';
     return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(vertical.y.toFixed(2))}" width="${esc(width.toFixed(2))}" height="${esc(vertical.height.toFixed(2))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.label)}</title></rect>`;
   }).join('');
 }
 
-function debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, zeroBar = false) {
-  const top = debugGraphPlotYForValue(topValue, chartMax);
-  const bottom = debugGraphPlotYForValue(bottomValue, chartMax);
+function debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, zeroBar = false, logScale = false) {
+  const top = debugGraphPlotYForValue(topValue, chartMax, logScale);
+  const bottom = debugGraphPlotYForValue(bottomValue, chartMax, logScale);
   const height = Math.max(0, bottom - top);
   if (height > 0 || !zeroBar) return {y: top, height};
   const zeroHeight = 0.75;
@@ -2857,12 +2867,12 @@ function debugGraphIntegerAxisHtml(group, max) {
   </div>`;
 }
 
-function debugGraphGridLineY(value, chartMax) {
-  return debugGraphPlotYForValue(value, chartMax);
+function debugGraphGridLineY(value, chartMax, logScale = false) {
+  return debugGraphPlotYForValue(value, chartMax, logScale);
 }
 
-function debugGraphAxisTickStyle(value, chartMax) {
-  const percent = (debugGraphGridLineY(value, chartMax) / jsDebugGraphGeometry.height) * 100;
+function debugGraphAxisTickStyle(value, chartMax, logScale = false) {
+  const percent = (debugGraphGridLineY(value, chartMax, logScale) / jsDebugGraphGeometry.height) * 100;
   return ` style="--js-debug-axis-y: ${esc(percent.toFixed(3))}%;"`;
 }
 
@@ -2871,9 +2881,11 @@ function debugGraphGridLinesHtml(group, axisMax) {
   const fallbackMax = max > 0 ? max : 1;
   const values = group.integerGridLines === true
     ? debugGraphIntegerGridValues(max)
+    : group.logScale === true
+    ? [fallbackMax, Math.expm1(Math.log1p(fallbackMax) / 2), 0]
     : [fallbackMax, fallbackMax / 2, 0];
   return values.map(value => {
-    const y = debugGraphGridLineY(value, max).toFixed(1);
+    const y = debugGraphGridLineY(value, max, group.logScale === true).toFixed(1);
     const axisValue = group.integerGridLines === true ? ` data-js-debug-grid-value="${esc(value)}"` : '';
     return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="${esc(jsDebugGraphGeometry.width)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
   }).join('');
@@ -2884,9 +2896,9 @@ function debugGraphAxisHtml(group, max) {
   if (group.integerAxis === true) return debugGraphIntegerAxisHtml(group, axisMax);
   const positionMax = axisMax > 0 ? axisMax : 1;
   return `<div class="js-debug-y-axis" data-js-debug-axis="${esc(group.key)}">
-    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
-    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax / 2, positionMax)}>${esc(debugGraphAxisValueText(axisMax / 2, group.unit))}</span>
-    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(group.logScale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(group.logScale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
+    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, group.logScale === true)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
   </div>`;
 }
 
@@ -3037,7 +3049,7 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
 }
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null) {
-  const groupLabel = debugGraphLocalizedLabel(group);
+  const groupLabel = debugGraphChartLabel(group, buckets);
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
@@ -3048,6 +3060,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
+  const logScale = debugGraphUsesLogScale(group, plotSeries);
   const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...lineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
   const max = debugGraphChartAxisMax(group, rawMax);
@@ -3061,7 +3074,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     ? ''
     : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
-  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}${logScale ? ' data-js-debug-chart-scale="log"' : ''}>
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(groupLabel)}</span>
@@ -3071,16 +3084,16 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       ${gpuUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
     ${gpuUnavailable ? `<div class="js-debug-chart-unavailable" data-js-debug-gpu-unavailable="${esc(group.key)}">${esc(t('finder.dateMode.none'))}</div>` : `<div class="js-debug-chart-body">
-      ${debugGraphAxisHtml(group, axisMax)}
+      ${debugGraphAxisHtml({...group, logScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
-          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain)).join('') : ''}
-          ${debugGraphGridLinesHtml(group, axisMax)}
+          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, logScale)).join('') : ''}
+          ${debugGraphGridLinesHtml({...group, logScale}, axisMax)}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, logScale)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, logScale)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
@@ -3090,6 +3103,23 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     </div>`}
     ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time></div>'}
   </section>`;
+}
+
+function debugGraphUsesLogScale(group, seriesItems) {
+  const values = (seriesItems || []).flatMap(series => series.plotValues || series.values || []).map(Number).filter(value => Number.isFinite(value) && value > 0);
+  if (!values.length) return false;
+  const max = Math.max(...values);
+  if (group?.key === 'latency') return max > 1000;
+  if (group?.key === 'modelTokens') return max / Math.min(...values) >= 10;
+  return false;
+}
+
+function debugGraphChartLabel(group, buckets = []) {
+  const label = debugGraphLocalizedLabel(group);
+  const detailKey = group?.key === 'cpu' ? 'cpuLabel' : group?.key === 'memory' ? 'systemMemoryLabel' : '';
+  if (!detailKey) return label;
+  const detail = buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
+  return detail ? `${label} (${detail})` : label;
 }
 
 function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {

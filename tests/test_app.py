@@ -152,7 +152,7 @@ def test_stats_host_resource_metrics_uses_only_aggregate_host_data(monkeypatch):
 
 
 def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monkeypatch):
-    responses = iter([SimpleNamespace(returncode=0, stdout="0, GPU-0, 75, 4000, 8000\n")])
+    responses = iter([SimpleNamespace(returncode=0, stdout="0, GPU Model A, 75, 4000, 8000\n")])
     calls = []
 
     def run(*args, **_kwargs):
@@ -166,8 +166,9 @@ def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monk
     assert metrics["devices"]["gpu:0"]["util_percent"] == 75.0
     assert metrics["devices"]["gpu:0"]["memory_used_bytes"] == 4000 * 1024 * 1024
     assert metrics["devices"]["gpu:0"]["memory_capacity_bytes"] == 8000 * 1024 * 1024
+    assert metrics["devices"]["gpu:0"]["label"] == "GPU 0 (GPU Model A)"
     assert metrics == {"devices": metrics["devices"]}
-    assert calls == [["gpu-info", "--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
+    assert calls == [["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
 
 
 def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypatch):
@@ -178,10 +179,25 @@ def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypa
     monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
     monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    metrics = app_module.stats_macos_gpu_metrics()
+    metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
 
-    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 8 * 1024 * 1024}
+    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0 (Apple M4 Pro)", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 8 * 1024 * 1024}
     assert metrics == {"devices": metrics["devices"]}
+
+
+def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
+    payload = json.dumps({
+        "SPHardwareDataType": [{"chip_type": "Apple M4 Pro", "number_processors": "proc 14:10:4:0"}],
+        "SPMemoryDataType": [{"dimm_type": "LPDDR5"}],
+        "SPDisplaysDataType": [{"sppci_model": "Apple M4 Pro", "sppci_cores": "20"}],
+    })
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+
+    assert app_module.stats_macos_hardware_metadata() == {
+        "cpu_label": "Apple M4 Pro · 14 cores (10 performance + 4 efficiency)",
+        "gpu_label": "Apple M4 Pro",
+        "system_memory_label": "LPDDR5 unified memory",
+    }
 
 
 def test_stats_follower_samples_local_host_metrics_when_legacy_owner_has_none(monkeypatch):
@@ -3914,7 +3930,7 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     assert status == HTTPStatus.OK
     assert payload["session"] == "1"
     assert payload["terminal"] == "bash"
-    assert commands[0][:6] == ["new-session", "-d", "-s", "1", "-c", str(tmp_path)]
+    assert commands[0][:8] == ["new-session", "-d", "-s", "1", "-e", "TERM=xterm-256color", "-c", str(tmp_path)]
     assert ["set-option", "-t", "1:", "status", "off"] in commands
     assert ["set-option", "-t", "1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
     assert ["set-window-option", "-t", "1:", "pane-active-border-style", "fg=#7c3aed"] in commands

@@ -3474,7 +3474,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/const jsDebugGraphGeometry = \(\(\) => \{[\s\S]*const width = 600;[\s\S]*const height = 120;[\s\S]*const plotTop = 8;[\s\S]*const plotHeight = height - plotTop;[\s\S]*plotBottom: plotTop \+ plotHeight,[\s\S]*hoverBottom: plotTop \+ plotHeight/.test(debugPaneSource), 'YO!stats owns SVG width, visible plot baseline, and hover coordinates in one frozen model');
     const debugGeometryConsumers = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphPointForValue'));
     assert.equal(/viewBox="0 0 600 120"|x2="600"|\* 600|\/ 120|const top = 8|const height = 104|baseline = 112|y2="116"|height="120"/.test(debugGeometryConsumers), false, 'YO!stats renderers and interactions do not restate shared SVG coordinate literals');
-    assert.ok(/function debugGraphPointForValue[\s\S]*debugGraphPlotYForValue\(value, chartMax\)/.test(debugPaneSource) && /function debugGraphGridLineY[\s\S]*return debugGraphPlotYForValue\(value, chartMax\)/.test(debugPaneSource) && /function debugGraphPlotOverlayRectHtml[\s\S]*jsDebugGraphGeometry\.plotTop[\s\S]*jsDebugGraphGeometry\.plotHeight/.test(debugPaneSource), 'lines, bars, areas, grids, axes, and overlays share one plot-coordinate parent');
+    assert.ok(/function debugGraphPointForValue[\s\S]*debugGraphPlotYForValue\(value, chartMax, logScale\)/.test(debugPaneSource) && /function debugGraphGridLineY[\s\S]*return debugGraphPlotYForValue\(value, chartMax, logScale\)/.test(debugPaneSource) && /function debugGraphPlotOverlayRectHtml[\s\S]*jsDebugGraphGeometry\.plotTop[\s\S]*jsDebugGraphGeometry\.plotHeight/.test(debugPaneSource), 'lines, bars, areas, grids, axes, and overlays share one plot-coordinate parent');
     assert.ok(debugPaneSource.includes("textWithMovingEllipsisHtml(t('debug.waitingForServerStats'))"), 'YO!stats waiting metadata uses the shared localized moving ellipsis');
     assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/function scheduleJsDebugPanelRefresh\(options = \{\}\) \{[\s\S]*if \(options\.force === true\) jsDebugRenderForce = true;[\s\S]*if \(jsDebugRenderTimer\) return;[\s\S]*const force = jsDebugRenderForce;[\s\S]*jsDebugRenderForce = false;[\s\S]*refreshDebugPanelsFromEvents\(\{force\}\)/.test(debugPaneSource), 'YO!stats latches a forced redraw into an already-pending shared refresh');
@@ -4220,7 +4220,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-js-debug-axis-max="count"[^>]*>4</.test(html), 'API/SSE per-second axis rounds 3.8/s to a whole 4');
     assert.ok(/data-js-debug-axis-mid="count"[^>]*>2</.test(html), 'API/SSE per-second midpoint stays whole');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>200ms</.test(html), 'latency axis rounds 196ms to 200ms');
-    assert.ok(/data-js-debug-axis-mid="latency"[^>]*>100ms</.test(html), 'latency midpoint stays readable after rounding');
+    assert.ok(/data-js-debug-axis-mid="latency"[^>]*>100ms</.test(html), 'sub-second latency stays linear with its familiar midpoint');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>200kB</.test(html), 'bandwidth axis rounds 140kB/s to 200kB');
     assert.ok(/data-js-debug-axis-mid="bandwidth"[^>]*>100kB</.test(html), 'bandwidth midpoint stays readable after rounding');
   });
@@ -4343,6 +4343,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         system_cpu_total_percent: 40,
         system_cpu_count: 1,
         host_metrics: {
+          cpu_label: 'Intel Xeon · 16 cores / 32 threads · 3.6GHz',
+          system_memory_label: 'DDR5',
           system_memory_used_total_bytes: 32 * 1024 * 1024 * 1024,
           system_memory_capacity_total_bytes: 64 * 1024 * 1024 * 1024,
           system_memory_count: 1,
@@ -4358,7 +4360,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             'memory:node': {label: 'node', total_bytes: 10 * 1024 * 1024 * 1024, samples: 1},
           },
           gpu_devices: {
-            'gpu:0': {label: 'GPU 0', util_total_percent: 70, memory_used_total_bytes: 60 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 80 * 1024 * 1024 * 1024, samples: 1},
+            'gpu:0': {label: 'GPU 0 (GPU Model A)', util_total_percent: 70, memory_used_total_bytes: 60 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 80 * 1024 * 1024 * 1024, samples: 1},
             'gpu:1': {label: 'GPU 1', util_total_percent: 0, memory_used_total_bytes: 30 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 48 * 1024 * 1024 * 1024, samples: 1},
           },
         },
@@ -4367,7 +4369,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const allSeries = api.debugGraphSeriesDataForTest(now);
     assert.equal(allSeries.some(series => series.hostMetric === 'cpu'), false, 'CPU does not add generic host process-name groups');
     assert.equal(allSeries.some(series => series.hostProcessId === 'cpu:python'), false, 'CPU does not add generic python process lines');
-    assert.deepStrictEqual([...allSeries.filter(series => series.hostMetric === 'gpuUtil').map(series => series.label)], ['GPU 0', 'GPU 1'], 'multiple GPUs render device labels instead of process names');
+    assert.deepStrictEqual([...allSeries.filter(series => series.hostMetric === 'gpuUtil').map(series => series.label)], ['GPU 0 (GPU Model A)', 'GPU 1'], 'multiple GPUs render device labels instead of process names');
     api.setDebugGraphChartVisibleForTest('memory', true);
     api.setDebugGraphChartVisibleForTest('gpuUtil', true);
     api.setDebugGraphChartVisibleForTest('gpuMemory', true);
@@ -4380,6 +4382,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(html, /data-js-debug-axis-zero="memory"[^>]*>0GB</, 'System memory axis explicitly starts at 0GB');
     assert.match(html, /data-js-debug-bar-series="gpu:gpuUtil:gpu:1"[^>]*data-js-debug-bar-total="0"/, 'a sampled 0% GPU still renders a visible utilization bar');
     assert.ok(html.includes('System memory') && html.includes('GPU utilization') && html.includes('GPU memory'), 'the host graph quartet is labeled');
+    assert.ok(html.includes('CPU (Intel Xeon · 16 cores / 32 threads · 3.6GHz)') && html.includes('System memory (DDR5)'), 'CPU and memory chart headings identify the sampled host hardware');
+    assert.ok(html.includes('GPU 0 (GPU Model A)'), 'both GPU charts retain the device model in their legends');
     assert.ok(html.includes('data-js-debug-chart-toggle="cpu"') && html.includes('data-js-debug-chart-toggle="memory"') && html.includes('data-js-debug-chart-close="cpu"'), 'every graph name is available in the persistent chart-toggle group while its heading retains a compact X');
     const debugPaneSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(debugPaneSource.includes("jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1'") && debugPaneSource.includes('data-js-debug-chart-toggle'), 'YO!stats preferences persist browser-local chart visibility through named toggle markup');
