@@ -192,6 +192,7 @@ def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, p
 
 def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clients(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
@@ -200,26 +201,27 @@ def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clie
     assert oct(lock_path.stat().st_mode & 0o777) == "0o600"
 
     slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    slow.connect(str(socket_path))
+    slow.connect(str(service_socket_path))
     envelope = rpc.new_envelope("testd", "echo", {"action": "echo"}, timeout_seconds=2.0)
-    response, _binary = rpc.request(socket_path, envelope, timeout_seconds=2.0)
+    response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=2.0)
     slow.close()
 
     assert response == {"ok": True, "echo": {"action": "echo"}}
     shutdown = rpc.new_envelope("testd", "shutdown", {"action": "shutdown"})
-    assert rpc.request(socket_path, shutdown, timeout_seconds=1.0)[0] == {"ok": True, "shutdown": True}
+    assert rpc.request(service_socket_path, shutdown, timeout_seconds=1.0)[0] == {"ok": True, "shutdown": True}
     worker.join(timeout=1.0)
     assert worker.is_alive() is False
 
 
 def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid() + 1)
     envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
 
-    response, _binary = rpc.request(socket_path, envelope, timeout_seconds=1.0)
+    response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=1.0)
     stop_event.set()
     worker.join(timeout=1.0)
 
@@ -229,6 +231,7 @@ def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, 
 
 def test_local_service_runtime_caps_oversize_responses_without_exiting(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
@@ -236,8 +239,8 @@ def test_local_service_runtime_caps_oversize_responses_without_exiting(tmp_path,
     oversize = rpc.new_envelope("testd", "oversize_response", {"action": "oversize_response"})
     echo = rpc.new_envelope("testd", "echo", {"action": "echo"})
 
-    assert rpc.request(socket_path, oversize, timeout_seconds=1.0)[0] == {"ok": False, "error": "response too large"}
-    assert rpc.request(socket_path, echo, timeout_seconds=1.0)[0] == {"ok": True, "echo": {"action": "echo"}}
+    assert rpc.request(service_socket_path, oversize, timeout_seconds=1.0)[0] == {"ok": False, "error": "response too large"}
+    assert rpc.request(service_socket_path, echo, timeout_seconds=1.0)[0] == {"ok": True, "echo": {"action": "echo"}}
     stop_event.set()
     worker.join(timeout=1.0)
     assert worker.is_alive() is False

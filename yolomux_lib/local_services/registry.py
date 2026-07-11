@@ -29,7 +29,10 @@ from .rpc import safe_socket_path
 
 LOCAL_SERVICE_REGISTRY_VERSION = 1
 LOCAL_SERVICE_IDLE_SECONDS = 60.0
-LOCAL_SERVICE_START_TIMEOUT_SECONDS = 2.0
+# A cold daemon can be delayed by concurrent browser/E2E workers on a
+# developer machine. Startup remains bounded, but it must outlast that normal
+# scheduler pressure before declaring the shared service unavailable.
+LOCAL_SERVICE_START_TIMEOUT_SECONDS = 5.0
 LOCAL_SERVICE_BACKOFF_SECONDS = 0.25
 LOCAL_SERVICE_MAX_BACKOFF_SECONDS = 8.0
 

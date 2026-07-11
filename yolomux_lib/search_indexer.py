@@ -42,7 +42,7 @@ INDEXER_LOCK_NAME = "indexer.lock"
 
 
 def default_socket_path() -> Path:
-    return safe_socket_path(file_index.INDEX_DIR / INDEXER_SOCKET_NAME, prefix="yolomux-indexer")
+    return safe_socket_path(file_index.INDEX_DIR / INDEXER_SOCKET_NAME, prefix="yolomux-indexd")
 
 
 def default_lock_path() -> Path:
@@ -53,7 +53,7 @@ class PersistentSearchIndexer:
     """One long-lived, local SQLite writer with a bounded dirty-path queue."""
 
     def __init__(self, socket_path: Path, idle_seconds: float = INDEXER_DEFAULT_IDLE_SECONDS):
-        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-indexer")
+        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-indexd")
         self.lock_path = self.socket_path.with_suffix(".lock")
         self.stop_event = threading.Event()
         self.pending_paths: dict[str, set[str]] = defaultdict(set)
@@ -208,7 +208,7 @@ class SearchIndexerClient:
     """Starts or reaches the one persistent indexer without exposing SQLite writes."""
 
     def __init__(self, socket_path: Path | None = None):
-        self.socket_path = safe_socket_path(socket_path or default_socket_path(), prefix="yolomux-indexer")
+        self.socket_path = safe_socket_path(socket_path or default_socket_path(), prefix="yolomux-indexd")
         self.registry = LocalServiceRegistry(
             self.socket_path.parent,
             LocalServiceSpec(

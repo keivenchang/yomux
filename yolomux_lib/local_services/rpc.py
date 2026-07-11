@@ -25,7 +25,10 @@ LOCAL_RPC_VERSION = 1
 LOCAL_RPC_MAX_METADATA_BYTES = 256 * 1024
 LOCAL_RPC_MAX_BINARY_BYTES = 4 * 1024 * 1024
 LOCAL_RPC_HEADER_BYTES = 4
-LOCAL_RPC_SOCKET_PATH_BYTES = 96
+# macOS uses a much smaller Unix-domain pathname budget than Linux. Leave
+# enough room for the platform's private /var expansion of /tmp as well as
+# the socket filename, instead of accepting a path that only fails at bind.
+LOCAL_RPC_SOCKET_PATH_BYTES = 72
 
 
 class LocalRpcError(ValueError):
@@ -71,8 +74,8 @@ def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | N
     digest = hashlib.sha256(os.fsencode(str(candidate))).hexdigest()[:20]
     uid = getattr(os, "getuid", lambda: "nouid")()
     if fallback_name:
-        return Path(tempfile.gettempdir()) / f"{prefix}-{uid}-{digest}" / fallback_name
-    return Path(tempfile.gettempdir()) / f"{prefix}-{uid}-{digest}.sock"
+        return Path("/tmp") / f"{prefix}-{uid}-{digest}" / fallback_name
+    return Path("/tmp") / f"{prefix}-{uid}-{digest}.sock"
 
 
 def new_envelope(

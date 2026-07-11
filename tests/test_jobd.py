@@ -6,6 +6,7 @@ from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 from yolomux_lib import jobd
+from yolomux_lib.local_services import rpc
 from yolomux_lib.local_services import runtime
 
 
@@ -228,7 +229,8 @@ def test_jobd_clients_share_one_registry_and_coalesce_across_ports(tmp_path):
     first_submission = first.submit("json_compact", {"z": 1, "a": 2}, priority="interactive", generation=7, coalesce_key="two-ports")
     second_submission = second.submit("json_compact", {"z": 1, "a": 2}, priority="interactive", generation=7, coalesce_key="two-ports")
 
-    assert first.registry.socket_path == second.registry.socket_path == socket_path
+    expected_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-jobd")
+    assert first.registry.socket_path == second.registry.socket_path == expected_socket_path
     assert first.registry.spec.name == second.registry.spec.name == "jobd"
     assert first_submission["coalesced"] is False
     assert second_submission["coalesced"] is True

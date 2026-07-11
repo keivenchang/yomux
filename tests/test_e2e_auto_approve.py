@@ -80,6 +80,9 @@ def _isolate_state(monkeypatch, tmp_path, control_dir):
     for d in (state_dir, lock_dir):
         d.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(common, "STATE_DIR", state_dir)
+    # approvald is spawned as a separate Python process, so in-process module
+    # monkeypatches alone do not isolate its AUTO_APPROVE_LOCK_DIR.
+    monkeypatch.setenv("YOLOMUX_STATE_DIR", str(state_dir))
     monkeypatch.setattr(common, "CONTROL_SOCKET_DIR", control_dir)
     monkeypatch.setattr(common, "AUTO_APPROVE_LOCK_DIR", lock_dir)
     monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", control_dir)

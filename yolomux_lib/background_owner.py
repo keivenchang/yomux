@@ -28,7 +28,10 @@ GENERATION_INDEX_VERSION = 1
 GENERATION_INDEX_MAX_RECORDS = 64
 BACKGROUND_OWNER_STALE_SECONDS = 10.0
 BACKGROUND_OWNER_HEARTBEAT_SECONDS = 1.0
-BACKGROUND_RELEASE_TIMEOUT_SECONDS = 2.0
+# The owner-control socket is local, but a concurrent browser/E2E test pool can
+# delay its handler briefly. Keep takeover bounded while avoiding a spurious
+# follower result when a healthy owner is simply scheduled late.
+BACKGROUND_RELEASE_TIMEOUT_SECONDS = 5.0
 BACKGROUND_REFRESH_TIMEOUT_SECONDS = 0.25
 BACKGROUND_OWNER_UNRESPONSIVE_SECONDS = 3.0
 BACKGROUND_REFRESH_COALESCE_SECONDS = 5.0

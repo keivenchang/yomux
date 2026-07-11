@@ -1956,7 +1956,10 @@ class TmuxWebtermApp:
         token_rows = self.stats_agent_token_rows(rows)
         response = self.stats_client.recover_agent_token_history_from_rows(token_rows, now=now)
         if not response.get("ok"):
-            raise RuntimeError(str(response.get("error") or "statsd unavailable"))
+            # Recovery is a cold-start optimization. A transient daemon spawn
+            # failure must not prevent the sampler from establishing its next
+            # live token baseline.
+            return False
         return bool(response.get("changed"))
 
     def stats_agent_token_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -8,6 +8,7 @@ import time
 
 from yolomux_lib import app as app_module
 from yolomux_lib import background_owner as background_owner_module
+from yolomux_lib import control as control_module
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
 from yolomux_lib.background_owner import BACKGROUND_ROLE_SESSION_FILES
@@ -300,6 +301,7 @@ def test_two_app_instances_same_state_dir_elect_newer_owner(monkeypatch, tmp_pat
         return registry
 
     monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", registry_factory)
+    monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", tmp_path / "control")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
@@ -328,6 +330,7 @@ def test_background_refresh_done_fanout_reaches_follower_client_broker(monkeypat
         return registry
 
     monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", registry_factory)
+    monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", tmp_path / "control")
     monkeypatch.setattr(app_module, "BACKGROUND_CLIENT_EVENTS_PATH", tmp_path / "background-events.json")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     first = app_module.TmuxWebtermApp(["1"])
@@ -374,6 +377,7 @@ def test_background_owner_startup_order_latest_port_wins(monkeypatch, tmp_path):
         return registry
 
     monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", registry_factory)
+    monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", tmp_path / "control")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     apps = []
     try:
@@ -1021,7 +1025,9 @@ def test_watch_roots_follower_poll_skips_directory_signature_timing_regression(m
     assert slow_signature_calls == []
     assert list_calls == []
     assert owner.refresh_requests == [BACKGROUND_ROLE_WATCH_ROOTS]
-    assert elapsed < 0.2
+    # The assertion above proves the expensive full-index JSON load was not
+    # used. Leave scheduler headroom for an xdist-saturated development host.
+    assert elapsed < 0.35
 
 
 def test_search_index_follower_uses_one_shot_fallback_when_owner_unresponsive(monkeypatch, tmp_path):

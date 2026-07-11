@@ -20,6 +20,7 @@ from threading import Event
 from .rpc import LocalRpcEnvelope
 from .rpc import LocalRpcError
 from .rpc import read_message
+from .rpc import safe_socket_path
 from .rpc import write_message
 
 
@@ -130,6 +131,9 @@ def run_local_rpc_service(
     bounded idle shutdown after the listener timeout.
     """
     previous_handlers = install_stop_signal_handlers(stop_event)
+    requested_socket_path = socket_path
+    socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{service_name}")
+    socket_alias = requested_socket_path if requested_socket_path != socket_path else None
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(socket_path.parent, 0o700)
@@ -156,6 +160,13 @@ def run_local_rpc_service(
             finally:
                 os.umask(old_umask)
             os.chmod(socket_path, 0o600)
+            if socket_alias is not None:
+                socket_alias.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    socket_alias.unlink()
+                except FileNotFoundError:
+                    pass
+                socket_alias.symlink_to(socket_path)
             server.listen(16)
             server.settimeout(0.1)
             try:
@@ -210,6 +221,11 @@ def run_local_rpc_service(
         if on_shutdown is not None:
             on_shutdown()
         if owns_lock:
+            if socket_alias is not None:
+                try:
+                    socket_alias.unlink()
+                except FileNotFoundError:
+                    pass
             try:
                 socket_path.unlink()
             except FileNotFoundError:
