@@ -1292,7 +1292,7 @@ const TAB_TYPES = [
       relocalizeYoagentPanelChrome(panel);
     },
     className: () => 'yoagent',
-    icon: 'yoagent',
+    icon: 'robot',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1309,7 +1309,7 @@ const TAB_TYPES = [
     relocalize: (_item, panel) => relocalizeChatPanel(panel),
     focusSearch: (_item, panel) => openChatSearch(panel),
     className: () => 'chat',
-    icon: 'chat',
+    icon: 'chat-bubble',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1425,7 +1425,7 @@ const TAB_TYPES = [
       relocalizeDebugPanelChrome(panel);
     },
     className: () => 'debug-item',
-    icon: 'tab-meta',
+    icon: 'chart',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),

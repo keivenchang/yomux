@@ -10636,6 +10636,10 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
               commandCount: commands.length,
               activeCommandCount: activeCommands.length,
               firstCommand: commands[0]?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+              commands: commands.map(command => ({
+                label: command.querySelector('.app-menu-label')?.textContent?.trim() || '',
+                iconClass: command.querySelector('.app-menu-ui-icon')?.className || '',
+              })),
               errors: window.__bootErrors || [],
               rejections: window.__bootRejections || [],
             };
@@ -10686,6 +10690,20 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         assert metrics["firstCommand"], metrics
         assert metrics["errors"] == [], metrics
         assert metrics["rejections"] == [], metrics
+
+        if menu_id == "file":
+            yo_commands = [command for command in metrics["commands"] if command["label"].startswith("YO!")]
+            assert [command["label"] for command in yo_commands] == [
+                "YO!agent",
+                "YO!chat",
+                "YO!info",
+                "YO!share...",
+                "YO!stats",
+            ], metrics
+            icons = {command["label"]: command["iconClass"] for command in yo_commands}
+            assert "app-menu-ui-icon-robot" in icons["YO!agent"], metrics
+            assert "app-menu-ui-icon-chat-bubble" in icons["YO!chat"], metrics
+            assert "app-menu-ui-icon-chart" in icons["YO!stats"], metrics
 
         first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
         fast_pointer_actions(browser).move_to_element(first_command).perform()

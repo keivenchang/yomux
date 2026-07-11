@@ -44,6 +44,12 @@ test('File destinations have a single-line icon label detail presentation', () =
   assert.match(css, /\.app-menu-file-destination \.app-menu-detail\s*\{[\s\S]*text-align:\s*end/);
 });
 
+test('File navigation destinations share one localized alphabetical sort owner', () => {
+  assert.match(menus, /function compareLocalizedMenuLabels\(left, right\)[\s\S]*localeCompare/);
+  assert.match(menus, /function sortMenuCommandsByLabel\(commands\)[\s\S]*compareLocalizedMenuLabels\(left\?\.label, right\?\.label\)/);
+  assert.match(menus, /const fileDestinationCommands = sortMenuCommandsByLabel\(\[[\s\S]*fileMenuPanelCommands\(\)[\s\S]*menu\.file\.share[\s\S]*common\.preferences[\s\S]*\]\)/);
+});
+
 test('Cmd/Ctrl+B delegates the triplet transaction without terminal fallback placement', () => {
   const shortcut = terminalBoot.slice(terminalBoot.indexOf('function toggleFileExplorerShortcut()'), terminalBoot.indexOf('function handleFocusedTerminalCopyShortcut()'));
   assert.match(shortcut, /typeof toggleAllFileSurfaces === 'function'\) return toggleAllFileSurfaces\(\)/);

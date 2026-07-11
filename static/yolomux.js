@@ -1293,7 +1293,7 @@ const TAB_TYPES = [
       relocalizeYoagentPanelChrome(panel);
     },
     className: () => 'yoagent',
-    icon: 'yoagent',
+    icon: 'robot',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1310,7 +1310,7 @@ const TAB_TYPES = [
     relocalize: (_item, panel) => relocalizeChatPanel(panel),
     focusSearch: (_item, panel) => openChatSearch(panel),
     className: () => 'chat',
-    icon: 'chat',
+    icon: 'chat-bubble',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1426,7 +1426,7 @@ const TAB_TYPES = [
       relocalizeDebugPanelChrome(panel);
     },
     className: () => 'debug-item',
-    icon: 'tab-meta',
+    icon: 'chart',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -10253,7 +10253,7 @@ function keyboardLegendCatalog() {
     ]},
     {section: t('legend.section.icons'), items: [
       {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
-      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
+      {sampleHtml: appMenuUiIcon('robot'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
       {sampleHtml: appMenuUiIcon('gear'), label: t('legend.icon.gear.label'), detail: t('legend.icon.gear.detail')},
       {sampleHtml: appMenuUiIcon('tab-meta'), label: t('legend.icon.tabMetadata.label'), detail: t('legend.icon.tabMetadata.detail')},
       {sampleHtml: appMenuUiIcon('share'), label: t('legend.icon.share.label'), detail: t('legend.icon.share.detail')},
@@ -12841,6 +12841,17 @@ function menuGroups(...groups) {
   return items;
 }
 
+function compareLocalizedMenuLabels(left, right) {
+  return String(left || '').localeCompare(String(right || ''), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function sortMenuCommandsByLabel(commands) {
+  return [...commands].sort((left, right) => compareLocalizedMenuLabels(left?.label, right?.label));
+}
+
 function layoutMenuCommand(mode) {
   const normalized = normalizeLayoutMode(mode);
   const detail = normalized === 'single'
@@ -13499,10 +13510,8 @@ function inactiveTabMenuItems() {
 
 function sortTabItemsForMenu(items) {
   const unique = Array.from(new Set(items.filter(isLayoutItem)));
-  const compare = (left, right) => String(itemLabel(left)).localeCompare(String(itemLabel(right)), undefined, {
-    numeric: true,
-    sensitivity: 'base',
-  }) || String(left).localeCompare(String(right));
+  const compare = (left, right) => compareLocalizedMenuLabels(itemLabel(left), itemLabel(right))
+    || compareLocalizedMenuLabels(left, right);
   // Tabs is a navigator, not a status dashboard: tmux sessions always form the first simple,
   // naturally sorted group; every YOLOmux-owned/file tab follows in the same stable label order.
   return [
@@ -13610,30 +13619,31 @@ function appMenuTree() {
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
+  const fileDestinationCommands = sortMenuCommandsByLabel([
+    menuCommand(t('common.openFile'), openFileQuickOpen, {
+      detail: appShortcutText('P'),
+      iconHtml: appMenuUiIcon('document'),
+    }),
+    ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
+    menuCommand(t('menu.file.share'), () => showShareModal(), {
+      disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
+      detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
+      iconHtml: appMenuUiIcon('share', shareMenuActive),
+    }),
+    menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
+      checked: itemInLayout(prefsItemId),
+      detail: compactHomePath(settingsConfigPath()),
+      iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
+      targetItem: prefsItemId,
+    }),
+  ]);
   return [
     {
       id: 'file',
       label: t('menu.file'),
       items: menuGroups(
         newTmuxSessionItems(),
-        [
-          menuCommand(t('common.openFile'), openFileQuickOpen, {
-            detail: appShortcutText('P'),
-            iconHtml: appMenuUiIcon('document'),
-          }),
-          ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
-          menuCommand(t('menu.file.share'), () => showShareModal(), {
-            disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
-            detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
-            iconHtml: appMenuUiIcon('share', shareMenuActive),
-          }),
-          menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
-            checked: itemInLayout(prefsItemId),
-            detail: compactHomePath(settingsConfigPath()),
-            iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
-            targetItem: prefsItemId,
-          }),
-        ],
+        fileDestinationCommands,
         [
           menuCommand(t('menu.file.logout'), logOut, {
             detail: t('menu.file.logout.detail'),

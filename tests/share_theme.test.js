@@ -1654,7 +1654,9 @@ async function runShareThemeSuite() {
     assert.ok(api.menuTabCommand(api.finderItemId).html.includes('app-menu-ui-icon-finder'));
     assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
     assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
-    assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-yoagent'), 'YO!agent has its own tab/menu icon');
+    assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-robot'), 'YO!agent uses the shared robot icon');
+    assert.ok(api.menuTabCommand('__chat__').html.includes('app-menu-ui-icon-chat-bubble'), 'YO!chat uses the shared speech-bubble icon');
+    assert.ok(api.menuTabCommand('__debug__').html.includes('app-menu-ui-icon-chart'), 'YO!stats uses the shared chart icon');
     assert.equal(api.menuTabCommand('__changes__').html.includes('app-menu-ui-icon-changes'), false, 'retired standalone Differ no longer has a menu/tab icon');
     assert.ok(api.menuTabCommand('file:/home/test/README.md').html.includes('app-menu-ui-icon-document'));
     assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
@@ -2998,11 +3000,13 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
     assert.equal(fileMenu.items[0].primary.label, 'new Claude', 'File starts with session creation instead of putting it under Tabs');
     assert.equal(fileMenu.items[1].primary.label, 'new Codex');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 9)), ['Shell:', 'Open file', api.t('yoagent.capability.finderDifferTabber.name'), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File starts with explicit Shell choices, then Open file/triplet/Search/data/YO commands');
-    const firstYoIndex = fileMenuLabels.indexOf('YO!info');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 5)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!chat immediately after YO!stats');
-    assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
-    assert.deepStrictEqual(canonical(fileMenu.items.slice(-4).map(item => item.type === 'separator' ? '---' : item.label)), ['YO!share...', 'Preferences', '---', 'Log out']);
+    const destinationLabels = fileMenu.items
+      .slice(fileMenu.items.findIndex(item => item.type === 'separator') + 1, fileMenu.items.findLastIndex(item => item.type === 'separator'))
+      .map(item => item.label);
+    assert.deepStrictEqual(canonical(destinationLabels), [api.t('yoagent.capability.finderDifferTabber.name'), 'Open file', 'Preferences', 'Search & Runs', 'YO!agent', 'YO!chat', 'YO!info', 'YO!share...', 'YO!stats'], 'File navigation destinations are alphabetized by their localized visible labels');
+    const yoLabels = destinationLabels.filter(label => label.startsWith('YO!'));
+    assert.deepStrictEqual(canonical(yoLabels), ['YO!agent', 'YO!chat', 'YO!info', 'YO!share...', 'YO!stats'], 'File menu keeps the YO!* destinations in alphabetical order');
+    assert.deepStrictEqual(canonical(fileMenu.items.slice(-2).map(item => item.type === 'separator' ? '---' : item.label)), ['---', 'Log out'], 'Log out remains in its own final group');
     const tripletLabel = api.t('yoagent.capability.finderDifferTabber.name');
     for (const label of [tripletLabel, 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
       const item = fileMenu.items.find(candidate => candidate.label === label);
@@ -3016,6 +3020,9 @@ async function runShareThemeSuite() {
     assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
     const shareMenuItem = fileMenu.items.find(candidate => candidate.label === 'YO!share...');
     assert.equal(shareMenuItem.detail, 'sharing', 'YO!share menu row avoids target/session counts');
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!agent').iconHtml.includes('app-menu-ui-icon-robot'));
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!chat').iconHtml.includes('app-menu-ui-icon-chat-bubble'));
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!stats').iconHtml.includes('app-menu-ui-icon-chart'));
     const shareCommandItem = api.commandPaletteCommandItems().find(candidate => candidate.label === 'File / YO!share...');
     assert.equal(shareCommandItem?.keybinding, 'Ctrl+K', 'YO!share is discoverable from the command surface with the direct share shortcut');
     const shareCreateHtml = api.shareCreateFormHtmlForTest();

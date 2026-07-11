@@ -1244,8 +1244,14 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 .app-menu-ui-icon-branch-info {
   --app-menu-ui-icon: var(--icon-branch-info);
 }
-.app-menu-ui-icon-yoagent {
-  --app-menu-ui-icon: var(--icon-yoagent);
+.app-menu-ui-icon-robot {
+  --app-menu-ui-icon: var(--icon-robot);
+}
+.app-menu-ui-icon-chat-bubble {
+  --app-menu-ui-icon: var(--icon-chat-bubble);
+}
+.app-menu-ui-icon-chart {
+  --app-menu-ui-icon: var(--icon-chart);
 }
 .app-menu-ui-icon-changes {
   --app-menu-ui-icon: var(--icon-changes);
