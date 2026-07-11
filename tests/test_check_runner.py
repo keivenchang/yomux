@@ -172,13 +172,19 @@ def test_focused_pytest_lanes_keep_expected_filters():
     ]
 
 
-def test_check_runner_bounds_concurrent_pytest_pools_on_macos(monkeypatch):
+def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkeypatch):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
-    monkeypatch.setattr(check.sys, "platform", "darwin")
-    monkeypatch.setattr(check.os, "cpu_count", lambda: 14)
 
-    assert check.pytest_worker_counts() == ("6", "4", "2")
+    expected = {
+        4: ("1", "1", "1"),
+        10: ("3", "2", "2"),
+        14: ("5", "3", "2"),
+        32: ("12", "8", "4"),
+    }
+    for cores, counts in expected.items():
+        monkeypatch.setattr(check.os, "cpu_count", lambda cores=cores: cores)
+        assert check.pytest_worker_counts() == counts
 
     monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
     assert check.pytest_worker_counts() == ("5", "3", "1")

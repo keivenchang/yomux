@@ -77,7 +77,7 @@ def py_compile_files() -> list[str]:
 
 
 def pytest_worker_counts() -> tuple[str, str, str]:
-    """Return non-browser, browser, and E2E worker counts for this host."""
+    """Divide a core-derived concurrent worker budget across pytest pools."""
     override = os.environ.get("YOLOMUX_PYTEST_WORKERS", "").strip()
     if override:
         parts = [part.strip() for part in override.split(",")]
@@ -86,10 +86,16 @@ def pytest_worker_counts() -> tuple[str, str, str]:
         if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
             return parts[0], parts[1], parts[2]
         raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
-    if sys.platform == "darwin":
-        cpus = max(1, os.cpu_count() or 1)
-        return str(max(2, min(6, cpus // 2))), str(max(2, min(4, cpus // 3))), "2"
-    return "auto", "auto", "4"
+    cpus = max(1, os.cpu_count() or 1)
+    # The three pools run together, and browser workers also own Chrome
+    # processes. Reserve one quarter of the logical CPUs for Chrome, Node,
+    # service daemons, live YOLOmux servers, and the OS. Split the remaining
+    # budget 1/2 non-browser, 1/3 browser, and the remainder E2E.
+    budget = max(3, (cpus * 3) // 4)
+    nonbrowser = max(1, budget // 2)
+    browser = max(1, budget // 3)
+    e2e = max(1, budget - nonbrowser - browser)
+    return str(nonbrowser), str(browser), str(e2e)
 
 
 def lanes() -> list[Lane]:

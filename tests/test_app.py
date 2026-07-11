@@ -6062,6 +6062,9 @@ def test_activity_warmup_adopts_session_files_disk_cache_without_rebuild(monkeyp
     calls = []
 
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    # This test owns warm-cache adoption, not the separately covered stale-refresh path. Keep CPU
+    # contention from aging the just-written fixture past the production 30-second refresh window.
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_SECONDS", 60 * 60.0)
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
     monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: calls.append("info") or files_payload)
     monkeypatch.setattr(app_module.session_files, "session_files_payload", lambda *_args, **_kwargs: calls.append("payload") or {"files": [], "repos": [], "errors": []})
