@@ -2404,4 +2404,6 @@
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
   "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+,
+  "debug.graph.chart.modelTokens": "Model tokens/min"
 }

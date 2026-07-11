@@ -2105,6 +2105,35 @@ def test_stats_agent_token_delta_records_accumulate_actual_overlap_seconds():
     assert token_item["tokens"] / token_item["seconds"] * 60 == pytest.approx(600.0)
 
 
+def test_stats_agent_token_rates_sum_models_and_keep_the_parent_window_key():
+    webapp = app_module.TmuxWebtermApp([])
+    state = {}
+    measurements = [
+        {"key": "1|0|codex", "label": "1:0:codex", "tokens": 100.0, "source": "transcript", "identity": "parent-rollout", "models": {"gpt-5.5": 100.0}},
+        {"key": "1|0|codex", "label": "1:0:codex", "tokens": 160.0, "source": "transcript", "identity": "parent-rollout", "models": {"gpt-5.5": 160.0}},
+        {"key": "1|0|codex", "label": "1:0:codex", "tokens": 250.0, "source": "transcript", "identity": "parent-rollout", "models": {"gpt-5.5": 160.0, "gpt-5.4-mini": 90.0}},
+    ]
+    try:
+        assert webapp.stats_agent_token_delta_records_from_state_locked([measurements[0]], {"1|0|codex"}, 1000.0, state) == []
+        records = webapp.stats_agent_token_delta_records_from_state_locked([measurements[1]], {"1|0|codex"}, 1010.0, state)
+        records.extend(webapp.stats_agent_token_delta_records_from_state_locked([measurements[2]], {"1|0|codex"}, 1020.0, state))
+        with webapp.stats_history_service.lock:
+            for record in records:
+                webapp.stats_history_merge_record_locked(record, 1020.0, fields=app_module.STATS_HISTORY_SERVER_FIELDS, client_id=None)
+            history = webapp.stats_history_payload_locked()
+    finally:
+        webapp.control_server.stop()
+
+    item = next(item for record in history["records"] for item in record["agent_token_rates"])
+    assert item["key"] == "1|0|codex"
+    assert item["tokens"] == pytest.approx(150.0)
+    assert item["model_rates"]["gpt-5.5"]["tokens"] == pytest.approx(60.0)
+    assert item["model_rates"]["gpt-5.4-mini"]["tokens"] == pytest.approx(90.0)
+    assert sum(rate["tokens"] for rate in item["model_rates"].values()) == pytest.approx(item["tokens"])
+    snapshot = webapp.stats_history_shared_agent_state_snapshot(state)
+    assert snapshot["1|0|codex"]["models"] == {"gpt-5.5": 160.0, "gpt-5.4-mini": 90.0}
+
+
 def test_stats_agent_token_rates_ignore_visible_counter_changes(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     rows = iter([

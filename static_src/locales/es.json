@@ -2450,4 +2450,6 @@
   "yoagent.job.answer.loopSend": "Creé la tarea YO!agent `{id}` para enviar a la sesión tmux `{session}` cada {interval}s, hasta {runs} veces, tras confirmar:\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "cada {seconds}s · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "repetir envío verificado"
+,
+  "debug.graph.chart.modelTokens": "Fichas de modelo/min"
 }

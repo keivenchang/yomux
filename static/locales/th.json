@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "โทเค็นโมเดล/นาที",
   "debug.graph.clientWork": "งานลูกค้า | ภาพเคลื่อนไหว {animations} | งานยาว {tasks}{timing}",
   "debug.graph.clientWorkTiming": " เฉลี่ย {average}ms สูงสุด {max}ms",
   "debug.graph.control.bucketSize": "ขนาดถังกราฟ",

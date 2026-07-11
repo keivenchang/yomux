@@ -224,6 +224,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "Tokeny modelu za min",
   "debug.graph.clientWork": "Praca z klientem | Animacje {animations} | Długie zadania {tasks}{timing}",
   "debug.graph.clientWorkTiming": " średnia {average} ms max {max}ms",
   "debug.graph.control.bucketSize": "Rozmiar kubełka grafów",

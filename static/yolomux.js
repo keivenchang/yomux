@@ -40790,6 +40790,12 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
     value: debugGraphAgentTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
+  modelTokens: {
+    attribute: 'displayed-token-sum',
+    labelKey: 'debug.graph.sumDisplayed',
+    value: debugGraphAgentTokenDisplayedSum,
+    format: debugGraphTokenNumberText,
+  },
 });
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
@@ -40798,6 +40804,7 @@ const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'bandwidth', labelKey: 'debug.graph.metric.bandwidth', unit: 'bytesPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.bandwidthBytes), hasData: bucket => Number(bucket.bandwidthBytes || 0) > 0},
 ]);
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
+const jsDebugGraphModelTokenSeriesPrefix = 'modelToken:';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
 const jsDebugAgentStatusSeriesLabelKeys = Object.freeze({
@@ -40873,6 +40880,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'memory', labelKey: 'debug.graph.chart.memory', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
   {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
   {key: 'latency', labelKey: 'common.clientLatency', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
@@ -40950,7 +40958,9 @@ function debugGraphHiddenChartKeys() {
 }
 
 function debugGraphChartVisible(key) {
-  return !debugGraphHiddenChartKeys().has(String(key || ''));
+  const chartKey = String(key || '');
+  if (chartKey === 'modelTokens' && !jsDebugGraphVisibleCharts.has(chartKey)) return false;
+  return !debugGraphHiddenChartKeys().has(chartKey);
 }
 
 function setDebugGraphChartVisible(key, visible) {
@@ -41756,6 +41766,18 @@ function debugGraphMergeAgentTokenRates(target, source) {
     existing.samples += Number(item?.samples || 0);
     existing.tokens += Number(item?.tokens || 0);
     existing.seconds += Number(item?.seconds || 0);
+    if (!(existing.modelRates instanceof Map)) existing.modelRates = new Map();
+    const sourceModelRates = item?.modelRates instanceof Map
+      ? item.modelRates
+      : new Map(Array.isArray(item?.modelRates) ? item.modelRates : []);
+    for (const [model, sourceRate] of sourceModelRates.entries()) {
+      const targetRate = existing.modelRates.get(String(model)) || {total: 0, samples: 0, tokens: 0, seconds: 0};
+      targetRate.total += Number(sourceRate?.total || 0);
+      targetRate.samples += Number(sourceRate?.samples || 0);
+      targetRate.tokens += Number(sourceRate?.tokens || 0);
+      targetRate.seconds += Number(sourceRate?.seconds || 0);
+      existing.modelRates.set(String(model), targetRate);
+    }
     target.agentTokenRates.set(String(key), existing);
   }
 }
@@ -42180,14 +42202,32 @@ function debugGraphApplyServerAgentTokenRates(bucket, rates) {
     const seconds = Number(item.seconds || 0);
     if (!Number.isFinite(total) && !Number.isFinite(samples) && !Number.isFinite(tokens)) continue;
     const label = String(item.label || key).trim() || key;
-    const existing = bucket.agentTokenRates.get(key) || {label, total: 0, samples: 0, tokens: 0, seconds: 0};
+    const existing = bucket.agentTokenRates.get(key) || {label, total: 0, samples: 0, tokens: 0, seconds: 0, modelRates: new Map()};
     existing.label = label;
     if (Number.isFinite(total)) existing.total = Math.max(Number(existing.total || 0), Math.max(0, total));
     if (Number.isFinite(samples)) existing.samples = Math.max(Number(existing.samples || 0), Math.max(0, samples));
     if (Number.isFinite(tokens)) existing.tokens = Math.max(Number(existing.tokens || 0), Math.max(0, tokens));
     if (Number.isFinite(seconds)) existing.seconds = Math.max(Number(existing.seconds || 0), Math.max(0, seconds));
+    if (!(existing.modelRates instanceof Map)) existing.modelRates = new Map();
+    const modelRates = item.model_rates && typeof item.model_rates === 'object' && !Array.isArray(item.model_rates)
+      ? Object.entries(item.model_rates)
+      : [];
+    for (const [rawModel, rawRate] of modelRates) {
+      if (!rawRate || typeof rawRate !== 'object') continue;
+      const model = String(rawModel || 'unknown').trim() || 'unknown';
+      const current = existing.modelRates.get(model) || {total: 0, samples: 0, tokens: 0, seconds: 0};
+      const modelTotal = Number(rawRate.total ?? rawRate.rate ?? rawRate.value);
+      const modelSamples = Number(rawRate.samples || 0);
+      const modelTokens = Number(rawRate.tokens || 0);
+      const modelSeconds = Number(rawRate.seconds || 0);
+      if (Number.isFinite(modelTotal)) current.total = Math.max(Number(current.total || 0), Math.max(0, modelTotal));
+      if (Number.isFinite(modelSamples)) current.samples = Math.max(Number(current.samples || 0), Math.max(0, modelSamples));
+      if (Number.isFinite(modelTokens)) current.tokens = Math.max(Number(current.tokens || 0), Math.max(0, modelTokens));
+      if (Number.isFinite(modelSeconds)) current.seconds = Math.max(Number(current.seconds || 0), Math.max(0, modelSeconds));
+      existing.modelRates.set(model, current);
+    }
     bucket.agentTokenRates.set(key, existing);
-  }
+}
 }
 
 function debugGraphRemoveCoarserServerBuckets(startSeconds, endSeconds, resolutionSeconds) {
@@ -42757,39 +42797,77 @@ function debugGraphHistoryOverlayHtml(state = jsDebugHistoryReadiness) {
   return `<div class="js-debug-history-overlay" data-js-debug-history-overlay aria-live="polite" aria-atomic="true"${hidden}>${debugGraphHistoryOverlayContentHtml(state)}</div>`;
 }
 
-function debugGraphAgentTokenSeriesDefs(buckets) {
-  const tokenAgents = new Map();
+function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
+  const tokenItems = new Map();
   for (const bucket of buckets) {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
     for (const [key, item] of bucket.agentTokenRates.entries()) {
-      const existing = tokenAgents.get(String(key)) || {label: item?.label || String(key), samples: 0};
-      existing.label = item?.label || existing.label;
-      existing.samples += Number(item?.samples || 0);
-      tokenAgents.set(String(key), existing);
+      if (dimension === 'agent') {
+        const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
+        existing.label = item?.label || existing.label;
+        existing.samples += Number(item?.samples || 0);
+        tokenItems.set(String(key), existing);
+        continue;
+      }
+      if (!(item?.modelRates instanceof Map)) continue;
+      for (const [model, rate] of item.modelRates.entries()) {
+        const modelKey = String(model || 'unknown').trim() || 'unknown';
+        const existing = tokenItems.get(modelKey) || {label: modelKey, samples: 0};
+        existing.samples += Number(rate?.samples || 0);
+        tokenItems.set(modelKey, existing);
+      }
     }
   }
-  const agentSeries = [...tokenAgents.entries()]
+  const prefix = dimension === 'agent' ? jsDebugGraphAgentTokenSeriesPrefix : jsDebugGraphModelTokenSeriesPrefix;
+  return [...tokenItems.entries()]
     .filter(([, item]) => item.samples > 0)
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
     .map(([key, item], index) => ({
-      key: `${jsDebugGraphAgentTokenSeriesPrefix}${key}`,
+      key: `${prefix}${key}`,
       label: item.label,
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
-      agentTokenSeries: true,
+      agentTokenSeries: dimension === 'agent',
       agentTokenKey: key,
+      tokenDimension: dimension,
       agentTokenPatternIndex: index % jsDebugGraphAgentTokenPatternCount,
       color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
       value: bucket => {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-        return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
+        if (dimension === 'agent') return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
+        let rate = null;
+        if (bucket?.agentTokenRates instanceof Map) {
+          for (const agentRate of bucket.agentTokenRates.values()) {
+            const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
+            if (!modelRate) continue;
+            if (!rate) rate = {total: 0, samples: 0, tokens: 0, seconds: 0};
+            rate.total += Number(modelRate.total || 0);
+            rate.samples += Number(modelRate.samples || 0);
+            rate.tokens += Number(modelRate.tokens || 0);
+            rate.seconds += Number(modelRate.seconds || 0);
+          }
+        }
+        return rate ? debugGraphAgentTokenBucketValue(bucket, rate) : 0;
       },
       hasData: bucket => {
-        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-        return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+        if (dimension === 'agent') {
+          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+          return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+        }
+        return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
+          const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
+          return Number(modelRate?.samples || 0) > 0 || Number(modelRate?.tokens || 0) > 0;
+        });
       },
     }));
-  return agentSeries;
+}
+
+function debugGraphAgentTokenSeriesDefs(buckets) {
+  return debugGraphTokenSeriesDefs(buckets, 'agent');
+}
+
+function debugGraphModelTokenSeriesDefs(buckets) {
+  return debugGraphTokenSeriesDefs(buckets, 'model');
 }
 
 function debugGraphClientMetricSeriesDefs(buckets) {
@@ -42904,7 +42982,7 @@ function debugGraphHostMetricSeriesDefs(buckets) {
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const values = buckets.map(bucket => def.value(bucket));
@@ -43477,6 +43555,7 @@ function debugGraphXAxisHtml(domain) {
 
 function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
+  if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
     if (group.hostMetric === 'cpu') {
@@ -43560,7 +43639,7 @@ function debugGraphChartCapacityMax(group, buckets) {
 }
 
 function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now()) {
-  if (group?.key === 'agentTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
+  if (group?.key === 'agentTokens' || group?.key === 'modelTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
     return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
@@ -43622,7 +43701,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const max = debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
   const chartClasses = ['js-debug-chart'];
-  if (group.dynamicAgentTokens === true) chartClasses.push('js-debug-chart--token-agents');
+  if (group.dynamicAgentTokens === true || group.dynamicTokenDimension) chartClasses.push('js-debug-chart--token-agents');
   const bucketSeconds = Number(group.bucketSeconds);
   const bucketAttr = Number.isFinite(bucketSeconds) && bucketSeconds > 0 ? ` data-js-debug-chart-bucket-seconds="${esc(bucketSeconds)}"` : '';
   const displayedSummary = debugGraphDisplayedSummary(group, buckets);
@@ -44363,13 +44442,13 @@ function debugGraphSetHoverLegendItems(chart, timestamp) {
   const key = String(chart?.dataset?.jsDebugChart || '');
   const data = jsDebugGraphHoverChartData.get(key);
   const items = chart?.querySelectorAll?.('[data-js-debug-legend]') || [];
-  if (!data || data.group.dynamicAgentTokens !== true) {
+  if (!data || (data.group.dynamicAgentTokens !== true && !data.group.dynamicTokenDimension)) {
     items.forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
     return;
   }
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   const activeKeys = new Set(index < 0 ? [] : data.groupSeries
-    .filter(series => series.agentTokenSeries === true)
+    .filter(series => series.agentTokenSeries === true && (!data.group.dynamicTokenDimension || series.tokenDimension === data.group.dynamicTokenDimension))
     .filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true)
     .map(series => series.key));
   items.forEach(item => item.classList.toggle('js-debug-legend-item--hovered', activeKeys.has(String(item.dataset.jsDebugLegend || ''))));

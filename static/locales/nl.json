@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "Modeltokens/min",
   "debug.graph.clientWork": "Klantwerk | animaties {animations} | Lange taken {tasks}{timing}",
   "debug.graph.clientWorkTiming": " gem. {average} ms, max. {max} ms",
   "debug.graph.control.bucketSize": "Grootte van de graafbak",

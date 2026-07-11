@@ -53,6 +53,27 @@ def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
     assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
 
 
+def test_codex_transcript_family_paths_includes_spawned_descendants_only(tmp_path):
+    def rollout(name, thread_id, parent_thread_id=""):
+        path = tmp_path / f"rollout-{name}.jsonl"
+        payload = {"id": thread_id}
+        if parent_thread_id:
+            payload["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+        path.write_text(json.dumps({"type": "session_meta", "payload": payload}) + "\n", encoding="utf-8")
+        return path
+
+    parent = rollout("parent", "parent")
+    child = rollout("child", "child", "parent")
+    grandchild = rollout("grandchild", "grandchild", "child")
+    unrelated = rollout("unrelated", "unrelated", "other")
+
+    assert sessions.codex_transcript_family_paths(parent, [unrelated, child, grandchild]) == [parent, child, grandchild]
+
+    missing_meta = tmp_path / "rollout-no-meta.jsonl"
+    missing_meta.write_text('{"type":"event"}\n', encoding="utf-8")
+    assert sessions.codex_transcript_family_paths(missing_meta, [child]) == [missing_meta]
+
+
 def test_find_recent_codex_transcript_keeps_structured_tail_fallback(tmp_path):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"

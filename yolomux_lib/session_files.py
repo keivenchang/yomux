@@ -42,6 +42,7 @@ from .filesystem.git_ops import refs_requested
 from .locales import message_descriptor
 from .locales import user_message_payload
 from .sessions import claude_transcript_family_paths
+from .sessions import codex_transcript_family_paths
 from .sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
 from .sessions import find_recent_codex_transcript
 from .sessions import recent_codex_transcript_candidates
@@ -66,8 +67,8 @@ _TRANSCRIPT_SCAN_CACHE_MAX = CODEX_TRANSCRIPT_SCAN_LIMIT * 2
 _TRANSCRIPT_SCAN_PREFIX_BYTES = 64 * 1024
 _TRANSCRIPT_SCAN_TAIL_BYTES = 512
 _TRANSCRIPT_REVERSE_SCAN_BYTES = 64 * 1024
-_CODEX_TRANSCRIPT_SCAN_VERSION = 5
-_CLAUDE_TRANSCRIPT_SCAN_VERSION = 4
+_CODEX_TRANSCRIPT_SCAN_VERSION = 7
+_CLAUDE_TRANSCRIPT_SCAN_VERSION = 5
 _TRANSCRIPT_SCAN_STORE_VERSION = 2
 _TRANSCRIPT_SCAN_STORE_MAX_BYTES = 64 * 1024 * 1024
 _TRANSCRIPT_SCAN_STORE_PRUNE_SECONDS = 60.0
@@ -93,6 +94,7 @@ class TranscriptUsageEvent:
     source: str
     timestamp: float
     tokens: float
+    model: str = ""
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,8 @@ def new_codex_transcript_scan_state() -> dict[str, Any]:
         "shell_changes": {},
         "last_token_total": None,
         "summed_last_generated_tokens": 0.0,
+        "generated_tokens_by_model": {},
+        "model": "",
         "parsed_tail": b"",
         "prefix_digest": "",
     }
@@ -245,6 +249,8 @@ def new_claude_transcript_scan_state() -> dict[str, Any]:
         "raw_changes": {},
         "generated_tokens": 0.0,
         "usage_tokens_by_message_id": {},
+        "generated_tokens_by_model": {},
+        "model": "",
         "parsed_tail": b"",
         "prefix_digest": "",
     }
@@ -293,6 +299,8 @@ def transcript_scan_state_payload(cache_key: tuple[Any, ...], state: dict[str, A
             "raw_changes": serialized_transcript_marker_map(state.get("raw_changes")),
             "generated_tokens": positive_finite_number(state.get("generated_tokens")),
             "usage_tokens_by_message_id": {str(key): positive_finite_number(value) for key, value in bounded_tokens},
+            "generated_tokens_by_model": transcript_usage_models(state.get("generated_tokens_by_model")),
+            "model": transcript_model_name(state.get("model")),
         })
     elif provider == "codex":
         payload.update({
@@ -300,6 +308,8 @@ def transcript_scan_state_payload(cache_key: tuple[Any, ...], state: dict[str, A
             "shell_changes": serialized_transcript_marker_map(state.get("shell_changes")),
             "last_token_total": positive_finite_number(state.get("last_token_total")) if state.get("last_token_total") is not None else None,
             "summed_last_generated_tokens": positive_finite_number(state.get("summed_last_generated_tokens")),
+            "generated_tokens_by_model": transcript_usage_models(state.get("generated_tokens_by_model")),
+            "model": transcript_model_name(state.get("model")),
         })
     return payload
 
@@ -325,11 +335,15 @@ def transcript_scan_state_from_payload(cache_key: tuple[Any, ...], payload: Any,
                 str(key): positive_finite_number(value)
                 for key, value in list(tokens_by_id.items())[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:]
             }
+        state["generated_tokens_by_model"] = transcript_usage_models(payload.get("generated_tokens_by_model"))
+        state["model"] = transcript_model_name(payload.get("model"))
     elif provider == "codex":
         state["patch_changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("patch_changes")).items()}
         state["shell_changes"] = {path: set(markers) for path, markers in serialized_transcript_marker_map(payload.get("shell_changes")).items()}
         state["last_token_total"] = positive_finite_number(payload.get("last_token_total")) if payload.get("last_token_total") is not None else None
         state["summed_last_generated_tokens"] = positive_finite_number(payload.get("summed_last_generated_tokens"))
+        state["generated_tokens_by_model"] = transcript_usage_models(payload.get("generated_tokens_by_model"))
+        state["model"] = transcript_model_name(payload.get("model"))
     return state
 
 
@@ -546,6 +560,9 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
     message = record.get("message")
     if not isinstance(message, dict):
         return
+    model = transcript_model_key(message.get("model"))
+    if model:
+        state["model"] = model
     generated_tokens = claude_usage_generated_tokens(message.get("usage"))
     message_id = str(message.get("id") or "").strip()
     if message_id:
@@ -555,12 +572,15 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
             state["usage_tokens_by_message_id"] = tokens_by_message_id
         previous_tokens = positive_finite_number(tokens_by_message_id.get(message_id))
         if generated_tokens > previous_tokens:
-            state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + generated_tokens - previous_tokens
+            token_delta = generated_tokens - previous_tokens
+            state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + token_delta
+            transcript_add_model_tokens(state, model, token_delta)
             tokens_by_message_id[message_id] = generated_tokens
             while len(tokens_by_message_id) > _TRANSCRIPT_SCAN_MESSAGE_ID_MAX:
                 tokens_by_message_id.pop(next(iter(tokens_by_message_id)))
     elif generated_tokens:
         state["generated_tokens"] = float(state.get("generated_tokens") or 0.0) + generated_tokens
+        transcript_add_model_tokens(state, model, generated_tokens)
     raw_changes = state.get("raw_changes")
     if not isinstance(raw_changes, dict):
         raw_changes = {}
@@ -586,7 +606,11 @@ def claude_transcript_scan_state_details(state: dict[str, Any], cwd: str | None)
             resolved = resolved_change_path(str(raw_path), cwd)
             if resolved is not None and isinstance(markers, set):
                 changes.setdefault(str(resolved), set()).update(markers)
-    return transcript_scan_details(changes, positive_finite_number(state.get("generated_tokens") if isinstance(state, dict) else 0.0))
+    return transcript_scan_details(
+        changes,
+        positive_finite_number(state.get("generated_tokens") if isinstance(state, dict) else 0.0),
+        transcript_usage_models(state.get("generated_tokens_by_model") if isinstance(state, dict) else {}),
+    )
 
 
 def update_codex_transcript_scan_state(state: dict[str, Any], line: str, _cwd: str | None = None, _include_patch_text: bool = True, _include_usage: bool = True) -> None:
@@ -599,6 +623,16 @@ def update_codex_transcript_scan_state(state: dict[str, Any], line: str, _cwd: s
         resolved = resolved_change_path(raw_path, _CODEX_RELATIVE_CWD_SENTINEL)
         if resolved is not None:
             patch_changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+    has_model_context = '"turn_context"' in line and '"model"' in line
+    if has_model_context:
+        try:
+            context_record = json.loads(line)
+        except json.JSONDecodeError:
+            context_record = None
+        payload = context_record.get("payload") if isinstance(context_record, dict) else None
+        model = transcript_model_key(payload.get("model") if isinstance(payload, dict) else "")
+        if model:
+            state["model"] = model
     has_usage = '"total_token_usage"' in line or '"last_token_usage"' in line
     has_shell_call = (
         ('"function_call"' in line or '"custom_tool_call"' in line)
@@ -619,9 +653,14 @@ def update_codex_transcript_scan_state(state: dict[str, Any], line: str, _cwd: s
     else:
         total_generated, last_generated = codex_record_usage_generated_tokens(record)
     if total_generated is not None:
+        previous_total = state.get("last_token_total")
+        previous_number = positive_finite_number(previous_total) if previous_total is not None else 0.0
+        token_delta = total_generated if previous_total is None or total_generated < previous_number else total_generated - previous_number
         state["last_token_total"] = total_generated
+        transcript_add_model_tokens(state, transcript_model_key(state.get("model")), token_delta)
     elif last_generated is not None:
         state["summed_last_generated_tokens"] = float(state.get("summed_last_generated_tokens") or 0.0) + last_generated
+        transcript_add_model_tokens(state, transcript_model_key(state.get("model")), last_generated)
     if not has_git_change:
         return
     shell_changes = state.get("shell_changes")
@@ -672,25 +711,68 @@ def codex_transcript_scan_state_details(state: dict[str, Any], cwd: str | None =
     last_token_total = state.get("last_token_total") if isinstance(state, dict) else None
     summed_last_generated_tokens = float(state.get("summed_last_generated_tokens") or 0.0) if isinstance(state, dict) else 0.0
     generated_tokens = (positive_finite_number(last_token_total) if last_token_total is not None else summed_last_generated_tokens) if include_usage else 0.0
-    return transcript_scan_details(changes if isinstance(changes, dict) else {}, generated_tokens)
+    return transcript_scan_details(
+        changes if isinstance(changes, dict) else {},
+        generated_tokens,
+        transcript_usage_models(state.get("generated_tokens_by_model") if isinstance(state, dict) else {}),
+    )
 
 
 def copy_change_set(changes: dict[str, set[str]]) -> dict[str, set[str]]:
     return {path_text: set(markers) for path_text, markers in changes.items()}
 
 
-def transcript_scan_details(changes: dict[str, set[str]], generated_tokens: float = 0.0) -> dict[str, Any]:
+def transcript_scan_details(
+    changes: dict[str, set[str]],
+    generated_tokens: float = 0.0,
+    generated_tokens_by_model: dict[str, float] | None = None,
+) -> dict[str, Any]:
     return {
         "changes": copy_change_set(changes),
-        "usage": {"generated_tokens": max(0.0, float(generated_tokens or 0.0))},
+        "usage": {
+            "generated_tokens": max(0.0, float(generated_tokens or 0.0)),
+            "generated_tokens_by_model": transcript_usage_models(generated_tokens_by_model),
+        },
     }
+
+
+def transcript_model_name(value: Any) -> str:
+    """Keep only a bounded, machine-provided model identifier; never infer one from prose."""
+
+    return str(value or "").strip()[:256]
+
+
+def transcript_model_key(value: Any) -> str:
+    return transcript_model_name(value) or "unknown"
+
+
+def transcript_usage_models(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        transcript_model_key(model): positive_finite_number(tokens)
+        for model, tokens in value.items()
+        if positive_finite_number(tokens) > 0
+    }
+
+
+def transcript_add_model_tokens(state: dict[str, Any], model: str, tokens: float) -> None:
+    if tokens <= 0:
+        return
+    models = state.get("generated_tokens_by_model")
+    if not isinstance(models, dict):
+        models = {}
+        state["generated_tokens_by_model"] = models
+    key = transcript_model_key(model)
+    models[key] = positive_finite_number(models.get(key)) + tokens
 
 
 def copy_transcript_scan_details(details: dict[str, Any]) -> dict[str, Any]:
     changes = details.get("changes") if isinstance(details, dict) else {}
     usage = details.get("usage") if isinstance(details, dict) else {}
     generated_tokens = usage.get("generated_tokens") if isinstance(usage, dict) else 0.0
-    return transcript_scan_details(changes if isinstance(changes, dict) else {}, positive_finite_number(generated_tokens))
+    models = usage.get("generated_tokens_by_model") if isinstance(usage, dict) else {}
+    return transcript_scan_details(changes if isinstance(changes, dict) else {}, positive_finite_number(generated_tokens), transcript_usage_models(models))
 
 
 def generated_usage_tokens(usage: Any) -> float:
@@ -796,11 +878,14 @@ def transcript_generated_tokens(path: Path, kind: str, cwd: str | None = None) -
             for transcript_path in claude_transcript_family_paths(path)
         )
     elif agent_kind == "codex":
-        generated_tokens = latest_codex_total_generated_tokens(path)
-        if generated_tokens is None:
-            details = scan_codex_transcript_details(path, cwd)
-            usage = details.get("usage") if isinstance(details, dict) else {}
-            generated_tokens = positive_finite_number(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
+        generated_tokens = 0.0
+        for transcript_path in codex_transcript_family_paths(path):
+            total = latest_codex_total_generated_tokens(transcript_path)
+            if total is None:
+                details = scan_codex_transcript_details(transcript_path, cwd)
+                usage = details.get("usage") if isinstance(details, dict) else {}
+                total = positive_finite_number(usage.get("generated_tokens") if isinstance(usage, dict) else 0.0)
+            generated_tokens += total or 0.0
     else:
         return None
     return generated_tokens if generated_tokens > 0 else None
@@ -857,34 +942,39 @@ def claude_transcript_generated_token_events(path: Path) -> list[TranscriptUsage
             tokens_by_message_id[message_id] = max(previous, tokens)
             tokens -= previous
         if tokens > 0:
-            events.append(TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=tokens))
+            events.append(TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=tokens, model=transcript_model_name(message.get("model"))))
     return events
 
 
 def codex_transcript_generated_token_events(path: Path) -> list[TranscriptUsageEvent]:
     source = str(path.expanduser().resolve(strict=False))
-    usage_records: list[tuple[float, float | None, float | None]] = []
+    usage_records: list[tuple[float, float | None, float | None, str]] = []
+    current_model = ""
     for record in transcript_json_records(path):
+        if record.get("type") == "turn_context":
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                current_model = transcript_model_name(payload.get("model")) or current_model
         timestamp = transcript_record_timestamp(record)
         if timestamp is None:
             continue
         total_generated, last_generated = codex_record_usage_generated_tokens(record)
         if total_generated is not None or last_generated is not None:
-            usage_records.append((timestamp, total_generated, last_generated))
-    if any(total is not None for _timestamp, total, _last in usage_records):
+            usage_records.append((timestamp, total_generated, last_generated, current_model))
+    if any(total is not None for _timestamp, total, _last, _model in usage_records):
         previous_total: float | None = None
         events: list[TranscriptUsageEvent] = []
-        for timestamp, total, _last in usage_records:
+        for timestamp, total, _last, model in usage_records:
             if total is None:
                 continue
             tokens = total if previous_total is None else total - previous_total
             previous_total = total
             if tokens > 0:
-                events.append(TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=tokens))
+                events.append(TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=tokens, model=model))
         return events
     return [
-        TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=last)
-        for timestamp, _total, last in usage_records
+        TranscriptUsageEvent(source=source, timestamp=timestamp, tokens=last, model=model)
+        for timestamp, _total, last, model in usage_records
         if last is not None and last > 0
     ]
 
@@ -898,10 +988,38 @@ def transcript_generated_token_events(path: Path, kind: str) -> list[TranscriptU
             for event in claude_transcript_generated_token_events(transcript_path)
         ]
     elif agent_kind == "codex":
-        events = codex_transcript_generated_token_events(path)
+        events = [
+            event
+            for transcript_path in codex_transcript_family_paths(path)
+            for event in codex_transcript_generated_token_events(transcript_path)
+        ]
     else:
         return []
     return sorted(events, key=lambda event: (event.source, event.timestamp))
+
+
+def transcript_generated_tokens_by_model(path: Path, kind: str, cwd: str | None = None) -> dict[str, float]:
+    """Return generated transcript tokens by exact provider-supplied model identifier."""
+
+    agent_kind = str(kind or "").strip().lower()
+    if agent_kind == "claude":
+        paths = claude_transcript_family_paths(path)
+    elif agent_kind == "codex":
+        paths = codex_transcript_family_paths(path)
+    else:
+        return {}
+    totals: dict[str, float] = {}
+    for transcript_path in paths:
+        details = (
+            scan_claude_transcript_details(transcript_path, cwd)
+            if agent_kind == "claude"
+            else scan_codex_transcript_details(transcript_path, cwd, include_patch_text=False, include_usage=True)
+        )
+        usage = details.get("usage") if isinstance(details, dict) else {}
+        models = usage.get("generated_tokens_by_model") if isinstance(usage, dict) else {}
+        for model, tokens in transcript_usage_models(models).items():
+            totals[model] = totals.get(model, 0.0) + tokens
+    return totals
 
 
 def codex_line_may_contain_git_change(line: str) -> bool:

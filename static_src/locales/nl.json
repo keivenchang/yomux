@@ -2404,4 +2404,6 @@
   "yoagent.job.answer.loopSend": "YO!agent-taak `{id}` gemaakt om na bevestiging maximaal {runs} keer elke {interval}s naar tmux-sessie `{session}` te sturen:\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "elke {seconds}s · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "geverifieerde verzending herhalen"
+,
+  "debug.graph.chart.modelTokens": "Modeltokens/min"
 }

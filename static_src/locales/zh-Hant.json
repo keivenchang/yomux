@@ -2404,4 +2404,6 @@
   "yoagent.job.answer.loopSend": "已建立優!助手工作 `{id}`：確認後每隔 {interval} 秒傳送到 tmux 工作階段 `{session}`，最多 {runs} 次：\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "每 {seconds} 秒 · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "重複已驗證的傳送"
+,
+  "debug.graph.chart.modelTokens": "模型權杖/分鐘"
 }

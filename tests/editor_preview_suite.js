@@ -3450,6 +3450,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       memory: 'System memory',
       activity: 'Agent status',
       agentTokens: 'Agent tokens/min',
+      modelTokens: 'Model tokens/min',
       gpuUtil: 'GPU utilization',
       gpuMemory: 'GPU memory',
       latency: 'Client latency',
@@ -4452,9 +4453,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         tokens_per_agent_total: 70,
         agent_token_samples: 1,
         agent_token_rates: [
-          {key: '1|0|claude', label: '1:0:claude', total: 60, samples: 1, tokens: 60, seconds: 60, source: 'transcript'},
-          {key: '1|1|codex', label: '1:1:codex', total: 30, samples: 1, tokens: 30, seconds: 60, source: 'transcript'},
-          {key: '2|0|codex', label: '2:0:codex', total: 120, samples: 1, tokens: 120, seconds: 60, source: 'transcript'},
+          {key: '1|0|claude', label: '1:0:claude', total: 60, samples: 1, tokens: 60, seconds: 60, source: 'transcript', model_rates: {'claude-sonnet-4.7': {total: 60, samples: 1, tokens: 60, seconds: 60}}},
+          {key: '1|1|codex', label: '1:1:codex', total: 30, samples: 1, tokens: 30, seconds: 60, source: 'transcript', model_rates: {'gpt-5.5': {total: 30, samples: 1, tokens: 30, seconds: 60}}},
+          {key: '2|0|codex', label: '2:0:codex', total: 120, samples: 1, tokens: 120, seconds: 60, source: 'transcript', model_rates: {'gpt-5.5': {total: 60, samples: 1, tokens: 60, seconds: 60}, 'gpt-5.4-mini': {total: 60, samples: 1, tokens: 60, seconds: 60}}},
         ],
       }],
     });
@@ -4467,6 +4468,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
     assert.ok(/data-js-debug-chart="activity"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="10"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'Agent status uses stacked ten-second bars');
     assert.ok(html.includes('data-js-debug-chart="agentTokens"') && html.includes('Agent tokens/min'), 'YO!stats renders the optional agent token-rate chart');
+    assert.ok(html.includes('data-js-debug-chart-toggle="modelTokens"') && html.includes('>Model tokens<'), 'YO!stats exposes the model token-rate chart without making the default graph stack taller');
     assert.ok(/data-js-debug-displayed-token-sum="210"[^>]*>\(210, Σ displayed\)<\/span>/.test(html), 'Agent tokens/min header sums the exact token deltas in displayed buckets');
     assert.ok(/class="js-debug-chart js-debug-chart--token-agents" data-js-debug-chart="agentTokens"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="60"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'agent token chart is marked as stacked one-minute bars');
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
@@ -4533,8 +4535,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok((html.match(/data-js-debug-token-agent="/g) || []).length >= 3, 'YO!stats renders per-agent generated-token series');
     assert.equal(agentTokenChartHtml.includes('data-js-debug-area-series="agentToken:'), false, 'agent token chart no longer renders token areas');
     assert.ok(agentTokenChartHtml.includes('js-debug-bar--agentToken') && agentTokenChartHtml.includes('data-js-debug-bar-stacked="agentToken:'), 'agent token bars are stacked by agent');
-    const tokenSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.agentTokenSeries === true);
+    const tokenSeries = api.debugGraphTokenSeriesDataForTest(now).filter(series => series.tokenDimension === 'agent');
     assert.deepStrictEqual([...tokenSeries.map(series => series.agentTokenPatternIndex)], [0, 1, 2], 'agent token series receive stable palette-aligned infill patterns');
+    const modelTokenSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.tokenDimension === 'model');
+    assert.deepStrictEqual([...modelTokenSeries.map(series => series.label)], ['claude-sonnet-4.7', 'gpt-5.4-mini', 'gpt-5.5'], 'model token chart groups the exact transcript model identifiers');
+    assert.equal(modelTokenSeries.find(series => series.label === 'gpt-5.5').values.at(-1), 45, 'model chart sums matching model records across parent windows without duplicating them');
     assert.equal((agentTokenChartHtml.match(/data-js-debug-token-pattern-def="/g) || []).length, 3, 'agent token chart emits one SVG infill definition per agent');
     for (const patternIndex of [0, 1, 2]) {
       assert.ok(agentTokenChartHtml.includes(`data-js-debug-token-pattern="${patternIndex}"`), `agent token bars and legend expose infill pattern ${patternIndex}`);

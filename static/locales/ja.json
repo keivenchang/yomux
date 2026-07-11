@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "モデルトークン/分",
   "debug.graph.clientWork": "クライアントワーク |アニメーション {animations} |長いタスク {tasks}{timing}",
   "debug.graph.clientWorkTiming": " 平均 {average}ms 最大 {max}ms",
   "debug.graph.control.bucketSize": "グラフバケットサイズ",

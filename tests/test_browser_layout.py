@@ -2318,7 +2318,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     assert metrics["memoryShown"] is True, metrics
     assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
     assert metrics["layoutLabel"] == "Size:", metrics
-    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
+    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
     assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["saved"] == {
         "subTab": "events",

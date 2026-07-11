@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "모델 토큰/분",
   "debug.graph.clientWork": "클라이언트 작업 | 애니메이션 {animations} | 긴 작업 {tasks}{timing}",
   "debug.graph.clientWorkTiming": " 평균 {average}ms 최대 {max}ms",
   "debug.graph.control.bucketSize": "그래프 버킷 크기",

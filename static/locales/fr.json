@@ -218,6 +218,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "Jetons de modèle/min",
   "debug.graph.clientWork": "Travail client | animations {animations} | tâches longues {tasks}{timing}",
   "debug.graph.clientWorkTiming": " moyenne {average}ms max {max}ms",
   "debug.graph.control.bucketSize": "Taille du bucket graphique",

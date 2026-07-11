@@ -212,6 +212,7 @@
   "debug.graph.chart.gpuMemory": "GPU memory",
   "debug.graph.chart.gpuUtil": "GPU utilization",
   "debug.graph.chart.memory": "System memory",
+  "debug.graph.chart.modelTokens": "Model tokenları/min",
   "debug.graph.clientWork": "Müşteri çalışmaları | animasyonlar {animations} | uzun görevler {tasks}{timing}",
   "debug.graph.clientWorkTiming": " ort. {average} ms, maks. {max} ms",
   "debug.graph.control.bucketSize": "Grafik kovası boyutu",

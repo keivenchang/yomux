@@ -2450,4 +2450,6 @@
   "yoagent.job.answer.loopSend": "נוצרה משימת YO!agent `{id}` לשליחה להפעלת tmux `{session}` כל {interval}ש׳, עד {runs} פעמים, לאחר אישור:\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "כל {seconds}ש׳ · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "חזור על שליחה מאומתת"
+,
+  "debug.graph.chart.modelTokens": "אסימוני מודל/דקה"
 }

@@ -2404,4 +2404,6 @@
   "yoagent.job.answer.loopSend": "Onaydan sonra tmux oturumu `{session}` içine her {interval}s'de bir, en fazla {runs} kez göndermek için YO!agent işi `{id}` oluşturuldu:\n\n```text\n{text}\n```",
   "yoagent.jobs.every": "her {seconds}s · {count}/{runs}",
   "yoagent.jobs.type.loopSend": "doğrulanmış göndermeyi tekrarla"
+,
+  "debug.graph.chart.modelTokens": "Model tokenları/min"
 }
