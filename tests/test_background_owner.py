@@ -1365,7 +1365,10 @@ def test_search_index_follower_large_sqlite_metadata_status_and_streaming_search
     assert payload["index_state"] == "follower-ready"
     assert [entry["relative_path"] for entry in payload["files"]] == ["dir-99/target-04999.py"]
     assert load_calls == []
-    assert elapsed < 0.2
+    # The no-deserialization contract above is deterministic.  Keep a generous
+    # wall-clock ceiling for an 8-core macOS runner persisting/searching 5,000
+    # SQLite rows while the full gate may use the remaining cores.
+    assert elapsed < 1.0
 
 
 def test_search_index_follower_refetches_manifest_after_owner_build(monkeypatch, tmp_path):

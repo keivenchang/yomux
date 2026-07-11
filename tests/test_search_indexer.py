@@ -58,7 +58,7 @@ def test_losing_indexer_does_not_unlink_the_owners_socket(tmp_path):
     assert client.healthy() is True
     contender = search_indexer.PersistentSearchIndexer(socket_path)
     assert contender.run() == 0
-    assert socket_path.exists() is True
+    assert owner.socket_path.exists() is True
     assert client.request({"action": "status"})["ok"] is True
 
     assert client.request({"action": "shutdown"}) == {"ok": True}
