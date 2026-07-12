@@ -433,7 +433,7 @@ body.editor-theme-light .file-editor-image-panel {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--panel);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
+  box-shadow: var(--app-modal-dialog-shadow);
   color: var(--text);
 }
 .file-editor-dialog-title {

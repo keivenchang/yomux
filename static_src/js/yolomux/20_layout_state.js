@@ -1343,7 +1343,10 @@ function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
 function normalizeLayoutSlotsForViewport(value, options = {}) {
   const singleColumn = narrowSingleColumnMode();
   const sideConstrained = sidePaneConstrainedMode();
-  let source = (singleColumn || sideConstrained)
+  // Side-pane capacity controls the special narrow Finder/Differ/Tabber role, not whether the
+  // viewport can hold ordinary Generic Pane splits. A portrait tablet can fit two generic panes
+  // even when it cannot reserve the Side Pane's capped one-third column.
+  let source = singleColumn
     ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
   if (!sideConstrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {

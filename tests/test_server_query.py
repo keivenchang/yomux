@@ -861,6 +861,8 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "chat", "filesystem", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert route_by_path("GET", "/api/stats-sample").handler is http_routes.get_stats_sample
+    assert route_by_path("GET", "/api/system-status").handler is http_routes.get_system_status
+    assert route_by_path("GET", "/api/system-status").role == "readonly"
     assert route_by_path("GET", "/pane-popout").handler is http_routes.get_pane_popout
     assert route_by_path("POST", "/api/stats-history").role == "readonly"
     assert route_by_path("POST", "/api/stats-history").body_limit == 128 * 1024
@@ -974,6 +976,12 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"status": "owner"})]
+
+    app = SimpleNamespace(system_status_payload=lambda: {"ok": True, "server": {"pid": 123}})
+    handler, calls, writes = route_handler("/api/system-status", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"ok": True, "server": {"pid": 123}})]
 
     app = SimpleNamespace(background_owner_claim_payload=lambda: ({"ok": True, "claimed": True, "was_owner": False}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/background/claim", app)

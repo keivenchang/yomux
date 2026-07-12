@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -43,7 +44,7 @@ MAX_SOURCE_BYTES = 1_000_000
 REFRESH_TIMEOUT_SECONDS = 10.0
 PRICING_STALE_SECONDS = 30 * 24 * 60 * 60
 SOURCE_PRIORITY = {"seed": 1, "official": 2, "override": 3}
-OFFICIAL_SOURCE_HOSTS = frozenset({"platform.openai.com", "openai.com", "www.anthropic.com", "anthropic.com", "ai.google.dev", "cloud.google.com"})
+OFFICIAL_SOURCE_HOSTS = frozenset({"platform.openai.com", "developers.openai.com", "openai.com", "www.anthropic.com", "anthropic.com", "platform.claude.com", "ai.google.dev", "cloud.google.com"})
 CORROBORATION_SOURCE_HOSTS = frozenset({"openrouter.ai", "raw.githubusercontent.com", "github.com"})
 
 
@@ -375,7 +376,8 @@ class PricingCatalog:
     def _status_from_connection(self, connection: sqlite3.Connection) -> dict[str, Any]:
         seed_revision = connection.execute("SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'seed'").fetchone()[0] or 0
         official_revision = connection.execute("SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'").fetchone()[0] or 0
-        latest_failed = connection.execute("SELECT 1 FROM refresh_runs WHERE status = 'failed' ORDER BY id DESC LIMIT 1").fetchone() is not None
+        latest_run = connection.execute("SELECT status FROM refresh_runs ORDER BY id DESC LIMIT 1").fetchone()
+        latest_failed = latest_run is not None and str(latest_run["status"]) == "failed"
         latest_check = connection.execute("SELECT MAX(checked_at) FROM source_checks WHERE status = 'accepted'").fetchone()[0] or 0
         state = "seed-only"
         if official_revision:
@@ -450,16 +452,22 @@ class PricingCatalog:
             run_id = connection.execute("INSERT INTO refresh_runs(started_at, status) VALUES (?, 'running')", (started,)).lastrowid
         try:
             catalogs: list[tuple[PricingSourceAdapter, dict[str, Any], dict[str, str], bytes]] = []
+            failures: list[dict[str, str]] = []
             for adapter in adapters:
-                state = self.source_check(adapter.url)
-                headers = {"If-None-Match": state.get("etag", ""), "If-Modified-Since": state.get("last_modified", "")}
-                status, response_headers, body = fetch(adapter.url, headers, REFRESH_TIMEOUT_SECONDS)
-                if status == 304:
-                    self.record_source_not_modified(adapter.url, response_headers, adapter.parser_version)
-                    continue
-                catalog = adapter.parse(body)
-                catalogs.append((adapter, validate_catalog(catalog), response_headers, body))
+                try:
+                    state = self.source_check(adapter.url)
+                    headers = {"If-None-Match": state.get("etag", ""), "If-Modified-Since": state.get("last_modified", "")}
+                    status, response_headers, body = fetch(adapter.url, headers, REFRESH_TIMEOUT_SECONDS)
+                    if status == 304:
+                        self.record_source_not_modified(adapter.url, response_headers, adapter.parser_version)
+                        continue
+                    catalog = adapter.parse(body)
+                    catalogs.append((adapter, validate_catalog(catalog), response_headers, body))
+                except Exception as exc:
+                    failures.append({"name": adapter.name, "error": str(exc)[:500]})
             if not catalogs:
+                if failures:
+                    raise PricingRefreshError(failures[0]["error"])
                 result = {"ok": True, "status": "unchanged", "catalog_revision": self.status()["catalog_revision"]}
             else:
                 # Only normalized, internally self-consistent official adapters are
@@ -482,6 +490,8 @@ class PricingCatalog:
                         # active pricing and audit state untouched.
                         self._record_source_check(connection, adapter.url, response_headers, body, adapter.parser_version, "accepted")
                 result = {"ok": True, "status": "updated", "catalog_revision": int(chosen["catalog_revision"])}
+                if failures:
+                    result["source_failures"] = failures
             with self._transaction() as connection:
                 connection.execute("UPDATE refresh_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?", (self.clock(), result["status"], json.dumps(result, sort_keys=True), run_id))
             return result
@@ -565,7 +575,29 @@ def _usd_per_million(value: str) -> str:
     # variants rather than treating a visually similar table as compatible.
     if not cleaned or any(marker in cleaned.lower() for marker in ("free", "contact", "-", "n/a")):
         raise PricingCatalogValidationError("missing concrete USD rate")
+    lowered = cleaned.lower()
+    for suffix in ("/ mtok", "per mtok"):
+        if lowered.endswith(suffix):
+            cleaned = cleaned[:len(cleaned) - len(suffix)].strip()
+            break
     return _decimal_text(cleaned)
+
+
+def _optional_usd_per_million(value: str) -> str | None:
+    cleaned = value.strip().lower()
+    if not cleaned or cleaned in {"-", "—", "n/a", "not available"} or "free" in cleaned or "contact" in cleaned:
+        return None
+    return _usd_per_million(value)
+
+
+def _provider_model_aliases(provider: str, model: str) -> list[str]:
+    aliases = [model]
+    if provider == "anthropic":
+        base = model.split("(", 1)[0].strip().lower()
+        slug = "-".join(part for part in re.split(r"[^a-z0-9]+", base) if part)
+        if slug and slug not in aliases:
+            aliases.append(slug)
+    return aliases
 
 
 def parse_provider_pricing_table(body: bytes, *, provider: str, source_url: str, catalog_revision: int = 1) -> dict[str, Any]:
@@ -584,27 +616,42 @@ def parse_provider_pricing_table(body: bytes, *, provider: str, source_url: str,
     if header_index is None:
         raise PricingCatalogValidationError("reviewed pricing table header missing")
     headers = [item.strip().lower() for item in parser.rows[header_index]]
-    required = {"model", "input", "output"}
-    if not required.issubset(headers):
+
+    def first_header(*names: str) -> int | None:
+        return next((headers.index(name) for name in names if name in headers), None)
+
+    input_index = first_header("input", "base input tokens")
+    output_index = first_header("output", "output tokens")
+    if input_index is None or output_index is None:
         raise PricingCatalogValidationError("reviewed pricing table columns changed")
-    input_index, output_index = headers.index("input"), headers.index("output")
-    cached_index = headers.index("cached input") if "cached input" in headers else None
+    cached_index = first_header("cached input", "cache hits & refreshes")
+    cache_write_index = first_header("cache writes", "5m cache writes")
+    cache_write_1h_index = first_header("1h cache writes")
     profile_index = headers.index("pricing profile") if "pricing profile" in headers else (headers.index("profile") if "profile" in headers else None)
     tier_index = headers.index("service tier") if "service tier" in headers else None
     models: list[dict[str, Any]] = []
     for row in parser.rows[header_index + 1:]:
+        if row and row[0].strip().lower() == "model":
+            break
         if len(row) != len(headers) or not row[0].strip():
             continue
         model = row[0].strip()
         profile = row[profile_index].strip().lower() if profile_index is not None and row[profile_index].strip() else "default"
         service_tier = row[tier_index].strip().lower() if tier_index is not None and row[tier_index].strip() else "default"
-        rates = [
-            {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1_000_000, "usd": _usd_per_million(row[input_index]), "effective_from": "1970-01-01T00:00:00Z", "profile": profile, "service_tier": service_tier},
-            {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1_000_000, "usd": _usd_per_million(row[output_index]), "effective_from": "1970-01-01T00:00:00Z", "profile": profile, "service_tier": service_tier},
-        ]
-        if cached_index is not None and row[cached_index].strip():
-            rates.append({"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1_000_000, "usd": _usd_per_million(row[cached_index]), "effective_from": "1970-01-01T00:00:00Z", "profile": profile, "service_tier": service_tier})
-        models.append({"provider": provider, "model": model, "aliases": [model], "rates": rates, "source": {"url": source_url, "kind": "official"}})
+        input_usd = _optional_usd_per_million(row[input_index])
+        output_usd = _optional_usd_per_million(row[output_index])
+        if input_usd is None or output_usd is None:
+            continue
+
+        def rate(direction: str, cache_role: str, usd: str) -> dict[str, Any]:
+            return {"direction": direction, "modality": "text", "cache_role": cache_role, "unit": "tokens", "scale": 1_000_000, "usd": usd, "effective_from": "1970-01-01T00:00:00Z", "profile": profile, "service_tier": service_tier}
+
+        rates = [rate("input", "none", input_usd), rate("output", "none", output_usd)]
+        for index, cache_role in ((cached_index, "read"), (cache_write_index, "write_5m"), (cache_write_1h_index, "write_1h")):
+            usd = _optional_usd_per_million(row[index]) if index is not None else None
+            if usd is not None:
+                rates.append(rate("input", cache_role, usd))
+        models.append({"provider": provider, "model": model, "aliases": _provider_model_aliases(provider, model), "rates": rates, "source": {"url": source_url, "kind": "official"}})
     if not models:
         raise PricingCatalogValidationError("reviewed pricing table has no models")
     return validate_catalog({"schema_version": 1, "catalog_revision": catalog_revision, "models": models})
@@ -700,8 +747,8 @@ def default_pricing_source_adapters() -> tuple[PricingSourceAdapter, ...]:
     """Reviewed registrations.  Official pages are authoritative; the JSON
     feeds are retained strictly as corroboration and model discovery input."""
     return (
-        PricingSourceAdapter("openai", "https://platform.openai.com/docs/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="openai", source_url="https://platform.openai.com/docs/pricing")),
-        PricingSourceAdapter("anthropic", "https://www.anthropic.com/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="anthropic", source_url="https://www.anthropic.com/pricing")),
+        PricingSourceAdapter("openai", "https://developers.openai.com/api/docs/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="openai", source_url="https://developers.openai.com/api/docs/pricing")),
+        PricingSourceAdapter("anthropic", "https://platform.claude.com/docs/en/about-claude/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="anthropic", source_url="https://platform.claude.com/docs/en/about-claude/pricing")),
         PricingSourceAdapter("google", "https://ai.google.dev/gemini-api/docs/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="google", source_url="https://ai.google.dev/gemini-api/docs/pricing")),
         PricingSourceAdapter("openrouter", "https://openrouter.ai/api/v1/models", "corroboration", parse_openrouter_prices),
         PricingSourceAdapter("litellm", "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "corroboration", parse_litellm_prices),

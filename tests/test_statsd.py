@@ -3,7 +3,6 @@ import os
 import sqlite3
 import threading
 import time
-import json
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -110,6 +109,49 @@ def test_statsd_new_owner_negotiates_old_and_current_protocols(tmp_path):
     service.store.close()
 
 
+def test_statsd_sampler_survives_store_maintenance_owned_by_rpc_thread(monkeypatch, tmp_path):
+    """The daemon sampler must keep ticking after pricing maintenance is requested.
+
+    StatsStore opens its SQLite connection on the RPC thread.  This regression
+    deliberately opens it before starting the sampler thread, matching the
+    daemon startup order, so direct sampler-thread store access fails loudly.
+    """
+    service = statsd.PersistentStatsService(
+        tmp_path / "statsd.sock",
+        tmp_path / "stats.sqlite3",
+        pricing_catalog=_MutablePricingCatalog(),
+    )
+    service.store.open()
+    calls = []
+    monkeypatch.setattr(service, "_sampler_owner_for_cycle", lambda: {"control_socket": "owner.sock"})
+    monkeypatch.setattr(
+        statsd,
+        "send_yolomux_control_request",
+        lambda *_args, **_kwargs: calls.append(time.time()) or {"ok": True},
+    )
+
+    class BoundedWake:
+        def wait(self, _seconds):
+            if len(calls) >= 2:
+                service.stop_event.set()
+
+        def clear(self):
+            pass
+
+        def set(self):
+            pass
+
+    service.sampler_wake_event = BoundedWake()
+    thread = threading.Thread(target=service._sampler_loop)
+    thread.start()
+    thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert len(calls) == 2
+    assert service.last_sampler_success_at > 0
+    service.store.close()
+
+
 def test_statsd_daemon_constructs_the_shared_pricing_catalog(monkeypatch, tmp_path):
     captured = {}
 
@@ -203,11 +245,16 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
     assert summary["components"][0]["rate_usd"] == "2.5"
     assert summary["models"][0]["model"] == "gpt-5.6"
     assert summary["models"][0]["input_micro_usd"] == 250
+    assert summary["models"][0]["token_quantity"] == 100
+    assert summary["models"][0]["input_tokens"] == 100
+    assert summary["models"][0]["cache_tokens"] == 0
+    assert summary["models"][0]["output_tokens"] == 0
     assert summary["models"][0]["cache_micro_usd"] == 0
     assert summary["models"][0]["output_micro_usd"] == 0
     assert summary["models"][0]["other_micro_usd"] == 0
     assert summary["sources"][0]["agent_thread_id"] == "child"
     assert summary["sources"][0]["input_micro_usd"] == 250
+    assert summary["sources"][0]["token_quantity"] == 108
     assert compact == summary
     assert catalog.calls[0]["timestamp"] == "1970-01-01T00:16:40Z"
     service.store.close()
@@ -369,6 +416,50 @@ def test_statsd_usage_atom_backfill_replaces_only_prior_staged_root_family_atoms
     service.store.close()
 
 
+def test_statsd_usage_atom_backfill_coalesces_busy_bucket_before_bounded_persistence(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    atoms = [{
+        "event_id": f"event-{index}", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+        "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 1,
+        "telemetry_complete": True, "backfill_source": "/tmp/rollout.jsonl",
+    } for index in range(1000)]
+
+    assert service._replace_backfill_source_atoms("/tmp/rollout.jsonl", atoms, 1010) == 1
+    record = service.handle({"action": "history"})["records"][0]
+
+    assert len(record["cost_summary"]["components"]) == 1
+    assert record["cost_summary"]["components"][0]["quantity"] == 1000
+    assert service.store.diagnostics()["rows"] == 1
+    service.store.close()
+
+
+def test_statsd_usage_atom_backfill_repairs_interrupted_uncoalesced_sources(tmp_path):
+    catalog = _FakePricingCatalog()
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=catalog)
+    legacy = [statsd.projected_usage_component({
+        "event_id": f"legacy-{index}", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+        "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 1,
+        "telemetry_complete": True, "backfill_source": "/tmp/legacy.jsonl",
+    }, catalog) for index in range(100)]
+    bucket = stats_store.empty_bucket(1000, 1)
+    bucket["sequence"] = 1
+    bucket["server_sequence"] = 1
+    service._recalculate_usage_summary(bucket["cost_summary"], legacy)
+    service.store.upsert_bucket(bucket)
+
+    assert service._replace_backfill_source_atoms("/tmp/new.jsonl", [{
+        "event_id": "new", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+        "direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 5,
+        "telemetry_complete": True, "backfill_source": "/tmp/new.jsonl",
+    }], 1010) == 1
+    components = service.store.bucket(1000, 1)["cost_summary"]["components"]
+
+    assert {(item["backfill_source"], item["quantity"]) for item in components} == {
+        ("/tmp/legacy.jsonl", 100), ("/tmp/new.jsonl", 5),
+    }
+    service.store.close()
+
+
 def test_statsd_reprojects_retained_usage_when_catalog_revision_changes_without_rewriting_tokens(tmp_path):
     catalog = _MutablePricingCatalog()
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=catalog)
@@ -412,7 +503,7 @@ def test_statsd_backfill_marks_counter_only_legacy_bucket_lower_bound_without_de
     service.store.close()
 
 
-def test_statsd_live_transcript_claim_carries_atoms_without_changing_output_counter_projection(tmp_path):
+def test_statsd_live_transcript_baseline_does_not_replay_historical_atoms(tmp_path):
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text("\n".join(json.dumps(item) for item in [
         {"type": "session_meta", "payload": {"id": "root"}},
@@ -423,13 +514,100 @@ def test_statsd_live_transcript_claim_carries_atoms_without_changing_output_coun
     rows = [{"key": "s|0|codex", "label": "s:0", "transcript": str(transcript), "kind": "codex"}]
 
     baseline = service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1002)
-    service.merge_server_records(baseline["records"], now=1002)
     history = service.handle({"action": "history"})
 
-    assert [record for record in baseline["records"] if "agent_token_rates" in record] == []
-    assert len([record for record in baseline["records"] if "usage_atoms" in record]) == 2
-    assert history["records"][0]["tokens_per_agent_total"] == 0
-    assert history["records"][0]["cost_summary"]["total_micro_usd"] == 38
+    assert baseline["records"] == []
+    assert baseline["persisted_records"] == 0
+    assert history["records"] == []
+    service.store.close()
+
+
+def test_statsd_live_claim_persists_delta_before_returning_compact_response(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("\n".join(json.dumps(item) for item in [
+        {"type": "session_meta", "payload": {"id": "root"}},
+        {"timestamp": 1000, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high"}},
+        {"timestamp": 1001, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
+    ]) + "\n", encoding="utf-8")
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    rows = [{"key": "s|0|codex", "label": "s:0", "transcript": str(transcript), "kind": "codex"}]
+    service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1002)
+    transcript.write_text(transcript.read_text(encoding="utf-8") + json.dumps(
+        {"timestamp": 1061, "payload": {"info": {"total_token_usage": {"input_tokens": 12, "output_tokens": 25}}}}
+    ) + "\n", encoding="utf-8")
+
+    claimed = service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1062)
+    history = service.handle({"action": "history"})
+
+    assert claimed["records"] == []
+    assert claimed["persisted_records"] > 0
+    assert len(json.dumps(claimed)) < 256 * 1024
+    assert sum(record["tokens_per_agent_total"] for record in history["records"]) == pytest.approx(20)
+    assert sum(sum(rate["model_rates"]["gpt-5.6"]["tokens"] for rate in record["agent_token_rates"]) for record in history["records"]) == pytest.approx(20)
+    service.store.close()
+
+
+def test_statsd_large_live_atom_claim_stays_below_rpc_metadata_limit(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    rows = [{"key": "s|0|codex", "label": "s:0", "transcript": "/large.jsonl", "kind": "codex"}]
+    token_counts = iter((100, 200))
+    model_counts = iter(({"gpt-5.6": 100}, {"gpt-5.6": 200}))
+    atoms = [SimpleNamespace(
+        event_id=f"event-{index}-" + ("e" * 480),
+        timestamp=1003 + (index / 10),
+        provider="openai",
+        model="gpt-5.6",
+        model_evidence="m" * 256,
+        effort="high",
+        direction="output",
+        modality="text",
+        cache_role="none",
+        unit="tokens",
+        quantity=1,
+        root_thread_id="r" * 256,
+        agent_thread_id="a" * 256,
+        parent_thread_id="p" * 256,
+        depth=0,
+        endpoint="responses",
+        tool_name="",
+        call_id="c" * 256,
+        pricing_profile="default",
+        service_tier="default",
+        telemetry_complete=True,
+        source="s" * 512,
+    ) for index in range(300)]
+    monkeypatch.setattr(statsd.session_files, "transcript_generated_tokens", lambda *_args: next(token_counts))
+    monkeypatch.setattr(statsd.session_files, "transcript_generated_tokens_by_model", lambda *_args: next(model_counts))
+    monkeypatch.setattr(statsd.session_files, "transcript_usage_identity", lambda *_args: "stable")
+    monkeypatch.setattr(statsd.session_files, "transcript_usage_atoms", lambda *_args: atoms)
+
+    service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1002)
+    claimed = service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1062)
+    old_wire_records = [
+        {"time": atom.timestamp, "usage_atoms": [statsd.normalized_usage_atom(atom)]}
+        for atom in atoms
+    ]
+    history = service.handle({"action": "history"})
+
+    assert len(json.dumps({"records": old_wire_records}).encode()) > 256 * 1024
+    assert claimed["records"] == []
+    assert len(json.dumps(claimed).encode()) < 256 * 1024
+    assert claimed["persisted_records"] >= len(atoms)
+    assert sum(record["tokens_per_agent_total"] for record in history["records"]) == pytest.approx(100)
+    assert sum(len(record["cost_summary"]["components"]) for record in history["records"]) > 0
+    service.store.close()
+
+
+def test_statsd_completed_recovery_skips_transcript_parsing(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.store.set_metadata_value(statsd.STATSD_AGENT_TOKEN_RECOVERY_MARKER, str(statsd.STATSD_AGENT_TOKEN_RECOVERY_VERSION))
+    monkeypatch.setattr(statsd.session_files, "transcript_generated_token_events", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("recovery reparsed transcript")))
+
+    result = service.recover_agent_token_history_from_rows([
+        {"key": "s|0|codex", "label": "s:0", "transcript": "/large.jsonl", "kind": "codex"},
+    ], now=1062)
+
+    assert result == {"ok": True, "changed": False, "reason": "already_recovered"}
     service.store.close()
 
 

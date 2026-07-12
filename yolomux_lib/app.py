@@ -2063,15 +2063,13 @@ class TmuxWebtermApp:
         scan.  Browser/API history reads never parse transcripts or initiate a
         retained-history migration.
         """
-        token_rows = self.stats_agent_token_rows(rows)
-        expected_keys = {self.stats_agent_token_key(row, index) for index, row in enumerate(rows)}
-        migrated_keys = {str(row.get("key") or "") for row in token_rows}
-        if not expected_keys or migrated_keys != expected_keys:
+        token_rows = self.stats_agent_token_rows(rows, include_missing=True)
+        if not token_rows:
             return False
         response = self.stats_client.migrate_usage_atom_history_from_rows(token_rows, now=now)
         return bool(response.get("ok"))
 
-    def stats_agent_token_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def stats_agent_token_rows(self, rows: list[dict[str, Any]], *, include_missing: bool = False) -> list[dict[str, Any]]:
         token_rows: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
         for index, row in enumerate(rows):
@@ -2081,7 +2079,7 @@ class TmuxWebtermApp:
             seen_keys.add(key)
             transcript = str(row.get("transcript") or "").strip()
             kind = str(row.get("kind") or "").strip().lower()
-            if not transcript:
+            if not transcript and not include_missing:
                 continue
             token_rows.append({"key": key, "label": self.stats_agent_token_label(row), "transcript": transcript, "kind": kind})
         return token_rows
@@ -8167,6 +8165,7 @@ class TmuxWebtermApp:
         background_status: dict[str, Any] | None = None,
         owner_debug: dict[str, Any] | None = None,
         owner_control_response: dict[str, Any] | None = None,
+        force_transcripts: bool = True,
     ) -> dict[str, Any]:
         status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
         # Remote control responses from older servers may still carry perf, while the current
@@ -8174,7 +8173,7 @@ class TmuxWebtermApp:
         diagnostic_status = dict(status)
         if not isinstance(diagnostic_status.get("perf"), dict):
             diagnostic_status.update(self.performance_diagnostics_payload())
-        transcript_payload = self.transcripts_payload(force=True)
+        transcript_payload = self.transcripts_payload(force=force_transcripts)
         client_events = self.client_events.snapshot()
         chat_events = {
             event_type: {
@@ -8217,6 +8216,23 @@ class TmuxWebtermApp:
             },
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
+        }
+
+    def system_status_payload(self) -> dict[str, Any]:
+        """Return bounded live diagnostics for the YO!stats System view."""
+        sample, _record_cpu_sample = self.current_stats_sample()
+        return {
+            **self.runtime_report_payload(force_transcripts=False),
+            "generated_at": time.time(),
+            "server": {
+                "version": YOLOMUX_VERSION,
+                "pid": int(sample.get("pid") or os.getpid()),
+                "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
+                "uptime_seconds": float(sample.get("uptime_seconds") or 0.0),
+                "cpu_percent": float(sample.get("cpu_percent") or 0.0),
+                "system_cpu_percent": float(sample.get("system_cpu_percent") or 0.0),
+                "rss_bytes": int(sample.get("rss_bytes") or 0),
+            },
         }
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:

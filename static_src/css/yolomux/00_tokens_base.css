@@ -330,6 +330,7 @@
   --app-modal-backdrop-bg: rgba(0, 0, 0, 0.46);
   --app-modal-border-width: max(2px, var(--pane-split-gap));
   --app-modal-border-color: color-mix(in srgb, var(--pane-tab-panel-ring) var(--pane-active-ring-opacity), transparent);
+  --app-modal-dialog-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
   --share-stage-bg: var(--paint-black);
@@ -392,6 +393,7 @@
   --z-file-conflict-dialog: 270;
   --z-file-editor-actions: 220;
   --z-file-editor-dialog: 275;
+  --z-cost-summary-modal: var(--z-file-editor-dialog);
   --z-share-presence: 320;
   --z-share-popup-mirror: calc(var(--z-share-presence) + 1);
   --z-share-viewer-banner: calc(var(--z-share-presence) + 2);
@@ -1497,13 +1499,14 @@ body.theme-light {
 .yoagent-jobs-list,
 .info-tree-chip,
 .share-field select,
-.share-field input[type="number"],
-.share-field input[type="text"],
-.file-explorer-path,
-.file-explorer-path-inline,
-.js-debug-hover-tooltip {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
+  .share-field input[type="number"],
+  .share-field input[type="text"],
+  .file-explorer-path,
+  .file-explorer-path-inline,
+  .js-debug-cost-modal-close,
+  .js-debug-hover-tooltip {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
   color: var(--text);
 }
 :where(button),
@@ -1512,12 +1515,13 @@ body.theme-light {
 .conversation-message,
 .yoagent-composer-pill,
 .yoagent-backend-pill,
-.terminal-drop-suggestions,
-.file-editor-preview-fallback,
-.markdown-image-error,
-.mermaid-preview-error {
-  border: 1px solid var(--line);
-  background: var(--panel2);
+  .terminal-drop-suggestions,
+  .file-editor-preview-fallback,
+  .markdown-image-error,
+  .js-debug-cost-modal-close,
+  .mermaid-preview-error {
+    border: 1px solid var(--line);
+    background: var(--panel2);
   color: var(--text);
 }
 :where(button) {

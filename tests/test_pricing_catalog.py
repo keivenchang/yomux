@@ -207,6 +207,29 @@ def test_provider_table_parser_preserves_explicit_profile_and_service_tier_candi
     assert {(rate["profile"], rate["service_tier"]) for rate in catalog["models"][0]["rates"]} == {("batch", "flex")}
 
 
+def test_provider_table_parser_accepts_reviewed_openai_context_and_cache_write_columns():
+    page = b"""<table>
+      <tr><th>Model</th><th>Input</th><th>Cached input</th><th>Cache writes</th><th>Output</th><th>Input</th><th>Cached input</th><th>Cache writes</th><th>Output</th></tr>
+      <tr><td>gpt-5.6-sol</td><td>$5.00</td><td>$0.50</td><td>$6.25</td><td>$30.00</td><td>$10.00</td><td>$1.00</td><td>$12.50</td><td>$45.00</td></tr>
+      <tr><td>gpt-optional</td><td>$1.00</td><td>-</td><td>-</td><td>$6.00</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+    </table>"""
+    catalog = parse_provider_pricing_table(page, provider="openai", source_url="https://developers.openai.com/api/docs/pricing")
+    sol = next(model for model in catalog["models"] if model["model"] == "gpt-5.6-sol")
+    assert {(rate["cache_role"], rate["usd"]) for rate in sol["rates"]} == {("none", "5.00"), ("none", "30.00"), ("read", "0.50"), ("write_5m", "6.25")}
+    assert len(next(model for model in catalog["models"] if model["model"] == "gpt-optional")["rates"]) == 2
+
+
+def test_provider_table_parser_accepts_reviewed_anthropic_mtok_columns_and_slug_alias():
+    page = b"""<table>
+      <tr><th>Model</th><th>Base Input Tokens</th><th>5m Cache Writes</th><th>1h Cache Writes</th><th>Cache Hits &amp; Refreshes</th><th>Output Tokens</th></tr>
+      <tr><td>Claude Opus 4.8</td><td>$5 / MTok</td><td>$6.25 / MTok</td><td>$10 / MTok</td><td>$0.50 / MTok</td><td>$25 / MTok</td></tr>
+    </table>"""
+    catalog = parse_provider_pricing_table(page, provider="anthropic", source_url="https://platform.claude.com/docs/en/about-claude/pricing")
+    model = catalog["models"][0]
+    assert "claude-opus-4-8" in model["aliases"]
+    assert {(rate["cache_role"], rate["usd"]) for rate in model["rates"]} == {("none", "5"), ("none", "25"), ("read", "0.50"), ("write_5m", "6.25"), ("write_1h", "10")}
+
+
 def test_bounded_refresh_fetch_rejects_non_allowlisted_redirectable_urls_without_network():
     for url in ("http://platform.openai.com/docs/pricing", "https://127.0.0.1/pricing", "https://platform.openai.com@evil.example/pricing"):
         with pytest.raises(Exception):
@@ -289,6 +312,35 @@ def test_refresh_coalesces_cross_server_equivalent_followup(tmp_path):
     assert catalog.refresh([adapter], fetch=fetch)["status"] == "updated"
     assert catalog.refresh([adapter], fetch=fetch)["status"] == "coalesced"
     assert calls == [1]
+
+
+def test_refresh_activates_valid_official_source_when_another_source_fails(tmp_path):
+    catalog = PricingCatalog(tmp_path)
+    payload = load_packaged_seed()
+    payload["catalog_revision"] = 2
+    good = PricingSourceAdapter("openai", "https://developers.openai.com/api/docs/pricing", "official", lambda value: json.loads(value.decode()))
+    stale = PricingSourceAdapter("google", "https://ai.google.dev/gemini-api/docs/pricing", "official", lambda _value: (_ for _ in ()).throw(PricingCatalogValidationError("columns changed")))
+
+    result = catalog.refresh([good, stale], fetch=lambda url, *_args: (200, {}, json.dumps(payload).encode() if "openai" in url else b"changed"))
+
+    assert result["status"] == "updated"
+    assert result["source_failures"] == [{"name": "google", "error": "columns changed"}]
+    assert catalog.resolve_rate(provider="openai", model="gpt-4.1", direction="input").source_kind == "official"
+
+
+def test_successful_refresh_clears_review_needed_state_from_an_older_failed_run(tmp_path):
+    catalog = PricingCatalog(tmp_path)
+    broken = PricingSourceAdapter("openai", "https://developers.openai.com/api/docs/pricing", "official", lambda _value: (_ for _ in ()).throw(PricingCatalogValidationError("old failure")))
+    with pytest.raises(Exception, match="old failure"):
+        catalog.refresh([broken], fetch=lambda *_args: (200, {}, b"changed"))
+    assert catalog.status()["state"] == "seed-only"
+
+    payload = load_packaged_seed()
+    payload["catalog_revision"] = 2
+    valid = PricingSourceAdapter("openai", "https://developers.openai.com/api/docs/pricing", "official", lambda value: json.loads(value.decode()))
+    catalog.refresh([valid], fetch=lambda *_args: (200, {}, json.dumps(payload).encode()))
+
+    assert catalog.status()["state"] == "fresh"
 
 
 def test_refresh_coordinator_returns_immediately_and_coalesces_in_process(tmp_path):

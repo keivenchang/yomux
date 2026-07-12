@@ -40,6 +40,13 @@ const jsDebugHistoryReadiness = {
   overlayTimer: null,
 };
 let jsDebugSubTab = 'graph';
+const jsDebugSystemPollMs = 5000;
+const jsDebugSystemState = {
+  payload: null,
+  error: '',
+  inFlight: false,
+  updatedAt: 0,
+};
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugGraphResolutionOverrideSeconds = 0;
 let jsDebugGraphChartLayout = 0;
@@ -82,6 +89,7 @@ const jsDebugGraphModelTokenDimensions = Object.freeze([
 ]);
 let jsDebugGraphModelTokenDimension = 'output';
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null};
+const jsDebugCostModalState = {overlay: null, anchor: null, keydown: null};
 const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 60, label: '1m'},
@@ -126,7 +134,7 @@ const jsDebugStatsHistoryPostMaxRecords = 1000;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphThisClientId = 'this-client';
@@ -251,6 +259,9 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
+const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
+  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title', toggleLabelEn: 'Cost'})]
+  : [group]));
 
 function debugGraphLocalizedLabel(item = {}) {
   if (!item.labelKey) return String(item.label || '');
@@ -260,7 +271,7 @@ function debugGraphLocalizedLabel(item = {}) {
 }
 
 function normalizedJsDebugSubTab(value) {
-  return value === 'events' ? 'events' : 'graph';
+  return value === 'events' || value === 'system' ? value : 'graph';
 }
 
 function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
@@ -661,6 +672,7 @@ function debugSubTabsHtml() {
   return `<div class="js-debug-subtabs" role="tablist" aria-label="${esc(t('tab.debug'))}">
     ${debugSubTabButtonHtml('graph', t('debug.tab.graph'))}
     ${debugSubTabButtonHtml('events', t('debug.tab.events'))}
+    ${debugSubTabButtonHtml('system', t('common.theme.system'))}
   </div>`;
 }
 
@@ -2341,6 +2353,11 @@ function debugGraphModelTokenComponentMatches(component, dimension = jsDebugGrap
 }
 
 function debugGraphModelTokenComponentRecords(bucket, dimension = jsDebugGraphModelTokenDimension) {
+  // Output is the compatibility projection of the authoritative generated-token
+  // partition. Cost atoms can be temporarily partial during migration or across
+  // provider telemetry variants, so they must not override the exact agent/model
+  // totals that keep Agent tokens and Model tokens synchronized.
+  if (dimension === 'output') return [];
   const components = debugGraphCostRows(bucket?.costSummary?.components);
   return components.filter(component => debugGraphModelTokenComponentMatches(component, dimension));
 }
@@ -2378,9 +2395,9 @@ function debugGraphModelTokenSeriesDefs(buckets) {
       }
       continue;
     }
-    // A legacy bucket has no atom data. It can only accurately populate the
-    // default Output selector, and deliberately remains model-only so the
-    // previous Model tokens/min behavior does not change underneath history.
+    // The default Output selector always uses the authoritative generated-token
+    // partition, including new buckets with cost atoms, so its stack is exactly
+    // the same total as Agent tokens/min.
     if (jsDebugGraphModelTokenDimension !== 'output') continue;
     for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
       for (const [rawModel, rate] of agentRate?.modelRates?.entries?.() || []) {
@@ -2591,7 +2608,7 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
 function debugGraphChartToggleControlsHtml() {
   return `<div class="js-debug-chart-toggle-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     <span>${esc(t('debug.graph.control.charts'))}:</span>
-    ${jsDebugGraphChartGroups.map(group => {
+    ${jsDebugGraphChartControlItems.map(group => {
       const label = debugGraphLocalizedLabel(group);
       // Compact labels are an English-only design vocabulary. Other locales keep the existing
       // localized chart title until their own compact translation exists; never leak English UI.
@@ -3437,14 +3454,38 @@ function debugGraphCostKind(item) {
   return String(item?.key || item?.kind || item?.direction || item?.label || '').toLowerCase();
 }
 
+function debugGraphCostClass(item) {
+  const unit = String(item?.unit || 'tokens').toLowerCase();
+  const modality = String(item?.modality || 'text').toLowerCase();
+  if (unit !== 'tokens' || modality !== 'text') return 'other';
+  const cacheRole = String(item?.cache_role || '').toLowerCase();
+  if (['read', 'write', 'write_5m', 'write_1h'].includes(cacheRole)) return 'cache';
+  const direction = String(item?.direction || debugGraphCostKind(item)).toLowerCase();
+  if (direction.includes('input') || direction.includes('uncached')) return 'input';
+  if (direction.includes('output')) return 'output';
+  return 'other';
+}
+
 function debugGraphCostCompactTotals(summary) {
   const totals = {input: 0, cache: 0, output: 0};
   for (const item of summary.components) {
-    const kind = debugGraphCostKind(item);
     const value = debugGraphCostMicroUsd(item);
-    if (kind.includes('input') || kind.includes('uncached')) totals.input += value;
-    else if (kind.includes('cache')) totals.cache += value;
-    else if (kind.includes('output') || kind.includes('image') || kind.includes('audio') || kind.includes('tool')) totals.output += value;
+    const itemClass = debugGraphCostClass(item);
+    if (itemClass === 'input') totals.input += value;
+    else if (itemClass === 'cache') totals.cache += value;
+    else totals.output += value;
+  }
+  return totals;
+}
+
+function debugGraphCostTokenTotals(summary) {
+  const totals = {input: 0, cache: 0, output: 0, other: 0, total: 0};
+  for (const item of summary.components) {
+    if (String(item?.unit || 'tokens').toLowerCase() !== 'tokens') continue;
+    const quantity = Math.max(0, Number(item?.quantity) || 0);
+    const itemClass = debugGraphCostClass(item);
+    totals[itemClass] += quantity;
+    totals.total += quantity;
   }
   return totals;
 }
@@ -3452,11 +3493,13 @@ function debugGraphCostCompactTotals(summary) {
 function debugGraphCostAggregateRows(rows, keyFields) {
   const grouped = new Map();
   const subtotalFields = ['input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd'];
+  const tokenFields = ['quantity', 'token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens'];
   for (const row of rows || []) {
     const key = keyFields.map(field => String(row?.[field] || '')).join('\u0000') || 'unknown';
-    const current = grouped.get(key) || {...row, micro_usd: 0, ...Object.fromEntries(subtotalFields.map(field => [field, 0]))};
+    const current = grouped.get(key) || {...row, micro_usd: 0, ...Object.fromEntries([...subtotalFields, ...tokenFields].map(field => [field, 0]))};
     current.micro_usd += debugGraphCostMicroUsd(row);
     for (const field of subtotalFields) current[field] += debugGraphCostInteger(row?.[field]);
+    for (const field of tokenFields) current[field] += Math.max(0, Number(row?.[field]) || 0);
     grouped.set(key, current);
   }
   return [...grouped.values()].sort((left, right) => debugGraphCostMicroUsd(right) - debugGraphCostMicroUsd(left)
@@ -3500,29 +3543,64 @@ function debugGraphCostRangeText(domain) {
   return `${start} – ${end} · ${debugGraphCostText('debug.cost.duration', `${seconds}s`, {seconds})}`;
 }
 
-function debugGraphCostDetailsTableHtml(title, rows, label) {
-  const limited = rows.slice(0, 24);
-  if (!limited.length) return '';
-  const subtotalColumns = [
-    ['input_micro_usd', debugGraphCostText('debug.cost.input', 'Input')],
-    ['cache_micro_usd', debugGraphCostText('debug.cost.cache', 'Cache')],
-    ['output_micro_usd', debugGraphCostText('debug.cost.output', 'Output')],
-    ['other_micro_usd', debugGraphCostText('debug.cost.other', 'Other')],
-  ];
-  const allModels = rows.reduce((total, row) => {
-    total.micro_usd += debugGraphCostMicroUsd(row);
-    for (const [key] of subtotalColumns) total[key] += debugGraphCostInteger(row?.[key]);
-    return total;
-  }, {label: debugGraphCostText('debug.cost.allModels', 'All models'), allModels: true, micro_usd: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0});
-  return `<section class="js-debug-cost-details-section">
-    <h4>${esc(title)}</h4>
-    <table><thead><tr><th scope="col">${esc(label)}</th>${subtotalColumns.map(([_key, heading]) => `<th scope="col">${esc(heading)}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead>
-    <tbody>${[...limited, allModels].map(row => {
-      const rowLabel = String(row?.label || row?.model || row?.source || row?.agent || row?.key || 'unknown');
-      const effort = String(row?.effort || '').trim();
-      return `<tr${row?.allModels ? ' class="js-debug-cost-all-models"' : ''}><th scope="row">${esc(effort ? `${rowLabel} · ${effort}` : rowLabel)}</th>${subtotalColumns.map(([key, heading]) => `<td data-js-debug-cost-cell-label="${esc(heading)}">${esc(debugGraphCostUsdText(debugGraphCostInteger(row?.[key])))}</td>`).join('')}<td data-js-debug-cost-cell-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</td></tr>`;
-    }).join('')}</tbody></table>
-  </section>`;
+function debugGraphCostModelLabel(row) {
+  const label = String(row?.label || row?.model || row?.source || row?.agent || row?.key || 'unknown');
+  const effort = String(row?.effort || '').trim();
+  return effort ? `${label} · ${effort}` : label;
+}
+
+function debugGraphCostBreakdownItems(row) {
+  return [
+    ['input', debugGraphCostText('debug.cost.input', 'Input')],
+    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')],
+    ['output', debugGraphCostText('debug.cost.output', 'Output')],
+    ['other', debugGraphCostText('debug.cost.other', 'Other')],
+  ].map(([key, label]) => ({
+    key,
+    label,
+    tokens: Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
+    microUsd: debugGraphCostInteger(row?.[`${key}_micro_usd`]),
+  }));
+}
+
+function debugGraphCostPricingLinksHtml(components, modelRow = null) {
+  const provider = String(modelRow?.provider || '').trim();
+  const model = String(modelRow?.model || '').trim();
+  const links = new Map();
+  for (const row of components || []) {
+    if (provider && String(row?.provider || '').trim() !== provider) continue;
+    if (model && String(row?.model || '').trim() !== model) continue;
+    const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
+    if (!url || links.has(url)) continue;
+    const sourceLabel = [row?.provider, row?.model].map(value => String(value || '').trim()).filter(Boolean).join(' · ')
+      || debugGraphCostText('debug.cost.source', 'Pricing source');
+    links.set(url, sourceLabel);
+  }
+  if (!links.size) return '';
+  return `<span class="js-debug-cost-pricing-links">${[...links].map(([url, label]) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`).join(' · ')}</span>`;
+}
+
+function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
+  if (!rows.length) return '';
+  const maxTokens = Math.max(1, ...rows.map(row => Math.max(0, Number(row?.token_quantity) || 0)));
+  const usageLabels = {
+    input: debugGraphCostText('debug.cost.input', 'Input'),
+    cache: debugGraphCostText('debug.cost.cached', 'Cached'),
+    output: debugGraphCostText('debug.cost.output', 'Output'),
+    other: debugGraphCostText('debug.cost.other', 'Other'),
+  };
+  const legend = Object.entries(usageLabels).map(([key, label]) => `<span><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(label)}</span>`).join('');
+  const report = options.report === true;
+  const heading = esc(debugGraphCostText('debug.cost.modelUsages', 'Model Usages'));
+  return `<section class="js-debug-cost-model-usages${report ? ' js-debug-cost-details-section' : ''}">${report ? `<h2>${heading}</h2>` : `<h4>${heading}</h4>`}<div class="js-debug-cost-usage-legend" aria-label="${esc(debugGraphCostText('debug.summary', 'Legend'))}">${legend}</div><div class="js-debug-cost-usage-chart">${rows.map(row => {
+    const breakdown = debugGraphCostBreakdownItems(row);
+    const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
+    const barShare = Math.max(0, Math.min(100, (totalTokens / maxTokens) * 100));
+    const segmentTotal = breakdown.reduce((total, item) => total + item.tokens, 0) || totalTokens || 1;
+    const pricingLinks = debugGraphCostPricingLinksHtml(components, row);
+    const accessible = `${debugGraphCostModelLabel(row)}: ${debugGraphTokensText(totalTokens)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphTokensText(item.tokens)}`).join('; ')}`;
+    return `<article class="js-debug-cost-usage-row"><div class="js-debug-cost-usage-heading"><span><strong>${esc(debugGraphCostModelLabel(row))}</strong>${pricingLinks}</span><span>${esc(`${debugGraphTokensText(totalTokens)} · ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}</span></div><div class="js-debug-cost-usage-track" role="img" aria-label="${esc(accessible)}"><div class="js-debug-cost-usage-fill" style="--js-debug-cost-model-share:${barShare.toFixed(4)}%">${breakdown.filter(item => item.tokens > 0).map(item => `<span class="js-debug-cost-usage-segment js-debug-cost-usage-segment--${esc(item.key)}" style="--js-debug-cost-class-share:${((item.tokens / segmentTotal) * 100).toFixed(4)}%" title="${esc(`${usageLabels[item.key]}: ${debugGraphTokensText(item.tokens)} · ${debugGraphCostUsdText(item.microUsd)}`)}"></span>`).join('')}</div></div><ul class="js-debug-cost-usage-values">${breakdown.map(item => `<li><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(item.key)}" aria-hidden="true"></i><span>${esc(usageLabels[item.key])}</span><strong>${esc(debugGraphTokensText(item.tokens))}</strong><small>${esc(debugGraphCostUsdText(item.microUsd))}</small></li>`).join('')}</ul></article>`;
+  }).join('')}</div></section>`;
 }
 
 function debugGraphCostComponentLabel(row) {
@@ -3550,20 +3628,18 @@ function debugGraphCostComponentFormulaText(row) {
 }
 
 function debugGraphCostComponentDetailsHtml(rows) {
-  const limited = rows.slice(0, 24);
-  if (!limited.length) return '';
+  if (!rows.length) return '';
   const formulaLabel = debugGraphCostText('debug.cost.formula', 'Formula');
   const rateLabel = debugGraphCostText('debug.cost.rate', 'Rate');
   const effectiveLabel = debugGraphCostText('debug.cost.effective', 'Effective');
   const estimatedLabel = debugGraphCostText('debug.cost.estimated', 'Estimated');
   return `<section class="js-debug-cost-details-section">
-    <h4>${esc(debugGraphCostText('debug.cost.byTokenClass', 'By token class'))}</h4>
-    <table><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.tokenClass', 'Token class'))}</th><th scope="col">${esc(formulaLabel)}</th><th scope="col">${esc(rateLabel)}</th><th scope="col">${esc(effectiveLabel)}</th><th scope="col">${esc(estimatedLabel)}</th></tr></thead>
-    <tbody>${limited.map(row => {
+    <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
+    <ul class="js-debug-cost-report-list">${rows.map(row => {
       const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      const source = url ? ` <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</a>` : '';
-      return `<tr><th scope="row">${esc(debugGraphCostComponentLabel(row))}${source}</th><td data-js-debug-cost-cell-label="${esc(formulaLabel)}">${esc(debugGraphCostComponentFormulaText(row))}</td><td data-js-debug-cost-cell-label="${esc(rateLabel)}">${esc(debugGraphCostComponentRateText(row))}</td><td data-js-debug-cost-cell-label="${esc(effectiveLabel)}">${esc(String(row?.effective_from || '—'))}</td><td data-js-debug-cost-cell-label="${esc(estimatedLabel)}">${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</td></tr>`;
-    }).join('')}</tbody></table>
+      const source = url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—';
+      return `<li><div><strong>${esc(debugGraphCostComponentLabel(row))}</strong> — ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</div><ul><li><span>${esc(formulaLabel)}:</span> ${esc(debugGraphCostComponentFormulaText(row))}</li><li><span>${esc(rateLabel)}:</span> ${esc(debugGraphCostComponentRateText(row))}</li><li><span>${esc(effectiveLabel)}:</span> ${esc(String(row?.effective_from || '—'))}</li><li><span>${esc(estimatedLabel)}:</span> ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</li><li><span>${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}:</span> ${source}</li></ul></li>`;
+    }).join('')}</ul>
   </section>`;
 }
 
@@ -3582,15 +3658,14 @@ function debugGraphCostSubtotalText(row) {
     ['output_micro_usd', debugGraphCostText('debug.cost.output', 'Output')],
     ['other_micro_usd', debugGraphCostText('debug.cost.other', 'Other')],
   ];
-  return `${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`;
+  return `${debugGraphTokensText(row?.token_quantity)} · ${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`;
 }
 
 function debugGraphCostSourceTreeHtml(rows) {
-  const limited = rows.slice(0, 24);
-  if (!limited.length) return '';
+  if (!rows.length) return '';
   return `<section class="js-debug-cost-details-section">
-    <h4>${esc(debugGraphCostText('debug.cost.bySource', 'By agent/source'))}</h4>
-    <ul class="js-debug-cost-source-tree" role="tree" aria-label="${esc(debugGraphCostText('debug.cost.bySource', 'By agent/source'))}">${limited.map(row => {
+    <h2>${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}</h2>
+    <ul class="js-debug-cost-source-tree" role="tree" aria-label="${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}">${rows.map(row => {
       const level = String(row?.agent_thread_id || '') && String(row?.agent_thread_id || '') !== String(row?.root_thread_id || '') ? 2 : 1;
       return `<li role="treeitem" aria-level="${level}" tabindex="0"><span class="js-debug-cost-source-label">${esc(debugGraphCostSourceLabel(row))}</span><span class="js-debug-cost-source-subtotals">${esc(debugGraphCostSubtotalText(row))}</span></li>`;
     }).join('')}</ul>
@@ -3618,19 +3693,29 @@ function debugGraphCostBackfillText(summary) {
   return debugGraphCostText('debug.cost.backfillPending', 'Backfill pending');
 }
 
-function debugGraphCostDetailsPopoverHtml(summary, domain) {
+function debugGraphCostDetailsModalHtml(summary, domain) {
   const hasPricedUsage = summary.pricedCount > 0;
   const exact = hasPricedUsage && summary.complete === true && summary.unpricedCount === 0;
   const total = hasPricedUsage ? debugGraphCostUsdText(exact ? summary.totalMicroUsd : summary.knownMicroUsd) : '—';
-  return `<div class="session-popover js-debug-cost-popover" role="dialog" aria-label="${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}">
-    <div class="js-debug-cost-popover-title">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div>
-    <p class="meta-muted">${esc(debugGraphCostRangeText(domain))}</p>
-    <p>${esc(!hasPricedUsage ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage') : (exact ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total}) : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total})))}</p>
-    ${debugGraphCostCatalogDetailsHtml(summary)}
-    ${debugGraphCostComponentDetailsHtml(summary.components)}
-    ${debugGraphCostDetailsTableHtml(debugGraphCostText('debug.cost.byModel', 'By model'), summary.models, debugGraphCostText('debug.cost.model', 'Model'))}
-    ${debugGraphCostSourceTreeHtml(summary.sources)}
-  </div>`;
+  const tokens = debugGraphCostTokenTotals(summary);
+  const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
+  return `<article class="js-debug-cost-modal-dialog js-debug-cost-report" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <div class="js-debug-cost-report-title">
+      <h1>${esc(title)}</h1>
+      <button type="button" class="js-debug-cost-modal-close" data-js-debug-cost-modal-close aria-label="${esc(t('common.close'))}" title="${esc(t('common.close'))}">×</button>
+    </div>
+    <div class="js-debug-cost-report-body">
+      <p class="meta-muted">${esc(debugGraphCostRangeText(domain))}</p>
+      <p>${esc(!hasPricedUsage ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage') : (exact ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total}) : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total})))}</p>
+      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.total', 'Summary'))}</h2>
+        <ul class="js-debug-cost-report-list"><li><strong>${esc(debugGraphCostText('debug.cost.total', 'Estimated total'))}:</strong> ${esc(total)}</li><li><strong>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}:</strong> ${esc(debugGraphTokensText(tokens.total))}<ul><li>${esc(`${debugGraphCostText('debug.cost.input', 'Input')}: ${debugGraphTokensText(tokens.input)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.cache', 'Cache')}: ${debugGraphTokensText(tokens.cache)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.output', 'Output')}: ${debugGraphTokensText(tokens.output)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.other', 'Other')}: ${debugGraphTokensText(tokens.other)}`)}</li></ul></li></ul>
+      </section>
+      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.catalogRevision', 'Pricing catalog'))}</h2>${debugGraphCostCatalogDetailsHtml(summary)}</section>
+      ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true})}
+      ${debugGraphCostComponentDetailsHtml(summary.components)}
+      ${debugGraphCostSourceTreeHtml(summary.sources)}
+    </div>
+  </article>`;
 }
 
 function debugGraphCostSummaryHtml(buckets, domain) {
@@ -3639,8 +3724,7 @@ function debugGraphCostSummaryHtml(buckets, domain) {
   const exact = hasPricedUsage && summary.complete === true && summary.unpricedCount === 0;
   const estimated = hasPricedUsage ? debugGraphCostUsdText(exact ? summary.totalMicroUsd : summary.knownMicroUsd) : '—';
   const compact = debugGraphCostCompactTotals(summary);
-  const synopsis = summary.models.slice(0, 3).map(row => `${String(row?.model || row?.label || 'unknown')} ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`);
-  const remaining = Math.max(0, summary.models.length - synopsis.length);
+  const tokens = debugGraphCostTokenTotals(summary);
   const heading = hasPricedUsage ? `${exact ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';
   const accessible = !hasPricedUsage
     ? 'No displayed usage has a selected price'
@@ -3651,11 +3735,13 @@ function debugGraphCostSummaryHtml(buckets, domain) {
   const refreshHtml = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh aria-label="${esc(refreshLabel)}" title="${esc(jsDebugPricingRefreshState.error || refreshLabel)}"${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
   const refreshStatus = jsDebugPricingRefreshState.error || (jsDebugPricingRefreshState.inFlight ? (jsDebugPricingRefreshState.status || `${refreshLabel}…`) : '');
   const backfillStatus = debugGraphCostBackfillText(summary);
+  const moreInfo = debugGraphCostText('debug.cost.moreInfo', 'More Info');
   return `<section class="js-debug-chart js-debug-cost-summary" data-js-debug-summary-group="costSummary">
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}</span>
-        <span class="session-popover-host js-debug-cost-popover-host"><button type="button" class="js-debug-chart-summary js-debug-cost-details" data-js-debug-cost-details aria-expanded="false" aria-haspopup="dialog" aria-label="${esc(accessible)}">(${esc(heading)})</button>${debugGraphCostDetailsPopoverHtml(summary, domain)}</span>
+        <span class="js-debug-chart-summary js-debug-cost-estimate">(${esc(heading)})</span>
+        <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details" data-js-debug-cost-details aria-expanded="false" aria-haspopup="dialog" aria-label="${esc(accessible)}">${esc(moreInfo)}</button><template data-js-debug-cost-modal-template>${debugGraphCostDetailsModalHtml(summary, domain)}</template></span>
         ${refreshHtml}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="costSummary" aria-label="${esc(t('common.close'))} ${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}" title="${esc(t('common.close'))}">×</button>
       </div>
@@ -3664,9 +3750,8 @@ function debugGraphCostSummaryHtml(buckets, domain) {
       ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
     </div>
     <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
-      ${[['Input', compact.input], ['Cache', compact.cache], ['Output', compact.output], ['Total', hasPricedUsage ? (exact ? summary.totalMicroUsd : summary.knownMicroUsd) : null]].map(([label, value]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : debugGraphCostUsdText(value))}</dd></div>`).join('')}
+      ${[['Input', compact.input, tokens.input], ['Cache', compact.cache, tokens.cache], ['Output', compact.output, tokens.output], ['Total', hasPricedUsage ? (exact ? summary.totalMicroUsd : summary.knownMicroUsd) : null, tokens.total]].map(([label, value, tokenCount]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : debugGraphCostUsdText(value))}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
     </dl>
-    <p class="js-debug-cost-models">${esc(synopsis.length ? `${debugGraphCostText('debug.cost.models', 'Models')}: ${synopsis.join(' · ')}${remaining ? ` · +${remaining}` : ''}` : debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage'))}</p>
   </section>`;
 }
 
@@ -3721,14 +3806,20 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
   const tokenBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
   const tokenAxis = debugGraphTokenAxisDescriptor(tokenBuckets);
-  const gridHtml = chartGroups.flatMap(group => {
+  const visibleGroupKeys = new Set(chartGroups.map(group => group.key));
+  const gridHtml = jsDebugGraphChartGroups.flatMap(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      const chart = debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {tokenAxis});
+      const items = visibleGroupKeys.has(group.key)
+        ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {tokenAxis})]
+        : [];
       // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
       // displayed bucket array, including the compact wide-range history, but adds no axes,
       // bars, or independent range state.
-      return group.key === 'modelTokens' ? [chart, debugGraphCostSummaryHtml(groupBuckets, domain)] : [chart];
+      if (group.key === 'modelTokens' && debugGraphChartVisible('costSummary')) {
+        items.push(debugGraphCostSummaryHtml(groupBuckets, domain));
+      }
+      return items;
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }
@@ -4116,6 +4207,7 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
     const visible = document.visibilityState === 'visible';
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
+    syncDebugSystemPolling({pollNow: visible});
   });
 }
 
@@ -4151,6 +4243,179 @@ function jsDebugTextForClipboard() {
   ].join('\n');
 }
 
+function debugSystemNumber(value, digits = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString(undefined, {maximumFractionDigits: digits}) : t('common.notAvailable');
+}
+
+function debugSystemRowsHtml(rows = []) {
+  return `<dl class="js-debug-system-kv">${rows.map(([label, value]) => `
+    <div><dt>${esc(label)}</dt><dd>${esc(value == null || value === '' ? t('common.notAvailable') : value)}</dd></div>`).join('')}</dl>`;
+}
+
+function debugSystemCardHtml(title, body, options = {}) {
+  return `<section class="js-debug-system-card${options.wide ? ' js-debug-system-card--wide' : ''}">
+    <h3>${esc(title)}</h3>${body}
+  </section>`;
+}
+
+function debugSystemServiceState(service = {}) {
+  const pid = Number(service.pid || 0);
+  if (pid <= 0) {
+    if (Number(service.restart_backoff_seconds || 0) > 0) return {label: 'Issue', tone: 'bad'};
+    return {label: 'Idle', tone: 'muted'};
+  }
+  if (service.healthy === false) return {label: 'Issue', tone: 'bad'};
+  return {label: 'Running', tone: 'good'};
+}
+
+function debugSystemRolesHtml(roles = {}) {
+  const rows = Object.entries(roles && typeof roles === 'object' ? roles : {});
+  if (!rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table">
+    <thead><tr><th>Role</th><th>Status</th><th>Refreshes</th><th>Fallbacks</th><th>Stale reads</th></tr></thead>
+    <tbody>${rows.map(([name, role]) => `<tr>
+      <td>${esc(name)}</td><td>${esc(role?.status || (role?.owner ? 'owner' : 'follower'))}</td>
+      <td>${esc(debugSystemNumber(role?.refresh_requests))}</td><td>${esc(debugSystemNumber(role?.fallback_count))}</td>
+      <td>${esc(debugSystemNumber(role?.follower_stale_reads))}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemServicesHtml(payload = {}) {
+  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
+  if (!services.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  return `<div class="js-debug-system-services">${services.map(service => {
+    const state = debugSystemServiceState(service);
+    const resources = service.resources && typeof service.resources === 'object' ? service.resources : {};
+    const queues = service.queues && typeof service.queues === 'object' ? service.queues : {};
+    const queueText = Object.entries(queues).map(([key, count]) => `${key} ${count}`).join(' · ');
+    return `<article class="js-debug-system-service">
+      <header><strong>${esc(service.service || 'service')}</strong><span class="js-debug-system-state js-debug-system-state--${state.tone}">${esc(state.label)}</span></header>
+      ${debugSystemRowsHtml([
+        ['PID', Number(service.pid || 0) || '—'],
+        ['Uptime', service.uptime_seconds == null ? '—' : debugGraphUptimeText(service.uptime_seconds)],
+        ['CPU', resources.cpu_percent == null ? '—' : `${debugSystemNumber(resources.cpu_percent, 1)}%`],
+        ['Memory', resources.rss_bytes == null ? '—' : debugGraphTerseBytesText(resources.rss_bytes)],
+        ['Clients', service.clients == null ? '—' : debugSystemNumber(service.clients)],
+        ['Queues', queueText || '—'],
+        ['Active task', service.active_task || '—'],
+        ['Last failure', service.last_failure || '—'],
+      ])}
+    </article>`;
+  }).join('')}</div>`;
+}
+
+function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
+  if (!Array.isArray(rows) || !rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table">
+    <thead><tr><th>${kind === 'endpoint' ? 'Endpoint' : 'Worker'}</th><th>Calls</th><th>Max</th><th>Payload</th></tr></thead>
+    <tbody>${rows.map(row => `<tr>
+      <td>${esc(kind === 'endpoint' ? row.surface : `${row.role || ''} · ${row.surface || ''}`)}</td>
+      <td>${esc(debugSystemNumber(row.count))}</td>
+      <td>${esc(debugGraphTerseTimeText(row.compute_ms_max))}</td>
+      <td>${esc(debugGraphTerseBytesText(row.payload_bytes_total))}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemInnerHtml() {
+  const payload = jsDebugSystemState.payload;
+  if (!payload) {
+    const message = jsDebugSystemState.error || t('common.loading');
+    return `<div class="js-debug-system-loading" role="status">${esc(message)}</div>`;
+  }
+  const server = payload.server || {};
+  const owner = payload.owner || {};
+  const currentOwner = owner.current_owner || {};
+  const refresh = payload.refresh || {};
+  const localRefreshing = refresh.local_refreshing || {};
+  const coalescing = refresh.coalescing || {};
+  const search = payload.search_index || {};
+  const caches = payload.caches || {};
+  const clientEvents = payload.client_events || {};
+  const chat = payload.chat || {};
+  const totals = payload.local_services?.totals || {};
+  const generatedAgo = payload.generated_at ? relativeTimeFormat(Math.max(0, Date.now() / 1000 - Number(payload.generated_at))) : t('common.notAvailable');
+  const cards = [
+    debugSystemCardHtml('Server', debugSystemRowsHtml([
+      ['Status', payload.ok ? 'Running' : 'Issue'],
+      ['Version', server.version], ['PID', server.pid], ['Uptime', debugGraphUptimeText(server.uptime_seconds)],
+      ['Process CPU', `${debugSystemNumber(server.cpu_percent, 1)}%`], ['System CPU', `${debugSystemNumber(server.system_cpu_percent, 1)}%`],
+      ['Memory', debugGraphTerseBytesText(server.rss_bytes)], ['State directory', payload.state_dir],
+    ])),
+    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
+      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
+      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
+      ['Index mode', owner.search_index?.mode], ['Generations', owner.debug?.generation_count],
+    ])),
+    debugSystemCardHtml('Worker totals', debugSystemRowsHtml([
+      ['Processes', totals.processes], ['CPU', `${debugSystemNumber(totals.cpu_percent, 1)}%`],
+      ['Memory', debugGraphTerseBytesText(totals.rss_bytes)],
+      ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
+      ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
+    ])),
+    debugSystemCardHtml('Search & caches', debugSystemRowsHtml([
+      ['Indexed roots', search.root_count], ['Builds', search.build_count], ['Scanned entries', search.scanned_entries],
+      ['Ignored entries', search.ignored_entries], ['Index bytes', debugGraphTerseBytesText(search.cache_bytes)],
+      ['Session files cache', `${debugSystemNumber(caches.session_files?.files)} files · ${debugGraphTerseBytesText(caches.session_files?.bytes)}`],
+      ['Activity cache', `${debugSystemNumber(caches.activity?.files)} files · ${debugGraphTerseBytesText(caches.activity?.bytes)}`],
+    ])),
+    debugSystemCardHtml('Events & chat', debugSystemRowsHtml([
+      ['SSE subscribers', Object.values(clientEvents.channel_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0)],
+      ['Published events', clientEvents.published_events],
+      ['Delivered events', clientEvents.delivered_events],
+      ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
+    ])),
+    debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
+    debugSystemCardHtml('Local services', debugSystemServicesHtml(payload), {wide: true}),
+    debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),
+    debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(payload.top_background_work, 'worker'), {wide: true}),
+  ];
+  return `<div class="js-debug-system-toolbar">
+    <span role="status">Updated ${esc(generatedAgo)}${jsDebugSystemState.error ? ` · ${esc(jsDebugSystemState.error)}` : ''}</span>
+    <button type="button" class="preferences-inline-action" data-js-debug-system-refresh${jsDebugSystemState.inFlight ? ' disabled' : ''}>${esc(t('common.refresh'))}</button>
+  </div><div class="js-debug-system-grid">${cards.join('')}</div>`;
+}
+
+function refreshDebugSystemViews() {
+  for (const view of document.querySelectorAll('[data-js-debug-system]')) {
+    const scrollTop = view.scrollTop;
+    const scrollLeft = view.scrollLeft;
+    view.innerHTML = debugSystemInnerHtml();
+    restoreElementScrollPosition(view, scrollTop, scrollLeft);
+    view.setAttribute('aria-busy', jsDebugSystemState.inFlight ? 'true' : 'false');
+  }
+}
+
+async function pollDebugSystemStatus({force = false} = {}) {
+  if (jsDebugSystemState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
+  if (!force && (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
+  jsDebugSystemState.inFlight = true;
+  jsDebugSystemState.error = '';
+  refreshDebugSystemViews();
+  try {
+    jsDebugSystemState.payload = await apiFetchJsonQuiet('/api/system-status', {cache: 'no-store'});
+    jsDebugSystemState.updatedAt = Date.now();
+    return true;
+  } catch (error) {
+    jsDebugSystemState.error = userMessageText(error);
+    return false;
+  } finally {
+    jsDebugSystemState.inFlight = false;
+    refreshDebugSystemViews();
+  }
+}
+
+function syncDebugSystemPolling({pollNow = false} = {}) {
+  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) {
+    clearRuntimeInterval('debug-system');
+    return;
+  }
+  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, jsDebugSystemPollMs);
+  if (pollNow || !jsDebugSystemState.payload) void pollDebugSystemStatus({force: true});
+}
+
 function debugPanelHtml() {
   const counts = debugEventCounts();
   return `
@@ -4170,7 +4435,8 @@ function debugPanelHtml() {
       </div>
       <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
     </div>
-    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`;
+    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>
+    <div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
@@ -4255,9 +4521,13 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   const lastRenderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
   if (!force && Number.isFinite(lastRenderedAt) && nowMs - lastRenderedAt < jsDebugGraphRefreshMs) return false;
   const perf = clientPerfStart('statsHistoryRender');
+  const scrollOwner = graph.closest('.js-debug-graph-view');
+  const scrollTop = scrollOwner?.scrollTop || 0;
+  const scrollLeft = scrollOwner?.scrollLeft || 0;
   try {
     graph.className = debugGraphClassName(nowMs);
     graph.innerHTML = debugGraphInnerHtml(nowMs);
+    restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
     bindDebugCostSummaryPopovers(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
@@ -4268,45 +4538,63 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   return true;
 }
 
+function closeDebugCostSummaryModal({restoreFocus = true} = {}) {
+  const {overlay, anchor, keydown} = jsDebugCostModalState;
+  if (keydown) document.removeEventListener('keydown', keydown, true);
+  if (overlay) overlay.remove();
+  if (anchor) {
+    anchor.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && document.contains(anchor)) anchor.focus({preventScroll: true});
+  }
+  jsDebugCostModalState.overlay = null;
+  jsDebugCostModalState.anchor = null;
+  jsDebugCostModalState.keydown = null;
+}
+
+function openDebugCostSummaryModal(anchor) {
+  const template = anchor?.closest?.('.js-debug-cost-modal-host')?.querySelector?.(':scope > template[data-js-debug-cost-modal-template]');
+  if (!template) return;
+  closeDebugCostSummaryModal({restoreFocus: false});
+  const overlay = document.createElement('div');
+  overlay.className = 'app-modal-overlay js-debug-cost-modal';
+  overlay.dataset.jsDebugCostModal = 'true';
+  overlay.appendChild(template.content.cloneNode(true));
+  const close = () => closeDebugCostSummaryModal();
+  const onKeydown = event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    close();
+  };
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay || event.target?.closest?.('[data-js-debug-cost-modal-close]')) {
+      event.preventDefault();
+      close();
+    }
+  });
+  document.addEventListener('keydown', onKeydown, true);
+  jsDebugCostModalState.overlay = overlay;
+  jsDebugCostModalState.anchor = anchor;
+  jsDebugCostModalState.keydown = onKeydown;
+  anchor.setAttribute('aria-expanded', 'true');
+  appOverlayRootElement().appendChild(overlay);
+  overlay.querySelector('[data-js-debug-cost-modal-close]')?.focus?.({preventScroll: true});
+}
+
 function bindDebugCostSummaryPopovers(graph) {
-  if (!graph || typeof createHoverPopover !== 'function') return;
+  if (!graph) return;
   graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
     if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
-    const host = anchor.closest('.js-debug-cost-popover-host');
-    const popover = host?.querySelector(':scope > .js-debug-cost-popover');
-    if (!host || !popover) return;
+    const template = anchor.closest('.js-debug-cost-modal-host')?.querySelector(':scope > template[data-js-debug-cost-modal-template]');
+    if (!template) return;
     anchor.dataset.jsDebugCostDetailsBound = 'true';
-    const controller = createHoverPopover({
-      anchor: host,
-      popover,
-      showDelay: 0,
-      hideDelay: () => popoverHideDelayMs,
-      position: () => {
-        if (typeof positionPaneTabPopover === 'function') positionPaneTabPopover(host, popover);
-      },
-      closeOthers: () => closeOtherSessionPopovers(host),
-      onOpen: () => anchor.setAttribute('aria-expanded', 'true'),
-      onClose: () => anchor.setAttribute('aria-expanded', 'false'),
-    });
     anchor.addEventListener('click', event => {
       event.preventDefault();
-      // Programmatic/assistive activation does not always establish :hover
-      // before the shared owner checks popover activity.  Focusing the real
-      // button also makes click and keyboard activation share one path.
-      anchor.focus({preventScroll: true});
-      controller?.openNow(event);
+      openDebugCostSummaryModal(anchor);
     });
     anchor.addEventListener('keydown', event => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
-      controller?.closeNow(event);
-      anchor.focus();
-    });
-    popover.addEventListener('keydown', event => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      controller?.closeNow(event);
-      anchor.focus();
+      closeDebugCostSummaryModal();
     });
   });
 }
@@ -4329,6 +4617,7 @@ function setDebugSubTab(tab) {
   jsDebugSubTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
+  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system'});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
@@ -4699,6 +4988,7 @@ function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
   bindDebugCostSummaryPopovers(panel.querySelector('[data-js-debug-graph]'));
+  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
   panel.addEventListener('pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
@@ -4729,6 +5019,12 @@ function bindDebugPanel(panel) {
     if (subtab && panel.contains(subtab)) {
       event.preventDefault();
       setDebugSubTab(subtab.dataset.jsDebugSubtab);
+      return;
+    }
+    const systemRefresh = event.target.closest('[data-js-debug-system-refresh]');
+    if (systemRefresh && panel.contains(systemRefresh)) {
+      event.preventDefault();
+      void pollDebugSystemStatus({force: true});
       return;
     }
     const copy = event.target.closest('[data-js-debug-copy]');

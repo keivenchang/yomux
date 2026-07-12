@@ -612,7 +612,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(narrowTablet.narrowSingleColumnModeForTest(), false, 'a 744px portrait iPad retains generic pane splits because two minimum-width panes fit');
     assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder remains an ordinary tab while its dedicated Side Pane cannot fit');
     assert.equal(narrowTablet.dropItemCanBeDraggedForTest(narrowTablet.fileExplorerItemId), true, 'Finder can be moved through the normal tab drag pipeline on iPad');
-    assert.equal(narrowTablet.layoutSlotKeys(narrowTablet.layoutSlotsForTest()).length, 1, 'a sub-900px portrait iPad follows the constrained one-Generic-Pane contract');
+    assert.equal(narrowTablet.layoutSlotKeys(narrowTablet.layoutSlotsForTest()).length, 2, 'a sub-900px portrait iPad converts the Side Pane without flattening Generic Pane splits');
     assert.equal(narrowTablet.sidePaneSlots(narrowTablet.layoutSlotsForTest()).length, 0, 'the same iPad does not force a clipped dedicated Finder column');
     const tooNarrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
@@ -3793,8 +3793,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
     assert.ok(html.includes('data-js-debug-subtab="graph"') && html.includes('Graph'), 'YO!stats renders a Graph sub-tab');
+    assert.ok(html.includes('data-js-debug-subtab="system"') && html.includes('System'), 'YO!stats renders a System sub-tab');
     assert.ok(html.indexOf('data-js-debug-subtab="graph"') < html.indexOf('data-js-debug-subtab="events"'), 'YO!stats puts the Graph button left of API/SSE');
+    assert.ok(html.indexOf('data-js-debug-subtab="events"') < html.indexOf('data-js-debug-subtab="system"'), 'YO!stats puts System immediately right of API/SSE');
     assert.ok(html.includes('data-js-debug-subview="graph"') && html.includes('data-js-debug-subview="events" hidden'), 'YO!stats defaults to the Graph sub-tab and keeps API/SSE separate');
+    assert.ok(html.includes('data-js-debug-subview="system" hidden') && html.includes('data-js-debug-system'), 'YO!stats keeps its System dashboard in a separate lazy subview');
+    const systemSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(systemSource.includes("apiFetchJsonQuiet('/api/system-status', {cache: 'no-store'})") && /jsDebugSubTab !== 'system' \|\| !jsDebugStatsPanelVisible\(\)/.test(systemSource), 'System status uses the bounded quiet endpoint and remains visibility-gated');
     assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
     assert.ok(html.includes('data-js-debug-stat="api">2<'), 'debug panel surfaces the API call count');
     assert.ok(html.includes('data-js-debug-graph'), 'YO!stats graph sub-tab renders a graph container');
@@ -5070,41 +5075,63 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         cost_summary: {
           total_micro_usd: 256000, known_micro_usd: 256000, priced_count: 4, complete: true, unpriced_count: 0,
           components: [
-            {key: 'uncached_input', label: 'Uncached input', micro_usd: 70500, quantity: 23500, unit: 'tokens', rate_usd: '3', rate_scale: 1000000, effective_from: '2026-07-01T00:00:00Z', source_url: 'https://platform.openai.com/pricing'},
-            {key: 'cache_read', label: 'Cached read', micro_usd: 37500},
-            {key: 'text_output', label: 'Text output', micro_usd: 95000},
-            {key: 'image_output', label: 'Image output', micro_usd: 53000},
+            {key: 'uncached_input', label: 'Uncached input', provider: 'openai', model: 'gpt-5.6-terra', micro_usd: 70500, quantity: 23500, unit: 'tokens', rate_usd: '3', rate_scale: 1000000, effective_from: '2026-07-01T00:00:00Z', source_url: 'https://platform.openai.com/pricing'},
+            {key: 'cache_read', label: 'Cached read', direction: 'input', cache_role: 'read', quantity: 125000, unit: 'tokens', micro_usd: 37500},
+            {key: 'text_output', label: 'Text output', direction: 'output', quantity: 3700, unit: 'tokens', micro_usd: 95000},
+            {key: 'image_output', label: 'Image output', direction: 'output', modality: 'image', quantity: 2, unit: 'images', micro_usd: 53000},
           ],
           models: [
-            {provider: 'openai', model: 'gpt-5.6-terra', effort: 'med', input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
-            {provider: 'anthropic', model: 'claude-opus-4-8', effort: 'xhigh', input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
+            {provider: 'openai', model: 'gpt-5.6-terra', effort: 'med', token_quantity: 148500, input_tokens: 23500, cache_tokens: 125000, output_tokens: 0, input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
+            {provider: 'anthropic', model: 'claude-opus-4-8', effort: 'xhigh', token_quantity: 3700, input_tokens: 0, cache_tokens: 0, output_tokens: 3700, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
+            {provider: 'openai', model: 'gpt-5.6-sol', effort: 'high', token_quantity: 0, input_tokens: 0, cache_tokens: 0, output_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0, micro_usd: 0},
+            {provider: 'openai', model: 'gpt-5.6-sol', effort: 'low', token_quantity: 0, input_tokens: 0, cache_tokens: 0, output_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0, micro_usd: 0},
+            {provider: 'openai', model: 'gpt-image-2', effort: '', token_quantity: 0, input_tokens: 0, cache_tokens: 0, output_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0, micro_usd: 0},
           ],
           sources: [
-            {source: 'Root Codex', root_thread_id: 'root', agent_thread_id: 'root', model: 'gpt-5.6-terra', input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
-            {source: 'Research subagent', root_thread_id: 'root', agent_thread_id: 'child', model: 'claude-opus-4-8', input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
+            {source: 'Root Codex', root_thread_id: 'root', agent_thread_id: 'root', model: 'gpt-5.6-terra', token_quantity: 148500, input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
+            {source: 'Research subagent', root_thread_id: 'root', agent_thread_id: 'child', model: 'claude-opus-4-8', token_quantity: 3700, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
           ],
           catalog_revision: 'seed-1', active_catalog_revision: 9, freshness: 'seed-only',
         },
       }],
     });
     api.setDebugGraphChartVisibleForTest('modelTokens', true);
+    const defaultCostHtml = api.debugPanelHtmlForTest();
+    assert.ok(defaultCostHtml.includes('data-js-debug-chart-toggle="costSummary" aria-pressed="false"') && !defaultCostHtml.includes('data-js-debug-summary-group="costSummary"'), 'Cost has a persistent toggle immediately after Model tokens but starts off');
+    api.setDebugGraphChartVisibleForTest('costSummary', true);
     const summary = canonical(api.debugGraphCostSummaryForTest(api.debugGraphAgentTokenDisplayBucketsForTest(now)));
     assert.equal(summary.totalMicroUsd, 256000, 'Cost summary preserves integer micro-USD totals from the existing stats bucket');
     assert.equal(summary.knownMicroUsd, 256000, 'Cost summary does not convert the total to a float before reconciliation');
-    assert.ok(/group\.key === 'modelTokens' \? \[chart, debugGraphCostSummaryHtml\(groupBuckets, domain\)\]/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Cost summary consumes the exact Model tokens/min bucket helper, including compact wide-range history');
+    assert.ok(/group\.key === 'modelTokens' && debugGraphChartVisible\('costSummary'\)[\s\S]*items\.push\(debugGraphCostSummaryHtml\(groupBuckets, domain\)\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Cost summary consumes the exact Model tokens/min bucket helper, including compact wide-range history');
     const html = api.debugPanelHtmlForTest();
     const modelIndex = html.indexOf('data-js-debug-chart="modelTokens"');
     const costIndex = html.indexOf('data-js-debug-summary-group="costSummary"');
     assert.ok(modelIndex >= 0 && costIndex > modelIndex, 'Cost summary is immediately ordered after Model tokens/min in the graph stack');
-    const cardBody = html.slice(costIndex).match(/<dl class="js-debug-cost-compact"[\s\S]*?<\/dl>\s*<p class="js-debug-cost-models">[\s\S]*?<\/p>/)?.[0] || '';
+    const modelToggleIndex = html.indexOf('data-js-debug-chart-toggle="modelTokens"');
+    const costToggleIndex = html.indexOf('data-js-debug-chart-toggle="costSummary"');
+    const gpuToggleIndex = html.indexOf('data-js-debug-chart-toggle="gpuUtil"');
+    assert.ok(modelToggleIndex >= 0 && modelToggleIndex < costToggleIndex && costToggleIndex < gpuToggleIndex, 'Cost control is immediately ordered after Model tokens and before GPU');
+    api.setDebugGraphChartVisibleForTest('costSummary', false);
+    assert.equal(api.debugPanelHtmlForTest().includes('data-js-debug-summary-group="costSummary"'), false, 'Cost control hides the independent summary card');
+    api.setDebugGraphChartVisibleForTest('costSummary', true);
+    assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-summary-group="costSummary"'), 'Cost control restores the summary card');
+    const cardBody = html.slice(costIndex).match(/<dl class="js-debug-cost-compact"[\s\S]*?<\/dl>/)?.[0] || '';
     assert.ok(html.includes('(est. ≥$0.2560, Σ displayed)') && cardBody.includes('Input') && cardBody.includes('Cache') && cardBody.includes('Output') && cardBody.includes('Total'), 'the default card remains a lower bound while backfill is active and contains only compact input/cache/output/total accounting');
     assert.ok(html.includes('Backfill in progress'), 'Cost summary marks a displayed estimate partial while retained transcript atoms are migrating');
-    assert.ok(cardBody.includes('Models: gpt-5.6-terra $0.1450 · claude-opus-4-8 $0.1110'), 'the compact card provides a bounded model synopsis');
+    assert.ok(cardBody.includes('Input') && cardBody.includes('$0.0705') && cardBody.includes('23.5k tokens') && cardBody.includes('Cache') && cardBody.includes('$0.0375') && cardBody.includes('125k tokens') && cardBody.includes('Output') && cardBody.includes('3.7k tokens') && cardBody.includes('Total') && cardBody.includes('152k tokens'), 'the compact card pairs every cost class and total with token-only usage');
+    const cardHeader = html.slice(costIndex, html.indexOf('<dl class="js-debug-cost-compact"', costIndex));
+    assert.ok(cardHeader.includes('js-debug-cost-estimate'), 'the Cost card heading carries the plain estimate text');
+    assert.ok(cardHeader.includes('>More Info<'), 'the Cost card exposes the separate More Info control');
+    assert.equal(cardBody.includes('<a '), false, 'the Cost card compact accounting list contains no pricing links');
+    assert.equal(cardBody.includes('js-debug-cost-usage-chart'), false, 'the Cost card compact accounting list contains no model usage chart');
+    assert.ok(html.includes('<template data-js-debug-cost-modal-template>') && html.includes('>Model Usages<') && html.includes('js-debug-cost-usage-chart') && html.includes('gpt-5.6-terra · med') && html.includes('149k tokens · $0.1450') && html.includes('claude-opus-4-8 · xhigh') && html.includes('gpt-5.6-sol · high') && html.includes('gpt-5.6-sol · low') && html.includes('gpt-image-2') && !html.includes('· +'), 'the full report is stored as modal template content and charts every model and effort instead of truncating to a +N suffix');
+    assert.ok(html.includes('js-debug-cost-usage-segment--input') && html.includes('js-debug-cost-usage-segment--cache') && html.includes('js-debug-cost-usage-values') && html.includes('Input') && html.includes('Cached') && html.includes('Output') && html.includes('Other') && html.includes('23.5k tokens') && html.includes('$0.0705') && html.includes('125k tokens') && html.includes('$0.0375'), 'report Model Usages combines comparable stacked bars with exact per-class token and cost values');
     assert.equal(cardBody.includes('js-debug-line-chart') || cardBody.includes('data-js-debug-axis') || cardBody.includes('data-js-debug-bar-'), false, 'Cost summary is not a cost-per-minute chart');
-    assert.ok(html.includes('data-js-debug-cost-details') && html.includes('aria-haspopup="dialog"') && html.includes('By token class') && html.includes('By model') && html.includes('By agent/source') && html.includes('>Other<') && html.includes('js-debug-cost-all-models') && html.includes('data-js-debug-cost-cell-label="Input"'), 'the amount button owns the complete token-class, model subtotal, All models, and source breakdown through the shared popover surface with narrow-row labels');
+    assert.ok(html.includes('data-js-debug-cost-details') && html.includes('aria-haspopup="dialog"') && html.includes('<article class="js-debug-cost-modal-dialog js-debug-cost-report"') && html.includes('data-js-debug-cost-modal-close') && html.includes('class="js-debug-cost-report-body"') && html.includes('152k tokens') && html.includes('Input: 23.5k tokens') && html.includes('Cache: 125k tokens') && html.includes('Output: 3.7k tokens') && html.includes('Other: 0 tokens') && html.includes('Cost calculation') && html.includes('Model Usages') && html.includes('Agent and source attribution') && !html.includes('<table'), 'More Info opens a bounded Markdown-like modal report whose inner body owns complete token, model, calculation, and source content instead of a spreadsheet table');
     const costSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(costSource.includes('data-js-debug-cost-refresh') && costSource.includes("/api/pricing-catalog/refresh") && costSource.includes("/api/pricing-catalog', {cache: 'no-store'}") && costSource.includes('readOnlyMode ? \'\'') && costSource.includes('} catch (error) {\n    jsDebugPricingRefreshState.inFlight = false;'), 'the card exposes the server-owned Refresh control only to writable/admin sessions, polls its bounded status, clears a failed request state, and never crawls from the browser');
-    assert.ok(html.includes('Catalog revision') && html.includes('>9<') && html.includes('Catalog freshness') && html.includes('seed-only') && html.includes('Priced coverage') && html.includes('>4/4<') && html.includes('Formula') && html.includes('23,500 tokens × $3/1,000,000 tokens') && html.includes('2026-07-01T00:00:00Z') && html.includes('Unpriced exclusions') && html.includes('https://platform.openai.com/pricing') && html.includes('role="tree"') && html.includes('aria-level="2"') && html.includes('Input $0.0705 · Cache $0.0375 · Output $0.0370 · Other $0.00 · Total $0.1450') && /All models<\/th><td[^>]*>\$0\.0705<\/td><td[^>]*>\$0\.0375<\/td><td[^>]*>\$0\.0950<\/td><td[^>]*>\$0\.0530<\/td><td[^>]*>\$0\.2560<\/td>/.test(html), 'the popover discloses active catalog state, priced coverage, safe pricing evidence/arithmetic, and reconciled root/subagent and All models subtotal arithmetic');
+    assert.ok(html.includes('Catalog revision') && html.includes('>9<') && html.includes('Catalog freshness') && html.includes('seed-only') && html.includes('Priced coverage') && html.includes('>4/4<') && html.includes('Formula:') && html.includes('23,500 tokens × $3/1,000,000 tokens') && html.includes('2026-07-01T00:00:00Z') && html.includes('Unpriced exclusions') && html.includes('href="https://platform.openai.com/pricing"') && html.includes('>openai · gpt-5.6-terra<') && html.includes('role="tree"') && html.includes('aria-level="2"') && html.includes('149k tokens · Input $0.0705 · Cache $0.0375 · Output $0.0370 · Other $0.00 · Total $0.1450'), 'the report discloses active catalog state, every safe pricing link and formula, token totals, and reconciled root/subagent arithmetic');
+    assert.equal((html.match(/<li>/g) || []).length > 24, true, 'the Cost report renders all available rows without the former 24-row caps');
 
     assert.ok(costSource.includes("const heading = hasPricedUsage ? `${exact ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';"), 'an interval with no priceable component is distinctly unestimated rather than a misleading $0 lower bound');
   });
@@ -10526,7 +10553,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         .map(series => [series.label, series.values.at(-1)]);
     };
     const hostLabelsFor = dimension => [...labelsFor(dimension)].map(item => [...item]);
-    assert.deepStrictEqual(hostLabelsFor('output'), [['gpt-5.6 · high', 7]], 'component-backed output replaces duplicate legacy counters and retains effort');
+    assert.deepStrictEqual(hostLabelsFor('output'), [['legacy-output', 20]], 'default Output keeps the authoritative per-model partition exactly synchronized with Agent tokens');
     assert.deepStrictEqual(hostLabelsFor('input'), [['gpt-5.6 · low', 90]], 'Input excludes cached input');
     assert.deepStrictEqual(hostLabelsFor('cacheRead'), [['gpt-5.6 · low', 40]], 'Cache read is independently selectable');
     assert.deepStrictEqual(hostLabelsFor('cacheWrite'), [['claude-opus · xhigh', 30]], 'Cache writes retain their model and effort');

@@ -1241,6 +1241,37 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
     assert "body" not in payload["chat"] and "query" not in payload["chat"] and "browser" not in payload["chat"]
 
 
+def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    transcript_forces = []
+    monkeypatch.setattr(webapp, "transcripts_payload", lambda force=False: transcript_forces.append(force) or {"sessions": {}, "cache": {"hit": True}})
+    monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({
+        "pid": 321,
+        "started_at": 100.0,
+        "uptime_seconds": 25.0,
+        "cpu_percent": 3.5,
+        "system_cpu_percent": 12.0,
+        "rss_bytes": 4096,
+    }, False))
+    try:
+        payload = webapp.system_status_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert transcript_forces == [False]
+    assert payload["ok"] is True
+    assert payload["generated_at"] > 0
+    assert payload["server"] == {
+        "version": app_module.YOLOMUX_VERSION,
+        "pid": 321,
+        "started_at": 100.0,
+        "uptime_seconds": 25.0,
+        "cpu_percent": 3.5,
+        "system_cpu_percent": 12.0,
+        "rss_bytes": 4096,
+    }
+
+
 def test_background_refresh_control_uses_nested_payload(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     calls = []
@@ -1339,6 +1370,8 @@ def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch
 def test_stats_agent_token_rate_tracks_claude_subagent_appends(monkeypatch, tmp_path):
     app_module.session_files._TRANSCRIPT_SCAN_CACHE.clear()
     webapp = app_module.TmuxWebtermApp(["1"])
+    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    webapp.stats_client = stats_client
     transcript = tmp_path / "session-id.jsonl"
     subagent = tmp_path / "session-id" / "subagents" / "agent-a.jsonl"
     subagent.parent.mkdir(parents=True)
@@ -1364,14 +1397,18 @@ def test_stats_agent_token_rate_tracks_claude_subagent_appends(monkeypatch, tmp_
         with subagent.open("a", encoding="utf-8") as handle:
             handle.write(line("child-second", 120))
         second = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
+        history = stats_client.history(token_resolution_seconds=60)
     finally:
+        stats_client.request({"action": "shutdown"})
         webapp.control_server.stop()
 
     assert "_agent_token_records" not in first
+    assert "_agent_token_records" not in second
     assert sum(
         rate["tokens"]
-        for record in second["_agent_token_records"]
+        for record in history["agent_token_history"]["records"]
         for rate in record["agent_token_rates"]
+        if rate["key"] == "1|0|claude"
     ) == pytest.approx(120.0)
 
 
@@ -1518,23 +1555,15 @@ def test_statsd_agent_token_delta_is_claimed_once_across_owner_handoff(monkeypat
             handle.write(json.dumps({"timestamp": 1060.0, "payload": {"info": {"total_token_usage": {"output_tokens": 220}}}}) + "\n")
         claimed = replacement_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
         duplicate = first_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
-        stats_client.merge_server_records(claimed.get("_agent_token_records", []), now=1060.0)
         history = stats_client.history(token_resolution_seconds=60)
     finally:
         stats_client.request({"action": "shutdown"})
         first_owner.control_server.stop()
         replacement_owner.control_server.stop()
 
-    baseline_records = baseline.get("_agent_token_records", [])
-    assert baseline_records and all("agent_token_rates" not in record for record in baseline_records)
-    assert all(record.get("usage_atoms") for record in baseline_records)
-    assert sum(
-        item["tokens"]
-        for record in claimed["_agent_token_records"]
-        for item in record.get("agent_token_rates", [])
-    ) == pytest.approx(120.0)
-    duplicate_records = duplicate.get("_agent_token_records", [])
-    assert duplicate_records and all("agent_token_rates" not in record for record in duplicate_records)
+    assert baseline.get("_agent_token_records", []) == []
+    assert claimed.get("_agent_token_records", []) == []
+    assert duplicate.get("_agent_token_records", []) == []
     assert history["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
     assert sum(
         item["tokens"]
@@ -1639,22 +1668,23 @@ def test_statsd_recovery_waits_for_every_active_agent_transcript(tmp_path):
         webapp.control_server.stop()
 
 
-def test_statsd_usage_atom_migration_uses_only_a_complete_agent_roster(tmp_path):
+def test_statsd_usage_atom_migration_enriches_available_rows_without_claiming_a_complete_roster(tmp_path):
     webapp = app_module.TmuxWebtermApp(["1"])
     calls = []
     webapp.stats_client = SimpleNamespace(
-        migrate_usage_atom_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True}
+        migrate_usage_atom_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True, "complete": all(row.get("transcript") for row in rows)}
     )
     rows = [
         {"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")},
         {"session": "1", "kind": "claude", "window_index": 1, "window_label": "1:claude", "transcript": ""},
     ]
     try:
-        assert webapp.statsd_migrate_usage_atom_history(rows, 1_000.0) is False
-        assert calls == []
+        assert webapp.statsd_migrate_usage_atom_history(rows, 1_000.0) is True
+        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
+        assert next(row for row in calls[0][0] if row["key"] == "1|1|claude")["transcript"] == ""
         rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
         assert webapp.statsd_migrate_usage_atom_history(rows, 1_001.0) is True
-        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
+        assert {row["key"] for row in calls[1][0]} == {"1|0|codex", "1|1|claude"}
     finally:
         webapp.control_server.stop()
 
@@ -1709,6 +1739,8 @@ def test_statsd_agent_token_delta_records_accumulate_actual_overlap_seconds(tmp_
 
 def test_stats_agent_token_rates_ignore_visible_counter_changes(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp(["1"])
+    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    webapp.stats_client = stats_client
     transcript = tmp_path / "claude.jsonl"
     transcript.write_text(json.dumps({"type": "assistant", "message": {"id": "first", "usage": {"output_tokens": 1000}, "content": []}}) + "\n", encoding="utf-8")
     rows = iter([
@@ -1723,12 +1755,20 @@ def test_stats_agent_token_rates_ignore_visible_counter_changes(monkeypatch, tmp
         with transcript.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"type": "assistant", "message": {"id": "second", "usage": {"output_tokens": 60}, "content": []}}) + "\n")
         transcript_delta = webapp.stats_agent_activity_record(1140.0, include_token_rates=True)
+        history = stats_client.history(token_resolution_seconds=60)
     finally:
+        stats_client.request({"action": "shutdown"})
         webapp.control_server.stop()
 
     assert "_agent_token_records" not in first
     assert "_agent_token_records" not in unchanged
-    assert transcript_delta["_agent_token_records"][0]["agent_token_rates"][0]["tokens"] == pytest.approx(60.0)
+    assert "_agent_token_records" not in transcript_delta
+    assert sum(
+        rate["tokens"]
+        for record in history["agent_token_history"]["records"]
+        for rate in record["agent_token_rates"]
+        if rate["key"] == "1|0|claude"
+    ) == pytest.approx(60.0)
 
 
 def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch):

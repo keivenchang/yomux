@@ -137,7 +137,7 @@ function dockviewRootBoundaryDropIntent(event) {
     // the drag actually reaches an eligible root boundary. Falling through to Dockview's broad
     // overlay here would recreate the false top-root drop after the shared pointer resolver
     // rejected it.
-    return dockviewTabPointerRootBoundaryIntent(event.nativeEvent, tabPointerDrag);
+    return dockviewTabPointerRootBoundaryIntentWithMemory(event.nativeEvent, tabPointerDrag);
   }
   if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
@@ -581,6 +581,7 @@ function dockviewBeginTabPointerDrag(event, item) {
     y: Number(event.clientY) || 0,
     rootBoundaryStartEdges: dockviewRootBoundaryEdgesAtPoint(event),
     rootBoundaryExitedEdges: {},
+    lastRootBoundaryIntent: null,
   };
 }
 
@@ -658,13 +659,27 @@ function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState
   };
 }
 
+function dockviewTabPointerRootBoundaryIntentWithMemory(event, state = dockviewLayoutState.tabPointerDrag) {
+  if (!state) return null;
+  const intent = dockviewTabPointerRootBoundaryIntent(event, state);
+  if (intent) {
+    state.lastRootBoundaryIntent = intent;
+    return intent;
+  }
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  const hasUsableCoordinates = Number.isFinite(x) && Number.isFinite(y) && (x !== 0 || y !== 0);
+  if (hasUsableCoordinates) state.lastRootBoundaryIntent = null;
+  return hasUsableCoordinates ? null : state.lastRootBoundaryIntent;
+}
+
 function dockviewTrackTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   if (!state?.item) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
-  const intent = dockviewTabPointerRootBoundaryIntent(event, state);
+  const intent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) dockviewShowRootBoundaryPreview(intent);
   else dockviewClearRootBoundaryPreview();
 }
@@ -690,14 +705,13 @@ function dockviewFinishTabPointerDrag(event) {
     void dockviewCommitSideVerticalDrop(sideIntent);
     return;
   }
-  const rootIntent = dockviewTabPointerRootBoundaryIntent(event, state);
+  const rootIntent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (rootIntent && !dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
-    const signature = layoutSlotsSignature(layoutSlots);
-    window.setTimeout(() => {
-      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
-      if (layoutSlotsSignature(layoutSlots) !== signature || !itemInLayout(rootIntent.item)) return;
-      void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
-    }, 0);
+    // The app owns the visible root-edge preview. Commit it before Dockview's generic tab-drop
+    // stamp can make the pointer fallback stand down without producing the requested root split.
+    event.preventDefault?.();
+    dockviewLayoutState.tabDropHandledAt = Date.now();
+    void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
     return;
   }
   const stripEnd = dockviewTabStripEndDropInfoForPointer(event, state);

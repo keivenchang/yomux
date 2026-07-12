@@ -5574,6 +5574,176 @@ def test_dockview_root_right_drop_is_easy_and_preserves_triplet_home_width(
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
+@pytest.mark.parametrize("zone", ["right", "bottom"])
+def test_dockview_touch_root_preview_commits_when_release_loses_coordinates(browser, tmp_path, zone):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:__info__,__debug__",
+        sessions=["1"],
+        grid_width=1000,
+        grid_height=760,
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_async_script(
+        """
+        const [zone, done] = arguments;
+        const item = debugPaneItemId;
+        const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${item}"]`);
+        const host = document.querySelector('#dockviewRoot');
+        const sourceSlot = slotForItem(item);
+        const tabRect = tab.getBoundingClientRect();
+        const hostRect = host.getBoundingClientRect();
+        dockviewLayoutState.tabDropHandledAt = 0;
+        dockviewLayoutState.tabPointerDrag = {
+          item,
+          slot: sourceSlot,
+          x: tabRect.left + tabRect.width / 2,
+          y: tabRect.top + tabRect.height / 2,
+          rootBoundaryStartEdges: dockviewRootBoundaryEdgesAtPoint({
+            clientX: tabRect.left + tabRect.width / 2,
+            clientY: tabRect.top + tabRect.height / 2,
+          }, hostRect),
+          rootBoundaryExitedEdges: {},
+        };
+        const edgeEvent = {
+          clientX: zone === 'right' ? hostRect.right - 2 : hostRect.left + hostRect.width / 2,
+          clientY: zone === 'bottom' ? hostRect.bottom - 2 : hostRect.top + hostRect.height / 2,
+        };
+        dockviewTrackTabPointerDrag(edgeEvent);
+        const preview = {
+          root: grid.classList.contains('drop-preview-root'),
+          zone: grid.classList.contains(`drop-preview-${zone}`),
+        };
+        // Mobile Safari/Dockview may finish a touch-owned drag with no useful
+        // client coordinates. The last valid, still-visible preview is the
+        // release intent in that case.
+        dockviewFinishTabPointerDrag({clientX: 0, clientY: 0, preventDefault() {}});
+        // Dockview can still emit onWillDrop for the same touch gesture even
+        // though it did not own the visible root-edge preview. Its generic tab
+        // stamp must not cancel the pointer owner's accepted split.
+        dockviewLayoutState.tabDropHandledAt = Date.now();
+        const wait = deadline => {
+          const tree = layoutSlots[layoutTreeKey];
+          if (tree?.split === (zone === 'right' ? 'row' : 'column')) {
+            done({preview, moved: true, tree, itemSlot: slotForItem(item)});
+            return;
+          }
+          if (performance.now() >= deadline) {
+            done({preview, moved: false, tree, itemSlot: slotForItem(item)});
+            return;
+          }
+          requestAnimationFrame(() => wait(deadline));
+        };
+        requestAnimationFrame(() => wait(performance.now() + 1000));
+        """,
+        zone,
+    )
+    assert result["preview"] == {"root": True, "zone": True}, result
+    assert result["moved"] is True, result
+    assert result["itemSlot"] != "left", result
+    assert result["tree"]["split"] == ("row" if zone == "right" else "column"), result
+
+
+def test_ipad_touch_drag_stats_tab_to_bottom_root_creates_lower_pane(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    try:
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1&layout=left&tabs=left:__info__,__debug__",
+            sessions=["1"],
+            grid_width=834,
+            grid_height=1000,
+        )
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+        browser.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": False},
+        )
+        browser.execute_script("dispatchEvent(new Event('resize'))")
+        wait_for_dockview(browser, min_tabs=2)
+        points = browser.execute_script(
+            """
+            window.__touchPaneDragEvents = [];
+            for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+              document.addEventListener(type, event => {
+                if (event.pointerType !== 'touch') return;
+                window.__touchPaneDragEvents.push({type, x: event.clientX, y: event.clientY});
+              }, true);
+            }
+            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${debugPaneItemId}"]`);
+            const host = document.querySelector('#dockviewRoot');
+            const tabRect = tab.getBoundingClientRect();
+            const hostRect = host.getBoundingClientRect();
+            return {
+              start: {x: tabRect.left + tabRect.width / 2, y: tabRect.top + tabRect.height / 2},
+              end: {x: hostRect.left + hostRect.width / 2, y: hostRect.bottom - 2},
+            };
+            """
+        )
+
+        def touch_point(x, y):
+            return {"x": x, "y": y, "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}
+
+        start = points["start"]
+        end = points["end"]
+        browser.execute_cdp_cmd(
+            "Input.dispatchTouchEvent",
+            {"type": "touchStart", "touchPoints": [touch_point(start["x"], start["y"])]},
+        )
+        for step in range(1, 13):
+            fraction = step / 12
+            x = start["x"] + (end["x"] - start["x"]) * fraction
+            y = start["y"] + (end["y"] - start["y"]) * fraction
+            browser.execute_cdp_cmd(
+                "Input.dispatchTouchEvent",
+                {"type": "touchMove", "touchPoints": [touch_point(x, y)]},
+            )
+            time.sleep(0.01)
+        preview = browser.execute_script(
+            """
+            const state = dockviewLayoutState.tabPointerDrag;
+            return {
+              root: grid.classList.contains('drop-preview-root'),
+              bottom: grid.classList.contains('drop-preview-bottom'),
+              tracked: Boolean(state),
+              rememberedZone: state?.lastRootBoundaryIntent?.zone || '',
+            };
+            """
+        )
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        time.sleep(0.5)
+        result = browser.execute_script(
+            """
+            const tree = layoutSlots[layoutTreeKey];
+            return {
+              moved: tree?.split === 'column' && slotForItem(debugPaneItemId) !== 'left',
+              tree,
+              itemSlot: slotForItem(debugPaneItemId),
+              events: window.__touchPaneDragEvents,
+              errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+            };
+            """
+        )
+        expected_preview = {"root": True, "bottom": True, "tracked": True, "rememberedZone": "bottom"}
+        assert preview == expected_preview, {"preview": preview, "result": result}
+        assert result["moved"] is True, {"preview": preview, "result": result}
+        assert result["events"][0]["type"] == "pointerdown", result
+        assert result["events"][-1]["type"] == "pointerup", result
+        assert result["tree"]["split"] == "column", result
+        assert result["itemSlot"] != "left", result
+        assert result["errors"] == [], result
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+
+
 def test_dockview_tab_header_drag_to_root_right_stays_beside_stacked_panes(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
@@ -7234,15 +7404,15 @@ def test_dockview_side_pane_responsive_role_geometry_matrix(browser, tmp_path):
         )
 
     cases = [
-        (899, 720, False, False, "constrained desktop"),
-        (900, 720, False, True, "minimum wide desktop"),
-        (430, 800, True, False, "phone"),
-        (834, 1112, True, False, "portrait tablet"),
-        (1180, 820, True, True, "wide tablet"),
-        (1366, 820, False, True, "desktop"),
+        (899, 720, False, False, 2, 3, "constrained desktop"),
+        (900, 720, False, True, 2, 3, "minimum wide desktop"),
+        (430, 800, True, False, 1, 1, "phone"),
+        (834, 1112, True, False, 1, 1, "portrait tablet after phone compaction"),
+        (1180, 820, True, True, 2, 3, "wide tablet"),
+        (1366, 820, False, True, 2, 3, "desktop"),
     ]
     try:
-        for width, height, touch, expected_side, label in cases:
+        for width, height, touch, expected_side, expected_groups, expected_file_surfaces, label in cases:
             browser.execute_cdp_cmd(
                 "Emulation.setDeviceMetricsOverride",
                 {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
@@ -7253,7 +7423,11 @@ def test_dockview_side_pane_responsive_role_geometry_matrix(browser, tmp_path):
             def settled(driver):
                 state = metrics(driver)
                 has_side = len(state["sideSlots"]) == 1 and sum(group["role"] == "side" for group in state["groups"]) == 1
-                no_side = len(state["sideSlots"]) == 0 and len(state["genericSlots"]) == 1 and len(state["groups"]) == 1
+                no_side = (
+                    len(state["sideSlots"]) == 0
+                    and len(state["genericSlots"]) == expected_groups
+                    and len(state["groups"]) == expected_groups
+                )
                 return state if state["viewport"]["width"] == width and (has_side if expected_side else no_side) else False
 
             try:
@@ -7269,8 +7443,8 @@ def test_dockview_side_pane_responsive_role_geometry_matrix(browser, tmp_path):
                 assert side_group["left"] <= min(group["left"] for group in state["groups"]) + 1, (label, state)
                 assert side_group["width"] <= width / 3 + 3, (label, state)
             else:
-                assert len(state["genericSlots"]) == 1 and len(state["groups"]) == 1, (label, state)
-                assert len({"__finder__", "__differ__", "__tabber__"}.intersection(state["genericItems"])) == 1, (label, state)
+                assert len(state["genericSlots"]) == expected_groups and len(state["groups"]) == expected_groups, (label, state)
+                assert len({"__finder__", "__differ__", "__tabber__"}.intersection(state["genericItems"])) == expected_file_surfaces, (label, state)
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})

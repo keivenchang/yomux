@@ -2204,6 +2204,7 @@ def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_pat
             key: '1|0|codex', label: '1:0:codex', total: tokens, samples: 1, tokens, seconds: 60, source: 'transcript',
             model_rates: {'gpt-5.6-sol': {total: tokens, samples: 1, tokens, seconds: 60}},
           }],
+          cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: Math.max(1, tokens / 10)}]},
         }))}}, {forceGraphRefresh: true});
         setDebugGraphChartVisible('modelTokens', true);
         renderDebugPanels({force: true});
@@ -2225,6 +2226,8 @@ def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_pat
             breakGlyph: getComputedStyle(breakLabel, '::after').content,
             ordinaryY: Number(ordinary?.getAttribute('y')),
             peakY: Number(peak?.getAttribute('y')),
+            barCount: chart.querySelectorAll('[data-js-debug-bar-total]').length,
+            displayedTokens: Number(chart.querySelector('[data-js-debug-displayed-token-sum]')?.dataset.jsDebugDisplayedTokenSum || 0),
           };
         });
         """
@@ -2235,6 +2238,8 @@ def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_pat
     assert 180 <= float(metrics[0]["threshold"]) < 5000, metrics
     assert all("≋" in item["breakGlyph"] for item in metrics), metrics
     assert all(item["ordinaryY"] > item["peakY"] for item in metrics), metrics
+    assert all(item["barCount"] > 0 for item in metrics), metrics
+    assert metrics[0]["displayedTokens"] == metrics[1]["displayedTokens"] == sum([100, 110, 120, 130, 140, 150, 160, 170, 180, 5000]), metrics
 
 
 def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_display_range(browser, tmp_path):
@@ -2269,13 +2274,14 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
                 {key: 'cache', cache_role: 'read', quantity: 10, unit: 'tokens', micro_usd: 3000, provider: 'openai', model: 'gpt-5.6-terra'},
                 {key: 'output', direction: 'output', quantity: 10, unit: 'tokens', micro_usd: 5000, provider: 'openai', model: 'gpt-5.6-terra'},
               ],
-              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', micro_usd: 10000}],
-              sources: [{root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', model: 'gpt-5.6-terra', micro_usd: 10000}],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, micro_usd: 10000}],
+              sources: [{root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', model: 'gpt-5.6-terra', token_quantity: 30, micro_usd: 10000}],
               catalog_revision: 'test-catalog', freshness: 'verified',
             },
           }));
           debugGraphApplyServerHistory({sequence: 6, records});
           setDebugGraphChartVisible('modelTokens', true);
+          setDebugGraphChartVisible('costSummary', true);
           setDebugGraphRange(6 * 60);
           renderDebugPanels({force: true});
 
@@ -2290,10 +2296,13 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             const expectedAmount = debugGraphCostUsdText(exact ? expected.totalMicroUsd : expected.knownMicroUsd);
             return {
               graph, model, card, buckets, expectedAmount,
-              renderedAmount: card?.querySelector('[data-js-debug-cost-details]')?.textContent || '',
+              renderedAmount: card?.querySelector('.js-debug-cost-estimate')?.textContent || '',
+              renderedTokens: card?.querySelector('.js-debug-cost-token-count')?.textContent || '',
             };
           };
           const initial = cardState();
+          const toggleOrder = [...document.querySelectorAll('[data-js-debug-chart-toggle]')]
+            .map(button => button.dataset.jsDebugChartToggle);
           const gridChildren = [...initial.graph.querySelector('[data-js-debug-chart-grid]').children];
           const initialOrder = {
             model: gridChildren.indexOf(initial.model),
@@ -2307,8 +2316,58 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary details popover'},
           );
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const popover = initial.card?.querySelector('.js-debug-cost-popover');
+          const overlay = document.querySelector('[data-js-debug-cost-modal]');
+          const popover = overlay?.querySelector('.js-debug-cost-modal-dialog');
+          const reportBody = popover?.querySelector('.js-debug-cost-report-body');
+          if (popover) {
+            popover.style.maxBlockSize = '16rem';
+          }
+          if (reportBody) reportBody.scrollTop = reportBody.scrollHeight;
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const popoverRect = popover?.getBoundingClientRect();
+          const popoverState = {
+            expanded: details?.getAttribute('aria-expanded'),
+            dialog: popover?.getAttribute('role'),
+            modal: popover?.getAttribute('aria-modal'),
+            overlay: Boolean(overlay),
+            closeButton: Boolean(popover?.querySelector('[data-js-debug-cost-modal-close]')),
+            costCalculation: popover?.textContent.includes('Cost calculation'),
+            modelUsages: popover?.textContent.includes('Model Usages'),
+            sourceAttribution: popover?.textContent.includes('Agent and source attribution'),
+            report: popover?.matches('article.js-debug-cost-report.js-debug-cost-modal-dialog'),
+            headings: [...(popover?.querySelectorAll('h1, h2') || [])].map(node => node.textContent.trim()),
+            hasTable: Boolean(popover?.querySelector('table')),
+            usageTitle: popover?.querySelector('.js-debug-cost-model-usages h2')?.textContent || '',
+            usageRows: popover?.querySelectorAll('.js-debug-cost-usage-row').length || 0,
+            usageSegments: popover?.querySelectorAll('.js-debug-cost-usage-segment').length || 0,
+            usageValues: [...(popover?.querySelectorAll('.js-debug-cost-usage-values li') || [])].map(node => node.textContent.trim()),
+            outerOverflow: popover ? getComputedStyle(popover).overflowY : '',
+            bodyOverflow: reportBody ? getComputedStyle(reportBody).overflowY : '',
+            scrollTop: reportBody?.scrollTop || 0,
+            scrollHeight: reportBody?.scrollHeight || 0,
+            clientHeight: reportBody?.clientHeight || 0,
+            left: popoverRect?.left, right: popoverRect?.right, top: popoverRect?.top, bottom: popoverRect?.bottom,
+          };
+          popover?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          popoverState.insideClickKeptOpen = document.querySelector('[data-js-debug-cost-modal]') !== null;
+          overlay?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+          await window.__yolomuxTestWaitFor(
+            () => details?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-js-debug-cost-modal]'),
+            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary modal backdrop close'},
+          );
+          popoverState.backdropClosed = details?.getAttribute('aria-expanded') === 'false' && document.activeElement === details;
+          details?.click();
+          await window.__yolomuxTestWaitFor(
+            () => details?.getAttribute('aria-expanded') === 'true' && document.querySelector('[data-js-debug-cost-modal]'),
+            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary modal reopen'},
+          );
+          document.querySelector('[data-js-debug-cost-modal-close]')?.click();
+          await window.__yolomuxTestWaitFor(
+            () => details?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-js-debug-cost-modal]'),
+            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary modal X close'},
+          );
+          popoverState.xClosed = details?.getAttribute('aria-expanded') === 'false' && document.activeElement === details;
           const compact = initial.card?.querySelector('.js-debug-cost-compact');
           const compactStyle = compact ? getComputedStyle(compact) : null;
           // A 21rem graph column represents the narrow Side Pane/card width. The
@@ -2346,13 +2405,16 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
           const zoomGrid = document.querySelector('[data-js-debug-chart-grid]');
           done({
             initialOrder,
-            initial: {amount: initial.renderedAmount, expected: initial.expectedAmount, buckets: initial.buckets.length},
-            ranged: {amount: ranged.renderedAmount, expected: ranged.expectedAmount, buckets: ranged.buckets.length},
-            zoomed: {amount: zoomed.renderedAmount, expected: zoomed.expectedAmount, buckets: zoomed.buckets.length, active: zoomGrid?.dataset.jsDebugZoomed === 'true'},
+            toggleOrder,
+            initial: {amount: initial.renderedAmount, tokens: initial.renderedTokens, expected: initial.expectedAmount, buckets: initial.buckets.length},
+            ranged: {amount: ranged.renderedAmount, tokens: ranged.renderedTokens, expected: ranged.expectedAmount, buckets: ranged.buckets.length},
+            zoomed: {amount: zoomed.renderedAmount, tokens: zoomed.renderedTokens, expected: zoomed.expectedAmount, buckets: zoomed.buckets.length, active: zoomGrid?.dataset.jsDebugZoomed === 'true'},
             compact: {
               columns: compactStyle?.gridTemplateColumns || '',
               totalCount: initial.card?.querySelectorAll('.js-debug-cost-compact > div').length || 0,
               hasChart: Boolean(initial.card?.querySelector('.js-debug-line-chart, [data-js-debug-axis], [data-js-debug-bar-series]')),
+              hasDirectLink: Boolean(initial.card?.querySelector(':scope > a, .js-debug-cost-compact a')),
+              moreInfo: initial.card?.querySelector('[data-js-debug-cost-details]')?.textContent || '',
             },
                 narrow: {
                   columns: narrowCompact ? getComputedStyle(narrowCompact).gridTemplateColumns : '',
@@ -2362,13 +2424,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
               card: narrowRect ? {left: narrowRect.left, right: narrowRect.right, top: narrowRect.top, bottom: narrowRect.bottom} : null,
               controls: narrowControls,
             },
-            popover: {
-              expanded: details?.getAttribute('aria-expanded'),
-              dialog: popover?.getAttribute('role'),
-              modelTable: popover?.textContent.includes('By model'),
-              sourceTree: popover?.textContent.includes('By agent/source'),
-              left: popoverRect?.left, right: popoverRect?.right, top: popoverRect?.top, bottom: popoverRect?.bottom,
-            },
+            popover: popoverState,
             viewport: {width: innerWidth, height: innerHeight},
           });
         })().catch(error => done({error: String(error?.stack || error)}));
@@ -2376,16 +2432,19 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     )
     assert "error" not in metrics, metrics
     assert metrics["initialOrder"]["cost"] == metrics["initialOrder"]["model"] + 1, metrics
+    assert metrics["toggleOrder"].index("costSummary") == metrics["toggleOrder"].index("modelTokens") + 1, metrics
     for state in (metrics["initial"], metrics["ranged"], metrics["zoomed"]):
         assert state["buckets"] > 0, metrics
         assert state["expected"] in state["amount"], metrics
+        assert "tokens" in state["tokens"], metrics
     assert metrics["zoomed"]["active"] is True, metrics
     assert metrics["compact"]["totalCount"] == 4, metrics
     assert metrics["compact"]["hasChart"] is False, metrics
-    # Narrow card uses two visible compact columns (geometry is more robust
-    # than serializing Chromium's grid-template computed value).
+    assert metrics["compact"]["hasDirectLink"] is False and metrics["compact"]["moreInfo"] == "More Info", metrics
+    # The condensed card stays one simple vertical accounting list.
     narrow_cells = metrics["narrow"]["cells"]
-    assert len(narrow_cells) == 4 and narrow_cells[0]["top"] == narrow_cells[1]["top"] and narrow_cells[2]["top"] == narrow_cells[3]["top"] and narrow_cells[0]["top"] < narrow_cells[2]["top"], metrics
+    assert len(narrow_cells) == 4 and len({cell["left"] for cell in narrow_cells}) == 1, metrics
+    assert [cell["top"] for cell in narrow_cells] == sorted({cell["top"] for cell in narrow_cells}), metrics
     assert metrics["narrow"]["scrollWidth"] <= metrics["narrow"]["clientWidth"], metrics
     assert all(
         control["left"] >= metrics["narrow"]["card"]["left"]
@@ -2394,9 +2453,64 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     ), metrics
     assert metrics["popover"]["expanded"] == "true", metrics
     assert metrics["popover"]["dialog"] == "dialog", metrics
-    assert metrics["popover"]["modelTable"] is True and metrics["popover"]["sourceTree"] is True, metrics
+    assert metrics["popover"]["modal"] == "true" and metrics["popover"]["overlay"] is True and metrics["popover"]["closeButton"] is True, metrics
+    assert metrics["popover"]["insideClickKeptOpen"] is True and metrics["popover"]["backdropClosed"] is True and metrics["popover"]["xClosed"] is True, metrics
+    assert metrics["popover"]["costCalculation"] is True and metrics["popover"]["modelUsages"] is True and metrics["popover"]["sourceAttribution"] is True, metrics
+    assert metrics["popover"]["report"] is True and metrics["popover"]["hasTable"] is False, metrics
+    assert metrics["popover"]["headings"][0] == "Cost summary details" and "Model Usages" in metrics["popover"]["headings"], metrics
+    assert metrics["popover"]["usageTitle"] == "Model Usages" and metrics["popover"]["usageRows"] == 1, metrics
+    assert metrics["popover"]["usageSegments"] == 3 and len(metrics["popover"]["usageValues"]) == 4, metrics
+    assert all(label in " ".join(metrics["popover"]["usageValues"]) for label in ("Input", "Cached", "Output", "Other")), metrics
+    assert metrics["popover"]["outerOverflow"] == "hidden" and metrics["popover"]["bodyOverflow"] == "auto", metrics
+    assert metrics["popover"]["scrollHeight"] > metrics["popover"]["clientHeight"] and metrics["popover"]["scrollTop"] > 0, metrics
     assert metrics["popover"]["left"] >= 0 and metrics["popover"]["right"] <= metrics["viewport"]["width"], metrics
     assert metrics["popover"]["top"] >= 0 and metrics["popover"]["bottom"] <= metrics["viewport"]["height"], metrics
+
+
+def test_debug_graph_periodic_refresh_preserves_user_scroll(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          const now = Math.floor(Date.now() / 1000);
+          debugGraphApplyServerHistory({sequence: 1, records: [{
+            start: now - 1, duration: 1, sequence: 1,
+            cpu_total_percent: 5, cpu_count: 1,
+            system_cpu_total_percent: 12, system_cpu_count: 1,
+            ask_agent_total: 1, run_agent_total: 1, idle_agent_total: 1,
+            active_agent_total: 2, inactive_agent_total: 1, agent_activity_samples: 1,
+            clients: {[jsDebugStatsClientIdForRequest()]: {api_count: 2, sse_count: 1, latency_total_ms: 8, latency_count: 1, bandwidth_bytes: 4096}},
+          }]});
+          for (const key of ['memory', 'gpuUtil', 'gpuMemory', 'modelTokens', 'costSummary']) {
+            setDebugGraphChartVisible(key, true);
+          }
+          renderDebugPanels({force: true});
+          const scroller = document.querySelector('.js-debug-panel .js-debug-graph-view');
+          scroller.style.flex = 'none';
+          scroller.style.blockSize = '260px';
+          scroller.scrollTop = Math.max(1, Math.round((scroller.scrollHeight - scroller.clientHeight) * 0.62));
+          const before = scroller.scrollTop;
+          refreshDebugGraphElement(document.querySelector('[data-js-debug-graph]'), {force: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          done({
+            before,
+            after: scroller.scrollTop,
+            max: scroller.scrollHeight - scroller.clientHeight,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["before"] > 0 and metrics["max"] > metrics["before"], metrics
+    assert abs(metrics["after"] - metrics["before"]) <= 1, metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
@@ -2641,7 +2755,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     assert metrics["memoryShown"] is True, metrics
     assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
     assert metrics["layoutLabel"] == "Size:", metrics
-    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
+    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
     assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["saved"] == {
         "subTab": "events",
@@ -2649,7 +2763,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
         "resolutionOverrideSeconds": 0,
             "chartLayout": 0,
             "modelTokenDimension": "output",
-            "hiddenCharts": ["gpuMemory", "gpuUtil"],
+            "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil"],
         "visibleCharts": ["cpu", "memory"],
     }, metrics
 
@@ -2667,6 +2781,88 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
         )
     )
 
+
+def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollDebugSystemStatus === 'function' && document.querySelector('[data-js-debug-subtab=\"system\"]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        let requests = 0;
+        const payload = {
+          ok: true, generated_at: Date.now() / 1000, state_dir: '/tmp/yolomux',
+          server: {version: '0.6.0', pid: 8881, uptime_seconds: 125, cpu_percent: 3.5, system_cpu_percent: 20, rss_bytes: 104857600},
+          owner: {status: 'owner', owner: true, current_owner: {port: 8881, pid: 8881}, search_index: {mode: 'indexing-server'}, debug: {generation_count: 2}},
+          refresh: {roles: {'stats-sampler': {status: 'owner', owner: true, refresh_requests: 7}}, local_refreshing: {session_files: 1}, coalescing: {recent_pending_count: 2}, counters: {coalesced_refresh_requests: 7}},
+          search_index: {root_count: 3, build_count: 4, scanned_entries: 100, ignored_entries: 5, cache_bytes: 2048},
+          caches: {session_files: {files: 2, bytes: 1024}, activity: {files: 1, bytes: 512}},
+          client_events: {channel_counts: {files: 2, status: 1}, published_events: 9, delivered_events: 8},
+          chat: {subscribers: 1, store: {message_rows: 4, typing_leases: 0}},
+          local_services: {totals: {processes: 2, cpu_percent: 1.5, rss_bytes: 2048}, services: [
+            {service: 'indexd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
+            {service: 'statsd', pid: 222, healthy: true, uptime_seconds: 55, resources: {cpu_percent: .5, rss_bytes: 1024}},
+            {service: 'jobd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
+            {service: 'approvald', pid: 333, healthy: false, uptime_seconds: 12, resources: {cpu_percent: 1, rss_bytes: 1024}},
+          ]},
+          top_endpoints: [{surface: 'GET /api/session-files', count: 5, compute_ms_max: 12, payload_bytes_total: 4096}],
+          top_background_work: [{role: 'stats-sampler', surface: 'global-sample', count: 3, compute_ms_max: 8, payload_bytes_total: 1024}],
+        };
+        window.fetch = (url, options) => {
+          if (String(url) === '/api/system-status') {
+            requests += 1;
+            return Promise.resolve(new Response(JSON.stringify(payload), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          }
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-js-debug-subtab="system"]').click();
+        window.__yolomuxTestWaitFor(
+          () => document.querySelectorAll('.js-debug-system-card').length >= 9,
+          {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats System dashboard'},
+        ).then(() => {
+          const view = document.querySelector('[data-js-debug-system]');
+          view.style.width = '260px';
+          view.style.maxHeight = '180px';
+          view.scrollTop = 100;
+          const before = view.scrollTop;
+          refreshDebugSystemViews();
+          const after = view.scrollTop;
+          const grid = view.querySelector('.js-debug-system-grid');
+          const cards = [...view.querySelectorAll('.js-debug-system-card')];
+          const viewRect = view.getBoundingClientRect();
+          const columns = getComputedStyle(grid).gridTemplateColumns.trim().split(/\\s+/).filter(Boolean).length;
+          done({
+            requests, before, after, columns,
+            services: [...view.querySelectorAll('.js-debug-system-service')].map(node => ({
+              name: node.querySelector('strong')?.textContent.trim(),
+              state: node.querySelector('.js-debug-system-state')?.textContent.trim(),
+              bad: node.querySelector('.js-debug-system-state')?.classList.contains('js-debug-system-state--bad'),
+            })),
+            cardsInside: cards.every(card => card.getBoundingClientRect().right <= viewRect.right + 1),
+            selected: document.querySelector('[data-js-debug-subtab="system"]').getAttribute('aria-selected'),
+          });
+        }).catch(error => done({error: String(error?.stack || error)})).finally(() => {
+          window.fetch = originalFetch;
+          clearRuntimeInterval('debug-system');
+        });
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requests"] == 1, metrics
+    assert metrics["selected"] == "true", metrics
+    assert metrics["services"] == [
+        {"name": "indexd", "state": "Idle", "bad": False},
+        {"name": "statsd", "state": "Running", "bad": False},
+        {"name": "jobd", "state": "Idle", "bad": False},
+        {"name": "approvald", "state": "Issue", "bad": True},
+    ], metrics
+    assert metrics["columns"] == 1, metrics
+    assert metrics["cardsInside"] is True, metrics
+    assert metrics["before"] > 0 and metrics["after"] == metrics["before"], metrics
 
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -42,8 +43,8 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 7
-STATSD_COMPAT_PROTOCOL_VERSION = 6
+STATSD_PROTOCOL_VERSION = 8
+STATSD_COMPAT_PROTOCOL_VERSION = 7
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
@@ -51,7 +52,7 @@ STATSD_LEGACY_IMPORT_VERSION = 1
 STATSD_LEGACY_IMPORT_MARKER = "legacy_import_version"
 STATSD_AGENT_TOKEN_STATE_KEY = "agent_token_state"
 STATSD_AGENT_TOKEN_RECOVERY_MARKER = "agent_token_history_recovery_version"
-STATSD_AGENT_TOKEN_RECOVERY_VERSION = 5
+STATSD_AGENT_TOKEN_RECOVERY_VERSION = 6
 STATSD_USAGE_ATOM_MIGRATION_MARKER = "usage_atom_migration_version"
 STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY = "usage_atom_migration_status"
 STATSD_USAGE_ATOM_MIGRATION_VERSION = 1
@@ -227,12 +228,18 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
             row = grouped.setdefault(identity, {key: identity[index] for index, key in enumerate(keys)} | {
                 "quantity": 0.0, "micro_usd": 0, "count": 0, "unpriced_count": 0,
                 "input_micro_usd": 0, "cache_micro_usd": 0, "output_micro_usd": 0, "other_micro_usd": 0,
+                "token_quantity": 0.0, "input_tokens": 0.0, "cache_tokens": 0.0, "output_tokens": 0.0, "other_tokens": 0.0,
             })
-            row["quantity"] += _usage_atom_number(atom.get("quantity"))
+            quantity = _usage_atom_number(atom.get("quantity"))
+            item_class = billed_class(atom)
+            row["quantity"] += quantity
             row["micro_usd"] += int(atom.get("micro_usd") or 0)
             row["count"] += 1
             row["unpriced_count"] += 0 if atom.get("priced") else 1
-            row[f"{billed_class(atom)}_micro_usd"] += int(atom.get("micro_usd") or 0)
+            row[f"{item_class}_micro_usd"] += int(atom.get("micro_usd") or 0)
+            if str(atom.get("unit") or "tokens").lower() == "tokens":
+                row["token_quantity"] += quantity
+                row[f"{item_class}_tokens"] += quantity
         return sorted(grouped.values(), key=lambda row: (-int(row["micro_usd"]), tuple(str(row[key]) for key in keys)))
 
     # A price revision is part of an atomic billable class.  Grouping events
@@ -392,24 +399,28 @@ class PersistentStatsService:
 
     def _sampler_loop(self) -> None:
         while not self.stop_event.is_set():
-            owner = self._sampler_owner_for_cycle()
-            if owner:
-                self.last_sampler_attempt_at = time.time()
-                response = send_yolomux_control_request(
-                    owner,
-                    {"action": "statsd_sample", "token_consumer": time.time() < self.agent_token_consumer_until},
-                    timeout=0.9,
-                )
-                if not response.get("ok"):
-                    self.last_sampler_failure = redact_local_service_text(response.get("error") or "stats owner unavailable")
-                else:
-                    self.last_sampler_success_at = self.last_sampler_attempt_at
-                    self.last_sampler_failure = ""
-                    # Pricing is a derived projection.  The statsd owner
-                    # notices seed/override/Refresh revisions while it is
-                    # already doing its background sampling work; no HTTP
-                    # history request can trigger this retained-data rewrite.
-                    self._maybe_reproject_cost_summaries()
+            try:
+                owner = self._sampler_owner_for_cycle()
+                if owner:
+                    self.last_sampler_attempt_at = time.time()
+                    response = send_yolomux_control_request(
+                        owner,
+                        {"action": "statsd_sample", "token_consumer": time.time() < self.agent_token_consumer_until},
+                        timeout=0.9,
+                    )
+                    if not response.get("ok"):
+                        self.last_sampler_failure = redact_local_service_text(response.get("error") or "stats owner unavailable")
+                    else:
+                        self.last_sampler_success_at = self.last_sampler_attempt_at
+                        self.last_sampler_failure = ""
+                        # StatsStore's SQLite connection belongs to the RPC thread. Route catalog
+                        # maintenance through that thread as a normal typed request; direct access
+                        # here kills the sampler while leaving the daemon process deceptively alive.
+                        maintenance = StatsClient(self.socket_path, self.store.path).maybe_reproject_cost_summaries()
+                        if maintenance.get("ok") is False:
+                            self.last_sampler_failure = redact_local_service_text(maintenance.get("error") or "stats pricing maintenance unavailable")
+            except Exception as exc:  # the persistent sampler must survive one failed owner/maintenance cycle
+                self.last_sampler_failure = redact_local_service_text(exc)
             self.sampler_wake_event.wait(STATSD_SAMPLE_INTERVAL_SECONDS)
             self.sampler_wake_event.clear()
 
@@ -980,6 +991,7 @@ class PersistentStatsService:
     ) -> dict[str, Any]:
         measurements: list[dict[str, Any]] = []
         atom_records: list[dict[str, Any]] = []
+        previous_state = self._agent_token_state(fallback_state)
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -1005,8 +1017,9 @@ class PersistentStatsService:
             # The old counter projection is deliberately retained above.  The
             # component stream is separate and idempotent by event identity,
             # so it cannot inflate the Output chart when both are present.
+            previous_time = float(previous_state.get(key, {}).get("time") or sample_time)
             for atom in session_files.transcript_usage_atoms(transcript_path, kind):
-                if atom.timestamp <= sample_time:
+                if previous_time < atom.timestamp <= sample_time:
                     # This response crosses the statsd Unix-RPC boundary.
                     # Dataclasses are useful inside the parser but are not a
                     # wire format; convert here so a successful baseline
@@ -1016,7 +1029,15 @@ class PersistentStatsService:
                     if normalized is not None:
                         atom_records.append({"time": atom.timestamp, "usage_atoms": [normalized]})
         claimed = self.claim_agent_token_deltas(measurements, seen_keys, sample_time, fallback_state=fallback_state)
-        claimed["records"].extend(atom_records)
+        records = [*claimed.get("records", []), *atom_records]
+        merged = self.merge_server_records(records, now=sample_time) if records else {"ok": True, "changed": 0, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
+        # Claiming and persistence belong to the statsd writer. Returning the
+        # transcript atom stream over the bounded metadata channel could exceed
+        # 256 KiB after the baseline had already advanced, permanently losing
+        # the corresponding graph delta. Keep the RPC response compact.
+        claimed["records"] = []
+        claimed["persisted_records"] = len(records)
+        claimed["merge"] = merged
         return claimed
 
     @staticmethod
@@ -1206,6 +1227,8 @@ class PersistentStatsService:
         return {"ok": True, "changed": changed, "recovered_buckets": len(recovered)}
 
     def recover_agent_token_history_from_rows(self, rows: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
+        if self.store.metadata_value(STATSD_AGENT_TOKEN_RECOVERY_MARKER) == str(STATSD_AGENT_TOKEN_RECOVERY_VERSION):
+            return {"ok": True, "changed": False, "reason": "already_recovered"}
         sample_now = float(time.time() if now is None else now)
         if not rows:
             return {"ok": True, "changed": False, "reason": "no_transcript_rows"}
@@ -1263,6 +1286,11 @@ class PersistentStatsService:
             duration = self._bucket_seconds(float(projected.get("timestamp") or now), now)
             start = int(math.floor(float(projected.get("timestamp") or now) / duration) * duration)
             staged.setdefault((start, duration), []).append(projected)
+        # Backfill replays cumulative transcript snapshots, which can yield hundreds of
+        # event atoms in one retained bucket.  The public cost schema already groups these
+        # exact billable/source dimensions; coalesce them before persistence so one busy
+        # minute cannot exceed the bounded SQLite JSON row contract.
+        staged = {key: self._coalesced_backfill_components(values) for key, values in staged.items()}
         changed = 0
         next_sequence = int(self.store.diagnostics().get("sequence") or 0)
         connection = self.store._connection()
@@ -1272,7 +1300,13 @@ class PersistentStatsService:
                 bucket = existing.get(key) or stats_store.empty_bucket(*key)
                 summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
                 old_components = [item for item in summary.get("components", []) if isinstance(item, dict)]
-                retained = [item for item in old_components if str(item.get("backfill_source") or "") != source]
+                retained_raw = [item for item in old_components if str(item.get("backfill_source") or "") != source]
+                retained_live = [item for item in retained_raw if not str(item.get("backfill_source") or "")]
+                retained_backfill = [item for item in retained_raw if str(item.get("backfill_source") or "")]
+                # A prior interrupted migration may have persisted the old one-event-per-component
+                # shape. Compact every retained backfill source while touching this bucket so the
+                # repair itself cannot hit the row-size ceiling before reaching that source later.
+                retained = [*retained_live, *self._coalesced_backfill_components(retained_backfill)]
                 identities = {(str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or "")) for item in retained}
                 for component in staged.get(key, []):
                     identity = (str(component.get("event_id") or ""), str(component.get("direction") or ""), str(component.get("modality") or ""), str(component.get("cache_role") or ""), str(component.get("unit") or ""))
@@ -1293,6 +1327,31 @@ class PersistentStatsService:
         if changed:
             self._encoded_query_cache.clear()
         return changed
+
+    @staticmethod
+    def _coalesced_backfill_components(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        dimension_fields = (
+            "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
+            "root_thread_id", "agent_thread_id", "parent_thread_id", "depth", "endpoint", "tool_name",
+            "pricing_profile", "service_tier", "backfill_source", "telemetry_complete", "source", "priced",
+            "catalog_revision", "source_url", "effective_from", "rate_usd", "rate_scale",
+        )
+        grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+        for component in components:
+            identity = tuple(str(component.get(field) if component.get(field) is not None else "") for field in dimension_fields)
+            current = grouped.get(identity)
+            if current is None:
+                current = dict(component)
+                current["event_id"] = "backfill:" + hashlib.sha256(
+                    json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                current["call_id"] = ""
+                current["quantity"] = 0.0
+                current["micro_usd"] = 0
+                grouped[identity] = current
+            current["quantity"] += _usage_atom_number(component.get("quantity"))
+            current["micro_usd"] += int(component.get("micro_usd") or 0)
+        return list(grouped.values())
 
     def migrate_usage_atom_history_from_rows(self, rows: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
         """Replay retained transcript families into component storage once.
@@ -1820,6 +1879,7 @@ class PersistentStatsService:
             "last_failure": last_failure,
             "last_sampler_success_at": self.last_sampler_success_at,
             "last_sampler_attempt_at": self.last_sampler_attempt_at,
+            "sampler_alive": bool(self.sampler_thread and self.sampler_thread.is_alive()),
             "restart_backoff_seconds": 0.0,
             "generation": generation,
             "idle_seconds": self.idle_seconds,
@@ -1987,6 +2047,11 @@ class PersistentStatsService:
                 return self.reproject_cost_summaries(), b""
             except (TypeError, ValueError, sqlite3.Error, OSError) as exc:
                 return {"ok": False, "error": str(exc)}, b""
+        if action == "maybe_reproject_cost_summaries":
+            try:
+                return self._maybe_reproject_cost_summaries(), b""
+            except (TypeError, ValueError, sqlite3.Error, OSError) as exc:
+                return {"ok": False, "error": str(exc)}, b""
         if action == "replace_buckets":
             buckets = request.get("buckets")
             if not isinstance(buckets, list):
@@ -2110,6 +2175,7 @@ class StatsClient(LocalServiceClient):
             "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""),
             "last_sampler_success_at": float(payload.get("last_sampler_success_at") or 0.0),
             "last_sampler_attempt_at": float(payload.get("last_sampler_attempt_at") or 0.0),
+            "sampler_alive": payload.get("sampler_alive") is True,
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - monotonic_clock()),
             "generation": int(payload.get("generation") or 0), "record": status.get("record") if isinstance(status.get("record"), dict) else {},
             "resources": self.registry.resources(int(payload.get("pid") or 0)),
@@ -2204,6 +2270,9 @@ class StatsClient(LocalServiceClient):
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
         return self.request({"action": "reproject_cost_summaries"}, timeout=10.0)
+
+    def maybe_reproject_cost_summaries(self) -> dict[str, Any]:
+        return self.request({"action": "maybe_reproject_cost_summaries"}, timeout=10.0)
 
     def set_sampler_owner(self, owner: dict[str, Any]) -> dict[str, Any]:
         if not self.ensure_started():
