@@ -1333,8 +1333,11 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
         for path in sorted(Path("static_src/locales").glob("*.json"))
     }
     assert set(locale_catalogs) == set(SHIPPED_LOCALES)
-    metrics = browser.execute_async_script(
-        r"""
+    previous_script_timeout = browser.timeouts.script
+    browser.set_script_timeout(30)
+    try:
+        setup_metrics = browser.execute_async_script(
+            r"""
         const localeCatalogs = arguments[0];
         const selectedPath = arguments[1];
         const done = arguments[arguments.length - 1];
@@ -1571,80 +1574,131 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
               };
             };
           const baselineState = preservedState();
-          const surfaceMatrix = {};
-          for (const [locale, catalog] of Object.entries(localeCatalogs)) {
-            await selectLocale(locale);
-            await frame();
-            await frame();
-            const help = keyboardShortcutsNode;
-            const stats = panelNodes.get(debugPaneItemId);
-            const finder = panelNodes.get(fileExplorerItemId);
-            const editor = panelNodes.get(editorItem);
-            const terminal = panelNodes.get('1');
+          window.__yolomuxLocaleMatrixHarness = {
+            async collect(locale) {
+              const catalog = localeCatalogs[locale];
+              if (!catalog) throw new Error(`missing locale catalog: ${locale}`);
+              await selectLocale(locale);
+              await frame();
+              await frame();
+              const help = keyboardShortcutsNode;
+              const stats = panelNodes.get(debugPaneItemId);
+              const finder = panelNodes.get(fileExplorerItemId);
+              const editor = panelNodes.get(editorItem);
+              const terminal = panelNodes.get('1');
               const expectedChartTitles = jsDebugGraphChartGroups
                 .filter(group => debugGraphChartVisible(group.key))
                 .map(group => catalog[group.labelKey]);
-            surfaceMatrix[locale] = {
-              activeLocale: i18nActiveLocale,
-              resolvedHelpHeading: t('common.keyboardShortcuts'),
-              helpHeading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
-              helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
-              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
-              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
-              languageTitle: document.querySelector('.topbar-language')?.title || '',
-              lang: document.documentElement.lang,
-              dir: document.documentElement.dir,
-              helpConnected: Boolean(help?.isConnected),
-              statsConnected: Boolean(stats?.isConnected),
-              state: preservedState(),
-              englishLeaks: obviousSourceEnglishLeaks(
-                locale,
-                catalog,
-                visibleSurfaceValues([help, stats, finder, editor, terminal]),
-              ),
-              expected: {
-                helpHeading: catalog['common.keyboardShortcuts'],
-                statsTitle: catalog['tab.debug'],
-                chartTitles: expectedChartTitles,
-                languageTitle: catalog['common.language'],
-              },
-            };
-          }
-          await selectLocale('zh-Hant');
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const help = keyboardShortcutsNode;
-          const helpText = help?.textContent || '';
-          const stats = panelNodes.get(debugPaneItemId);
-          const statsText = stats?.textContent || '';
-          const zhHant = {
-            heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
-            sections: Array.from(help?.querySelectorAll('.keyboard-shortcuts-section h3') || []).map(node => node.textContent),
-            englishLeak: /Agent status glyphs|Color meanings|Icon meanings|YO button meanings|Menus, palettes, and pickers|Open selected file or folder/.test(helpText),
-            markerTexts: Array.from(help?.querySelectorAll('.session-yolo-marker') || []).map(node => node.textContent),
-            statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
-            chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
-            statsEnglishLeak: /Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|Graph bucket size|Graph time range/.test(statsText),
+              return {
+                activeLocale: i18nActiveLocale,
+                resolvedHelpHeading: t('common.keyboardShortcuts'),
+                helpHeading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+                helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
+                statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+                chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+                languageTitle: document.querySelector('.topbar-language')?.title || '',
+                lang: document.documentElement.lang,
+                dir: document.documentElement.dir,
+                helpConnected: Boolean(help?.isConnected),
+                statsConnected: Boolean(stats?.isConnected),
+                state: preservedState(),
+                englishLeaks: obviousSourceEnglishLeaks(
+                  locale,
+                  catalog,
+                  visibleSurfaceValues([help, stats, finder, editor, terminal]),
+                ),
+                expected: {
+                  helpHeading: catalog['common.keyboardShortcuts'],
+                  statsTitle: catalog['tab.debug'],
+                  chartTitles: expectedChartTitles,
+                  languageTitle: catalog['common.language'],
+                },
+              };
+            },
+            async collectDirectionChecks() {
+              await selectLocale('zh-Hant');
+              await frame();
+              await frame();
+              const help = keyboardShortcutsNode;
+              const helpText = help?.textContent || '';
+              const stats = panelNodes.get(debugPaneItemId);
+              const statsText = stats?.textContent || '';
+              const zhHant = {
+                heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+                sections: Array.from(help?.querySelectorAll('.keyboard-shortcuts-section h3') || []).map(node => node.textContent),
+                englishLeak: /Agent status glyphs|Color meanings|Icon meanings|YO button meanings|Menus, palettes, and pickers|Open selected file or folder/.test(helpText),
+                markerTexts: Array.from(help?.querySelectorAll('.session-yolo-marker') || []).map(node => node.textContent),
+                statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+                chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+                statsEnglishLeak: /Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|Graph bucket size|Graph time range/.test(statsText),
+              };
+              await selectLocale('he');
+              await frame();
+              await frame();
+              const hebrewHelp = keyboardShortcutsNode;
+              const hebrewStats = panelNodes.get(debugPaneItemId);
+              return {
+                zhHant,
+                hebrew: {
+                  heading: hebrewHelp?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+                  statsTitle: hebrewStats?.querySelector('.panel-session-label')?.textContent || '',
+                  chartTitles: Array.from(hebrewStats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+                  dir: document.documentElement.dir,
+                },
+              };
+            },
           };
-          await selectLocale('he');
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           done({
             beforeHeading,
             codeMirrorLocaleState,
             baselineState,
-            surfaceMatrix,
-            zhHant,
-            hebrew: {
-              heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
-              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
-              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
-              dir: document.documentElement.dir,
-            },
           });
         })().catch(error => done({error: String(error), stack: error?.stack || ''}));
-        """,
-        locale_catalogs,
-        selected_path,
-    )
+            """,
+            locale_catalogs,
+            selected_path,
+        )
+        assert "error" not in setup_metrics, setup_metrics
+        surface_matrix = {}
+        for locale in locale_catalogs:
+            result = browser.execute_async_script(
+                """
+                const locale = arguments[0];
+                const done = arguments[arguments.length - 1];
+                const harness = window.__yolomuxLocaleMatrixHarness;
+                if (!harness) {
+                  done({error: 'locale matrix harness is unavailable'});
+                  return;
+                }
+                harness.collect(locale)
+                  .then(value => done({value}))
+                  .catch(error => done({error: String(error), stack: error?.stack || ''}));
+                """,
+                locale,
+            )
+            assert "error" not in result, {"locale": locale, **result}
+            surface_matrix[locale] = result["value"]
+        direction_metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const harness = window.__yolomuxLocaleMatrixHarness;
+            if (!harness) {
+              done({error: 'locale matrix harness is unavailable'});
+              return;
+            }
+            harness.collectDirectionChecks()
+              .then(value => done(value))
+              .catch(error => done({error: String(error), stack: error?.stack || ''}));
+            """
+        )
+        assert "error" not in direction_metrics, direction_metrics
+        metrics = {
+            **setup_metrics,
+            "surfaceMatrix": surface_matrix,
+            **direction_metrics,
+        }
+    finally:
+        browser.set_script_timeout(previous_script_timeout)
     assert "error" not in metrics, metrics
     assert set(metrics["surfaceMatrix"]) == set(locale_catalogs), metrics
     expected_editor_text = "\n".join(f"STATE_{index:02d}_{'X' * 160}" for index in range(1, 49))

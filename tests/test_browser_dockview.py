@@ -448,6 +448,8 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
         });
         tab.dispatchEvent(event);
         const menu = document.querySelector('.session-context-menu');
+        const menuWidth = menu?.getBoundingClientRect().width || 0;
+        const menuCapacity = rootCssLengthPx('--context-menu-compact-inline-size');
         const initial = Array.from(menu?.querySelectorAll('button') || []).map(button => button.textContent.trim());
         const description = menu?.querySelector('.tab-action-description')?.textContent.trim() || '';
         const descriptionNode = menu?.querySelector('.tab-action-description');
@@ -474,6 +476,8 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
           keyboardPrevented: keyEvent.defaultPrevented,
           active: activeItemForSide('left'),
           initial,
+          menuWidth,
+          menuCapacity,
           description,
           descriptionStyle,
           descriptionTag: descriptionNode?.tagName || '',
@@ -506,6 +510,7 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
     assert result["keyboardPrevented"] is True and result["keyboardDescription"].startswith("More desc: 2"), result
     assert result["active"] == "1", result
     assert result["description"].startswith("More desc: 2"), result
+    assert 0 < result["menuWidth"] <= result["menuCapacity"] + 1, result
     assert result["descriptionTag"] == "BUTTON" and result["descriptionOpensDetail"] is True, result
     assert result["detailClosesOnTerminalEngagement"] is True, result
     assert result["descriptionStyle"] == {"whiteSpace": "nowrap", "textOverflow": "ellipsis", "overflow": "hidden"}, result
@@ -543,6 +548,8 @@ def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, t
             active: activeItemForSide('left'),
             sheet: menu?.classList.contains('tab-action-sheet') === true,
             description: menu?.querySelector('.tab-action-description')?.textContent.trim() || '',
+            sheetWidth: sheetRect?.width || 0,
+            sheetCapacity: rootCssLengthPx('--context-menu-compact-inline-size'),
             tabBottom: rect.bottom,
             sheetTop: sheetRect?.top || 0,
             viewportHeight: window.innerHeight,
@@ -552,6 +559,7 @@ def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, t
     )
     assert result["active"] == "1", result
     assert result["sheet"] is True and result["description"].startswith("More desc: 2"), result
+    assert 0 < result["sheetWidth"] <= result["sheetCapacity"] + 1, result
     assert result["sheetTop"] >= result["tabBottom"] and result["sheetTop"] - result["tabBottom"] <= 12, result
 
 

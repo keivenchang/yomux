@@ -344,20 +344,20 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu {
   position: fixed;
   z-index: var(--z-terminal-popover);
-  min-width: 150px;
-  padding: var(--space-4);
+  padding: var(--space-3);
   color: var(--chrome-text-strong);
   background: var(--overlay-surface-strong);
   border: 1px solid var(--sep-muted);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-elevated);
 }
-.session-context-menu {
-  min-width: 178px;
+.terminal-context-menu:not(.repo-chip-menu) {
+  max-width: var(--context-menu-compact-inline-size);
 }
-.tab-action-sheet {
-  width: min(calc(100vw - (2 * var(--popover-edge-gap))), 38rem);
-  max-height: min(72vh, 42rem);
+.terminal-context-menu.tab-action-sheet {
+  width: var(--context-menu-compact-inline-size);
+  max-width: var(--popover-max-inline-size);
+  max-height: var(--context-menu-max-block-size);
   overflow: auto;
   transform: none;
 }
@@ -366,7 +366,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   width: 100%;
   min-width: 0;
   border: 0;
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-4) var(--space-6);
   color: var(--chrome-text-strong);
   background: transparent;
   cursor: pointer;
@@ -381,12 +381,12 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .tab-directional-action-groups {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2);
 }
 .tab-split-actions {
   display: grid;
-  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  grid-template-columns: auto repeat(var(--context-menu-direction-count), minmax(0, 1fr));
   grid-template-rows: var(--touch-target-min-size);
   gap: var(--space-2);
   min-width: 0;
@@ -421,8 +421,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: none;
 }
 .tab-directional-action-icon {
-  --tab-directional-icon-inline-size: 32px;
-  --tab-directional-icon-block-size: 24px;
+  --tab-directional-icon-inline-size: 2.75em;
+  --tab-directional-icon-block-size: 2em;
   --tab-directional-icon-border-width: var(--space-2);
   --tab-directional-icon-outer-radius: var(--radius-control);
   --tab-directional-icon-inner-radius: var(--space-2);
@@ -515,11 +515,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu button {
   width: 100%;
   display: block;
-  padding: var(--space-5) var(--space-8);
+  padding: var(--space-4) var(--space-6);
   color: inherit;
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   text-align: start;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
@@ -529,20 +529,20 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-8);
+  gap: var(--space-6);
 }
 .context-menu-icon {
   display: inline-flex;
   align-items: center;
 }
 .context-menu-icon .app-menu-ui-icon {
-  width: 20px;
-  height: 18px;
+  width: 1.75em;
+  height: 1.55em;
   border-radius: var(--radius-control);
 }
 .context-menu-icon .app-menu-ui-icon::before {
-  width: 12px;
-  height: 12px;
+  width: 1em;
+  height: 1em;
 }
 .context-menu-label {
   min-width: 0;
@@ -553,11 +553,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   white-space: nowrap;
 }
 .terminal-context-menu button.danger {
-  color: #ffd6dc;
+  color: var(--danger-text-soft);
 }
 .terminal-context-menu button.danger:hover,
 .terminal-context-menu button.danger:focus-visible {
-  color: #1d0307;
+  color: var(--danger-confirm-text);
   background: var(--bad);
 }
 .terminal-context-menu button:disabled:hover,
@@ -567,8 +567,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .terminal-context-menu-separator {
   height: 1px;
-  margin: var(--space-4) var(--space-2);
-  background: #394354;
+  margin: var(--space-3) var(--space-2);
+  background: var(--menu-tab-row-separator);
 }
 .file-image-preview-popover {
   position: fixed;

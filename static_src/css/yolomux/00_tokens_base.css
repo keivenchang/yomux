@@ -320,6 +320,10 @@
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
+  --context-menu-direction-count: 4;
+  --context-menu-action-column-count: calc(var(--context-menu-direction-count) + 1);
+  --context-menu-compact-inline-size: min(calc(var(--touch-target-min-size) * var(--context-menu-action-column-count)), var(--popover-max-inline-size));
+  --context-menu-max-block-size: var(--app-menu-max-block-size);
   --dialog-compact-inline-size: 80ch;
   --dialog-standard-inline-size: 112ch;
   --dialog-wide-inline-size: 144ch;
