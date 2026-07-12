@@ -14,7 +14,7 @@ Section order follows the reading path: capabilities and terms, layout and tab m
 - [x] Tab insertion preview appears between tabs, not over the target tab.
 - [x] Active tabs have rounded top corners and a distinct active background.
 - [x] Inactive tabs inherit the tab-container background instead of using a disconnected color.
-- [x] Pinned tabs stay at the front of a pane, show a pin icon, are protected from LRU tab eviction, and can be toggled from the tab context menu or the `Mod+K` then `Enter` shortcut.
+- [x] Pinned tabs stay at the front of a pane, show a pin icon, are protected from LRU tab eviction, and can be toggled from the tab context menu or the `Mod+K` then `Enter` shortcut. Toggling pin state while its hover detail is open updates the icon immediately without closing or rebuilding that detail.
 - [x] Tab hover shows a detail popover with session/file state when a cursor-hover-capable pointer is available.
 - [x] Tab context menu exposes tab-level actions before destructive session actions.
 - [x] Open editors support edit, preview, split, and diff-capable modes based on file capability.

@@ -564,6 +564,16 @@ function syncClassListPreserving(node, freshClassName, preservedNames = []) {
   }
 }
 
+function syncPaneTabPinnedIcon(tab, item) {
+  const existing = tab.querySelector(':scope > .pane-tab-pin-icon');
+  if (!tabIsPinned(item)) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  tab.insertAdjacentHTML('afterbegin', pinnedTabIconHtml(item));
+}
+
 function syncPreservedPaneTab(tab, fresh) {
   const hoverState = tab.dataset.popoverHoverState || '';
   syncClassListPreserving(tab, fresh.className, ['popover-open', 'dragging']);
@@ -576,6 +586,7 @@ function syncPreservedPaneTab(tab, fresh) {
   const label = fresh.getAttribute('aria-label');
   if (label) tab.setAttribute('aria-label', label);
   else tab.removeAttribute('aria-label');
+  syncPaneTabPinnedIcon(tab, fresh.dataset.paneTab);
 }
 
 function paneTabPopoverItemToRestore(strip) {

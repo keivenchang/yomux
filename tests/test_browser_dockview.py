@@ -1262,6 +1262,46 @@ def test_dockview_tab_hover_popover_survives_tab_refresh_without_pointer_move(br
     assert metrics["tabOpen"] is True, metrics
 
 
+def test_dockview_pin_toggle_updates_open_hover_popover_tab(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=left&tabs=left:1,2",
+        sessions=["1", "2"],
+        transcript_sessions={
+            "1": {
+                "current_path": "/home/test/yolomux.dev1",
+                "git_root": "/home/test/yolomux.dev1",
+                "branch": "pinned-popover",
+            }
+        },
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    wait_for_dockview_tab_geometry(browser, min_tabs=2)
+    browser.execute_script("tabPopoverShowDelayMs = 0; tabPopoverFollowDelayMs = 0;")
+    fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.dockview-pane-tab[data-pane-tab="1"]')).perform()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return Boolean(document.querySelector('.pane-tab-detached-popover.popover-open'));"
+        )
+    )
+    browser.execute_script("setTabPinned('1', true);")
+    metrics = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
+            if (!tab?.classList.contains('pinned-tab')) return false;
+            return {
+              pinned: tab.classList.contains('pinned-tab'),
+              hasPinIcon: Boolean(tab.querySelector('.pane-tab-pin-icon')),
+              popoverOpen: tab.classList.contains('popover-open'),
+            };
+            """
+        )
+    )
+    assert metrics == {"pinned": True, "hasPinIcon": True, "popoverOpen": True}, metrics
+
+
 def test_dockview_separator_inactive_tab_and_preview_colors_match_tokens(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
