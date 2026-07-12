@@ -3748,12 +3748,29 @@ function cycleSessionRepoDisplay(session, info, direction) {
 
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
+function resetLayoutStatusSurface() {
+  statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
+  statusEl.removeAttribute('data-layout-status-kind');
+}
+
 function statusErr(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="err">${html}</span>`;
 }
 
 function statusOk(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="ok">${html}</span>`;
+}
+
+function showLayoutStatus(message, kind = '') {
+  const tone = kind === 'danger' || kind === 'advisory' ? kind : '';
+  statusEl.textContent = String(message || '');
+  resetLayoutStatusSurface();
+  if (tone && statusEl.textContent.trim()) {
+    statusEl.classList.add('layout-status-visible', `layout-status-${tone}`);
+    statusEl.dataset.layoutStatusKind = tone;
+  }
 }
 
 function localizedHtml(key, params) {
@@ -12701,8 +12718,9 @@ function applyLayoutSlots(nextSlots, options = {}) {
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
-    statusEl.textContent = options.message;
+    showLayoutStatus(options.message, options.messageKind || '');
   } else {
+    resetLayoutStatusSurface();
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
@@ -28108,10 +28126,22 @@ function maxTabsPerPane() {
   return Math.max(2, Math.min(30, raw));
 }
 
-// A tab may be auto-evicted unless it is the one being kept active, pinned, the Finder dock,
+function capKeepItemSet(keepItem, keepItems = []) {
+  const result = new Set();
+  if (keepItem instanceof Set) {
+    for (const item of keepItem) if (isLayoutItem(item)) result.add(item);
+  } else if (isLayoutItem(keepItem)) {
+    result.add(keepItem);
+  }
+  for (const item of keepItems || []) if (isLayoutItem(item)) result.add(item);
+  return result;
+}
+
+// A tab may be auto-evicted unless it is being kept active, pinned, the Finder dock,
 // or a dirty/unsaved editor (never silently drop unsaved edits).
 function tabIsEvictableForCap(item, keepItem) {
-  if (item === keepItem || tabIsPinned(item) || isFileExplorerItem(item)) return false;
+  const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
+  if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
     const state = openFiles.get(fileItemPath(item));
     if (state && state.dirty) return false;
@@ -28119,16 +28149,57 @@ function tabIsEvictableForCap(item, keepItem) {
   return true;
 }
 
+function capRefusalReason(tabs, keep) {
+  const protectedTabs = tabs.filter(item => !keep.has(item));
+  return protectedTabs.length > 0 && protectedTabs.every(item => tabIsPinned(item)) ? 'all-pinned' : 'nothing-evictable';
+}
+
+function paneCapacityCheckForInsert(slot, incomingTabs = [], keepItem = null, slots = layoutSlots, options = {}) {
+  const keep = capKeepItemSet(keepItem, options.keepItems);
+  const baseTabs = Array.isArray(options.tabs) ? [...options.tabs] : paneTabs(slot, slots);
+  const tabs = appendUniqueItems([...baseTabs], Array.isArray(incomingTabs) ? incomingTabs : [incomingTabs]);
+  const cap = maxTabsPerPane();
+  const overflow = tabs.length - cap;
+  if (overflow <= 0) return {ok: true, cap, overflow: 0, evicted: [], finalTabs: tabs, reason: ''};
+  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keep));
+  if (!evictable.length) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
+  const byLeastRecent = [...evictable].sort((a, b) => (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0));
+  const evicted = byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+  if (evicted.length < overflow) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
+  return {ok: true, cap, overflow, evicted, finalTabs: tabs.filter(item => !evicted.includes(item)), reason: ''};
+}
+
 // Given a pane's tab list (newest tab already inserted) return the least-recently-used evictable
 // tabs to drop so the pane fits the cap. Keeps keepItem, dirty editors, and the Finder.
 function tabsToEvictForCap(tabs, keepItem) {
-  const cap = maxTabsPerPane();
-  const overflow = tabs.length - cap;
-  if (overflow <= 0) return [];
-  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keepItem));
-  if (!evictable.length) return [];
-  const byLeastRecent = [...evictable].sort((a, b) => (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0));
-  return byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+  return paneCapacityCheckForInsert('', [], keepItem, layoutSlots, {tabs}).evicted;
+}
+
+function paneCapacityRefusalStatus(item, capacity, targetSlot = '') {
+  const statusKey = capacity?.reason === 'all-pinned'
+    ? 'layout.status.paneFullPinned'
+    : 'layout.status.nothingEvictable';
+  return t(statusKey, {
+    item: itemLabel(item),
+    pane: targetSlot || t('layout.zone.middle'),
+    limit: capacity?.cap || maxTabsPerPane(),
+  });
+}
+
+function dropIntentCapacityCheckForSession(session, intent, sourceSlot = null) {
+  if (!intent?.targetSlot || intent.zone !== 'middle' || intent.boundary) return null;
+  if (sourceSlot && sourceSlot === intent.targetSlot) return null;
+  return paneCapacityCheckForInsert(intent.targetSlot, [session], session, layoutSlots);
+}
+
+function dropIntentCapacityAllowsSession(session, intent, sourceSlot = null) {
+  const capacity = dropIntentCapacityCheckForSession(session, intent, sourceSlot);
+  return !capacity || capacity.ok;
+}
+
+function dropIntentCapacityRefusalStatus(session, intent, sourceSlot = null) {
+  const capacity = dropIntentCapacityCheckForSession(session, intent, sourceSlot);
+  return capacity && !capacity.ok ? paneCapacityRefusalStatus(session, capacity, intent.targetSlot) : '';
 }
 
 function paneTabsForGenericActions(slot, slots = layoutSlots) {
@@ -28537,16 +28608,19 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   const index = Math.max(0, Math.min(Number.isFinite(insertIndex) ? insertIndex : 0, tabs.length));
   tabs.splice(index, 0, session);
   recordTabActivation(session);
-  // Enforce the per-pane tab cap: if this pane is now over the limit, auto-close the least-recently
-  // used tabs (keeping the new active tab, the Finder, and any dirty editors).
-  const evicted = tabsToEvictForCap(tabs, session);
-  const keptTabs = evicted.length ? tabs.filter(item => !evicted.includes(item)) : tabs;
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, keptTabs, session, next);
+  // Enforce the per-pane tab cap through the shared capacity owner. Later pinned/cap items reuse
+  // the same result shape for visible refusals, preview parity, minimize, and expand.
+  const capacity = paneCapacityCheckForInsert(targetSlot, [], session, next, {tabs});
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatus(session, capacity, targetSlot), 'danger');
+    return false;
+  }
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, session, next);
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
     preservePlaceholderSlots: options.preserveSourcePlaceholder === true,
-    message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
+    message: capacity.evicted.length ? t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}) : '',
   });
   return true;
 }
@@ -31458,6 +31532,7 @@ function dropIntentAllowsSession(session, intent, options = {}) {
   if (!paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
     allowCandidate: options.allowCandidate === true,
   })) return false;
+  if (!dropIntentCapacityAllowsSession(session, intent, sourceSlot)) return false;
   if (slotIsSidePane(intent.targetSlot)) {
     return intent.zone === 'middle'
       || (['top', 'bottom'].includes(intent.zone) && dropIntentHasRoomForItem(session, intent));
@@ -31618,7 +31693,7 @@ function classifyLayoutDrag(event, {intentForFile, intentForSession, suppressSes
   const intent = intentForSession?.(event) || null;
   if (intent) intent.item = session.session;
   if (ignoreMissingIntent && !intent) return null;
-  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent), dropEffect: 'move'};
+  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent, {sourceSlot: session.sourceSlot}), dropEffect: 'move'};
 }
 
 function applyLayoutDragIntent(event, drag, {phase = 'over'} = {}) {
@@ -31966,8 +32041,12 @@ function dockviewShowRootBoundaryPreview(intent) {
 
 function dockviewTrackRootBoundaryOverlay(event) {
   const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
-  dockviewSetInvalidTabDropPreview(invalidTabDrop);
-  if (invalidTabDrop) {
+  const paneInfo = dockviewPaneContentDropInfo(event);
+  const capacityRefusal = dockviewTabCapacityRefusalStatus(event) || (paneInfo?.intent?.zone === 'middle'
+    ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+    : '');
+  dockviewSetInvalidTabDropPreview(invalidTabDrop || Boolean(capacityRefusal));
+  if (invalidTabDrop || capacityRefusal) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
     return;
@@ -32172,6 +32251,12 @@ function dockviewTabDropViolatesPinnedPartition(event) {
   return tabIsPinned(info.item)
     ? info.adjustedIndex > info.pinnedBoundary
     : info.adjustedIndex < info.pinnedBoundary;
+}
+
+function dockviewTabCapacityRefusalStatus(event) {
+  const info = dockviewTabStripEndDropInfoForEvent(event) || dockviewTabInsertionInfo(event);
+  if (!info || !info.targetSlot) return '';
+  return dropIntentCapacityRefusalStatus(info.item, {targetSlot: info.targetSlot, zone: 'middle'}, info.sourceSlot);
 }
 
 function dockviewPinnedTabCrossPaneViolation(info) {
@@ -32564,20 +32649,45 @@ function dockviewFileDropIntentForEvent(event) {
   return dockviewGroupDropIntentForEvent(event);
 }
 
+function dockviewCapacityRefusalForDrag(drag) {
+  if (drag?.kind !== 'session' || !drag.intent) return '';
+  return dropIntentCapacityRefusalStatus(drag.payload?.session, drag.intent, drag.payload?.sourceSlot || slotForItem(drag.payload?.session));
+}
+
 function dockviewHandleFileDragOver(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }));
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'none';
+    dockviewSetInvalidTabDropPreview(true);
+    showDropPreview(drag.intent);
+    return;
+  }
+  applyLayoutDragIntent(event, drag);
 }
 
 function dockviewHandleFileDrop(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }), {phase: 'drop'});
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
+    showLayoutStatus(capacityRefusal, 'danger');
+    return;
+  }
+  applyLayoutDragIntent(event, drag, {phase: 'drop'});
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -32586,6 +32696,7 @@ function dockviewInstallFileDropBridge(host) {
   const dragLeave = event => {
     if (host?.contains?.(event.relatedTarget)) return;
     clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
   };
   host.addEventListener('dragover', dragOver, true);
   host.addEventListener('drop', drop, true);
@@ -32908,6 +33019,14 @@ function dockviewInit() {
         event.preventDefault();
         return;
       }
+      const tabCapacityRefusal = dockviewTabCapacityRefusalStatus(event);
+      if (tabCapacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(tabCapacityRefusal, 'danger');
+        return;
+      }
       const tabInsertion = dockviewTabInsertionInfo(event);
       // A tab-header drop is `kind: tab`, not `kind: content`. Dockview otherwise owns that move
       // internally and its later adoption path rejects the protected home group. A triplet item
@@ -32933,6 +33052,16 @@ function dockviewInit() {
         return;
       }
       const paneInfo = dockviewPaneContentDropInfo(event);
+      const capacityRefusal = paneInfo?.intent?.zone === 'middle'
+        ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+        : '';
+      if (capacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(capacityRefusal, 'danger');
+        return;
+      }
       // Dockview's default center-drop mutates its private group first and relies on a later
       // adoption pass. That lost center drops into the protected triplet home column. Apply every
       // allowed center move through the same layout transaction as the rest of the app instead.

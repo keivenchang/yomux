@@ -5922,8 +5922,9 @@ function applyLayoutSlots(nextSlots, options = {}) {
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
-    statusEl.textContent = options.message;
+    showLayoutStatus(options.message, options.messageKind || '');
   } else {
+    resetLayoutStatusSurface();
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();

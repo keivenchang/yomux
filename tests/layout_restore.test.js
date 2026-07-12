@@ -2310,9 +2310,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.file-tree-repo-ahead/.test(css) && /\.file-tree-repo-dirty/.test(css), 'inline ahead/dirty markers are styled');
   });
 
-  test('per-pane tab cap normalizes and applies settings', () => {
+  testAsync('per-pane tab cap normalizes, refuses, and applies settings', async () => {
     // Max tabs per pane + LRU eviction (Preference).
-    const api = loadYolomux('', ['1', '2', '3', '4', '5']);
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', 'file:/x/draft.txt']);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
     assert.equal(api.maxTabsPerPane(), 3, 'tab cap reads appearance.max_tabs_per_pane');
@@ -2348,10 +2348,73 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual([...api.normalizeLayoutSlots(rawPinnedSlots).left.tabs], ['1', '2', '3'], 'raw layout normalization also enforces pinned-first ordering');
     assert.ok(api.pinnedTabIconHtml('1').includes('pane-tab-pin-icon'), 'pinned tabs render a pin icon helper');
     assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2', '3', '4'], '4')], ['3', '2'], 'LRU eviction skips pinned tabs');
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
+    rawPinnedSlots.left = {tabs: ['1', '2', '3'], active: '3'};
+    assert.deepStrictEqual(canonical(api.paneCapacityCheckForInsert('left', ['4'], '4', rawPinnedSlots)), {
+      cap: 3,
+      evicted: ['3'],
+      finalTabs: ['1', '2', '4'],
+      ok: true,
+      overflow: 1,
+      reason: '',
+    }, 'the shared capacity helper returns final tabs and LRU evictions');
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+    rawPinnedSlots.left = {tabs: ['1', '2'], active: '1'};
+    api.setPinnedTabsForTest(['1', '2']);
+    assert.deepStrictEqual(canonical(api.paneCapacityCheckForInsert('left', ['3'], '3', rawPinnedSlots)), {
+      cap: 2,
+      evicted: [],
+      finalTabs: ['1', '2', '3'],
+      ok: false,
+      overflow: 1,
+      reason: 'all-pinned',
+    }, 'the shared capacity helper refuses an over-cap pane whose residents are all pinned');
+    rawPinnedSlots.left = {tabs: ['1', editorItem], active: '1'};
+    api.setPinnedTabsForTest(['1']);
+    assert.deepStrictEqual(canonical(api.paneCapacityCheckForInsert('left', ['3'], '3', rawPinnedSlots)), {
+      cap: 2,
+      evicted: [],
+      finalTabs: ['1', editorItem, '3'],
+      ok: false,
+      overflow: 1,
+      reason: 'nothing-evictable',
+    }, 'the shared capacity helper refuses mixed unevictable residents with a distinct reason');
     assert.equal(api.isPinnableTab(api.fileExplorerItemId), false, 'Finder/Differ is not pinnable');
     assert.equal(api.isPinnableTab('2'), true, 'normal tmux tabs are pinnable');
     api.setPinnedTabsForTest([]);
-    assert.ok(source.includes('const evicted = tabsToEvictForCap(tabs, session);'), 'moveSessionToSlot enforces the tab cap when a tab joins a pane');
+    assert.ok(/function tabsToEvictForCap\(tabs, keepItem\)[\s\S]*paneCapacityCheckForInsert\('', \[\], keepItem/.test(source), 'legacy eviction helper delegates to the shared capacity owner');
+    assert.equal((source.match(/tabsToEvictForCap\(/g) || []).length, 1, 'product code has no direct cap-eviction callers outside the compatibility wrapper');
+    assert.ok(/function paneCapacityRefusalStatus\(item, capacity, targetSlot = ''\)[\s\S]*layout\.status\.paneFullPinned[\s\S]*layout\.status\.nothingEvictable[\s\S]*pane: targetSlot[\s\S]*limit: capacity/.test(source), 'cap refusals use dedicated localized pinned/cap status keys and name the target pane plus cap');
+    assert.ok(/const capacity = paneCapacityCheckForInsert\(targetSlot, \[\], session, next, \{tabs\}\);[\s\S]*if \(!capacity\.ok\)[\s\S]*showLayoutStatus\(paneCapacityRefusalStatus\(session, capacity, targetSlot\), 'danger'\)[\s\S]*return false;[\s\S]*next\[targetSlot\] = paneStateWithTabsForSlot/.test(source), 'moveSessionToSlot refuses over-cap inserts before applying a changed layout');
+    assert.ok(/function showLayoutStatus\(message, kind = ''\)[\s\S]*kind === 'danger'[\s\S]*layout-status-visible[\s\S]*`layout-status-\$\{tone\}`/.test(source), 'layout danger messages reuse #status as a visible status surface');
+    assert.ok(/function dropIntentCapacityCheckForSession\(session, intent, sourceSlot = null\)[\s\S]*paneCapacityCheckForInsert\(intent\.targetSlot, \[session\], session, layoutSlots\)[\s\S]*function dropIntentCapacityAllowsSession/.test(source), 'drag preview capacity checks reuse the shared capacity owner');
+    assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dropIntentCapacityRefusalStatus\(paneInfo\.item, paneInfo\.intent, paneInfo\.intent\.sourceSlot\)[\s\S]*dockviewSetInvalidTabDropPreview\(invalidTabDrop \|\| Boolean\(capacityRefusal\)\)/.test(source), 'Dockview preview paints capacity refusals through the existing invalid-drop danger state');
+    assert.ok(/const capacityRefusal = paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*showLayoutStatus\(capacityRefusal, 'danger'\)[\s\S]*return;[\s\S]*Dockview's default center-drop mutates/.test(source), 'Dockview release prevents capacity-refused drops and shows the shared danger status');
+    const moveSlots = api.emptyLayoutSlots();
+    moveSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
+    moveSlots.left = api.paneStateWithTabs(['3'], '3');
+    moveSlots.right = api.paneStateWithTabs(['1', '2'], '1');
+    api.setPinnedTabsForTest(['1', '2']);
+    api.setLayoutSlotsForTest(moveSlots);
+    const refused = await api.moveSessionToSlot('3', 'right', 'left', 2);
+    const afterRefusal = api.serialize(api.layoutSlotsForTest());
+    assert.equal(refused, false, 'moveSessionToSlot reports a refused full-pinned target');
+    assert.deepStrictEqual([...afterRefusal.panes.left.tabs], ['3'], 'refused move leaves the source pane unchanged');
+    assert.deepStrictEqual([...afterRefusal.panes.right.tabs], ['1', '2'], 'refused move leaves the target pane unchanged');
+    assert.ok(api.statusTextForTest().includes('tab limit 2'), 'refused move status names the active cap');
+    assert.ok(api.statusTextForTest().includes('right'), 'refused move status names the target pane');
+    assert.equal(api.statusKindForTest(), 'danger', 'refused move publishes a visible danger layout status');
+    assert.ok(api.statusClassForTest().includes('layout-status-visible'), 'refused move makes the existing status live region visible');
+    assert.ok(api.statusClassForTest().includes('layout-status-danger'), 'refused move applies danger status styling');
+    assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), false, 'drag preview refuses a cross-pane drop into a full all-pinned target');
+    moveSlots.right = api.paneStateWithTabs(['1', editorItem], '1');
+    api.setLayoutSlotsForTest(moveSlots);
+    assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), false, 'drag preview refuses a cross-pane drop into a mixed unevictable target');
+    moveSlots.right = api.paneStateWithTabs(['1', '2'], '1');
+    api.setPinnedTabsForTest(['1']);
+    api.setLayoutSlotsForTest(moveSlots);
+    assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), true, 'drag preview allows an at-cap target when an unpinned LRU tab can be evicted');
+    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'right'}), true, 'same-pane reorder stays allowed even when the pane is at the cap');
   });
 
   test('pull request review badges render review outcomes', () => {

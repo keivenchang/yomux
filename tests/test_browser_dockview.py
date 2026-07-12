@@ -4557,6 +4557,119 @@ def test_dockview_pinned_tabs_render_first_after_pin_toggle(browser, tmp_path):
     assert pinned == {"item": "2", "pinned": True, "hasIcon": True}
 
 
+def test_dockview_refused_move_to_full_pinned_pane_shows_danger_status(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=row@50(left,right)&tabs=left:3;right:1,2",
+        sessions=["1", "2", "3"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        clientSettings = mergeSettingObjects(clientSettings, {appearance: {max_tabs_per_pane: 2}});
+        terminals.set('3', {socket: {readyState: WebSocket.OPEN}});
+        setTabPinned('1', true);
+        setTabPinned('2', true);
+        const before = JSON.stringify({left: paneTabs('left'), right: paneTabs('right')});
+        moveSessionToSlot('3', 'right', 'left', 2).then(moved => {
+          requestAnimationFrame(() => {
+            const status = document.getElementById('status');
+            const rect = status.getBoundingClientRect();
+            const style = getComputedStyle(status);
+            done({
+              moved,
+              before,
+              after: JSON.stringify({left: paneTabs('left'), right: paneTabs('right')}),
+              text: status.textContent,
+              classes: Array.from(status.classList),
+              kind: status.dataset.layoutStatusKind || '',
+              rect: {width: rect.width, height: rect.height, top: rect.top, right: rect.right},
+              display: style.display,
+              position: style.position,
+              borderColor: style.borderTopColor,
+              color: style.color,
+            });
+          });
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert result.get("error") is None, result
+    assert result["moved"] is False, result
+    assert result["before"] == result["after"], result
+    assert "tab limit 2" in result["text"], result
+    assert "right" in result["text"], result
+    assert result["kind"] == "danger", result
+    assert "layout-status-visible" in result["classes"], result
+    assert "layout-status-danger" in result["classes"], result
+    assert result["display"] != "none", result
+    assert result["position"] == "fixed", result
+    assert result["rect"]["width"] > 80 and result["rect"]["height"] > 20, result
+    assert result["borderColor"] != result["color"], result
+
+
+def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_status(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=row@50(left,right)&tabs=left:3;right:1,2",
+        sessions=["1", "2", "3"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    browser.execute_script(
+        """
+        clientSettings = mergeSettingObjects(clientSettings, {appearance: {max_tabs_per_pane: 2}});
+        setTabPinned('1', true);
+        setTabPinned('2', true);
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: dockview_layout_metrics(driver)["slots"]["right"]["tabs"] == ["1", "2"]
+    )
+    before = dockview_layout_metrics(browser)["slots"]
+    start = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="3"]', 0.5, 0.5)
+    end = dockview_point(browser, '.dockview-pane-tab[data-pane-tab="2"]', 0.72, 0.5)
+    try:
+        cdp_drag_hold(browser, start, end, steps=32)
+        WebDriverWait(browser, 3).until(
+            lambda driver: dockview_invalid_drop_preview(driver)["invalidPreview"] is True
+        )
+        preview = dockview_invalid_drop_preview(browser)
+    finally:
+        cdp_release(browser, end)
+    status = WebDriverWait(browser, 5).until(
+        lambda driver: (
+            result
+            if (result := driver.execute_script(
+                """
+                const status = document.getElementById('status');
+                return {
+                  left: paneTabs('left'),
+                  right: paneTabs('right'),
+                  text: status.textContent,
+                  classes: Array.from(status.classList),
+                  kind: status.dataset.layoutStatusKind || '',
+                  invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+                };
+                """
+            ))["kind"] == "danger"
+            else False
+        )
+    )
+    assert preview["invalidPreview"] is True, preview
+    assert any(item["borderStyle"] == "dashed" and item["borderColor"] == preview["dangerColor"] for item in preview["previews"]), preview
+    assert status["left"] == before["left"]["tabs"], status
+    assert status["right"] == before["right"]["tabs"], status
+    assert "tab limit 2" in status["text"] and "right" in status["text"], status
+    assert "layout-status-visible" in status["classes"], status
+    assert "layout-status-danger" in status["classes"], status
+    assert status["invalidPreview"] is False, status
+    assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
+
+
 def test_dockview_first_pinned_tab_drags_after_second_pinned_tab(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
     wait_for_dockview(browser, min_tabs=3)

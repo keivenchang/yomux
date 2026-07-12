@@ -1569,12 +1569,29 @@ function cycleSessionRepoDisplay(session, info, direction) {
 
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
+function resetLayoutStatusSurface() {
+  statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
+  statusEl.removeAttribute('data-layout-status-kind');
+}
+
 function statusErr(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="err">${html}</span>`;
 }
 
 function statusOk(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="ok">${html}</span>`;
+}
+
+function showLayoutStatus(message, kind = '') {
+  const tone = kind === 'danger' || kind === 'advisory' ? kind : '';
+  statusEl.textContent = String(message || '');
+  resetLayoutStatusSurface();
+  if (tone && statusEl.textContent.trim()) {
+    statusEl.classList.add('layout-status-visible', `layout-status-${tone}`);
+    statusEl.dataset.layoutStatusKind = tone;
+  }
 }
 
 function localizedHtml(key, params) {

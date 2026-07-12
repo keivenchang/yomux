@@ -304,8 +304,12 @@ function dockviewShowRootBoundaryPreview(intent) {
 
 function dockviewTrackRootBoundaryOverlay(event) {
   const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
-  dockviewSetInvalidTabDropPreview(invalidTabDrop);
-  if (invalidTabDrop) {
+  const paneInfo = dockviewPaneContentDropInfo(event);
+  const capacityRefusal = dockviewTabCapacityRefusalStatus(event) || (paneInfo?.intent?.zone === 'middle'
+    ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+    : '');
+  dockviewSetInvalidTabDropPreview(invalidTabDrop || Boolean(capacityRefusal));
+  if (invalidTabDrop || capacityRefusal) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
     return;
@@ -510,6 +514,12 @@ function dockviewTabDropViolatesPinnedPartition(event) {
   return tabIsPinned(info.item)
     ? info.adjustedIndex > info.pinnedBoundary
     : info.adjustedIndex < info.pinnedBoundary;
+}
+
+function dockviewTabCapacityRefusalStatus(event) {
+  const info = dockviewTabStripEndDropInfoForEvent(event) || dockviewTabInsertionInfo(event);
+  if (!info || !info.targetSlot) return '';
+  return dropIntentCapacityRefusalStatus(info.item, {targetSlot: info.targetSlot, zone: 'middle'}, info.sourceSlot);
 }
 
 function dockviewPinnedTabCrossPaneViolation(info) {
@@ -902,20 +912,45 @@ function dockviewFileDropIntentForEvent(event) {
   return dockviewGroupDropIntentForEvent(event);
 }
 
+function dockviewCapacityRefusalForDrag(drag) {
+  if (drag?.kind !== 'session' || !drag.intent) return '';
+  return dropIntentCapacityRefusalStatus(drag.payload?.session, drag.intent, drag.payload?.sourceSlot || slotForItem(drag.payload?.session));
+}
+
 function dockviewHandleFileDragOver(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }));
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'none';
+    dockviewSetInvalidTabDropPreview(true);
+    showDropPreview(drag.intent);
+    return;
+  }
+  applyLayoutDragIntent(event, drag);
 }
 
 function dockviewHandleFileDrop(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }), {phase: 'drop'});
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
+    showLayoutStatus(capacityRefusal, 'danger');
+    return;
+  }
+  applyLayoutDragIntent(event, drag, {phase: 'drop'});
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -924,6 +959,7 @@ function dockviewInstallFileDropBridge(host) {
   const dragLeave = event => {
     if (host?.contains?.(event.relatedTarget)) return;
     clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
   };
   host.addEventListener('dragover', dragOver, true);
   host.addEventListener('drop', drop, true);
@@ -1246,6 +1282,14 @@ function dockviewInit() {
         event.preventDefault();
         return;
       }
+      const tabCapacityRefusal = dockviewTabCapacityRefusalStatus(event);
+      if (tabCapacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(tabCapacityRefusal, 'danger');
+        return;
+      }
       const tabInsertion = dockviewTabInsertionInfo(event);
       // A tab-header drop is `kind: tab`, not `kind: content`. Dockview otherwise owns that move
       // internally and its later adoption path rejects the protected home group. A triplet item
@@ -1271,6 +1315,16 @@ function dockviewInit() {
         return;
       }
       const paneInfo = dockviewPaneContentDropInfo(event);
+      const capacityRefusal = paneInfo?.intent?.zone === 'middle'
+        ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+        : '';
+      if (capacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(capacityRefusal, 'danger');
+        return;
+      }
       // Dockview's default center-drop mutates its private group first and relies on a later
       // adoption pass. That lost center drops into the protected triplet home column. Apply every
       // allowed center move through the same layout transaction as the rest of the app instead.

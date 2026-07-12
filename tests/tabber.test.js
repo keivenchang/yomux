@@ -914,7 +914,7 @@ async function runTabberSuite() {
     assert.ok(source.includes('bindPaneTabNativeDragSource(tab, item, () => side);'), 'createPaneTab uses the shared native tab drag binder');
     assert.ok(/function bindTabberRowDragSource\(row\)[\s\S]*bindPaneTabNativeDragSource\(row, \(\) => tabberRowDragItem\(row\)/.test(source), 'Tabber rows reuse the shared native tab drag binder');
     assert.ok(source.includes('dragImage: () => tabberNativeDragImageForRow(row)'), 'Tabber rows and inner session tabs preview only the dragged subtree');
-    assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*applyLayoutDragIntent\(event, classifyLayoutDrag\(event, \{[\s\S]*intentForSession: dockviewGroupDropIntentForEvent/.test(source), 'Dockview accepts external shared tab drags through the shared classifier');
+    assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*const drag = classifyLayoutDrag\(event, \{[\s\S]*intentForSession: dockviewGroupDropIntentForEvent[\s\S]*const capacityRefusal = dockviewCapacityRefusalForDrag\(drag\)[\s\S]*applyLayoutDragIntent\(event, drag\)/.test(source), 'Dockview accepts external shared tab drags through the shared classifier before applying capacity-aware preview rules');
     assert.ok(/function applyLayoutDragIntent\(event, drag,[\s\S]*dropSessionWithIntent\(drag\.payload\.session, drag\.intent/.test(source), 'Dockview drops external shared tab drags through the normal session action executor');
 
     const api = loadYolomux('', ['1', '2']);

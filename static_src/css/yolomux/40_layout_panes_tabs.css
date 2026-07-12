@@ -518,6 +518,11 @@ body.layout-resizing {
 .grid.drop-preview::before {
   z-index: var(--z-drop-preview);
 }
+.yolomux-dockview.dockview-invalid-tab-drop-preview .dv-groupview.drop-preview::before {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger-bg) 20%, transparent);
+  border-color: var(--danger-border);
+}
 .drop-slot.drop-preview-middle::before {
   inset: 18%;
 }

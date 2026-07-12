@@ -2010,6 +2010,7 @@ globalThis.__layoutTestApi = {
   applyAutoApprovePayloadForTest: applyAutoApprovePayload,
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
+  paneCapacityCheckForInsert,
   tabsToEvictForCap,
   recordTabActivation,
   setTabLastActivatedForTest(item, ts) { tabLastActivatedAt.set(item, ts); },
@@ -2842,6 +2843,8 @@ globalThis.__layoutTestApi = {
   modalBodyHtmlForTest() { return document.getElementById('modalBody').innerHTML; },
   statusTextForTest() { return statusEl.textContent; },
   statusHtmlForTest() { return statusEl.innerHTML; },
+  statusClassForTest() { return statusEl.className; },
+  statusKindForTest() { return statusEl.dataset.layoutStatusKind || ''; },
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],
