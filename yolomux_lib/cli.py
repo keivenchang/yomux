@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .app import TmuxWebtermApp
+from .background_owner import background_owner_priority
 from .background_owner import read_background_owner_debug_status
 from .common import AUTH_CONFIG_DISPLAY_PATH
 from .common import SERVER_HOSTNAME
@@ -296,7 +297,7 @@ def main() -> int:
                 return 2
             return print_transcripts(app)
 
-        app.start_background_owner(port=args.port)
+        app.start_background_owner(port=args.port, priority=background_owner_priority(args.port))
         server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
         if hasattr(app, "start_yoagent_backend_prewarm"):
             app.start_yoagent_backend_prewarm(reason="server_start")

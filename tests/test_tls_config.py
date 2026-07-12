@@ -117,6 +117,7 @@ def test_print_runtime_report_outputs_json(monkeypatch, capsys):
 
 def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     captured = {}
+    monkeypatch.setenv("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT", "19001")
     args = argparse.Namespace(
         host="0.0.0.0",
         port=19001,
@@ -139,8 +140,9 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         def restore_auto_approve(self):
             return []
 
-        def start_background_owner(self, port=None):
+        def start_background_owner(self, port=None, priority=0):
             captured["background_owner_port"] = port
+            captured["background_owner_priority"] = priority
             return True
 
         def start_yoagent_backend_prewarm(self, **kwargs):
@@ -178,6 +180,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["tls_context"] is None
     assert captured["dev"] is False  # dev mode off by default
     assert captured["background_owner_port"] == 19001
+    assert captured["background_owner_priority"] == 100
     assert captured["yoagent_prewarm"] == {"reason": "server_start"}
     assert captured["served"] is True
     assert captured["stopped"] is True

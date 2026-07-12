@@ -35,6 +35,7 @@ LOCAL_SERVICE_IDLE_SECONDS = 60.0
 LOCAL_SERVICE_START_TIMEOUT_SECONDS = 5.0
 LOCAL_SERVICE_BACKOFF_SECONDS = 0.25
 LOCAL_SERVICE_MAX_BACKOFF_SECONDS = 8.0
+LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,13 @@ class LocalServiceRegistry:
         self.next_start_at = self.clock() + delay
 
     def _spawn(self) -> subprocess.Popen[Any] | None:
+        idle_seconds = self.spec.idle_seconds
+        configured_idle = os.environ.get(LOCAL_SERVICE_IDLE_SECONDS_ENV)
+        if configured_idle:
+            try:
+                idle_seconds = max(0.1, float(configured_idle))
+            except ValueError:
+                pass
         args = [
             sys.executable,
             "-m",
@@ -187,7 +195,7 @@ class LocalServiceRegistry:
             "--socket",
             str(self.socket_path),
             "--idle-seconds",
-            str(self.spec.idle_seconds),
+            str(idle_seconds),
             *self.spec.extra_args,
         ]
         try:

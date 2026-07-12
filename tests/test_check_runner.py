@@ -78,6 +78,11 @@ def test_check_runner_reuses_background_owner_process_liveness():
     assert check.pid_is_alive is background_owner_pid_is_alive
 
 
+def test_check_lock_is_one_per_user_across_worktrees_and_tmpdirs():
+    check = load_check_module()
+    assert check.DEFAULT_TOOL_LOCK_PATH == Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"
+
+
 def test_default_check_lanes_keep_full_pytest_gate():
     check = load_check_module()
     nonbrowser_workers, browser_workers, e2e_workers = check.pytest_worker_counts()
@@ -175,6 +180,7 @@ def test_focused_pytest_lanes_keep_expected_filters():
 def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkeypatch):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.setattr(check.platform, "system", lambda: "Linux")
 
     expected = {
         4: ("1", "1", "1"),
@@ -188,6 +194,59 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkey
 
     monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
     assert check.pytest_worker_counts() == ("5", "3", "1")
+
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
+    assert check.pytest_worker_counts() == ("3", "2", "1")
+
+
+def test_serial_check_gate_forces_every_pytest_pool_to_one_worker(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "8,8,8")
+
+    pytest_steps = {
+        lane.name: lane.steps
+        for lane in check.lanes(serial=True)
+        if lane.name in {"pytest", "pytest-browser", "pytest-e2e"}
+    }
+    assert check.pytest_worker_counts(serial=True) == ("1", "1", "1")
+    for steps in pytest_steps.values():
+        for step in steps:
+            assert "-n" not in step.args
+            assert "--dist" not in step.args
+
+
+def test_expensive_tool_lock_refuses_independent_contender_without_queueing(tmp_path):
+    lock_path = tmp_path / "shared" / "expensive-tools.lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib.util,time;"
+                f"s=importlib.util.spec_from_file_location('check_holder',{str(CHECK_PATH)!r});"
+                "m=importlib.util.module_from_spec(s);"
+                "__import__('sys').modules[s.name]=m;s.loader.exec_module(m);"
+                f"c=m.expensive_tool_lock(lock_path=m.Path({str(lock_path)!r}));"
+                "c.__enter__();print('locked',flush=True);time.sleep(5);c.__exit__(None,None,None)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        check = load_check_module()
+        try:
+            with check.expensive_tool_lock(lock_path=lock_path):
+                raise AssertionError("contender unexpectedly acquired the lock")
+        except check.ToolGuardBusy:
+            pass
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
 
 
 def test_every_slowest_first_base_node_id_resolves_in_collection():
@@ -263,7 +322,7 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
     assert events[2][0] == "run"
     assert events[2][1] == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
     output = capsys.readouterr().out
-    assert "Waiting for YOLOmux expensive-tool lock" in output
+    assert "Acquiring YOLOmux expensive-tool lock" in output
     assert "lowered check priority by nice +5" in output
 
 

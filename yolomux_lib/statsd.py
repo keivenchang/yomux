@@ -379,7 +379,10 @@ class PersistentStatsService:
         # already acquired background ownership. Adopt that durable owner rather
         # than waiting for another election transition to register it over RPC.
         durable_owner = self._durable_sampler_owner()
-        if durable_owner:
+        if self.sampler_owner_path is not None:
+            # The durable election record is authoritative. Clear an RPC-cached
+            # owner after release/staleness so statsd can idle instead of living
+            # forever on a dead generation.
             self.sampler_owner = durable_owner
         return dict(self.sampler_owner)
 

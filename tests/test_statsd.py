@@ -578,6 +578,24 @@ def test_statsd_restart_recovers_durable_sampler_owner_and_does_not_idle_exit(tm
     service.store.close()
 
 
+def test_statsd_clears_cached_sampler_when_durable_owner_is_released(tmp_path):
+    owner_path = tmp_path / "background-owner" / "owner.json"
+    owner_path.parent.mkdir()
+    owner_path.write_text(json.dumps({"status": "follower", "pid": os.getpid()}), encoding="utf-8")
+    service = statsd.PersistentStatsService(
+        tmp_path / "statsd.sock",
+        tmp_path / "stats.sqlite3",
+        idle_seconds=1.0,
+        sampler_owner_path=owner_path,
+    )
+    service.sampler_owner = {"generation_id": "stale-owner", "pid": os.getpid()}
+    service.last_client_at = time.monotonic() - 10
+
+    assert service._sampler_owner_for_cycle() == {}
+    assert service._idle_shutdown_ready() is True
+    service.store.close()
+
+
 def test_stats_client_registry_spawns_statsd_with_its_requested_database(tmp_path):
     socket_path = tmp_path / "state with spaces" / "statsd.sock"
     database_path = tmp_path / "state with spaces" / "stats.sqlite3"

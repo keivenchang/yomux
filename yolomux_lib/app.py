@@ -2414,13 +2414,14 @@ class TmuxWebtermApp:
         endpoint_profile["stats_app_build_ms"] = round((time.perf_counter() - build_started) * 1000, 3)
         return endpoint_profile, encoded
 
-    def start_background_owner(self, port: int | None = None) -> bool:
+    def start_background_owner(self, port: int | None = None, priority: int = 0) -> bool:
         self.background_owner = BackgroundOwnerRegistry(
             control_socket=str(self.control_server.path),
             port=port,
             project_root=str(PROJECT_ROOT),
             on_demote=self.demote_background_owner,
             on_acquire=self.handle_background_owner_acquired,
+            priority=priority,
         )
         file_index.set_background_owner_checker(self.search_index_can_build)
         acquired = self.background_owner.start()
@@ -2550,6 +2551,18 @@ class TmuxWebtermApp:
         self.publish_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
 
     def background_release_owner(self, requester: dict[str, Any]) -> dict[str, Any]:
+        try:
+            requester_priority = int(requester.get("priority") or 0)
+        except (TypeError, ValueError):
+            requester_priority = 0
+        owner_priority = int(getattr(self.background_owner, "priority", 0) or 0)
+        if self.background_owner.is_owner() and requester_priority < owner_priority:
+            return {
+                "ok": False,
+                "owner": True,
+                "error": "lower-priority server cannot release the preferred background owner",
+                "status": self.background_owner.status_payload(),
+            }
         was_owner = self.background_owner.is_owner()
         self.background_owner.release_owner("control_release")
         if was_owner:

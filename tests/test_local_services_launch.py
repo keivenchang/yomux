@@ -37,7 +37,8 @@ def test_pyproject_package_discovery_includes_local_service_subpackages():
         assert importlib.util.find_spec(module_name) is not None
 
 
-def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path):
+def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path, monkeypatch):
+    monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     starts = []
 
     class FakeProcess:
@@ -73,6 +74,25 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert kwargs["start_new_session"] is True
     assert kwargs["stdout"] is subprocess.DEVNULL
     assert kwargs["stderr"] is subprocess.DEVNULL
+
+
+def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
+    starts = []
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.5")
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION, idle_seconds=60),
+        popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
+    )
+
+    assert registry._spawn() is not None
+    args, _kwargs = starts[0]
+    assert args[args.index("--idle-seconds") + 1] == "0.5"
 
 
 def test_registry_health_request_identifies_expected_service_protocol(tmp_path, monkeypatch):

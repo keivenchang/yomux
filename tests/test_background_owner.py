@@ -6,6 +6,8 @@ import queue
 import threading
 import time
 
+import pytest
+
 from yolomux_lib import app as app_module
 from yolomux_lib import background_owner as background_owner_module
 from yolomux_lib import control as control_module
@@ -24,6 +26,14 @@ from _git_helpers import git
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def no_detached_local_services(monkeypatch):
+    """Ownership unit tests must not leave five-minute service daemons behind."""
+
+    monkeypatch.setattr(app_module.JobClient, "start_for_scheduler", lambda self: False)
+    monkeypatch.setattr(app_module.StatsClient, "set_sampler_owner", lambda self, owner: {"ok": True})
 
 
 class FollowerOwner:
@@ -82,6 +92,27 @@ def test_background_owner_latest_generation_wins(monkeypatch, tmp_path):
 
     assert older.is_latest_live_generation() is False
     assert newer.is_latest_live_generation() is True
+
+
+def test_background_owner_preferred_priority_survives_later_follower_start(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
+    preferred = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, priority=100, clock=lambda: 100.0)
+    later_follower = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=101, priority=0, clock=lambda: 100.0)
+    preferred.started_at_ns = 10
+    later_follower.started_at_ns = 20
+    preferred.publish_generation()
+    later_follower.publish_generation()
+
+    assert preferred.is_latest_live_generation() is True
+    assert later_follower.is_latest_live_generation() is False
+
+
+def test_background_owner_priority_reads_configured_primary_port():
+    configured = {background_owner_module.BACKGROUND_OWNER_PRIMARY_PORT_ENV: "8882"}
+
+    assert background_owner_module.background_owner_priority(8882, configured) == 100
+    assert background_owner_module.background_owner_priority(8881, configured) == 0
+    assert background_owner_module.background_owner_priority(8882, {background_owner_module.BACKGROUND_OWNER_PRIMARY_PORT_ENV: "invalid"}) == 0
 
 
 def test_background_owner_prunes_dead_generation_records(monkeypatch, tmp_path):
@@ -169,6 +200,21 @@ def test_background_owner_claim_payload_takeover_demotes_live_owner(monkeypatch,
     assert owner.is_owner() is False
     assert release_requests[0][1]["action"] == "background_release_owner"
     follower.release_owner("test-cleanup")
+
+
+def test_lower_priority_server_cannot_release_preferred_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
+    owner = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=100, priority=100, clock=lambda: 100.0)
+    assert owner.attempt_takeover() is True
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.background_owner = owner
+
+    payload = webapp.background_release_owner({"pid": 101, "priority": 0})
+
+    assert payload["ok"] is False
+    assert payload["owner"] is True
+    assert owner.is_owner() is True
+    owner.release_owner("test-cleanup")
 
 
 def test_background_owner_reports_blocked_unreachable_owner(monkeypatch, tmp_path):
@@ -303,6 +349,7 @@ def test_two_app_instances_same_state_dir_elect_newer_owner(monkeypatch, tmp_pat
     monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", registry_factory)
     monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", tmp_path / "control")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     try:
@@ -333,6 +380,7 @@ def test_background_refresh_done_fanout_reaches_follower_client_broker(monkeypat
     monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", tmp_path / "control")
     monkeypatch.setattr(app_module, "BACKGROUND_CLIENT_EVENTS_PATH", tmp_path / "background-events.json")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     subscriber_id, subscriber_queue = first.client_events.subscribe()
@@ -379,6 +427,7 @@ def test_background_owner_startup_order_latest_port_wins(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", registry_factory)
     monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", tmp_path / "control")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
     apps = []
     try:
         for port in (9910, 9911, 9912, 9913):
@@ -400,6 +449,36 @@ def test_background_owner_startup_order_latest_port_wins(monkeypatch, tmp_path):
             app.control_server.stop()
 
 
+def test_preferred_owner_stays_stable_while_later_follower_starts(monkeypatch, tmp_path):
+    real_registry = app_module.BackgroundOwnerRegistry
+    started_at = iter([10, 20])
+
+    def registry_factory(**kwargs):
+        registry = real_registry(owner_dir=tmp_path / "owner", **kwargs)
+        registry.started_at_ns = next(started_at)
+        return registry
+
+    monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", registry_factory)
+    monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", tmp_path / "control")
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
+    preferred = app_module.TmuxWebtermApp(["1"])
+    follower = app_module.TmuxWebtermApp(["1"])
+    try:
+        assert preferred.start_background_owner(port=8882, priority=100) is True
+        assert follower.start_background_owner(port=8883, priority=0) is False
+
+        assert preferred.background_owner.is_owner() is True
+        assert follower.background_owner.is_owner() is False
+        assert preferred.background_owner.counters["owner_acquired"] == 1
+        assert preferred.background_owner.counters["owner_released"] == 0
+    finally:
+        preferred.background_owner.stop()
+        follower.background_owner.stop()
+        preferred.control_server.stop()
+        follower.control_server.stop()
+
+
 def test_follower_has_no_expensive_worker_threads_after_takeover(monkeypatch, tmp_path):
     real_registry = app_module.BackgroundOwnerRegistry
     started_at = iter([10, 20])
@@ -411,6 +490,7 @@ def test_follower_has_no_expensive_worker_threads_after_takeover(monkeypatch, tm
 
     monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", registry_factory)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     try:
@@ -483,6 +563,7 @@ def test_background_owner_required_log_event_names_have_emitters():
 
 def test_background_refresh_event_log_is_sampled_and_sanitized(no_control_socket, monkeypatch):
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
     monkeypatch.setattr(app_module, "BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY", 3)
     webapp = app_module.TmuxWebtermApp(["1"])
     raw_cache_key = ("payload", "1", "/tmp/repo", {"branch": "main"})

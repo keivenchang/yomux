@@ -23,6 +23,7 @@ from .control import send_yolomux_control_request
 
 
 BACKGROUND_OWNER_DIR = STATE_DIR / "background-owner"
+BACKGROUND_OWNER_PROTOCOL_VERSION = 2
 GENERATION_INDEX_FILENAME = "index.json"
 GENERATION_INDEX_VERSION = 1
 GENERATION_INDEX_MAX_RECORDS = 64
@@ -35,6 +36,8 @@ BACKGROUND_RELEASE_TIMEOUT_SECONDS = 5.0
 BACKGROUND_REFRESH_TIMEOUT_SECONDS = 0.25
 BACKGROUND_OWNER_UNRESPONSIVE_SECONDS = 3.0
 BACKGROUND_REFRESH_COALESCE_SECONDS = 5.0
+BACKGROUND_OWNER_PRIMARY_PORT_ENV = "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT"
+BACKGROUND_OWNER_PRIMARY_PRIORITY = 100
 BACKGROUND_ROLE_TABBER_ACTIVITY = "tabber-activity"
 BACKGROUND_ROLE_SESSION_FILES = "session-files"
 BACKGROUND_ROLE_SEARCH_INDEX = "search-index"
@@ -59,7 +62,22 @@ class BackgroundRoleState:
     last_error: str = ""
 
 
-def _generation_sort_key(record: dict[str, Any]) -> tuple[int, int, str]:
+def background_owner_priority(port: int | None, environ: dict[str, str] | None = None) -> int:
+    """Prefer one configured server while retaining follower failover."""
+
+    source = os.environ if environ is None else environ
+    try:
+        preferred_port = int(str(source.get(BACKGROUND_OWNER_PRIMARY_PORT_ENV, "") or ""))
+    except (TypeError, ValueError):
+        return 0
+    return BACKGROUND_OWNER_PRIMARY_PRIORITY if port is not None and int(port) == preferred_port else 0
+
+
+def _generation_sort_key(record: dict[str, Any]) -> tuple[int, int, int, str]:
+    try:
+        priority = int(record.get("priority") or 0)
+    except (TypeError, ValueError):
+        priority = 0
     try:
         started_at_ns = int(record.get("started_at_ns") or 0)
     except (TypeError, ValueError):
@@ -68,7 +86,7 @@ def _generation_sort_key(record: dict[str, Any]) -> tuple[int, int, str]:
         pid = int(record.get("pid") or 0)
     except (TypeError, ValueError):
         pid = 0
-    return started_at_ns, pid, str(record.get("nonce") or "")
+    return priority, started_at_ns, pid, str(record.get("nonce") or "")
 
 
 def pid_is_alive(pid: int) -> bool:
@@ -98,6 +116,7 @@ class BackgroundOwnerRegistry:
         monotonic: Callable[[], float] = time.monotonic,
         pid: int | None = None,
         hostname: str | None = None,
+        priority: int = 0,
     ):
         self.owner_dir = owner_dir
         self.generations_dir = owner_dir / "generations"
@@ -112,6 +131,7 @@ class BackgroundOwnerRegistry:
         self.monotonic = monotonic
         self.pid = os.getpid() if pid is None else int(pid)
         self.hostname = hostname or socket.gethostname()
+        self.priority = int(priority)
         self.started_at_ns = time.time_ns()
         self.nonce = uuid.uuid4().hex
         self.generation_id = f"{self.started_at_ns}-{self.pid}-{self.nonce[:12]}"
@@ -152,6 +172,7 @@ class BackgroundOwnerRegistry:
             "generation_id": self.generation_id,
             "started_at_ns": self.started_at_ns,
             "nonce": self.nonce,
+            "priority": self.priority,
         }
 
     def generation_record(self) -> dict[str, Any]:
