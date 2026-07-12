@@ -7,11 +7,13 @@ from yolomux_lib import sessions
 from yolomux_lib.common import AgentInfo, PaneInfo, ProcessInfo
 from yolomux_lib.sessions import list_processes
 from yolomux_lib.sessions import pane_process_label
+from yolomux_lib.server_logs import SERVER_LOGS
 
 
 def clear_transcript_lookup_cache():
     # the lookup cache is now a shared TtlCache (was a hand-rolled dict + lock).
     sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
+    sessions._PROCESS_LSOF_PATH_CACHE.clear()
 
 
 def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
@@ -384,7 +386,7 @@ def test_codex_transcript_from_process_fd_accepts_deleted_suffix(tmp_path, monke
     assert sessions.codex_transcript_from_process_fd(123, root=root, fd_dir=fd_dir) == transcript
 
 
-def test_codex_transcript_from_process_fd_uses_darwin_lsof_and_caches_result(tmp_path, monkeypatch):
+def test_codex_transcript_from_process_fd_uses_darwin_libproc_without_lsof(tmp_path, monkeypatch):
     clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     old = root / "2026" / "05" / "rollout-old.jsonl"
@@ -395,17 +397,38 @@ def test_codex_transcript_from_process_fd_uses_darwin_lsof_and_caches_result(tmp
         path.write_text("{}\n", encoding="utf-8")
     os.utime(old, (1000, 1000))
     os.utime(live, (5000, 5000))
+    monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sessions, "_darwin_process_open_paths", lambda pid: [str(old), str(outside), str(live)])
+
+    def unexpected_lsof(*_args, **_kwargs):
+        raise AssertionError("Darwin transcript lookup must not call lsof when libproc succeeds")
+
+    assert sessions.codex_transcript_from_process_fd(123, root=root, lsof_runner=unexpected_lsof) == live
+
+
+def test_codex_transcript_from_process_fd_falls_back_to_lsof_with_deduped_warning(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    SERVER_LOGS.clear()
+    root = tmp_path / "codex" / "sessions"
+    live = root / "2026" / "06" / "rollout-live.jsonl"
+    live.parent.mkdir(parents=True)
+    live.write_text("{}\n", encoding="utf-8")
     calls = []
 
     def lsof_runner(args, timeout):
         calls.append((args, timeout))
-        return subprocess.CompletedProcess(args, 0, f"p123\nf4\nn{old}\nf5\nn{outside}\nf6\nn{live}\n", "")
+        return subprocess.CompletedProcess(args, 0, f"p123\nf6\nn{live}\n", "")
 
     monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sessions, "_darwin_process_open_paths", lambda pid: None)
 
     assert sessions.codex_transcript_from_process_fd(123, root=root, lsof_runner=lsof_runner) == live
     assert sessions.codex_transcript_from_process_fd(123, root=root, lsof_runner=lsof_runner) == live
     assert calls == [(["lsof", "-p", "123", "-a", "-d", sessions.CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER, "-Fn"], sessions.CODEX_LSOF_TIMEOUT_SECONDS)]
+    warnings = [entry for entry in SERVER_LOGS.payload()["logs"] if entry["level"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["source"] == "sessions"
+    assert "transcript" in warnings[0]["message"] and "pid 123" in warnings[0]["message"]
 
 
 def test_codex_transcript_from_process_fd_keeps_linux_proc_path(tmp_path, monkeypatch):
@@ -439,6 +462,7 @@ def test_process_cwd_uses_darwin_libproc_before_lsof(tmp_path, monkeypatch):
 
 
 def test_process_cwd_falls_back_to_darwin_lsof(tmp_path, monkeypatch):
+    SERVER_LOGS.clear()
     expected = tmp_path / "repo"
     expected.mkdir()
     calls = []
@@ -451,10 +475,14 @@ def test_process_cwd_falls_back_to_darwin_lsof(tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "_darwin_process_cwd", lambda pid: None)
 
     assert sessions.process_cwd(123, lsof_runner=lsof_runner) == str(expected)
+    assert sessions.process_cwd(123, lsof_runner=lsof_runner) == str(expected)
     assert calls == [(["lsof", "-p", "123", "-a", "-d", "cwd", "-Fn"], sessions.CODEX_LSOF_TIMEOUT_SECONDS)]
+    warnings = [entry for entry in SERVER_LOGS.payload()["logs"] if entry["level"] == "warning"]
+    assert len(warnings) == 1
+    assert "cwd" in warnings[0]["message"] and "pid 123" in warnings[0]["message"]
 
 
-def test_discover_sessions_batches_darwin_codex_transcript_lsof(tmp_path, monkeypatch):
+def test_discover_sessions_uses_darwin_libproc_for_each_codex_process(tmp_path, monkeypatch):
     clear_transcript_lookup_cache()
     root = tmp_path / ".codex" / "sessions"
     first = root / "2026" / "07" / "rollout-first.jsonl"
@@ -475,25 +503,25 @@ def test_discover_sessions_batches_darwin_codex_transcript_lsof(tmp_path, monkey
     }
     calls = []
 
-    def fake_lsof_paths_for_processes(pids, descriptor=None, runner=None):
-        calls.append((pids, descriptor))
-        return {101: [str(first)], 201: [str(second)]}
+    def fake_open_paths(pid):
+        calls.append(pid)
+        return {101: [str(first)], 201: [str(second)]}[pid]
 
     def unexpected_lsof(*_args, **_kwargs):
-        raise AssertionError("per-pid lsof should be satisfied by the batched cache")
+        raise AssertionError("Darwin discovery must not call lsof when each libproc lookup succeeds")
 
     monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(sessions, "list_tmux_panes", lambda: (panes, None))
     monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
     monkeypatch.setattr(sessions, "_darwin_process_cwd", lambda pid: "/repo")
-    monkeypatch.setattr(sessions, "lsof_paths_for_processes", fake_lsof_paths_for_processes)
+    monkeypatch.setattr(sessions, "_darwin_process_open_paths", fake_open_paths)
     monkeypatch.setattr(sessions, "lsof_paths_for_process", unexpected_lsof)
 
     discovered, errors = sessions.discover_sessions(["1", "2"])
 
     assert errors == []
-    assert calls == [([101, 201], sessions.CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER)]
+    assert calls == [101, 201]
     assert [agent.session_id for agent in discovered["1"].agents + discovered["2"].agents] == ["codex-first", "codex-second"]
 
 

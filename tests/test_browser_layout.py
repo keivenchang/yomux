@@ -3137,6 +3137,129 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert all(layout["scrolls"] for layout in metrics["themeLayouts"]), metrics
     assert all(layout["labelWidth"] >= 120 and layout["serviceWidth"] >= 120 for layout in metrics["themeLayouts"]), metrics
 
+
+def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollDebugLogs === 'function' && document.querySelector('[data-js-debug-subtab=\"logs\"]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const now = Date.now() / 1000;
+        let requests = 0;
+        window.fetch = (url, options = {}) => {
+          if (String(url) === '/api/logs') {
+            requests += 1;
+            return Promise.resolve(new Response(JSON.stringify({ok: true, capacity: 500, sequence: 4, logs: [
+              {id: 1, timestamp: now - 3, level: 'info', source: 'server', category: 'boot', message: 'server ready'},
+              {id: 2, timestamp: now - 2, level: 'warning', source: 'sessions', category: 'process-discovery', message: 'used lsof fallback'},
+              {id: 3, timestamp: now - 1, level: 'debug', source: 'statsd', category: 'history', message: 'cache hit'},
+            ]}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          }
+          return originalFetch(url, options);
+        };
+        jsDebugEvents.push({id: 999999, ts: new Date().toISOString(), type: 'error', message: 'client exploded', source: 'browser-test'});
+        document.querySelector('[data-js-debug-subtab="logs"]').click();
+        window.__yolomuxTestWaitFor(
+          () => {
+            const text = document.querySelector('[data-js-debug-subview="logs"]')?.textContent || '';
+            return text.includes('used lsof fallback') && text.includes('client exploded');
+          },
+          {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats leveled logs'},
+        ).then(() => {
+          const view = document.querySelector('[data-js-debug-subview="logs"]');
+          view.style.width = '240px';
+          view.style.height = '260px';
+          const list = view.querySelector('[data-js-debug-log-list]');
+          const initial = [...view.querySelectorAll('[data-js-debug-log-entry]')];
+          const themeColors = ['dark', 'light'].map(theme => {
+            document.body.classList.toggle('theme-light', theme === 'light');
+            const warning = view.querySelector('[data-level="warning"] .js-debug-log-chip');
+            const error = view.querySelector('[data-level="error"] .js-debug-log-chip');
+            return {theme, warning: getComputedStyle(warning).color, error: getComputedStyle(error).color};
+          });
+          document.body.classList.remove('theme-light');
+          view.querySelector('[data-js-debug-log-level="error"]').click();
+          const afterFilter = [...view.querySelectorAll('[data-js-debug-log-entry]')].map(node => node.dataset.level);
+          view.querySelector('[data-js-debug-logs-clear]').click();
+          const afterClear = view.querySelectorAll('[data-js-debug-log-entry]').length;
+          done({
+            requests,
+            selected: document.querySelector('[data-js-debug-subtab="logs"]').getAttribute('aria-selected'),
+            levels: initial.map(node => node.dataset.level).sort(),
+            hasFallback: initial.some(node => node.textContent.includes('used lsof fallback')),
+            hasClientError: initial.some(node => node.textContent.includes('client exploded')),
+            filters: view.querySelectorAll('[data-js-debug-log-level]').length,
+            afterFilter,
+            afterClear,
+            themeColors,
+            narrowContained: list.scrollWidth <= list.clientWidth + 1,
+          });
+        }).catch(error => done({error: String(error?.stack || error)})).finally(() => {
+          window.fetch = originalFetch;
+          clearRuntimeInterval('debug-logs');
+        });
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requests"] == 1, metrics
+    assert metrics["selected"] == "true", metrics
+    assert {"debug", "error", "info", "warning"} <= set(metrics["levels"]), metrics
+    assert metrics["hasFallback"] is True and metrics["hasClientError"] is True, metrics
+    assert metrics["filters"] == 4, metrics
+    assert "error" not in metrics["afterFilter"], metrics
+    assert metrics["afterClear"] == 0, metrics
+    assert metrics["narrowContained"] is True, metrics
+    assert [item["theme"] for item in metrics["themeColors"]] == ["dark", "light"], metrics
+    assert all(item["warning"] != item["error"] for item in metrics["themeColors"]), metrics
+
+
+def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphAgentStatusNoDataRuns === 'function' && typeof debugGraphApplyServerHistory === 'function' && document.querySelector('.js-debug-panel') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugGraphRangeSeconds = 15 * 60;
+        const base = Math.floor((Date.now() - 60_000) / 10_000) * 10;
+        debugGraphApplyServerHistory({sequence: 3, records: [
+          {start: base, duration: 10, sequence: 1, cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
+          {start: base + 10, duration: 10, sequence: 2, cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
+          {start: base + 30, duration: 10, sequence: 3, cpu_count: 1, run_agent_total: 0, idle_agent_total: 2, agent_activity_samples: 1},
+        ]});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="activity"]');
+        const working = [...chart.querySelectorAll('[data-js-debug-bar-series="workingAgents"]')]
+          .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width'))}))
+          .sort((a, b) => a.x - b.x);
+        const idle = [...chart.querySelectorAll('[data-js-debug-bar-series="idleAgents"]')]
+          .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width'))}))
+          .sort((a, b) => a.x - b.x);
+        const outage = chart.querySelector('[data-js-debug-agent-status-no-data-range]');
+        return {
+          working,
+          idle,
+          outage: outage ? {x: Number(outage.getAttribute('x')), width: Number(outage.getAttribute('width')), title: outage.textContent} : null,
+          workingGap: working.length >= 2 ? Math.abs((working[0].x + working[0].width) - working[1].x) : null,
+          transitionBoundary: idle.length >= 3 ? idle.at(-1).x : null,
+        };
+        """
+    )
+    assert len(metrics["working"]) == 2, metrics
+    assert metrics["workingGap"] <= 0.02, metrics
+    assert metrics["outage"] is not None and metrics["outage"]["width"] > 0, metrics
+    assert "sample" in metrics["outage"]["title"].lower(), metrics
+    assert metrics["transitionBoundary"] > metrics["working"][-1]["x"], metrics
+
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(

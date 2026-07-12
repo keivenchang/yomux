@@ -254,6 +254,12 @@ def request(
             client.connect(str(socket_path))
             write_message(client, envelope, envelope.payload, binary)
             response_envelope, payload, response_binary, legacy = read_message(client)
+    except TimeoutError:
+        # A current peer that accepted but missed its deadline is busy.  A
+        # second legacy request would duplicate the queued work and amplify
+        # overload; legacy fallback is only for an immediate protocol/connect
+        # incompatibility during a rolling restart.
+        raise
     except (OSError, LocalRpcError):
         if not fallback_legacy or binary:
             raise

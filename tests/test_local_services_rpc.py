@@ -1,5 +1,7 @@
+import json
 import socket
 import threading
+import fcntl
 import os
 import time
 
@@ -142,6 +144,32 @@ def test_current_rpc_socketpair_round_trip_preserves_request_id_and_deadline():
     assert response == {"ok": True, "echo": {"one": True}}
 
 
+def test_current_rpc_timeout_never_replays_work_through_legacy_fallback(tmp_path, monkeypatch):
+    legacy_calls = []
+
+    class TimedOutSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _seconds):
+            pass
+
+        def connect(self, _path):
+            raise TimeoutError("busy peer")
+
+    monkeypatch.setattr(rpc.socket, "socket", lambda *_args, **_kwargs: TimedOutSocket())
+    monkeypatch.setattr(rpc, "legacy_request", lambda *_args, **_kwargs: legacy_calls.append(True) or {})
+    envelope = rpc.new_envelope("testd", "history", {"action": "history"})
+
+    with pytest.raises(TimeoutError, match="busy peer"):
+        rpc.request(tmp_path / "testd.sock", envelope, timeout_seconds=0.1, fallback_legacy=True)
+
+    assert legacy_calls == []
+
+
 def test_local_service_runtime_peer_uid_is_safe_when_unsupported_or_matching(monkeypatch):
     client, server = socket.socketpair()
     try:
@@ -219,9 +247,10 @@ def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, 
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid() + 1)
-    envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
-
-    response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=1.0)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(1.0)
+        client.connect(str(service_socket_path))
+        response = json.loads(client.makefile("rb").readline())
     stop_event.set()
     worker.join(timeout=1.0)
 
@@ -269,6 +298,30 @@ def test_local_service_runtime_never_opens_a_network_listener(tmp_path, monkeypa
     )
 
     assert families == [socket.AF_UNIX]
+
+
+def test_local_service_runtime_loser_does_not_run_stateful_startup(tmp_path):
+    lock_path = tmp_path / "service.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    starts = []
+    try:
+        result = runtime.run_local_rpc_service(
+            socket_path=tmp_path / "service.sock",
+            lock_path=lock_path,
+            service_name="testd",
+            stop_event=threading.Event(),
+            handle=lambda _request: ({"ok": True}, b""),
+            on_idle=lambda: False,
+            on_client=lambda: None,
+            on_start=lambda: starts.append("opened-database"),
+        )
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    assert result == 0
+    assert starts == []
 
 
 def test_local_service_transport_has_no_pickle_or_decompression_surface():

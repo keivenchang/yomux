@@ -866,6 +866,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("GET", "/api/stats-sample").handler is http_routes.get_stats_sample
     assert route_by_path("GET", "/api/system-status").handler is http_routes.get_system_status
     assert route_by_path("GET", "/api/system-status").role == "readonly"
+    assert route_by_path("GET", "/api/logs").handler is http_routes.get_server_logs
     assert route_by_path("GET", "/pane-popout").handler is http_routes.get_pane_popout
     assert route_by_path("POST", "/api/stats-history").role == "readonly"
     assert route_by_path("POST", "/api/stats-history").body_limit == 128 * 1024

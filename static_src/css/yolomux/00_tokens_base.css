@@ -1448,7 +1448,8 @@ body.theme-light {
 .yoagent-message-details pre,
 .modal pre,
 .drop-action-result pre,
-.file-editor-conflict-compare pre {
+.file-editor-conflict-compare pre,
+.js-debug-log-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1607,7 +1608,10 @@ body.theme-light {
 .file-explorer-head,
 .file-editor-head,
 .file-explorer-toolbar-row,
-.file-explorer-panel-meta {
+.file-explorer-panel-meta,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   align-items: center;
   gap: var(--space-6);
@@ -1663,7 +1667,10 @@ body.theme-light {
 .info-tree-group-selects,
 .info-tree-sort-controls,
 .yoagent-job-controls,
-.yoagent-chat-error {
+.yoagent-chat-error,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);
@@ -1696,6 +1703,7 @@ body.theme-light {
 .file-explorer-date-toggle.active,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
+.js-debug-log-level[aria-pressed="true"],
 .js-debug-cost-details:hover,
 .file-editor-preview-zoom-toolbar button[aria-pressed="true"],
 .file-editor-codemirror .cm-search label:has(input:checked),

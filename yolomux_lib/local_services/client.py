@@ -32,7 +32,9 @@ class LocalServiceClient:
             envelope = new_envelope(self.service, str(payload.get("action") or "request"), payload, timeout_seconds=timeout)
             response, binary = local_service_request(self.socket_path, envelope, timeout_seconds=timeout, fallback_legacy=True)
         except (OSError, LocalRpcError) as exc:
+            self.registry.note_rpc_failure()
             return {"ok": False, "error": redact_local_service_text(exc)}, b""
+        self.registry.note_rpc_success()
         return (response, binary) if isinstance(response, dict) else ({"ok": False, "error": "invalid local service response"}, b"")
 
     def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:

@@ -957,6 +957,10 @@ def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch,
             }
             owner.stats_history_service.agent_token_next_sample_at = 0.0
         assert owner.handle_control_request({"action": "statsd_sample", "token_consumer": True})["ok"] is True
+        worker = owner.stats_history_service.agent_token_worker
+        if worker is not None:
+            worker.join(timeout=2.0)
+            assert worker.is_alive() is False
         history = stats_client.history(client_id="client-a")
     finally:
         stats_client.request({"action": "shutdown"})
@@ -1727,13 +1731,24 @@ def test_statsd_sampler_not_api_path_triggers_usage_atom_migration(monkeypatch, 
         monkeypatch.setattr(
             webapp,
             "stats_agent_activity_record",
-            lambda *_args, **kwargs: {"time": 1_000.0, **({"_usage_atom_migration_rows": rows} if kwargs.get("include_token_rates") else {})},
+            lambda *_args, **_kwargs: {"time": 1_000.0},
+        )
+        monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: rows)
+        monkeypatch.setattr(
+            webapp,
+            "stats_agent_activity_record_from_rows",
+            lambda *_args, **_kwargs: {"time": 1_000.0, "agent_activity_samples": 1},
         )
         monkeypatch.setattr(webapp, "record_performance_sample", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {})
         webapp.stats_client = SimpleNamespace(
             merge_server_records=lambda *_args, **_kwargs: {"ok": True},
             migrate_usage_atom_history_from_rows=lambda records, now: migrated.append((records, now)) or {"ok": True},
+        )
+        monkeypatch.setattr(
+            webapp,
+            "start_stats_agent_token_work",
+            lambda records, now: webapp.statsd_migrate_usage_atom_history(records, now),
         )
 
         webapp.record_stats_global_sample(trigger="api", defer_token_scan=True)
@@ -2276,6 +2291,82 @@ def test_stats_agent_window_rows_uses_briefly_stale_cache_while_refreshing(monke
 
     assert rows == [{"kind": "codex", "state": "working", "window_index": 0, "session": "1"}]
     assert refreshes == [True]
+
+
+def test_stats_agent_window_rows_holds_very_stale_state_while_refreshing(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    cached_payload = {
+        "session_order": ["1"],
+        "sessions": {"1": {"agent_windows": [{"kind": "codex", "state": "working", "window_index": 0}]}},
+    }
+    refreshes = []
+    with webapp.auto_approve_cache_condition:
+        webapp.auto_approve_cache_record.payload = (time.monotonic() - 3600.0, (cached_payload, HTTPStatus.OK))
+    monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append(True) or True)
+    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stats must never synchronously refresh a held roster")))
+    try:
+        rows = webapp.stats_agent_window_rows()
+    finally:
+        webapp.control_server.stop()
+
+    assert rows == [{"kind": "codex", "state": "working", "window_index": 0, "session": "1"}]
+    assert refreshes == [True]
+
+
+def test_statsd_fast_status_samples_continue_while_one_token_worker_is_blocked(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    assert webapp.stats_client.ensure_started() is True
+    webapp.background_owner = StatsRoleOwner(owner=True, port=8881)
+    sample_times = iter([1000.0, 1001.0, 1002.0])
+    token_started = threading.Event()
+    token_release = threading.Event()
+    token_calls = []
+
+    def current_sample():
+        sample_time = next(sample_times)
+        return {
+            "time": sample_time,
+            "pid": 8881,
+            "started_at": 990.0,
+            "uptime_seconds": sample_time - 990.0,
+            "cpu_percent": 1.0,
+            "system_cpu_percent": 2.0,
+            "rss_bytes": 1234,
+        }, True
+
+    def blocked_tokens(rows, sample_time):
+        token_calls.append((rows, sample_time))
+        token_started.set()
+        assert token_release.wait(2.0) is True
+        return []
+
+    monkeypatch.setattr(webapp, "current_stats_sample", current_sample)
+    monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {})
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "transcript": "/tmp/rollout.jsonl"}])
+    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", blocked_tokens)
+    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args, **_kwargs: True)
+    try:
+        elapsed = []
+        for _index in range(3):
+            started = time.perf_counter()
+            webapp.record_stats_global_sample(trigger="statsd", token_consumer=True)
+            elapsed.append(time.perf_counter() - started)
+        assert token_started.wait(1.0) is True
+        history = webapp.stats_client.history(client_id="client-a")
+    finally:
+        token_release.set()
+        worker = webapp.stats_history_service.agent_token_worker
+        if worker is not None:
+            worker.join(timeout=2.0)
+        webapp.stats_client.request({"action": "shutdown"})
+        webapp.control_server.stop()
+
+    assert len(token_calls) == 1
+    assert max(elapsed) < 0.5
+    assert sum(record["cpu_count"] for record in history["records"]) == 3
+    assert sum(record["agent_activity_samples"] for record in history["records"]) == 3
+    assert sum(record["run_agent_total"] for record in history["records"]) == 3
 
 
 def test_auto_approve_session_status_skips_roster_cache(monkeypatch):

@@ -35,6 +35,7 @@ LOCAL_SERVICE_IDLE_SECONDS = 60.0
 LOCAL_SERVICE_START_TIMEOUT_SECONDS = 5.0
 LOCAL_SERVICE_BACKOFF_SECONDS = 0.25
 LOCAL_SERVICE_MAX_BACKOFF_SECONDS = 8.0
+LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 
 
@@ -71,6 +72,7 @@ class LocalServiceRegistry:
         self.process: subprocess.Popen[Any] | None = None
         self.failures = 0
         self.next_start_at = 0.0
+        self._healthy_until = 0.0
         self._last_resource_sample: tuple[float, float] | None = None
 
     @property
@@ -157,11 +159,26 @@ class LocalServiceRegistry:
 
     def healthy(self) -> bool:
         response = self._request("ping", timeout=0.15)
-        return (
+        healthy = (
             bool(response.get("ok"))
             and int(response.get("version") or 0) == self.spec.protocol_version
             and int(response.get("pid") or 0) > 0
         )
+        if healthy:
+            self.note_rpc_success()
+        else:
+            self.note_rpc_failure()
+        return healthy
+
+    def note_rpc_success(self) -> None:
+        """Cache recent transport health to avoid ping/status fan-out per action."""
+        self._healthy_until = self.clock() + LOCAL_SERVICE_HEALTH_CACHE_SECONDS
+
+    def note_rpc_failure(self) -> None:
+        self._healthy_until = 0.0
+
+    def recently_healthy(self) -> bool:
+        return self.clock() < self._healthy_until
 
     def _record_from_status(self, status: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -211,6 +228,8 @@ class LocalServiceRegistry:
             return None
 
     def ensure_started(self) -> bool:
+        if self.recently_healthy():
+            return True
         if self.healthy():
             self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
             return True

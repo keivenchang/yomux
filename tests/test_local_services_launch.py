@@ -112,6 +112,32 @@ def test_registry_health_request_identifies_expected_service_protocol(tmp_path, 
     assert captured == {"action": "ping", "protocol_version": 5}
 
 
+def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_path, monkeypatch):
+    now = [100.0]
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", 5),
+        clock=lambda: now[0],
+    )
+    requests = []
+
+    def fake_request(_path, envelope, **_kwargs):
+        requests.append(envelope.method)
+        if envelope.method == "ping":
+            return {"ok": True, "version": 5, "pid": 42}, b""
+        return {"ok": True, "version": 5, "pid": 42, "started_at": 1}, b""
+
+    monkeypatch.setattr("yolomux_lib.local_services.registry.request", fake_request)
+
+    assert registry.ensure_started() is True
+    first_requests = list(requests)
+    assert registry.ensure_started() is True
+    assert requests == first_requests
+    now[0] += 1.1
+    assert registry.ensure_started() is True
+    assert requests.count("ping") == 2
+
+
 @pytest.mark.parametrize(
     ("module", "service_name", "client_factory", "extra_args"),
     (

@@ -325,6 +325,10 @@ class StatsStore:
         ).fetchall()
         return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
+    def latest_sequence(self) -> int:
+        row = self._connection().execute("SELECT COALESCE(MAX(sequence), 0) FROM stats_buckets").fetchone()
+        return int(row[0] or 0)
+
     def query_coverage(self, *, start: int = 0, end: int = 0) -> dict[str, int]:
         """Return bounded range facts without materializing historical buckets."""
         clauses: list[str] = []

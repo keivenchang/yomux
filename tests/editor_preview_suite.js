@@ -4083,7 +4083,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(guiSpec.split(chartOrderText).length - 1, 1, 'YO!stats GUI spec has one canonical prose chart-order contract matching the source');
     const sourceKeyOrderText = chartKeys.map(key => `\`${key}\``).join(', ');
     assert.ok(guiSpec.includes(`source-key chart order ${sourceKeyOrderText}`), 'YO!stats coverage inventory names every chart key in shipped order');
-    assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2001;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30001;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 5000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30001;'), 'YO!stats retries cold-start samples just after two seconds, then keeps its thirty-second steady cadence and a bounded request timeout');
+    assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2001;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30001;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 8000;') && debugPaneSource.includes('const jsDebugStatsHistoryMaxTimeoutMs = 30000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30001;'), 'YO!stats retries cold-start samples just after two seconds, then keeps its thirty-second steady cadence and a range-bounded request timeout');
     assert.ok(/const jsDebugStatsPollState = \{\s*inFlight: false,\s*pending: false,\s*pendingForceGraphRefresh: false,\s*firstSampleReceived: false,\s*\};/.test(debugPaneSource), 'YO!stats polling lifecycle has one state owner');
     for (const retiredName of ['jsDebugStatsPollInFlight', 'jsDebugStatsPollPending', 'jsDebugStatsPollPendingForceGraphRefresh', 'jsDebugStatsFirstSampleReceived']) {
       assert.equal(debugPaneSource.includes(retiredName), false, `YO!stats retires parallel polling global ${retiredName}`);
@@ -4092,6 +4092,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     for (const retiredName of ['jsDebugStatsHistoryFlushTimer', 'jsDebugStatsHistoryFlushInFlight']) {
       assert.equal(debugPaneSource.includes(retiredName), false, `YO!stats retires parallel upload global ${retiredName}`);
     }
+    assert.equal(api.jsDebugStatsHistoryTimeoutMsForTest(15 * 60), 8000, 'short history uses the responsive eight-second timeout floor');
+    assert.equal(api.jsDebugStatsHistoryTimeoutMsForTest(24 * 60 * 60), 30000, '24-hour history scales to the bounded thirty-second timeout');
+    const largeUploadRecords = Array.from({length: 1000}, (_, index) => ({start: index, duration: 1, api_count: 1, note: 'x'.repeat(2048)}));
+    const uploadRequest = api.jsDebugStatsHistoryUploadRequestForTest(largeUploadRecords, 'browser-a', 7);
+    assert.ok(Buffer.byteLength(uploadRequest.body, 'utf8') <= 96 * 1024, 'history POST chunks stay below the route body budget');
+    assert.ok(uploadRequest.chunk.length > 0 && uploadRequest.chunk.length < largeUploadRecords.length, 'byte-bound chunking splits a large upload instead of relying only on record count');
+    assert.equal(uploadRequest.chunk.length + uploadRequest.held.length, largeUploadRecords.length, 'byte-bound chunking preserves every pending record');
     assert.ok(/const jsDebugGraphGeometry = \(\(\) => \{[\s\S]*const width = 600;[\s\S]*const height = 120;[\s\S]*const plotTop = 8;[\s\S]*const plotHeight = height - plotTop;[\s\S]*plotBottom: plotTop \+ plotHeight,[\s\S]*hoverBottom: plotTop \+ plotHeight/.test(debugPaneSource), 'YO!stats owns SVG width, visible plot baseline, and hover coordinates in one frozen model');
     const debugGeometryConsumers = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphPointForValue'));
     assert.equal(/viewBox="0 0 600 120"|x2="600"|\* 600|\/ 120|const top = 8|const height = 104|baseline = 112|y2="116"|height="120"/.test(debugGeometryConsumers), false, 'YO!stats renderers and interactions do not restate shared SVG coordinate literals');
@@ -5301,6 +5308,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-js-debug-displayed-token-sum="0"[^>]*>\(0, Σ displayed\)<\/span>/.test(noTokenHtml), 'empty Agent tokens/min charts report a zero displayed sum');
   });
 
+  test('YO!stats agent status abuts held samples and marks real sampler outages', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const domain = {startMs: 0, endMs: 30000};
+    const bars = api.debugGraphBarRectsHtmlForTest({
+      key: 'workingAgents',
+      label: 'Working',
+      values: [1, 1],
+      times: [0, 10000],
+      durations: [10000, 10000],
+      hasDataValues: [true, true],
+    }, 1, domain);
+    const rects = [...bars.matchAll(/<rect[^>]* x="([0-9.]+)"[^>]* width="([0-9.]+)"/g)]
+      .map(match => ({x: Number(match[1]), width: Number(match[2])}));
+    assert.equal(rects.length, 2, 'two sampled held-state buckets render two bars');
+    assert.equal(rects[0].x + rects[0].width, rects[1].x, 'adjacent held-state bars touch exactly with no picket-fence seam');
+    const buckets = [
+      {startMs: 0, durationMs: 10000, cpuCount: 1, agentActivitySamples: 1},
+      {startMs: 20000, durationMs: 10000, cpuCount: 1, agentActivitySamples: 1},
+    ];
+    const noDataRuns = [...api.debugGraphAgentStatusNoDataRunsForTest(buckets, domain)]
+      .map(({startMs, endMs}) => ({startMs, endMs}));
+    assert.deepStrictEqual(noDataRuns, [{startMs: 10000, endMs: 20000}], 'a missing server/status interval remains an honest outage rather than carried green state');
+    const outage = api.debugGraphAgentStatusNoDataRectsHtmlForTest(buckets, domain);
+    assert.match(outage, /data-js-debug-agent-status-no-data-range="0"[^>]* x="200\.0"[^>]* width="200\.0"/, 'the status outage overlay exactly spans the missing slot');
+    assert.ok(/key: 'activity'[\s\S]{0,500}statusNoDataOverlay: true/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'only the held-state activity chart opts into sampler-outage rendering');
+  });
+
   test('YO!stats Cost summary is a compact non-chart card with full accounting in its popover', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
@@ -5531,6 +5565,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(summary.rangeSeconds, 4 * 60 * 60, 'the graph time range survives reload');
     assert.equal(summary.charts.includes('gpuMemory'), false, 'a closed chart remains hidden after reload');
     assert.ok(html.includes('data-js-debug-chart-toggle="gpuMemory" aria-pressed="false"'), 'the persistent toggle retains a closed chart after reload');
+  });
+
+  test('YO!stats Logs merges bounded server and client levels with filters', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.clearJsDebugEventsForTest();
+    api.setJsDebugLogsPayloadForTest([
+      {id: 1, timestamp: 100, level: 'info', source: 'server', category: 'boot', message: 'ready'},
+      {id: 2, timestamp: 101, level: 'warning', source: 'sessions', category: 'process-discovery', message: 'used lsof fallback'},
+      {id: 3, timestamp: 102, level: 'debug', source: 'statsd', category: 'history', message: 'cache hit'},
+      {id: 4, timestamp: 103, level: 'error', source: 'server', category: 'request', message: 'request failed'},
+    ]);
+    api.recordJsDebugEventForTest('error', {message: 'client exploded', source: 'browser-test'});
+
+    const html = api.debugLogsInnerHtmlForTest();
+    assert.ok(html.includes('used lsof fallback') && html.includes('client exploded'), 'Logs merges server warnings and client errors');
+    for (const level of ['info', 'warning', 'debug', 'error']) {
+      assert.ok(html.includes(`data-level="${level}"`), `Logs renders the ${level} level row`);
+      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="true"`), `Logs exposes an active ${level} filter`);
+    }
+    assert.ok(/data-js-debug-subtab="graph"[\s\S]*data-js-debug-subtab="events"[\s\S]*data-js-debug-subtab="system"[\s\S]*data-js-debug-subtab="logs"/.test(api.debugPanelHtmlForTest()), 'Logs is the fourth YO!stats sub-tab after System');
+    api.setJsDebugLogLevelsForTest(['warning']);
+    const warningOnly = api.debugLogsInnerHtmlForTest();
+    assert.ok(warningOnly.includes('used lsof fallback'), 'warning filter retains warnings');
+    assert.equal(warningOnly.includes('ready'), false, 'warning filter hides info');
+    assert.equal(warningOnly.includes('client exploded'), false, 'warning filter hides client errors');
+    assert.match(api.debugLogsTextForClipboardForTest(), /WARNING.*sessions\/process-discovery.*used lsof fallback/, 'Logs copy text includes level, source, category, and message');
+    assert.ok(/const jsDebugLogsState = \{[\s\S]*payload: \[\][\s\S]*levels: new Set\(jsDebugLogLevels\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Logs uses one bounded server/client viewer state owner');
   });
 
   test('YO!stats hover guides sync across charts and drag-select zooms with reset', () => {
@@ -6205,14 +6266,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.syncJsDebugStatsPollingForTest({pollNow: true});
     const coldInterval = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 2001 && !clearedTimeouts.has(timer.id)).at(-1);
     await flushAsyncWork();
-    const timeout = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 5000).at(-1);
+    const timeout = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 8000).at(-1);
     assert.equal(coldInterval.ms, 2001, 'cold-start polling uses the just-over-two-second retry cadence');
     assert.ok(abortSignal, 'the cold-start stats request receives an abort signal');
-    assert.ok(timeout, 'the cold-start stats request arms the five-second timeout');
+    assert.ok(timeout, 'the cold-start stats request arms the eight-second timeout');
     timeout.callback();
     await flushAsyncWork();
     await flushAsyncWork();
     assert.equal(abortSignal.aborted, true, 'the timeout aborts a stalled stats request');
+    assert.match(api.jsDebugHistoryReadinessForTest().error, /history request timed out after 8s/, 'the timeout exposes its bounded reason instead of a reasonless AbortError');
     assert.equal(api.jsDebugStatsPollingStateForTest().inFlight, false, 'an aborted stats request releases the in-flight guard for the next fast retry');
 
     coldInterval.callback();
@@ -6223,7 +6285,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.jsDebugStatsPollingStateForTest().firstSampleReceived, true, 'a real stats payload records the first successful sample');
     assert.equal(steadyInterval.ms, 30001, 'first success re-arms polling at the just-over-thirty-second steady cadence');
     assert.ok(clearedTimeouts.has(timeout.id), 'the aborted request clears its timeout handle');
-    assert.ok([...timeouts.entries()].some(([id, timer]) => timer.ms === 5000 && clearedTimeouts.has(id)), 'the successful request also clears its timeout handle');
+    assert.ok([...timeouts.entries()].some(([id, timer]) => timer.ms === 8000 && clearedTimeouts.has(id)), 'the successful request also clears its timeout handle');
 
     const waitingHtml = api.debugGraphMetaHtmlForTest();
     assert.equal(waitingHtml.includes('Waiting for server stats'), false, 'server metadata replaces the waiting state after a successful sample');

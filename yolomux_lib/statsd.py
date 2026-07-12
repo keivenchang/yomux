@@ -431,6 +431,7 @@ class PersistentStatsService:
         self.last_client_at = time.monotonic()
         self._encoded_query_cache: dict[tuple[Any, ...], tuple[dict[str, Any], float]] = {}
         self._query_cache_ttl_seconds = 1.0
+        self.last_history_profile: dict[str, Any] = {}
         self.sampler_owner: dict[str, Any] = {}
         self.sampler_owner_path = Path(sampler_owner_path) if sampler_owner_path is not None else None
         self.agent_token_consumer_until = 0.0
@@ -1872,9 +1873,18 @@ class PersistentStatsService:
                             item[field] = float(item.get(field) or 0.0) + float(value)
 
     def _encoded_history(self, request: dict[str, Any]) -> dict[str, Any]:
+        history_started = time.perf_counter()
         after_sequence = max(0, int(request.get("after_sequence", request.get("since", 0)) or 0))
         if request.get("include_history") is False:
-            generation = int(self.store.diagnostics().get("sequence") or 0)
+            generation = self.store.latest_sequence()
+            self.last_history_profile = {
+                "cache_hit": False,
+                "coverage_ms": 0.0,
+                "query_ms": 0.0,
+                "assemble_ms": round((time.perf_counter() - history_started) * 1000, 3),
+                "source_records": 0,
+                "returned_records": 0,
+            }
             return {
                 "sequence": after_sequence,
                 "latest_sequence": generation,
@@ -1888,7 +1898,7 @@ class PersistentStatsService:
         client_id = stats_history_client_id(request.get("client_id") or "")
         token_resolution = max(0, int(request.get("token_resolution_seconds", request.get("token_resolution", 0)) or 0))
         include_agent_tokens = bool(request.get("include_agent_tokens", token_resolution <= 0))
-        generation = int(self.store.diagnostics().get("sequence") or 0)
+        generation = self.store.latest_sequence()
         include_token_history = bool(int(request.get("token_resolution_seconds", request.get("token_resolution", 0)) or 0))
         token_since = max(0, int(request.get("token_since") or 0))
         token_history_start = max(0, int(request.get("token_history_start", start) if request.get("token_history_start") is not None else start))
@@ -1910,12 +1920,24 @@ class PersistentStatsService:
         )
         cached = self._encoded_query_cache.get(cache_key)
         if cached is not None and time.monotonic() - cached[1] <= self._query_cache_ttl_seconds:
+            self.last_history_profile = {
+                "cache_hit": True,
+                "coverage_ms": 0.0,
+                "query_ms": 0.0,
+                "assemble_ms": round((time.perf_counter() - history_started) * 1000, 3),
+                "source_records": int(cached[0].get("coverage", {}).get("source_records") or 0),
+                "returned_records": len(cached[0].get("records") or []),
+            }
             return copy.deepcopy(cached[0])
         # A live cursor is immutable: records before it cannot change the
         # returned delta. Range/zoom reads need the full bounded window to
         # aggregate exact totals at the requested resolution.
+        coverage_started = time.perf_counter()
         coverage_facts = self.store.query_coverage(start=start, end=end)
+        coverage_ms = (time.perf_counter() - coverage_started) * 1000
+        query_started = time.perf_counter()
         source_buckets = self.store.query_buckets(after_sequence=after_sequence if not end else 0, start=start, end=end)
+        query_ms = (time.perf_counter() - query_started) * 1000
         available_start = coverage_facts["available_start"]
         available_end = coverage_facts["available_end"]
         retained_resolution = coverage_facts["retained_resolution"]
@@ -2004,6 +2026,14 @@ class PersistentStatsService:
                 "coverage": token_payload["coverage"],
             }
         self._encoded_query_cache = {cache_key: (copy.deepcopy(payload), time.monotonic())}
+        self.last_history_profile = {
+            "cache_hit": False,
+            "coverage_ms": round(coverage_ms, 3),
+            "query_ms": round(query_ms, 3),
+            "assemble_ms": round((time.perf_counter() - history_started) * 1000, 3),
+            "source_records": len(source_buckets),
+            "returned_records": len(records),
+        }
         return payload
 
     def encoded_history_from_buckets(self, buckets: list[dict[str, Any]], request: dict[str, Any]) -> bytes:
@@ -2018,6 +2048,15 @@ class PersistentStatsService:
         payload.update(sample)
         if query.get("include_history") is not False:
             payload["history"] = self._encoded_history(query)
+        else:
+            self.last_history_profile = {
+                "cache_hit": False,
+                "coverage_ms": 0.0,
+                "query_ms": 0.0,
+                "assemble_ms": 0.0,
+                "source_records": 0,
+                "returned_records": 0,
+            }
         payload["shared_stats"] = shared_stats
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -2042,6 +2081,7 @@ class PersistentStatsService:
             "queues": {"interactive": 0, "normal": 0, "maintenance": 0},
             "active_task": "",
             "cache": cache,
+            "history_profile": dict(self.last_history_profile),
             "last_success": self.last_client_at,
             "last_failure": last_failure,
             "last_sampler_success_at": self.last_sampler_success_at,
@@ -2289,10 +2329,6 @@ class PersistentStatsService:
         return response
 
     def run(self) -> int:
-        self.import_legacy_history_once()
-        self._maybe_reproject_cost_summaries()
-        self.sampler_thread = threading.Thread(target=self._sampler_loop, name="statsd-sampler", daemon=True)
-        self.sampler_thread.start()
         return run_local_rpc_service(
             socket_path=self.socket_path,
             lock_path=self.lock_path,
@@ -2301,8 +2337,16 @@ class PersistentStatsService:
             handle=self.handle_with_binary,
             on_idle=self._idle_shutdown_ready,
             on_client=lambda: setattr(self, "last_client_at", monotonic_clock()),
+            on_start=self._start_after_listener,
             on_shutdown=self._shutdown,
         )
+
+    def _start_after_listener(self) -> None:
+        """Open/migrate the durable store only after this daemon owns the lock."""
+        self.import_legacy_history_once()
+        self._maybe_reproject_cost_summaries()
+        self.sampler_thread = threading.Thread(target=self._sampler_loop, name="statsd-sampler", daemon=True)
+        self.sampler_thread.start()
 
     def _shutdown(self) -> None:
         self.stop_event.set()

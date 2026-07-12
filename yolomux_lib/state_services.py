@@ -115,6 +115,7 @@ class StatsHistoryService:
     agent_token_next_sample_at: float = 0.0
     agent_token_consumer_until: float = 0.0
     agent_token_bootstrap_pending: bool = True
+    agent_token_worker: threading.Thread | None = None
 
 
 @dataclass

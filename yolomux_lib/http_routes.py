@@ -28,6 +28,7 @@ from .locales import resolve_locale_preference
 from .web import html_page
 from .web import server_string
 from .web import static_content_type
+from .server_logs import server_logs_payload
 
 
 RouteRole = str | Callable[[Any, Any], str]
@@ -499,6 +500,11 @@ def get_performance_diagnostics(request: Any, parsed: Any, route: Route) -> None
 def get_system_status(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_json(request.server.app.system_status_payload())
+
+
+def get_server_logs(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(server_logs_payload())
 
 
 def post_background_claim(request: Any, parsed: Any, route: Route) -> None:
@@ -1355,6 +1361,7 @@ CORE_ROUTES = (
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
     Route("GET", "/api/background/status", "readonly", get_background_status, group="core"),
     Route("GET", "/api/system-status", "readonly", get_system_status, group="core"),
+    Route("GET", "/api/logs", "readonly", get_server_logs, group="core"),
     Route("GET", "/api/diagnostics/performance", "admin", get_performance_diagnostics, group="core"),
     Route("GET", "/api/auto-approve", "readonly", get_auto_approve, group="core"),
     Route("GET", "/api/notify", "readonly", get_notify, group="core"),

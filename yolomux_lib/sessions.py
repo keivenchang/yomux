@@ -23,6 +23,7 @@ from .common import path_mtime_or_zero
 from .tmux_utils import cmd_error
 from .tmux_utils import run_cmd
 from .tmux_utils import tmux
+from .server_logs import emit_server_log
 
 
 TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
@@ -33,10 +34,14 @@ CODEX_LSOF_CACHE_SECONDS = 15.0
 CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER = "0-999"
 CLAUDE_SUBAGENTS_DIRNAME = "subagents"
 DARWIN_PROC_PIDVNODEPATHINFO = 9
+DARWIN_PROC_PIDLISTFDS = 1
+DARWIN_PROC_PIDFDVNODEPATHINFO = 2
+DARWIN_PROX_FDTYPE_VNODE = 1
 DARWIN_MAXPATHLEN = 1024
 # the shared TtlCache instead of a hand-rolled dict+lock+TTL. get_or_miss() preserves the
 # _CACHE_MISS-vs-cached-None distinction the callers rely on.
 _TRANSCRIPT_LOOKUP_CACHE = TtlCache(ttl_seconds=TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS)
+_PROCESS_LSOF_PATH_CACHE = TtlCache(ttl_seconds=CODEX_LSOF_CACHE_SECONDS)
 
 
 class DarwinVinfoStat(ctypes.Structure):
@@ -89,6 +94,30 @@ class DarwinProcVnodePathInfo(ctypes.Structure):
     _fields_ = [
         ("pvi_cdir", DarwinVnodeInfoPath),
         ("pvi_rdir", DarwinVnodeInfoPath),
+    ]
+
+
+class DarwinProcFdInfo(ctypes.Structure):
+    _fields_ = [
+        ("proc_fd", ctypes.c_int32),
+        ("proc_fdtype", ctypes.c_uint32),
+    ]
+
+
+class DarwinProcFileInfo(ctypes.Structure):
+    _fields_ = [
+        ("fi_openflags", ctypes.c_uint32),
+        ("fi_status", ctypes.c_uint32),
+        ("fi_offset", ctypes.c_int64),
+        ("fi_type", ctypes.c_int32),
+        ("fi_guardflags", ctypes.c_uint32),
+    ]
+
+
+class DarwinVnodeFdInfoWithPath(ctypes.Structure):
+    _fields_ = [
+        ("pfi", DarwinProcFileInfo),
+        ("pvip", DarwinVnodeInfoPath),
     ]
 
 
@@ -664,33 +693,25 @@ def lsof_paths_for_process(pid: int, descriptor: str | None = None, runner: Any 
     return [line[1:] for line in result.stdout.splitlines() if line.startswith("n") and len(line) > 1]
 
 
-def lsof_paths_for_processes(pids: list[int], descriptor: str | None = None, runner: Any = None) -> dict[int, list[str]]:
-    unique_pids = sorted({int(pid) for pid in pids if int(pid) > 0})
-    if not unique_pids:
-        return {}
-    args = ["lsof", "-p", ",".join(str(pid) for pid in unique_pids)]
-    if descriptor:
-        args.extend(["-a", "-d", descriptor])
-    args.append("-Fn")
-    try:
-        result = (runner or run_cmd)(args, timeout=CODEX_LSOF_TIMEOUT_SECONDS)
-    except OSError:
-        return {pid: [] for pid in unique_pids}
-    paths_by_pid: dict[int, list[str]] = {pid: [] for pid in unique_pids}
-    if result.returncode != 0:
-        return paths_by_pid
-    current_pid: int | None = None
-    for line in result.stdout.splitlines():
-        if line.startswith("p"):
-            try:
-                current_pid = int(line[1:])
-            except ValueError:
-                current_pid = None
-            if current_pid is not None:
-                paths_by_pid.setdefault(current_pid, [])
-        elif line.startswith("n") and len(line) > 1 and current_pid is not None:
-            paths_by_pid.setdefault(current_pid, []).append(line[1:])
-    return paths_by_pid
+def cached_lsof_paths_for_process(pid: int, descriptor: str | None = None, runner: Any = None) -> list[str]:
+    cache_key = f"{int(pid)}:{descriptor or '*'}:{id(runner) if runner is not None else 0}"
+    cached = _PROCESS_LSOF_PATH_CACHE.get_or_miss(cache_key)
+    if cached is not _CACHE_MISS:
+        return list(cached)
+    paths = lsof_paths_for_process(pid, descriptor=descriptor, runner=runner)
+    _PROCESS_LSOF_PATH_CACHE.set(cache_key, tuple(paths))
+    return paths
+
+
+def warn_lsof_fallback(pid: int, lookup: str, *, platform_name: str) -> None:
+    emit_server_log(
+        "warning",
+        "sessions",
+        f"{platform_name} native {lookup} lookup failed for pid {pid}; using lsof fallback (slower)",
+        category="process-discovery",
+        dedupe_key=f"lsof-fallback:{platform_name}:{lookup}:{pid}",
+        dedupe_seconds=CODEX_LSOF_CACHE_SECONDS,
+    )
 
 
 def codex_lsof_cache_key_pid(pid: int) -> str:
@@ -715,27 +736,6 @@ def codex_transcript_from_lsof(pid: int, root: Path, runner: Any = None) -> Path
     )
 
 
-def prime_codex_transcript_lsof_cache(pids: list[int], root: Path | None = None, runner: Any = None) -> None:
-    root = root or Path.home() / ".codex" / "sessions"
-    missing = [
-        pid
-        for pid in sorted({int(pid) for pid in pids if int(pid) > 0})
-        if cached_transcript_lookup("codex-lsof-pid", root, codex_lsof_cache_key_pid(pid)) is _CACHE_MISS
-    ]
-    if not missing:
-        return
-    paths_by_pid = lsof_paths_for_processes(missing, descriptor=CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER, runner=runner)
-    for pid in missing:
-        candidates = codex_rollout_paths(paths_by_pid.get(pid, []), root)
-        set_cached_transcript_lookup(
-            "codex-lsof-pid",
-            root,
-            codex_lsof_cache_key_pid(pid),
-            newest_codex_transcript(candidates),
-            ttl=CODEX_LSOF_CACHE_SECONDS,
-        )
-
-
 def codex_transcript_from_process_fd(
     pid: int,
     root: Path | None = None,
@@ -744,11 +744,26 @@ def codex_transcript_from_process_fd(
 ) -> Path | None:
     root = root or Path.home() / ".codex" / "sessions"
     if fd_dir is None and platform.system() == "Darwin":
+        cache_pid = str(pid)
+        cached = cached_transcript_lookup("codex-libproc-pid", root, cache_pid)
+        if cached is not _CACHE_MISS:
+            return cached
+        open_paths = _darwin_process_open_paths(pid)
+        if open_paths is not None:
+            return set_cached_transcript_lookup(
+                "codex-libproc-pid",
+                root,
+                cache_pid,
+                newest_codex_transcript(codex_rollout_paths(open_paths, root)),
+                ttl=CODEX_LSOF_CACHE_SECONDS,
+            )
+        warn_lsof_fallback(pid, "transcript/open-vnode", platform_name="Darwin libproc")
         return codex_transcript_from_lsof(pid, root, runner=lsof_runner)
     fd_dir = fd_dir or Path(f"/proc/{pid}/fd")
     try:
         entries = list(fd_dir.iterdir())
     except OSError:
+        warn_lsof_fallback(pid, "transcript/open-fd", platform_name="Linux procfs")
         return codex_transcript_from_lsof(pid, root, runner=lsof_runner)
     targets: list[str] = []
     for entry in entries:
@@ -824,17 +839,59 @@ def _darwin_process_cwd(pid: int) -> str | None:
     return path or None
 
 
+def _darwin_process_open_paths(pid: int) -> list[str] | None:
+    """Return open vnode paths, or None when libproc could not perform the lookup."""
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        libproc.proc_pidinfo.restype = ctypes.c_int
+        libproc.proc_pidfdinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        libproc.proc_pidfdinfo.restype = ctypes.c_int
+        needed = libproc.proc_pidinfo(pid, DARWIN_PROC_PIDLISTFDS, 0, None, 0)
+        if needed <= 0:
+            return None
+        entry_size = ctypes.sizeof(DarwinProcFdInfo)
+        capacity = max(1, (needed // entry_size) + 32)
+        entries = (DarwinProcFdInfo * capacity)()
+        result = libproc.proc_pidinfo(pid, DARWIN_PROC_PIDLISTFDS, 0, ctypes.byref(entries), ctypes.sizeof(entries))
+        if result <= 0:
+            return None
+        paths: list[str] = []
+        for entry in entries[: result // entry_size]:
+            if entry.proc_fdtype != DARWIN_PROX_FDTYPE_VNODE:
+                continue
+            info = DarwinVnodeFdInfoWithPath()
+            size = ctypes.sizeof(info)
+            fd_result = libproc.proc_pidfdinfo(
+                pid,
+                entry.proc_fd,
+                DARWIN_PROC_PIDFDVNODEPATHINFO,
+                ctypes.byref(info),
+                size,
+            )
+            if fd_result < size:
+                continue
+            path = bytes(info.pvip.vip_path).split(b"\0", 1)[0].decode("utf-8", errors="surrogateescape").strip()
+            if path:
+                paths.append(path)
+        return paths
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
 def process_cwd(pid: int, lsof_runner: Any = None) -> str | None:
     if platform.system() == "Darwin":
         cwd = _darwin_process_cwd(pid)
         if cwd:
             return cwd
-        paths = lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
+        warn_lsof_fallback(pid, "cwd", platform_name="Darwin libproc")
+        paths = cached_lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
         return paths[0] if paths else None
     try:
         return os.readlink(f"/proc/{pid}/cwd")
     except OSError:
-        paths = lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
+        warn_lsof_fallback(pid, "cwd", platform_name="Linux procfs")
+        paths = cached_lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
         return paths[0] if paths else None
 
 
@@ -891,20 +948,6 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
     for pane in panes:
         if pane.session in by_session:
             by_session[pane.session].append(pane)
-
-    if platform.system() == "Darwin":
-        codex_pids: list[int] = []
-        for raw_panes in by_session.values():
-            for raw_pane in raw_panes:
-                candidates = []
-                root_process = processes.get(raw_pane.pid)
-                if root_process:
-                    candidates.append(root_process)
-                candidates.extend(descendants(raw_pane.pid, children))
-                process = selected_codex_process(candidates)
-                if process is not None:
-                    codex_pids.append(process.pid)
-        prime_codex_transcript_lsof_cache(codex_pids)
 
     result: dict[str, SessionInfo] = {}
     for session in sessions:

@@ -121,6 +121,7 @@ def run_local_rpc_service(
     handle: Callable[[dict[str, object]], LocalServiceResponse],
     on_idle: Callable[[], bool],
     on_client: Callable[[], None],
+    on_start: Callable[[], None] | None = None,
     on_shutdown: Callable[[], None] | None = None,
 ) -> int:
     """Run one bounded local service socket until stopped or idle.
@@ -169,6 +170,11 @@ def run_local_rpc_service(
                 socket_alias.symlink_to(socket_path)
             server.listen(16)
             server.settimeout(0.1)
+            if on_start is not None:
+                # Stateful initialization belongs after singleton ownership and
+                # listener publication.  A losing contender must never open or
+                # migrate the winner's database before discovering the lock.
+                on_start()
             try:
                 while not stop_event.is_set():
                     try:

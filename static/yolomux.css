@@ -1449,7 +1449,8 @@ body.theme-light {
 .yoagent-message-details pre,
 .modal pre,
 .drop-action-result pre,
-.file-editor-conflict-compare pre {
+.file-editor-conflict-compare pre,
+.js-debug-log-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1608,7 +1609,10 @@ body.theme-light {
 .file-explorer-head,
 .file-editor-head,
 .file-explorer-toolbar-row,
-.file-explorer-panel-meta {
+.file-explorer-panel-meta,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   align-items: center;
   gap: var(--space-6);
@@ -1664,7 +1668,10 @@ body.theme-light {
 .info-tree-group-selects,
 .info-tree-sort-controls,
 .yoagent-job-controls,
-.yoagent-chat-error {
+.yoagent-chat-error,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);
@@ -1697,6 +1704,7 @@ body.theme-light {
 .file-explorer-date-toggle.active,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
+.js-debug-log-level[aria-pressed="true"],
 .js-debug-cost-details:hover,
 .file-editor-preview-zoom-toolbar button[aria-pressed="true"],
 .file-editor-codemirror .cm-search label:has(input:checked),
@@ -4390,7 +4398,9 @@ body :is(
   height: var(--pane-tab-height);
   border: 1px solid var(--line);
   border-radius: var(--radius-md) var(--radius-md) 0 0;
-  overflow: hidden;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--pane-bar-bg, var(--panel2));
 }
 .js-debug-subtab {
@@ -4423,6 +4433,83 @@ body :is(
 .js-debug-system-view {
   min-height: 0;
   overflow: auto;
+}
+.js-debug-logs-view {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--space-8);
+  min-height: 0;
+  overflow: hidden;
+}
+.js-debug-logs-toolbar,
+.js-debug-log-levels {
+  min-width: 0;
+}
+.js-debug-logs-toolbar {
+  justify-content: space-between;
+}
+.js-debug-log-levels {
+  flex: 1 1 auto;
+}
+.js-debug-log-level {
+  text-transform: none;
+}
+.js-debug-logs-error {
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--danger-border-soft);
+  border-radius: var(--radius-control);
+  color: var(--bad);
+  background: var(--danger-panel-bg);
+  overflow-wrap: anywhere;
+}
+.js-debug-log-list {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+}
+.js-debug-log-row {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-7) var(--space-8);
+  border-block-end: 1px solid var(--line);
+}
+.js-debug-log-row:last-child {
+  border-block-end: 0;
+}
+.js-debug-log-meta {
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.3 var(--mono-font);
+}
+.js-debug-log-chip {
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-control);
+  font-weight: 800;
+}
+.js-debug-log-row--info .js-debug-log-chip {
+  color: var(--good);
+}
+.js-debug-log-row--warning .js-debug-log-chip {
+  color: var(--attention);
+}
+.js-debug-log-row--debug .js-debug-log-chip {
+  color: var(--muted);
+}
+.js-debug-log-row--error .js-debug-log-chip {
+  color: var(--bad);
+}
+.js-debug-log-message {
+  min-width: 0;
+  color: var(--text);
+  font: 500 var(--ui-font-size-sm)/1.45 var(--mono-font);
+}
+.js-debug-log-empty {
+  padding: var(--space-12);
+  color: var(--muted);
+  text-align: center;
 }
 .js-debug-system-toolbar {
   position: sticky;

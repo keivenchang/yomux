@@ -197,6 +197,56 @@ def test_statsd_daemon_constructs_the_shared_pricing_catalog(monkeypatch, tmp_pa
     assert isinstance(captured["pricing_catalog"], Catalog)
 
 
+def test_statsd_defers_database_migration_until_listener_owns_singleton(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    events = []
+    monkeypatch.setattr(service, "import_legacy_history_once", lambda: events.append("import") or {"ok": True})
+    monkeypatch.setattr(service, "_maybe_reproject_cost_summaries", lambda: events.append("reproject") or {"ok": True})
+
+    class Thread:
+        def __init__(self, *, target, name, daemon):
+            events.append(("thread", target.__name__, name, daemon))
+
+        def start(self):
+            events.append("sampler-start")
+
+        def is_alive(self):
+            return False
+
+    def fake_runtime(**kwargs):
+        assert events == []
+        events.append("listener-owned")
+        kwargs["on_start"]()
+        return 0
+
+    monkeypatch.setattr(statsd.threading, "Thread", Thread)
+    monkeypatch.setattr(statsd, "run_local_rpc_service", fake_runtime)
+
+    assert service.run() == 0
+    assert events == [
+        "listener-owned",
+        "import",
+        "reproject",
+        ("thread", "_sampler_loop", "statsd-sampler", True),
+        "sampler-start",
+    ]
+    service.store.close()
+
+
+def test_stats_store_history_range_uses_primary_time_index_and_fast_sequence(tmp_path):
+    store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
+    store.upsert_bucket(_bucket(sequence=17))
+
+    plan = store._connection().execute(
+        "EXPLAIN QUERY PLAN SELECT bucket_json FROM stats_buckets WHERE sequence > ? AND start + duration > ? AND start < ? ORDER BY start,duration LIMIT ?",
+        (0, 1, 10_000, 100),
+    ).fetchall()
+
+    assert any("sqlite_autoindex_stats_buckets_1" in str(row[3]) for row in plan)
+    assert store.latest_sequence() == 17
+    store.close()
+
+
 def test_statsd_claims_model_deltas_and_preserves_them_through_history(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     key = "1|0|codex"
@@ -968,6 +1018,62 @@ def test_statsd_encoded_sample_can_omit_history_payload(tmp_path):
     assert payload["pid"] == 456
     assert payload["shared_stats"] == {"enabled": True}
     assert "history" not in payload
+    assert service.last_history_profile["cache_hit"] is False
+    assert service.last_history_profile["coverage_ms"] == 0.0
+    assert service.last_history_profile["query_ms"] == 0.0
+    assert service.last_history_profile["assemble_ms"] >= 0.0
+    assert service.last_history_profile["source_records"] == 0
+    assert service.last_history_profile["returned_records"] == 0
+    service.store.close()
+
+
+def test_statsd_history_listener_stays_responsive_while_sampler_owner_is_slow(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.store.upsert_bucket(_bucket(sequence=1))
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(service, "_sampler_owner_for_cycle", lambda: {"control_socket": "slow-owner.sock"})
+
+    def slow_owner(*_args, **_kwargs):
+        entered.set()
+        release.wait(1.0)
+        return {"ok": False, "error": "injected slow sampler"}
+
+    monkeypatch.setattr(statsd, "send_yolomux_control_request", slow_owner)
+    sampler = threading.Thread(target=service._sampler_loop)
+    sampler.start()
+    assert entered.wait(1.0) is True
+
+    started = time.perf_counter()
+    response, _binary = service.handle_with_binary({"action": "history", "start": 0, "end": 0})
+    elapsed = time.perf_counter() - started
+
+    release.set()
+    service.stop_event.set()
+    service.sampler_wake_event.set()
+    sampler.join(timeout=1.0)
+    assert response["ok"] is True
+    assert response["records"]
+    assert elapsed < 0.1
+    assert sampler.is_alive() is False
+    service.store.close()
+
+
+def test_statsd_history_profile_separates_sqlite_query_and_assembly(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.store.upsert_bucket(_bucket(sequence=1))
+
+    response = service._encoded_history({"start": 1, "end": 10_000, "max_points": 100})
+    profile = service.last_history_profile
+
+    assert response["records"]
+    assert profile["cache_hit"] is False
+    assert profile["source_records"] == 1
+    assert profile["returned_records"] == 1
+    assert profile["coverage_ms"] >= 0
+    assert profile["query_ms"] >= 0
+    assert profile["assemble_ms"] >= profile["coverage_ms"] + profile["query_ms"]
+    assert service.common_status()["history_profile"] == profile
     service.store.close()
 
 

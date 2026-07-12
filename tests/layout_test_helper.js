@@ -1260,6 +1260,9 @@ globalThis.__layoutTestApi = {
   debugGraphGridLineYForTest: debugGraphGridLineY,
   debugGraphPlotOverlayRectHtmlForTest: debugGraphPlotOverlayRectHtml,
   debugGraphBarVerticalGeometryForTest: debugGraphBarVerticalGeometry,
+  debugGraphBarRectsHtmlForTest: debugGraphBarRectsHtml,
+  debugGraphAgentStatusNoDataRunsForTest: debugGraphAgentStatusNoDataRuns,
+  debugGraphAgentStatusNoDataRectsHtmlForTest: debugGraphAgentStatusNoDataRectsHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {
@@ -1284,6 +1287,8 @@ globalThis.__layoutTestApi = {
   syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
   stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
   flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
+  jsDebugStatsHistoryTimeoutMsForTest: jsDebugStatsHistoryTimeoutMs,
+  jsDebugStatsHistoryUploadRequestForTest: jsDebugStatsHistoryUploadRequest,
   clearJsDebugServerHistoryForTest: clearJsDebugServerHistory,
   jsDebugStatsUploadStateForTest() {
     return {
@@ -1301,6 +1306,19 @@ globalThis.__layoutTestApi = {
   recordJsDebugStatsSampleForTest: recordJsDebugStatsSample,
   bindDebugPanelForTest: bindDebugPanel,
   setDebugSubTabForTest: setDebugSubTab,
+  debugLogsInnerHtmlForTest: debugLogsInnerHtml,
+  debugLogsTextForClipboardForTest: debugLogsTextForClipboard,
+  debugMergedLogRecordsForTest: debugMergedLogRecords,
+  pollDebugLogsForTest: pollDebugLogs,
+  setJsDebugLogsPayloadForTest(logs) {
+    jsDebugLogsState.payload = Array.isArray(logs) ? logs.map(entry => ({...entry})) : [];
+    jsDebugLogsState.error = '';
+    jsDebugLogsState.updatedAt = Date.now();
+    jsDebugLogsState.clearedAt = 0;
+  },
+  setJsDebugLogLevelsForTest(levels) {
+    jsDebugLogsState.levels = new Set((levels || []).filter(level => jsDebugLogLevels.includes(level)));
+  },
   setDebugGraphRangeForTest: setDebugGraphRange,
   setDebugGraphResolutionOverrideForTest: setDebugGraphResolutionOverride,
   setDebugGraphZoomDomainForTest(startMs, endMs) { jsDebugGraphZoomDomain = {startMs, endMs}; },

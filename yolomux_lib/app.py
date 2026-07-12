@@ -1883,9 +1883,13 @@ class TmuxWebtermApp:
             return []
         cached_payload = self.fresh_auto_approve_payload_for_stats()
         if cached_payload is None:
-            cached_payload, status = self.refresh_auto_approve_cache_sync()
-            if status != HTTPStatus.OK:
-                return []
+            # The one-second stats control request is a latency-critical state
+            # sample.  Cold roster discovery belongs to the existing async
+            # cache owner; one initial missing status point is honest, while a
+            # synchronous tmux/transcript refresh would stall CPU + status and
+            # trigger statsd's exponential outage backoff.
+            self.start_auto_approve_cache_refresh()
+            return []
         return self.stats_agent_window_rows_from_auto_approve_payload(cached_payload)
 
     def fresh_auto_approve_payload_for_stats(self) -> AutoApproveStatusPayload | None:
@@ -1897,8 +1901,6 @@ class TmuxWebtermApp:
             if status != HTTPStatus.OK:
                 return None
             age_seconds = time.monotonic() - stored_at
-            if age_seconds > AUTO_APPROVE_STATS_CACHE_MAX_AGE_SECONDS:
-                return None
             if not isinstance(payload, dict):
                 return None
         if age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
@@ -2114,6 +2116,22 @@ class TmuxWebtermApp:
 
     def stats_agent_activity_record(self, sample_time: float, include_token_rates: bool = True) -> dict[str, Any] | None:
         rows = self.stats_agent_window_rows()
+        return self.stats_agent_activity_record_from_rows(rows, sample_time, include_token_rates=include_token_rates)
+
+    def stats_agent_token_records_for_rows(self, rows: list[dict[str, Any]], sample_time: float) -> list[dict[str, Any]]:
+        self.statsd_recover_agent_token_history(rows, sample_time)
+        token_rows = self.stats_agent_token_rows(rows)
+        seen_keys = {self.stats_agent_token_key(row, index) for index, row in enumerate(rows)}
+        with self.stats_history_service.agent_token_lock:
+            return self.stats_agent_token_claim_durable_delta_records_locked(token_rows, seen_keys, sample_time) if token_rows else []
+
+    def stats_agent_activity_record_from_rows(
+        self,
+        rows: list[dict[str, Any]],
+        sample_time: float,
+        *,
+        include_token_rates: bool = True,
+    ) -> dict[str, Any] | None:
         if not rows:
             with self.stats_history_service.agent_token_lock:
                 self.stats_history_service.agent_token_state.clear()
@@ -2128,13 +2146,8 @@ class TmuxWebtermApp:
         idle_agents = 0
         inactive_agents = 0
         agent_token_records: list[dict[str, Any]] = []
-        token_rows: list[dict[str, Any]] = []
-        token_rows_by_key: dict[str, dict[str, Any]] = {}
         seen_keys: set[str] = set()
         transition_seconds = self.notification_transition_seconds()
-        if include_token_rates:
-            self.statsd_recover_agent_token_history(rows, sample_time)
-            token_rows_by_key = {str(row.get("key") or ""): row for row in self.stats_agent_token_rows(rows)}
         with self.stats_history_service.agent_token_lock:
             for index, row in enumerate(rows):
                 key = self.stats_agent_token_key(row, index)
@@ -2151,14 +2164,11 @@ class TmuxWebtermApp:
                 else:
                     idle_agents += 1
                     inactive_agents += 1
-                if include_token_rates and key in token_rows_by_key:
-                    token_rows.append(token_rows_by_key[key])
-            if include_token_rates:
-                if token_rows:
-                    agent_token_records = self.stats_agent_token_claim_durable_delta_records_locked(token_rows, seen_keys, sample_time)
             for key in list(self.stats_history_service.agent_activity_state):
                 if key not in seen_keys:
                     self.stats_history_service.agent_activity_state.pop(key, None)
+        if include_token_rates:
+            agent_token_records = self.stats_agent_token_records_for_rows(rows, sample_time)
         active_agents = max(0, len(seen_keys) - inactive_agents)
         record: dict[str, Any] = {
             "time": sample_time,
@@ -2178,6 +2188,41 @@ class TmuxWebtermApp:
             # from a partial agent discovery snapshot.
             record["_usage_atom_migration_rows"] = rows
         return record
+
+    def run_stats_agent_token_work(self, rows: list[dict[str, Any]], sample_time: float, worker: threading.Thread) -> None:
+        try:
+            token_records = self.stats_agent_token_records_for_rows(rows, sample_time)
+            if token_records:
+                merged = self.stats_client.merge_server_records(token_records, now=sample_time)
+                if not merged.get("ok"):
+                    raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
+            self.statsd_migrate_usage_atom_history(rows, sample_time)
+        except (OSError, RuntimeError, ValueError):
+            logger.exception("stats agent-token background sample failed")
+        finally:
+            with self.stats_history_service.agent_token_lock:
+                if self.stats_history_service.agent_token_worker is worker:
+                    self.stats_history_service.agent_token_worker = None
+
+    def start_stats_agent_token_work(self, rows: list[dict[str, Any]], sample_time: float) -> bool:
+        with self.stats_history_service.agent_token_lock:
+            if self.stats_history_service.agent_token_worker is not None:
+                return False
+            worker: threading.Thread
+
+            def run() -> None:
+                self.run_stats_agent_token_work(rows, sample_time, worker)
+
+            worker = threading.Thread(target=run, name="stats-agent-token", daemon=True)
+            self.stats_history_service.agent_token_worker = worker
+
+        def rollback() -> None:
+            with self.stats_history_service.agent_token_lock:
+                if self.stats_history_service.agent_token_worker is worker:
+                    self.stats_history_service.agent_token_worker = None
+
+        common.start_thread_with_rollback(worker, rollback)
+        return True
 
     def current_stats_sample(self) -> tuple[dict[str, Any], bool]:
         now = time.time()
@@ -2232,7 +2277,12 @@ class TmuxWebtermApp:
         phase_ms["host_resources_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample and owns_expensive_stats and not defer_token_scan else False
         phase_started = time.perf_counter()
-        agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample and owns_expensive_stats else None
+        deferred_token_rows: list[dict[str, Any]] = []
+        if record_cpu_sample and owns_expensive_stats and trigger == "statsd":
+            deferred_token_rows = self.stats_agent_window_rows()
+            agent_record = self.stats_agent_activity_record_from_rows(deferred_token_rows, sample["time"], include_token_rates=False)
+        else:
+            agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample and owns_expensive_stats else None
         phase_ms["agent_activity_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         agent_token_records = list(agent_record.pop("_agent_token_records", [])) if isinstance(agent_record, dict) else []
         usage_atom_migration_rows = list(agent_record.pop("_usage_atom_migration_rows", [])) if isinstance(agent_record, dict) else []
@@ -2267,6 +2317,7 @@ class TmuxWebtermApp:
             shared_written = True
         if usage_atom_migration_rows:
             self.statsd_migrate_usage_atom_history(usage_atom_migration_rows, now)
+        token_async_started = bool(include_token_rates and deferred_token_rows and self.start_stats_agent_token_work(deferred_token_rows, now))
         phase_ms["history_merge_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         self.record_performance_sample(
             BACKGROUND_ROLE_STATS_SAMPLER,
@@ -2276,7 +2327,7 @@ class TmuxWebtermApp:
             payload=sample,
             cache_status="sampled" if record_cpu_sample else "cached",
             record_time=sample["time"],
-            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates), "token_deferred": bool(defer_token_scan), "shared_written": shared_written, **phase_ms},
+            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates), "token_deferred": bool(defer_token_scan or (include_token_rates and trigger == "statsd")), "token_async_started": token_async_started, "shared_written": shared_written, **phase_ms},
         )
         return sample
 

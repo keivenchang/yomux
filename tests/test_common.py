@@ -100,6 +100,7 @@ def test_main_process_cpu_work_has_named_allowlist():
         "start_input_heartbeat_worker",
         "start_native_filesystem_watcher",
         "start_session_files_cache_refresh",
+        "start_stats_agent_token_work",
         "start_tabber_activity_cache_refresh",
         "start_tabber_activity_cache_warmer",
         "start_transcripts_payload_refresh",
