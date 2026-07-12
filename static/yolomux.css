@@ -6668,18 +6668,6 @@ body .file-explorer-changes-panel {
   margin: 0 var(--space-1) 0 var(--space-4);
   overflow: visible;
 }
-.yolomux-dockview .dockview-pane-header-actions :is(
-  .pane-drag-handle,
-  .pane-actions,
-  .panel-tab-overflow,
-  .pane-detail-toggle,
-  .pane-popout,
-  .pane-expand,
-  .pane-minimize,
-  .pane-close
-) {
-  flex-shrink: 0;
-}
 .yolomux-dockview .dockview-pane-header-actions .tab {
   box-sizing: border-box;
   height: min(18px, var(--pane-tab-height));
@@ -8514,7 +8502,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: 0;
   padding-inline: var(--space-3);
 }
-.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-popout):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: var(--space-3);

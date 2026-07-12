@@ -2312,6 +2312,12 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 	                    await clickRootMode(rootMode);
 	                    renderFileExplorerChangesPanels({force: true});
 	                    await frame();
+	                    // A sync-mode click can leave an asynchronous Finder-root refresh in flight.
+	                    // Normalize the requested matrix state after that refresh has had a frame to
+	                    // settle so the next case cannot inherit the preceding case's root mode.
+	                    if (fileExplorerRootModeValue() !== rootMode) {
+	                      setFileExplorerRootMode(rootMode, {sync: false, persist: false});
+	                    }
 	                    return publish(`finder-${mode}-${rootMode}-${sortMode}-${dateMode}`, {mode, rootMode, sortMode, dateMode});
                   },
 	                  async visible(visible, mode) {
@@ -2435,14 +2441,14 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     if (!popover) throw new Error('tab hover popover did not open through the real hover path');
                     let priorGeometry = '';
                     let stableFrames = 0;
-                    for (let attempt = 0; attempt < 8 && stableFrames < 2; attempt += 1) {
-                      await frame();
+                    const settledGeometry = await waitFor(() => {
                       const rect = appSpaceRect(popover);
                       const geometry = [popover.style.left, popover.style.top, popover.style.height, rect.left, rect.top, rect.width, rect.height].join('|');
                       stableFrames = geometry === priorGeometry ? stableFrames + 1 : 0;
                       priorGeometry = geometry;
-                    }
-                    if (stableFrames < 2) throw new Error('tab hover popover geometry did not settle before share publish');
+                      return stableFrames >= 2 ? geometry : false;
+                    }, {timeoutMs: 2000, intervalMs: 50, description: 'stable shared tab popover geometry'});
+                    if (!settledGeometry) throw new Error('tab hover popover geometry did not settle before share publish');
                     const popoverRect = appSpaceRect(popover);
                     return publish('tab-hover-popover', {
                       tabPopoverRect: {left: Math.round(popoverRect.left), top: Math.round(popoverRect.top), width: Math.round(popoverRect.width), height: Math.round(popoverRect.height)},

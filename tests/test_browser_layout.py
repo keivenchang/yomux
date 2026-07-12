@@ -8713,21 +8713,24 @@ def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrappi
             extra_css="body { margin: 0; background: var(--bg); }",
         ),
     )
-    metrics = browser.execute_script(
-        """
+    metrics = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
         const {rect} = window.__yolomuxTestHelpers;
         const fieldStyle = getComputedStyle(document.getElementById('branch-field'));
         const textStyle = getComputedStyle(document.getElementById('branch-text'));
-        return {
+        const metrics = {
           columns: fieldStyle.gridTemplateColumns,
-          labelBottom: rect('branch-label').bottom,
-          valueTop: rect('branch-value').top,
-          valueWidth: rect('branch-value').width,
-          textWidth: rect('branch-text').width,
-          textHeight: rect('branch-text').height,
+          labelBottom: rect('#branch-label').bottom,
+          valueTop: rect('#branch-value').top,
+          valueWidth: rect('#branch-value').width,
+          textWidth: rect('#branch-text').width,
+          textHeight: rect('#branch-text').height,
           lineHeight: parseFloat(textStyle.lineHeight),
         };
+        return !metrics.columns.trim().includes(' ') ? metrics : false;
         """
+        )
     )
     assert " " not in metrics["columns"].strip(), metrics
     assert metrics["valueTop"] >= metrics["labelBottom"], metrics

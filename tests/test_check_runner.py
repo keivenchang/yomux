@@ -198,7 +198,7 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkey
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
-    assert check.pytest_worker_counts() == ("3", "2", "1")
+    assert check.pytest_worker_counts() == ("2", "1", "1")
 
 
 def test_serial_check_gate_forces_every_pytest_pool_to_one_worker(monkeypatch):

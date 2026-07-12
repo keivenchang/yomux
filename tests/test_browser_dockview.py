@@ -1738,11 +1738,6 @@ def test_roomy_portrait_ipad_tab_menu_keeps_directional_splits(browser, tmp_path
         "Network.setUserAgentOverride",
         {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
     )
-    browser.execute_cdp_cmd(
-        "Emulation.setDeviceMetricsOverride",
-        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
-    )
-    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
     try:
         load_dockview_runtime_boot_fixture(
             browser,
@@ -1752,6 +1747,15 @@ def test_roomy_portrait_ipad_tab_menu_keeps_directional_splits(browser, tmp_path
             grid_width=834,
             grid_height=1000,
         )
+        # The shared Dockview loader establishes its desktop window first. Apply
+        # device emulation afterwards so that setup cannot replace the requested
+        # viewport on Chrome/macOS.
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+        browser.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": False},
+        )
+        browser.execute_script("dispatchEvent(new Event('resize'))")
         wait_for_dockview(browser, min_tabs=2)
         metrics = browser.execute_script(
             """
@@ -2063,7 +2067,8 @@ def test_dockview_virtual_pane_actions_stay_unshrunk_at_physical_top_right(brows
     assert metrics["rail"]["top"] - metrics["header"]["top"] <= 1, metrics
     assert abs(metrics["rail"]["right"] - metrics["header"]["right"]) <= 1, metrics
     assert metrics["actions"]["top"] - metrics["header"]["top"] <= 1, metrics
-    assert all(control["shrink"] == "0" for control in metrics["controls"]), metrics
+    shrinking_controls = [control for control in metrics["controls"] if control["shrink"] != "0"]
+    assert shrinking_controls == [], shrinking_controls
     assert all(control["width"] >= 18 for control in metrics["controls"]), metrics
     assert all(abs(control["top"] - metrics["header"]["top"]) <= 1 for control in metrics["controls"]), metrics
     assert all(
@@ -7230,17 +7235,17 @@ def test_dockview_side_pane_responsive_role_geometry_matrix(browser, tmp_path):
     ]
     try:
         for width, height, touch, expected_side, label in cases:
-            browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": touch})
             browser.execute_cdp_cmd(
                 "Emulation.setDeviceMetricsOverride",
                 {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
             )
+            browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": touch})
             browser.execute_script("dispatchEvent(new Event('resize'))")
 
             def settled(driver):
                 state = metrics(driver)
                 has_side = len(state["sideSlots"]) == 1 and sum(group["role"] == "side" for group in state["groups"]) == 1
-                no_side = len(state["sideSlots"]) == 0 and all(group["role"] != "side" for group in state["groups"])
+                no_side = len(state["sideSlots"]) == 0 and len(state["genericSlots"]) == 1 and len(state["groups"]) == 1
                 return state if state["viewport"]["width"] == width and (has_side if expected_side else no_side) else False
 
             try:

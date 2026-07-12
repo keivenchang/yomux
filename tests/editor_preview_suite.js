@@ -612,7 +612,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(narrowTablet.narrowSingleColumnModeForTest(), false, 'a 744px portrait iPad retains generic pane splits because two minimum-width panes fit');
     assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder remains an ordinary tab while its dedicated Side Pane cannot fit');
     assert.equal(narrowTablet.dropItemCanBeDraggedForTest(narrowTablet.fileExplorerItemId), true, 'Finder can be moved through the normal tab drag pipeline on iPad');
-    assert.equal(narrowTablet.layoutSlotKeys(narrowTablet.layoutSlotsForTest()).length, 2, 'a 744px portrait iPad starts with two measured generic panes');
+    assert.equal(narrowTablet.layoutSlotKeys(narrowTablet.layoutSlotsForTest()).length, 1, 'a sub-900px portrait iPad follows the constrained one-Generic-Pane contract');
     assert.equal(narrowTablet.sidePaneSlots(narrowTablet.layoutSlotsForTest()).length, 0, 'the same iPad does not force a clipped dedicated Finder column');
     const tooNarrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,

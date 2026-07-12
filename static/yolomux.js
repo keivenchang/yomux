@@ -8122,7 +8122,7 @@ function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
 function normalizeLayoutSlotsForViewport(value, options = {}) {
   const singleColumn = narrowSingleColumnMode();
   const sideConstrained = sidePaneConstrainedMode();
-  let source = singleColumn
+  let source = (singleColumn || sideConstrained)
     ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
   if (!sideConstrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {

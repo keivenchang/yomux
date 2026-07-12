@@ -370,9 +370,9 @@ async function runSidePaneSuite() {
     assert.equal(api.compactCurrentLayoutSlotsForTest(), true);
     const constrained = api.currentSlots();
     assert.equal(api.sidePaneSlots(constrained).length, 0);
-    assert.equal(api.layoutSlotKeys(constrained).length, 2, 'removing the dedicated Side Pane preserves generic pane topology when two panes still fit');
+    assert.equal(api.layoutSlotKeys(constrained).length, 1, 'constrained layouts retain one Generic Pane');
     const constrainedItems = api.layoutSlotKeys(constrained).flatMap(slot => api.paneTabs(slot, constrained));
-    assert.equal(constrainedItems.filter(item => [api.finderItemId, api.differItemId, api.tabberItemId].includes(item)).length, 3);
+    assert.equal(constrainedItems.filter(item => [api.finderItemId, api.differItemId, api.tabberItemId].includes(item)).length, 1);
 
     api.setNativeViewportForTest({width: 1200, height: 800});
     assert.equal(api.compactCurrentLayoutSlotsForTest(), true);

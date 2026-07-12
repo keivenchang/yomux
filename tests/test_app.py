@@ -6219,6 +6219,9 @@ def test_activity_warmup_adopts_session_files_disk_cache_without_rebuild(monkeyp
         seed_app.set_session_files_cache(key, files_payload, HTTPStatus.OK)
         path, _signature = seed_app.session_files_disk_cache_path(key)
         payload_mtime = path.stat().st_mtime_ns
+        # App construction owns separate warm-up coverage. Measure only the explicit disk-cache
+        # adoption below so a slower worker cannot attribute constructor work to this assertion.
+        calls.clear()
         webapp.warm_start_session_files_payload_cache()
         payload, status = webapp.session_files_payload("5")
     finally:
@@ -6227,6 +6230,7 @@ def test_activity_warmup_adopts_session_files_disk_cache_without_rebuild(monkeyp
 
     assert status == HTTPStatus.OK
     assert payload["cache"]["hit"] is True
+    assert payload["cache"]["stale"] is False
     assert payload["files"] == [{"path": "README.md", "repo": str(tmp_path)}]
     assert calls == []
     assert path.stat().st_mtime_ns == payload_mtime

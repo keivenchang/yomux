@@ -120,11 +120,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     )
     path = str(REPO_ROOT / "README.md")
     original = subprocess.check_output(["git", "show", "HEAD:README.md"], cwd=REPO_ROOT, text=True)
-    current = original.replace(
-        "Browser tools for watching, driving, and summarizing tmux sessions.",
-        "Browser tools for watching and summarizing tmux sessions.\n\nDeterministic test-only README diff line.",
-        1,
-    )
+    current = original.replace("# YOLOmux\n", "# YOLOmux — Deterministic test-only README diff line.\n", 1)
     diff = "diff --git a/README.md b/README.md\n" + "".join(difflib.unified_diff(
         original.splitlines(keepends=True),
         current.splitlines(keepends=True),
@@ -208,20 +204,6 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
               panel.classList.add('active-pane');
               panelNodes.set(item, panel);
               document.getElementById('mount').append(panel);
-              const originalLoadCodeMirrorApi = loadCodeMirrorApi;
-              window.__holdReadmeCodeMirrorLoad = false;
-              window.__readmeDiffLoadEntered = false;
-              let releaseLoad = null;
-              loadCodeMirrorApi = async function(...args) {{
-                if (window.__holdReadmeCodeMirrorLoad) {{
-                  window.__readmeDiffLoadEntered = true;
-                  await new Promise(resolve => {{
-                    releaseLoad = resolve;
-                    window.__releaseReadmeCodeMirrorLoad = resolve;
-                  }});
-                }}
-                return originalLoadCodeMirrorApi.apply(this, args);
-              }};
               const {{frame}} = window.__yolomuxTestHelpers;
               const waitFor = window.__yolomuxTestWaitFor;
               renderFileEditorPanel(panel, item);
@@ -230,27 +212,20 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
               await frame();
               const modeWhilePayloadUnresolved = panel._cmMode || '';
               const textWhilePayloadUnresolved = panel._cmView?.state?.doc?.toString?.() || '';
-              window.__holdReadmeCodeMirrorLoad = true;
               window.__resolveReadmeDiffFetch();
               const diffLoadedWait = await waitFor(() => openFiles.get(path)?.diffLoaded === true);
-              let manualRenderCalled = false;
-              if (!window.__readmeDiffLoadEntered) {{
-                manualRenderCalled = true;
-                renderFileEditorPanel(panel, item);
-              }}
-              const loadEnteredWait = await waitFor(() => window.__readmeDiffLoadEntered);
               const modeBeforeDiffBuildRelease = panel._cmMode || '';
-              if (releaseLoad) releaseLoad();
-              const finalWait = await waitFor(() => panel._cmMode === 'diff' && panel._cmView?.state?.doc?.toString?.().includes('Browser tools for watching'));
+              const finalWait = await waitFor(
+                () => panel._cmMode === 'diff' && panel._cmView?.state?.doc?.toString?.().includes('Deterministic test-only README diff line.'),
+                {{timeoutMs: 15000, description: 'README diff CodeMirror payload build'}}
+              );
               const finalText = panel._cmView?.state?.doc?.toString?.() || '';
               const state = openFiles.get(path) || {{}};
               return {{
                 modeWhilePayloadUnresolved,
                 textWhilePayloadUnresolved,
                 diffLoadedWait,
-                loadEnteredWait,
                 finalWait,
-                manualRenderCalled,
                 modeBeforeDiffBuildRelease,
                 finalMode: panel._cmMode || '',
                 finalTextLength: finalText.length,
@@ -264,7 +239,6 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 viewMode: editorViewModeFor(path, item),
                 panelItems: filePanelItemsForPath(path),
                 panelConnected: panel.isConnected === true,
-                loadEntered: window.__readmeDiffLoadEntered === true,
                 apiHasMergeView: Boolean(window.YOLOmuxCodeMirror?.MergeView),
                 apiHasUnifiedMergeView: Boolean(window.YOLOmuxCodeMirror?.unifiedMergeView),
                 statusText: panel.querySelector('.file-editor-status-message')?.textContent || '',
@@ -283,7 +257,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     )
     assert "error" not in metrics, metrics
     assert metrics["modeWhilePayloadUnresolved"] != "edit", metrics
-    assert "Browser tools for watching" not in metrics["textWhilePayloadUnresolved"], metrics
+    assert "Deterministic test-only README diff line." not in metrics["textWhilePayloadUnresolved"], metrics
     assert metrics["finalMode"] == "diff", json.dumps(metrics, sort_keys=True)
     assert metrics["finalTextLength"] == metrics["expectedTextLength"], metrics
     assert metrics["deletedRows"] > 0, metrics

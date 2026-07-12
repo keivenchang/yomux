@@ -104,7 +104,10 @@ def pytest_worker_counts(*, serial: bool = False) -> tuple[str, str, str]:
     # processes. Reserve one quarter of the logical CPUs for Chrome, Node,
     # service daemons, live YOLOmux servers, and the OS. Split the remaining
     # budget 1/2 non-browser, 1/3 browser, and the remainder E2E.
-    budget = max(3, (cpus * 3) // 4)
+    # Browser workers own Chrome process trees and macOS security/indexing
+    # services scan their temporary profiles. Keep the Mac gate to half of the
+    # capped CPU budget; Linux keeps the measured 75% allocation.
+    budget = max(3, cpus // 2) if platform.system() == "Darwin" else max(3, (cpus * 3) // 4)
     nonbrowser = max(1, budget // 2)
     browser = max(1, budget // 3)
     e2e = max(1, budget - nonbrowser - browser)
