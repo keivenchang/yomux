@@ -381,6 +381,25 @@ Each process keeps browser-requested file watches in one `ClientWatchFileRecord`
 
 Expensive background coordination is single-owner per `YOLOMUX_STATE_DIR`, while durable stateful work is owned by local services in separate PIDs. `STATE_DIR` defaults to `~/.local/state/yolomux`; setting `YOLOMUX_STATE_DIR=/some/path` makes every YOLOmux process that uses that path share the same coordination files, caches, locks, service sockets, and service-discovery records. The background-owner election files live under `STATE_DIR/background-owner/`: `owner.lock` is the global flock, `owner.json` is the current owner heartbeat/status record, and `generations/*.json` are live process generation records. The latest live generation owns Tabber activity refresh, session-files refresh demand, watch-root polling, and the owner control socket that `statsd` calls for one-second samples; older servers become followers even if a browser is actively connected to them. Followers serve shared ready/stale snapshots and request refresh from the owner over the control socket. They must not start warmers or derived watch-root directory polling/listing. They still update the shared watch-root intent index at `STATE_DIR/watch-index.json` so the owner can observe connected browser interest.
 
+### Offline token/cost history rebuild
+
+`tools/rebuild_stats_tokens.py` is the one offline repair path for rebuilding retained YO!stats input/cache/output/cost components from Claude and Codex JSONL transcript families. It reuses `session_files.transcript_usage_atoms()` and statsd's component projector, so live collection and repair have the same event identities, cache semantics, model evidence, pricing inputs, and retention tiers. It does not recreate CPU, memory, GPU, API/SSE, latency, bandwidth, or agent-status history because transcripts do not contain those measurements.
+
+The command fails closed. A dry run or apply refuses while a registered YOLOmux generation, `statsd`, fresh background owner, DB/WAL/SHM opener, or statsd socket remains. `--apply --stop-services` first stops every recorded server sharing the target `YOLOMUX_STATE_DIR`, then stops statsd, holds the service-registry and daemon ownership locks, rechecks that the database is exclusive, creates a timestamped SQLite backup, and performs the wipe+rebuild in one transaction. It preserves live metrics and the generated-output scalar by default; transcriptless retained buckets remain visible as explicit output-only lower bounds. `--include-live` permanently erases live-only history and cannot reconstruct it.
+
+```bash
+# Inspect the complete contract and options. A live-state dry run intentionally refuses.
+python3 tools/rebuild_stats_tokens.py --help
+
+# Stop all servers sharing the default state directory, back up, and rebuild retained token/cost data.
+python3 tools/rebuild_stats_tokens.py --apply --stop-services
+
+# Restart only the intended server after checking the JSON report and backup path.
+./boot.sh 8881
+```
+
+After restart, verify one listener on the intended HTTP port, exactly one `yolomux_lib.statsd` process, a healthy auth-gated `/api/ping`, and `billable_lt_output_buckets: 0` in the rebuild report. Keep the reported `stats-history.sqlite3.backup-<UTC timestamp>` until the repaired graphs have been reviewed. Re-running the same command is idempotent at the component/event level and creates another backup before replacing the projection.
+
 Local services share one lifecycle and RPC parent. `local_services/rpc.py` owns the versioned length-prefixed JSON envelope with optional bounded binary payload and rolling legacy newline reads. `local_services/runtime.py` owns service-side mode-`0600` Unix socket binding, peer UID checks where available, singleton locks, response correlation, and idle cleanup. `local_services/registry.py` owns client-side discovery, stale PID/socket cleanup, `sys.executable -m <module> --serve` spawning, service records under `STATE_DIR/services/*.service.json` or next to the socket, exponential crash backoff from 0.25 seconds to 8 seconds, and lease-protected idle exit. A service failure may produce stale/pending/unavailable responses, but the web process must not run a retired expensive local fallback.
 
 | Service | Module | Socket | Owns | Idle behavior |

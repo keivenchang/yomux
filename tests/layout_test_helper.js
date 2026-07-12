@@ -1117,6 +1117,9 @@ globalThis.__layoutTestApi = {
   commonAncestorPath,
   cancelPendingFileExplorerActiveSync,
   fileExplorerSyncPlanForTest: fileExplorerSyncPlan,
+  fileExplorerSyncTargetDirsForTest: fileExplorerSyncTargetDirs,
+  sessionFilesAffectedDirsForTest: sessionFilesAffectedDirs,
+  syncFileExplorerRootToPlanForTest: syncFileExplorerRootToPlan,
   fileExplorerSyncStateForTest() { return {...fileExplorerSyncState}; },
   setFileExplorerVisibleSyncTargetForTest: setFileExplorerVisibleSyncTarget,
   rememberFileExplorerSyncExpandedStateForTest: rememberFileExplorerSyncExpandedState,
@@ -1144,7 +1147,7 @@ globalThis.__layoutTestApi = {
   },
   fileExplorerSessionHighlightSetsForTest(preferredItem = null) {
     const sets = fileExplorerSessionHighlightSets(preferredItem);
-    return {repoRoots: [...sets.repoRoots], touchedDirs: [...sets.touchedDirs], expandedDirs: [...sets.expandedDirs]};
+    return {repoRoots: [...sets.repoRoots], touchedDirs: [...sets.touchedDirs], expandedDirs: [...sets.expandedDirs], syncTargetDirs: [...sets.syncTargetDirs]};
   },
   fileExplorerRootForOpen,
   fileExplorerRootModeValue,
@@ -2034,8 +2037,10 @@ globalThis.__layoutTestApi = {
   previewRendererForPath,
   previewPathIsPreviewable,
   previewKindForPath,
+  defaultFileEditorViewModeForPath,
   previewMediaKindForPath,
   previewMimeForPath,
+  jsonLinesTablePreview,
   markdownPreviewHtml,
   markdownPreviewImageTarget,
   sanitizeStandaloneSvg,
@@ -2476,10 +2481,12 @@ globalThis.__layoutTestApi = {
   fileExplorerExpandedForTest() { return Array.from(fileExplorerExpanded).sort(); },
   setFileExplorerRootForTest(path) { fileExplorerRoot = normalizeDirectoryPath(path); },
   fileExplorerRootForTest() { return fileExplorerRoot; },
+  fileExplorerTreeForTest() { return fileExplorerTree; },
   fileExplorerPathDisplayForTest() { return fileExplorerPath?.value || fileExplorerPath?.textContent || ''; },
   setFileExplorerDirListingForTest(path, entries) {
     setFileExplorerFsResourceValue('list', path, entries);
   },
+  fileExplorerFsResourceKeysForTest() { return [...fileExplorerFsResourceRecords.keys()]; },
   setAutoApproveStateForTest(session, payload) {
     autoApproveStates.set(session, payload);
   },

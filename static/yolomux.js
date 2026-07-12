@@ -439,10 +439,9 @@ const PREVIEW_RENDERERS = Object.freeze([
   }},
   {id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, mimeByExtension: {'.pdf': 'application/pdf'}},
   {id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid'},
-  {id: 'structured', kind: 'structured', extensions: ['.json', '.jsonl', '.ndjson', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  {id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json'},
+  {id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
     '.json': 'json',
-    '.jsonl': 'json',
-    '.ndjson': 'json',
     '.geojson': 'json',
     '.ipynb': 'json',
     '.yaml': 'yaml',
@@ -15026,6 +15025,15 @@ function fileExplorerFsResourceHasValue(type, path) {
   return record?.value !== undefined;
 }
 
+function cachedFileExplorerFsResourceValue(type, path) {
+  const key = fileExplorerFsBatchKey(type, path);
+  const record = fileExplorerFsResourceRecords.get(key);
+  if (!record || record.value === undefined) return undefined;
+  // Cache reads on the session-switch hot path count as use for the existing bounded LRU.
+  setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
+  return record.value;
+}
+
 function invalidateFileExplorerFsResourceRecord(key, record) {
   record.generation += 1;
   record.value = undefined;
@@ -15727,7 +15735,15 @@ function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payloa
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
-    if (dir) dirs.add(dir);
+    if (!dir) continue;
+    const rawRepo = String(file?.repo || '').trim();
+    const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
+    if (repo && pathIsInsideDirectory(dir, repo)) {
+      dirs.add(repo);
+      for (const ancestor of ancestorPathsUnderRoot(repo, dir)) dirs.add(ancestor);
+    } else {
+      dirs.add(dir);
+    }
   }
   return Array.from(dirs);
 }
@@ -16017,10 +16033,9 @@ function emptyFileExplorerSessionHighlightSets() {
 
 function fileExplorerSyncTargetDirs(plan) {
   const root = normalizeDirectoryPath(plan?.root || '');
-  const dirs = Array.from(new Set((plan?.affectedDirs || [])
+  return Array.from(new Set((plan?.affectedDirs || [])
     .map(path => normalizeDirectoryPath(path))
-    .filter(path => path && root && path !== root && pathIsInsideDirectory(path, root))));
-  return dirs.filter(path => !dirs.some(other => other !== path && pathIsInsideDirectory(other, path)));
+    .filter(path => path && root && pathIsInsideDirectory(path, root))));
 }
 
 function fileExplorerSessionHighlightSets(preferredItem = null) {
@@ -16440,10 +16455,96 @@ async function syncFileExplorerRootToActiveFile(path, options = {}) {
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
+function fileExplorerSyncRenderPaths(plan, rememberedExpandedPaths = []) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  if (!root) return [];
+  return fileExplorerExpandedPathsForRoot(root, [
+    ...rememberedExpandedPaths,
+    ...fileExplorerSyncExpansionPaths(plan),
+  ]).filter(path => !fileExplorerSyncPathSuppressed(path));
+}
+
+function fileExplorerSyncListingDirectories(plan, renderPaths = []) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const directories = new Set(root ? [root] : []);
+  for (const path of renderPaths) {
+    for (const ancestor of ancestorPathsUnderRoot(root, path)) directories.add(ancestor);
+  }
+  return Array.from(directories);
+}
+
+function cachedFileExplorerSyncListings(directories = []) {
+  const entriesByDir = new Map();
+  for (const directory of directories) {
+    const entries = cachedFileExplorerFsResourceValue('list', directory);
+    if (!Array.isArray(entries)) return null;
+    entriesByDir.set(normalizeDirectoryPath(directory), entries);
+  }
+  return entriesByDir;
+}
+
+function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const rootEntries = entriesByDir?.get(root);
+  if (!root || !Array.isArray(rootEntries)) return false;
+  fileExplorerRoot = root;
+  pruneFileExplorerSelectionForRoot(root);
+  fileExplorerManualSelectionActive = false;
+  setFileExplorerPathDisplay(root);
+  renderFileExplorerRootModeControls();
+  fileExplorerExpanded.clear();
+  for (const path of renderPaths) fileExplorerExpanded.add(path);
+  if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
+    const tree = panel.querySelector?.('.file-explorer-tree-panel');
+    if (tree) renderTreeChildren(tree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  }
+  updateFileExplorerCurrentFileHighlight();
+  scheduleShareTopologySnapshot('finder-root');
+  return true;
+}
+
+async function fetchFileExplorerSyncListings(directories = [], options = {}) {
+  const entriesByDir = new Map();
+  const queue = [...directories];
+  const workerCount = Math.min(8, queue.length);
+  await Promise.all(Array.from({length: workerCount}, async () => {
+    while (queue.length) {
+      const directory = queue.shift();
+      const entries = await fetchDirectory(directory, options);
+      if (Array.isArray(entries)) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+    }
+  }));
+  return entriesByDir;
+}
+
+function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
+  requestAnimationFrame(() => {
+    const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
+    const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
+    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true}).then(entriesByDir => {
+      if (
+        fileExplorerSyncPlanSignature(plan) !== signature
+        || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
+        || !fileExplorerSyncPlanTargetStillCurrent(plan)
+      ) return;
+      const changed = directories.some(path => previousSignatures.get(path) !== fileExplorerDirectoryRecord(path)?.signature);
+      if (!changed) return;
+      const currentRenderPaths = fileExplorerSyncRenderPaths(
+        plan,
+        rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root),
+      );
+      const currentDirectories = fileExplorerSyncListingDirectories(plan, currentRenderPaths);
+      const completeEntriesByDir = cachedFileExplorerSyncListings(currentDirectories) || entriesByDir;
+      renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir);
+      updateFileExplorerSessionHighlightRows(plan.session);
+    }).catch(error => console.warn('Finder sync background revalidation failed', error));
+  });
+}
+
 async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
-  const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncState.inFlightSignature === signature) return false;
   if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
   if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
@@ -16460,41 +16561,30 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (targetChanged) {
       rememberFileExplorerSyncExpandedState();
     }
-    if (plan.root !== currentFileExplorerRoot()) {
-      changed = await openFileExplorerAt(plan.root, {
-        preserveExpanded: false,
-        preserveScroll: false,
-        syncSelection: true,
-        user: options.force === true,
-        showPending: options.force === true,
-      });
-      if (!changed) return false;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    } else if (targetChanged) {
-      fileExplorerExpanded.clear();
-      await refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: false});
-      changed = true;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    }
-    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
-    if (rememberedExpandedPaths.length) {
-      changed = await restoreFileExplorerExpandedPaths(rememberedExpandedPaths, plan.root) || changed;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
+    const renderPaths = fileExplorerSyncRenderPaths(plan, rememberedExpandedPaths);
+    const listingDirectories = fileExplorerSyncListingDirectories(plan, renderPaths);
+    const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
+    if (cachedListings) {
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings) || changed;
+      setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+      rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+      markFileExplorerSyncPlanApplied(plan);
+      updateFileExplorerSessionHighlightRows(preferredItem);
+      scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature);
+      return changed;
     }
-    if (expandPaths.length) {
-      const generation = ++fileExplorerSyncState.generation;
-      for (const path of expandPaths) {
-        if (generation !== fileExplorerSyncState.generation) return changed;
-        changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true, user: options.force === true}) || changed;
-        if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-      }
-    }
+    const fetchedListings = await fetchFileExplorerSyncListings(listingDirectories, {force: true, user: options.force === true});
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    rememberFileExplorerSyncExpandedState(plan.session, plan.root);
-    markFileExplorerSyncPlanApplied(plan);
-    updateFileExplorerSessionHighlightRows(preferredItem);
-    return changed;
+    if (fetchedListings.has(normalizeDirectoryPath(plan.root))) {
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings) || changed;
+      setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+      rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+      markFileExplorerSyncPlanApplied(plan);
+      updateFileExplorerSessionHighlightRows(preferredItem);
+      return changed;
+    }
+    return false;
   } finally {
     if (fileExplorerSyncState.inFlightSignature === signature) fileExplorerSyncState.inFlightSignature = '';
   }
@@ -45915,7 +46005,8 @@ function debugSystemLocalServicesCardHtml() {
 }
 
 function debugSystemLocalServicesTableHtml(serviceNames = []) {
-  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table">
+  const minWidthRem = 10 + (Math.max(1, serviceNames.length) * 9);
+  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
     <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
     <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}">—</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>`;
@@ -52254,35 +52345,6 @@ function jsonStructuredPreview(label, source, errorLabel = t('preview.structured
   }
 }
 
-function jsonLinesStructuredPreview(path, source) {
-  const ext = fileExtensionOf(path);
-  const lines = String(source ?? '').split(/\r?\n/);
-  const records = [];
-  const errors = [];
-  lines.forEach((line, index) => {
-    if (!line.trim()) return;
-    try {
-      records.push(JSON.parse(line));
-    } catch (error) {
-      errors.push(t('preview.parse.lineError', {line: index + 1, error: String(error?.message || error)}));
-    }
-  });
-  if (errors.length) {
-    return {
-      label: t('preview.structured.parseError', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL'}),
-      text: source,
-      language: 'json',
-      error: errors.slice(0, 5).join('\n'),
-    };
-  }
-  return {
-    label: t('preview.structured.records', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL', count: records.length}),
-    text: records.map(record => JSON.stringify(record)).join('\n'),
-    language: 'json',
-    error: '',
-  };
-}
-
 function notebookStructuredPreview(source) {
   let notebook;
   try {
@@ -52309,7 +52371,6 @@ function structuredPreviewValue(path, text) {
   if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
   if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
   if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
-  if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
   if (ext === '.ipynb') return notebookStructuredPreview(source);
   if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
   if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
@@ -52372,7 +52433,132 @@ function splitDelimitedPreviewLine(line, delimiter) {
   return cells;
 }
 
+function compactJsonLinesCell(value, maxChars = 240) {
+  let full;
+  if (typeof value === 'string') full = value;
+  else if (value === undefined) full = '';
+  else if (value !== null && typeof value === 'object') full = JSON.stringify(value);
+  else full = String(value);
+  const truncated = full.length > maxChars;
+  return {text: truncated ? `${full.slice(0, Math.max(0, maxChars - 1))}…` : full, title: full, truncated};
+}
+
+function jsonLinesTablePreview(path, text, options = {}) {
+  const maxRows = Math.max(1, Number(options.maxRows) || 200);
+  const maxColumns = Math.max(1, Number(options.maxColumns) || 40);
+  const maxCellChars = Math.max(8, Number(options.maxCellChars) || 240);
+  const sourceLines = String(text ?? '').split(/\r?\n/);
+  const nonEmptyLines = sourceLines
+    .map((raw, index) => ({raw, lineNumber: index + 1}))
+    .filter(entry => entry.raw.trim());
+  const parsedRows = nonEmptyLines.slice(0, maxRows).map(entry => {
+    try {
+      const value = JSON.parse(entry.raw);
+      const record = value && typeof value === 'object' && !Array.isArray(value) ? value : {$value: value};
+      return {...entry, parsed: true, record};
+    } catch (_error) {
+      return {...entry, parsed: false, record: null};
+    }
+  });
+  const allColumns = [];
+  const seenColumns = new Set();
+  for (const row of parsedRows) {
+    for (const key of Object.keys(row.record || {})) {
+      if (seenColumns.has(key)) continue;
+      seenColumns.add(key);
+      allColumns.push(key);
+    }
+  }
+  const columns = allColumns.slice(0, maxColumns);
+  const overflowColumns = allColumns.slice(maxColumns);
+  const rows = parsedRows.map(row => {
+    if (!row.parsed) return {lineNumber: row.lineNumber, parsed: false, raw: row.raw};
+    const cells = columns.map(key => compactJsonLinesCell(row.record[key], maxCellChars));
+    const overflow = {};
+    for (const key of overflowColumns) {
+      if (Object.hasOwn(row.record, key)) overflow[key] = row.record[key];
+    }
+    return {
+      lineNumber: row.lineNumber,
+      parsed: true,
+      cells,
+      overflow: overflowColumns.length ? compactJsonLinesCell(overflow, maxCellChars) : null,
+    };
+  });
+  return {
+    format: fileExtensionOf(path) === '.ndjson' ? 'NDJSON' : 'JSONL',
+    total: nonEmptyLines.length,
+    shown: rows.length,
+    columns,
+    overflowColumns,
+    rows,
+    truncated: nonEmptyLines.length > rows.length || overflowColumns.length > 0,
+  };
+}
+
+function appendJsonLinesTableCell(row, tagName, cell, className = '') {
+  const node = document.createElement(tagName);
+  if (className) node.className = className;
+  node.textContent = cell?.text || '';
+  if (cell?.title) node.title = cell.title;
+  row.appendChild(node);
+  return node;
+}
+
+function renderJsonLinesTablePreviewInto(container, path, text) {
+  const preview = jsonLinesTablePreview(path, text);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-editor-table-preview file-editor-jsonl-preview';
+  const header = document.createElement('div');
+  header.className = 'file-editor-data-preview-header';
+  header.textContent = t('preview.table.summary', {
+    format: preview.format,
+    shown: preview.shown,
+    total: preview.total,
+    truncated: preview.truncated ? t('preview.table.truncatedSuffix') : '',
+  });
+  wrapper.appendChild(header);
+  const table = document.createElement('table');
+  const head = document.createElement('thead');
+  const headingRow = document.createElement('tr');
+  preview.columns.forEach(column => appendJsonLinesTableCell(headingRow, 'th', {text: column, title: column}));
+  if (preview.overflowColumns.length) {
+    appendJsonLinesTableCell(headingRow, 'th', {
+      text: `… +${preview.overflowColumns.length}`,
+      title: preview.overflowColumns.join(', '),
+    }, 'file-editor-jsonl-overflow');
+  }
+  if (!preview.columns.length && !preview.overflowColumns.length) {
+    appendJsonLinesTableCell(headingRow, 'th', {text: preview.format});
+  }
+  head.appendChild(headingRow);
+  table.appendChild(head);
+  const body = document.createElement('tbody');
+  const columnSpan = Math.max(1, preview.columns.length + (preview.overflowColumns.length ? 1 : 0));
+  preview.rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.dataset.sourceLine = String(row.lineNumber);
+    if (!row.parsed) {
+      tr.className = 'file-editor-jsonl-unparsed';
+      const raw = appendJsonLinesTableCell(tr, 'td', {text: row.raw, title: row.raw});
+      raw.colSpan = columnSpan;
+      raw.dataset.unparsedLine = String(row.lineNumber);
+    } else {
+      row.cells.forEach(cell => appendJsonLinesTableCell(tr, 'td', cell));
+      if (row.overflow) appendJsonLinesTableCell(tr, 'td', row.overflow, 'file-editor-jsonl-overflow');
+    }
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  wrapper.appendChild(table);
+  container.replaceChildren(wrapper);
+}
+
 function renderTablePreviewInto(container, path, text) {
+  if (['.jsonl', '.ndjson'].includes(fileExtensionOf(path))) {
+    renderJsonLinesTablePreviewInto(container, path, text);
+    return;
+  }
   const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
   const maxRows = 200;
   const maxCols = 50;

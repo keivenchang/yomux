@@ -9380,7 +9380,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes('function bindDifferRowData('), 'RA4: Differ row data has a named binder');
     assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState[\s\S]*applyFileTreeRowDataset[\s\S]*applyFileTreeRowDerivedState[\s\S]*applyFileExplorerSessionHighlightRow[\s\S]*bindDifferRowData[\s\S]*bindFinderRowHandlers/.test(source), 'RA4: updateFileTreeRow is the short dispatcher over the row helpers');
     assert.ok(source.includes('syncFileTreeRowKindClass(row, entry.kind)'), 'Finder row kind classes update through stable toggles');
-    assert.ok(/function fileExplorerSyncTargetDirs\(plan\)[\s\S]*dirs\.filter\(path => !dirs\.some\(other => other !== path && pathIsInsideDirectory\(other, path\)\)\)/.test(source), 'Finder Sync stars the deepest affected working dirs instead of every ancestor repo root');
+    assert.ok(/function fileExplorerSyncTargetDirs\(plan\)[\s\S]*pathIsInsideDirectory\(path, root\)/.test(source)
+      && !/function fileExplorerSyncTargetDirs\(plan\)[\s\S]{0,500}dirs\.filter\(path => !dirs\.some/.test(source), 'Finder Sync stars every affected directory under the visible root instead of pruning ancestors');
     assert.ok(source.includes("marker.className = 'file-tree-sync-target'")
       && /function applyFileExplorerSessionHighlightRow\([\s\S]*updateFileTreeSyncTargetMarker\(row, isSyncTarget, sets\.syncTargetTitle/.test(source), 'Finder Sync star is a real row marker with localized title updates');
     assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'rows flag symlinks');

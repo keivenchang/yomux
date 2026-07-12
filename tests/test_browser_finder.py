@@ -399,8 +399,10 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         assert "file-tree-row--sync-expanded" in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-repo" not in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-touched" not in rows_by_path[path]["classes"], metrics
-        assert "file-tree-row--sync-target" not in rows_by_path[path]["classes"], metrics
-        assert rows_by_path[path]["syncStarHidden"] is True, metrics
+        assert "file-tree-row--sync-target" in rows_by_path[path]["classes"], metrics
+        assert rows_by_path[path]["syncStar"] == "★", metrics
+        assert rows_by_path[path]["syncStarHidden"] is False, metrics
+        assert "1" in rows_by_path[path]["syncStarTitle"], metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
         assert rows_by_path[path]["nameWeight"] >= 700, metrics
     for path in ["/home/test/dynamo/repo-a/src", "/home/test/dynamo/repo-b/lib"]:
@@ -428,6 +430,8 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
             done({
               expanded: current?.getAttribute('aria-expanded'),
               childVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]') !== null,
+              syncStar: current?.querySelector(':scope > .file-tree-sync-target')?.textContent || '',
+              syncStarHidden: current?.querySelector(':scope > .file-tree-sync-target')?.hidden ?? true,
               root: document.querySelector('.file-explorer-path-inline')?.value || '',
             });
           }));
@@ -437,6 +441,8 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     assert manual_collapse["root"] == "~", manual_collapse
     assert manual_collapse["expanded"] == "false", manual_collapse
     assert manual_collapse["childVisible"] is False, manual_collapse
+    assert manual_collapse["syncStar"] == "★", manual_collapse
+    assert manual_collapse["syncStarHidden"] is False, manual_collapse
     payload_change = browser.execute_async_script(
         """
         const updatedPayload = arguments[0];

@@ -2961,7 +2961,7 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
           chat: {subscribers: 1, store: {message_rows: 4, typing_leases: 0}},
           local_services: {totals: {processes: 2, cpu_percent: 1.5, rss_bytes: 2048}, services: [
             {service: 'indexd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
-            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}},
+            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0, normal: 0, background: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}},
             {service: 'jobd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
             {service: 'approvald', pid: 333, healthy: false, started_at: fakeNow / 1000 - 12, uptime_seconds: 12, resources: {cpu_percent: 1, rss_bytes: 1024}},
           ]},
@@ -3006,6 +3006,57 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
             state: node.querySelector('.js-debug-system-state')?.textContent.trim(),
             bad: node.querySelector('.js-debug-system-state')?.classList.contains('js-debug-system-state--bad'),
           }));
+          const wrap = table.closest('.js-debug-system-local-services-wrap');
+          const labelCells = [...table.querySelectorAll('tbody th')];
+          const pidRect = pidCell.getBoundingClientRect();
+          const queueRect = queueCell.getBoundingClientRect();
+          const narrowMetrics = {
+            scrolls: wrap.scrollWidth > wrap.clientWidth + 1,
+            labelColumnWidth: labelCells[0].getBoundingClientRect().width,
+            labelsNowrap: labelCells.every(node => getComputedStyle(node).whiteSpace === 'nowrap'),
+            labelsSingleLine: labelCells.every(node => {
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              return range.getClientRects().length <= 1;
+            }),
+            serviceColumnWidth: pidRect.width,
+            queueWrapStyle: getComputedStyle(queueCell).whiteSpace,
+            queueSharesColumnWidth: Math.abs(queueRect.width - pidRect.width) <= 1,
+            queueCanWrapTaller: queueRect.height > pidRect.height + 2,
+          };
+          view.style.width = '920px';
+          refreshDebugSystemViews();
+          const wideTable = view.querySelector('.js-debug-system-local-services-table');
+          const wideServices = [...wideTable.querySelectorAll('thead th:not(:first-child)')].map(header => {
+            const name = header.getAttribute('data-js-debug-service-head');
+            const cells = [...wideTable.querySelectorAll(`td[data-service="${CSS.escape(name)}"]`)];
+            const headerRect = header.getBoundingClientRect();
+            return {
+              name,
+              textAlign: getComputedStyle(header).textAlign,
+              cellTextAligns: cells.map(cell => getComputedStyle(cell).textAlign),
+              aligned: cells.every(cell => {
+                const rect = cell.getBoundingClientRect();
+                return Math.abs(rect.left - headerRect.left) <= 1.5 && Math.abs(rect.right - headerRect.right) <= 1.5;
+              }),
+            };
+          });
+          const wasLight = document.body.classList.contains('theme-light');
+          const themeLayouts = ['dark', 'light'].map(theme => {
+            document.body.classList.toggle('theme-light', theme === 'light');
+            view.style.width = '260px';
+            const themedTable = view.querySelector('.js-debug-system-local-services-table');
+            const themedWrap = themedTable.closest('.js-debug-system-local-services-wrap');
+            return {
+              theme,
+              scrolls: themedWrap.scrollWidth > themedWrap.clientWidth + 1,
+              labelWidth: themedTable.querySelector('tbody th').getBoundingClientRect().width,
+              serviceWidth: themedTable.querySelector('td[data-service="statsd"]').getBoundingClientRect().width,
+            };
+          });
+          document.body.classList.toggle('theme-light', wasLight);
+          view.style.width = '260px';
+          refreshDebugSystemViews();
           jsDebugSystemState.payload.local_services.services[1] = {...jsDebugSystemState.payload.local_services.services[1], pid: 0, resources: {cpu_percent: null, rss_bytes: null}};
           refreshDebugSystemViews();
           const nextPidCell = view.querySelector('.js-debug-system-local-services-table [data-service="statsd"][data-field="pid"]');
@@ -3018,6 +3069,9 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
           done({
             requests, before, after, columns,
             headers,
+            narrowMetrics,
+            wideServices,
+            themeLayouts,
             rows: [...table.querySelectorAll('tbody tr')].map(node => node.getAttribute('data-js-debug-service-row')),
             fieldLabels: [...table.querySelectorAll('tbody th')].map(node => node.textContent.trim()),
             pidBefore: pidBeforeText,
@@ -3068,6 +3122,20 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert metrics["columns"] == 1, metrics
     assert metrics["cardsInside"] is True, metrics
     assert metrics["before"] > 0 and metrics["after"] == metrics["before"], metrics
+    assert metrics["narrowMetrics"]["scrolls"] is True, metrics
+    assert metrics["narrowMetrics"]["labelColumnWidth"] >= 120, metrics
+    assert metrics["narrowMetrics"]["labelsNowrap"] is True, metrics
+    assert metrics["narrowMetrics"]["labelsSingleLine"] is True, metrics
+    assert metrics["narrowMetrics"]["serviceColumnWidth"] >= 120, metrics
+    assert metrics["narrowMetrics"]["queueWrapStyle"] == "normal", metrics
+    assert metrics["narrowMetrics"]["queueSharesColumnWidth"] is True, metrics
+    assert metrics["narrowMetrics"]["queueCanWrapTaller"] is True, metrics
+    assert all(service["textAlign"] in {"end", "right"} for service in metrics["wideServices"]), metrics
+    assert all(set(service["cellTextAligns"]) == {service["textAlign"]} for service in metrics["wideServices"]), metrics
+    assert all(service["aligned"] for service in metrics["wideServices"]), metrics
+    assert [layout["theme"] for layout in metrics["themeLayouts"]] == ["dark", "light"], metrics
+    assert all(layout["scrolls"] for layout in metrics["themeLayouts"]), metrics
+    assert all(layout["labelWidth"] >= 120 and layout["serviceWidth"] >= 120 for layout in metrics["themeLayouts"]), metrics
 
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")

@@ -859,7 +859,8 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewKindForPath('/repo/spec.pdf'), 'pdf', 'PDF paths route to raw PDF Preview');
     assert.equal(api.previewKindForPath('/repo/chart.mmd'), 'mermaid', 'Mermaid source files route to Mermaid Preview');
     assert.equal(api.previewKindForPath('/repo/config.json'), 'structured', 'JSON paths route to structured Preview');
-    assert.equal(api.previewKindForPath('/repo/events.jsonl'), 'structured', 'JSONL paths route to structured Preview');
+    assert.equal(api.previewKindForPath('/repo/events.jsonl'), 'table', 'JSONL paths route to table Preview');
+    assert.equal(api.previewKindForPath('/repo/events.ndjson'), 'table', 'NDJSON paths route to table Preview');
     assert.equal(api.previewKindForPath('/repo/map.geojson'), 'structured', 'GeoJSON paths route to structured Preview');
     assert.equal(api.previewKindForPath('/repo/notebook.ipynb'), 'structured', 'notebooks route to safe structured Preview');
     assert.equal(api.previewKindForPath('/repo/diagram.drawio'), 'structured', 'Draw.io XML routes to structured Preview');
@@ -877,6 +878,9 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewKindForPath('/repo/archive.zip'), 'unsupported', 'archives are recognized fallback, not unpacked');
     assert.equal(api.previewKindForPath('/repo/app.py'), 'text', 'known code files get the code-preview fallback');
     assert.equal(api.previewRendererForPath('/repo/config.json').id, 'structured', 'preview dispatch comes from the shared renderer registry');
+    assert.equal(api.previewRendererForPath('/repo/events.jsonl').id, 'json-lines-table', 'JSONL table dispatch comes from the shared renderer registry');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.jsonl', 'text'), 'preview', 'JSONL opens in table Preview by default');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.ndjson', 'text'), 'preview', 'NDJSON opens in table Preview by default');
     assert.equal(api.previewPathIsPreviewable('/repo/app.py'), false, 'generic code/text renderer is not a distinct Preview affordance');
     assert.equal(api.previewPathIsPreviewable('/repo/notes.txt'), false, 'plain text renderer is not a distinct Preview affordance');
     assert.equal(api.previewPathIsPreviewable('/repo/config.json'), true, 'structured JSON preview stays available because it differs from the editor');
@@ -889,7 +893,7 @@ async function runLayoutRestoreSuite() {
       'docs/preview-samples/12-image.svg': 'image',
       'docs/preview-samples/14-mermaid.mmd': 'mermaid',
       'docs/preview-samples/15-structured.json': 'structured',
-      'docs/preview-samples/16-structured.jsonl': 'structured',
+      'docs/preview-samples/16-structured.jsonl': 'json-lines-table',
       'docs/preview-samples/17-notebook.ipynb': 'structured',
       'docs/preview-samples/18-structured.yaml': 'structured',
       'docs/preview-samples/19-structured.toml': 'structured',
@@ -902,6 +906,28 @@ async function runLayoutRestoreSuite() {
       assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a docs/preview-samples fixture`);
       assert.equal(api.previewRendererForPath(`/repo/${samplePath}`).id, rendererId, `${samplePath} routes to ${rendererId}`);
     }
+    const transcriptPreview = api.jsonLinesTablePreview('/repo/transcript.jsonl', [
+      JSON.stringify({type: 'session_meta', session: {id: 's1'}}),
+      JSON.stringify({type: 'user', message: {role: 'user', content: 'hello'}}),
+      JSON.stringify({type: 'assistant', tokens: {input: 10, output: 4}}),
+      JSON.stringify({type: 'tool', tool_name: 'shell', result: ['ok']}),
+      '{malformed',
+    ].join('\n'));
+    assert.deepStrictEqual(canonical(transcriptPreview.columns), ['type', 'session', 'message', 'tokens', 'tool_name', 'result'], 'heterogeneous JSONL columns preserve first-seen key order');
+    assert.equal(transcriptPreview.rows.length, 5, 'JSONL produces one table row per non-empty input line');
+    assert.equal(transcriptPreview.rows[1].cells[2].text, '{"role":"user","content":"hello"}', 'nested JSONL values render compactly');
+    assert.equal(transcriptPreview.rows[4].parsed, false, 'malformed JSONL remains as a raw fallback row');
+    assert.equal(transcriptPreview.rows[4].raw, '{malformed', 'malformed JSONL raw text is preserved');
+    const longJsonl = api.jsonLinesTablePreview('/repo/long.jsonl', JSON.stringify({payload: 'x'.repeat(300)}));
+    assert.equal(longJsonl.rows[0].cells[0].text.endsWith('…'), true, 'long JSONL values are compacted in the visible cell');
+    assert.equal(longJsonl.rows[0].cells[0].title.length, 300, 'the complete JSONL value remains available on hover');
+    const boundedJsonl = api.jsonLinesTablePreview('/repo/large.jsonl', Array.from({length: 260}, (_, index) => JSON.stringify({index})).join('\n'));
+    assert.equal(boundedJsonl.rows.length, 200, 'large JSONL rendering is capped');
+    assert.equal(boundedJsonl.total, 260, 'large JSONL still reports the full non-empty line count');
+    assert.equal(boundedJsonl.truncated, true, 'large JSONL reports truncation');
+    const wideJsonl = api.jsonLinesTablePreview('/repo/wide.jsonl', JSON.stringify(Object.fromEntries(Array.from({length: 44}, (_, index) => [`key${index}`, index]))));
+    assert.equal(wideJsonl.columns.length, 40, 'JSONL column count is capped');
+    assert.equal(wideJsonl.overflowColumns.length, 4, 'JSONL retains overflow keys behind one affordance');
     [
       'docs/preview-samples/13-pdf.pdf',
       'docs/preview-samples/24-audio.wav',

@@ -618,6 +618,57 @@ async function runLayoutAsyncSuite() {
     assert.ok(source.includes('const fileExplorerSyncTargetRecords = new Map()'), 'one target-record map remains');
   });
 
+  await testAsync('Finder Sync warm session switches render synchronously from the bounded listing cache', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const listings = new Map([
+      ['/home/test', [{name: 'project', kind: 'dir'}]],
+      ['/home/test/project', [{name: 'one', kind: 'dir'}, {name: 'two', kind: 'dir'}]],
+      ['/home/test/project/one', [{name: 'a.js', kind: 'file'}]],
+      ['/home/test/project/two', [{name: 'b.js', kind: 'file'}]],
+    ]);
+    for (const [path, entries] of listings) api.setFileExplorerDirListingForTest(path, entries);
+    let fetchCalls = 0;
+    api.setFetchForTest(() => {
+      fetchCalls += 1;
+      return Promise.reject(new Error('warm switch must not block on HTTP'));
+    });
+    const firstPlan = {
+      session: '1',
+      root: '/home/test',
+      expandPaths: ['/home/test/project', '/home/test/project/one'],
+      affectedDirs: ['/home/test/project/one'],
+    };
+    const first = api.syncFileExplorerRootToPlanForTest(firstPlan, '1');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/home/test/project', '/home/test/project/one'], 'the cached expansion is visible before the returned promise is awaited');
+    assert.equal(fetchCalls, 0, 'the warm switch hot path issues no blocking request');
+    await first;
+    const projectRow = Array.from(api.fileExplorerTreeForTest().children).find(row => row.dataset?.path === '/home/test/project');
+    assert.ok(projectRow, 'the cached root is materialized immediately');
+
+    const secondPlan = {
+      session: '2',
+      root: '/home/test',
+      expandPaths: ['/home/test/project', '/home/test/project/two'],
+      affectedDirs: ['/home/test/project/two'],
+    };
+    const second = api.syncFileExplorerRootToPlanForTest(secondPlan, '2');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/home/test/project', '/home/test/project/two'], 'the next session expansion replaces the first session expansion synchronously');
+    assert.equal(fetchCalls, 0, 'switching back and forth remains cache-only until background revalidation');
+    assert.equal(Array.from(api.fileExplorerTreeForTest().children).find(row => row.dataset?.path === '/home/test/project'), projectRow, 'same-root session switches reconcile and retain the existing directory row node');
+    await second;
+    assert.ok(api.fileExplorerFsResourceKeysForTest().length <= api.fileExplorerMemoryCacheLimitForTest, 'the reused listing cache remains under the shared LRU bound');
+  });
+
+  test('Finder Sync cold and stale paths share bounded parallel fetch and deferred revalidation owners', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const syncOwner = source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab('));
+    assert.ok(/function fetchFileExplorerSyncListings[\s\S]*workerCount = Math\.min\(8, queue\.length\)[\s\S]*Promise\.all\(Array\.from/.test(source), 'cold directory listings use one bounded parallel worker owner');
+    assert.ok(/function scheduleFileExplorerSyncRevalidation[\s\S]*requestAnimationFrame[\s\S]*fresh: true, force: true/.test(source), 'stale-while-revalidate starts only after the cache-first frame and bypasses background suppression');
+    assert.equal(syncOwner.includes('for (const path of expandPaths)'), false, 'the retired sequential per-folder expansion loop cannot return');
+    assert.equal(syncOwner.includes('preserveExpanded: false'), false, 'session switches no longer enter the destructive subtree teardown path');
+  });
+
   await testAsync('Tabber activity cache treats direct snapshots as newer than in-flight HTTP work', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);

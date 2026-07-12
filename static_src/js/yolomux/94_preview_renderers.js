@@ -677,35 +677,6 @@ function jsonStructuredPreview(label, source, errorLabel = t('preview.structured
   }
 }
 
-function jsonLinesStructuredPreview(path, source) {
-  const ext = fileExtensionOf(path);
-  const lines = String(source ?? '').split(/\r?\n/);
-  const records = [];
-  const errors = [];
-  lines.forEach((line, index) => {
-    if (!line.trim()) return;
-    try {
-      records.push(JSON.parse(line));
-    } catch (error) {
-      errors.push(t('preview.parse.lineError', {line: index + 1, error: String(error?.message || error)}));
-    }
-  });
-  if (errors.length) {
-    return {
-      label: t('preview.structured.parseError', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL'}),
-      text: source,
-      language: 'json',
-      error: errors.slice(0, 5).join('\n'),
-    };
-  }
-  return {
-    label: t('preview.structured.records', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL', count: records.length}),
-    text: records.map(record => JSON.stringify(record)).join('\n'),
-    language: 'json',
-    error: '',
-  };
-}
-
 function notebookStructuredPreview(source) {
   let notebook;
   try {
@@ -732,7 +703,6 @@ function structuredPreviewValue(path, text) {
   if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
   if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
   if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
-  if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
   if (ext === '.ipynb') return notebookStructuredPreview(source);
   if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
   if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
@@ -795,7 +765,132 @@ function splitDelimitedPreviewLine(line, delimiter) {
   return cells;
 }
 
+function compactJsonLinesCell(value, maxChars = 240) {
+  let full;
+  if (typeof value === 'string') full = value;
+  else if (value === undefined) full = '';
+  else if (value !== null && typeof value === 'object') full = JSON.stringify(value);
+  else full = String(value);
+  const truncated = full.length > maxChars;
+  return {text: truncated ? `${full.slice(0, Math.max(0, maxChars - 1))}…` : full, title: full, truncated};
+}
+
+function jsonLinesTablePreview(path, text, options = {}) {
+  const maxRows = Math.max(1, Number(options.maxRows) || 200);
+  const maxColumns = Math.max(1, Number(options.maxColumns) || 40);
+  const maxCellChars = Math.max(8, Number(options.maxCellChars) || 240);
+  const sourceLines = String(text ?? '').split(/\r?\n/);
+  const nonEmptyLines = sourceLines
+    .map((raw, index) => ({raw, lineNumber: index + 1}))
+    .filter(entry => entry.raw.trim());
+  const parsedRows = nonEmptyLines.slice(0, maxRows).map(entry => {
+    try {
+      const value = JSON.parse(entry.raw);
+      const record = value && typeof value === 'object' && !Array.isArray(value) ? value : {$value: value};
+      return {...entry, parsed: true, record};
+    } catch (_error) {
+      return {...entry, parsed: false, record: null};
+    }
+  });
+  const allColumns = [];
+  const seenColumns = new Set();
+  for (const row of parsedRows) {
+    for (const key of Object.keys(row.record || {})) {
+      if (seenColumns.has(key)) continue;
+      seenColumns.add(key);
+      allColumns.push(key);
+    }
+  }
+  const columns = allColumns.slice(0, maxColumns);
+  const overflowColumns = allColumns.slice(maxColumns);
+  const rows = parsedRows.map(row => {
+    if (!row.parsed) return {lineNumber: row.lineNumber, parsed: false, raw: row.raw};
+    const cells = columns.map(key => compactJsonLinesCell(row.record[key], maxCellChars));
+    const overflow = {};
+    for (const key of overflowColumns) {
+      if (Object.hasOwn(row.record, key)) overflow[key] = row.record[key];
+    }
+    return {
+      lineNumber: row.lineNumber,
+      parsed: true,
+      cells,
+      overflow: overflowColumns.length ? compactJsonLinesCell(overflow, maxCellChars) : null,
+    };
+  });
+  return {
+    format: fileExtensionOf(path) === '.ndjson' ? 'NDJSON' : 'JSONL',
+    total: nonEmptyLines.length,
+    shown: rows.length,
+    columns,
+    overflowColumns,
+    rows,
+    truncated: nonEmptyLines.length > rows.length || overflowColumns.length > 0,
+  };
+}
+
+function appendJsonLinesTableCell(row, tagName, cell, className = '') {
+  const node = document.createElement(tagName);
+  if (className) node.className = className;
+  node.textContent = cell?.text || '';
+  if (cell?.title) node.title = cell.title;
+  row.appendChild(node);
+  return node;
+}
+
+function renderJsonLinesTablePreviewInto(container, path, text) {
+  const preview = jsonLinesTablePreview(path, text);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-editor-table-preview file-editor-jsonl-preview';
+  const header = document.createElement('div');
+  header.className = 'file-editor-data-preview-header';
+  header.textContent = t('preview.table.summary', {
+    format: preview.format,
+    shown: preview.shown,
+    total: preview.total,
+    truncated: preview.truncated ? t('preview.table.truncatedSuffix') : '',
+  });
+  wrapper.appendChild(header);
+  const table = document.createElement('table');
+  const head = document.createElement('thead');
+  const headingRow = document.createElement('tr');
+  preview.columns.forEach(column => appendJsonLinesTableCell(headingRow, 'th', {text: column, title: column}));
+  if (preview.overflowColumns.length) {
+    appendJsonLinesTableCell(headingRow, 'th', {
+      text: `… +${preview.overflowColumns.length}`,
+      title: preview.overflowColumns.join(', '),
+    }, 'file-editor-jsonl-overflow');
+  }
+  if (!preview.columns.length && !preview.overflowColumns.length) {
+    appendJsonLinesTableCell(headingRow, 'th', {text: preview.format});
+  }
+  head.appendChild(headingRow);
+  table.appendChild(head);
+  const body = document.createElement('tbody');
+  const columnSpan = Math.max(1, preview.columns.length + (preview.overflowColumns.length ? 1 : 0));
+  preview.rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.dataset.sourceLine = String(row.lineNumber);
+    if (!row.parsed) {
+      tr.className = 'file-editor-jsonl-unparsed';
+      const raw = appendJsonLinesTableCell(tr, 'td', {text: row.raw, title: row.raw});
+      raw.colSpan = columnSpan;
+      raw.dataset.unparsedLine = String(row.lineNumber);
+    } else {
+      row.cells.forEach(cell => appendJsonLinesTableCell(tr, 'td', cell));
+      if (row.overflow) appendJsonLinesTableCell(tr, 'td', row.overflow, 'file-editor-jsonl-overflow');
+    }
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  wrapper.appendChild(table);
+  container.replaceChildren(wrapper);
+}
+
 function renderTablePreviewInto(container, path, text) {
+  if (['.jsonl', '.ndjson'].includes(fileExtensionOf(path))) {
+    renderJsonLinesTablePreviewInto(container, path, text);
+    return;
+  }
   const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
   const maxRows = 200;
   const maxCols = 50;

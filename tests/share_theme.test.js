@@ -4399,7 +4399,7 @@ async function runShareThemeSuite() {
     assert.ok(/const syncItem = fileSyncPath \? preferredItem : \(isTmuxSession\(preferredItem\) \? preferredItem : explicitSession\);[\s\S]*if \(!syncItem \|\| \(!fileSyncPath && syncItem !== explicitSession\)\) return/.test(finderSyncBody), 'Finder Sync accepts clicked editor files without requiring a tmux target');
     assert.ok(finderSyncBody.includes('fileExplorerSyncPlanForFile(fileSyncPath)'), 'Finder Sync can plan from an explicit editor file');
     assert.ok(finderSyncBody.includes('syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})'), 'Finder Sync can move the root to a clicked editor file and explicit sync forces a re-apply');
-    assert.ok(/openFileExplorerAt\(plan\.root, \{[\s\S]*preserveExpanded: false,[\s\S]*preserveScroll: false,[\s\S]*syncSelection: true,[\s\S]*user: options\.force === true,[\s\S]*showPending: options\.force === true,/.test(source), 'sync-driven Finder root opens do not cancel newer pending explicit pane syncs and explicit opens are user-owned');
+    assert.ok(/fetchFileExplorerSyncListings\(listingDirectories, \{force: true, user: options\.force === true\}\)/.test(source), 'cold sync-driven Finder loads bypass background suppression without entering the destructive root-open owner');
     assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#automatic Finder Sync skips a repeated already-applied plan');
     const openFileExplorerAtStart = source.indexOf('async function openFileExplorerAt(');
     const openFileExplorerAtEnd = source.indexOf('function resetFileExplorerAppliedSyncPlan(', openFileExplorerAtStart);
@@ -4407,7 +4407,7 @@ async function runShareThemeSuite() {
     assert.ok(/async function openFileExplorerAt\([\s\S]*const openGeneration = \+\+fileExplorerOpenGeneration;[\s\S]*const openStillCurrent = \(\) => openGeneration === fileExplorerOpenGeneration;[\s\S]*const entries = await fetchDirectory\(root,[\s\S]*if \(!openStillCurrent\(\)\) return false;/.test(source), 'stale Finder root fetches are dropped before they can render');
     assert.ok(source.slice(openFileExplorerAtStart, openFileExplorerAtEnd).includes("if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});"), 'completed manual Finder opens cancel pending sync without invalidating their own open generation');
     assert.ok(/const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*if \(showPendingRoot\) \{[\s\S]*fileExplorerManualSelectionActive = options\.manualSelection === true;[\s\S]*renderFileExplorerTreeSearching\(root\);/.test(source), 'manual and explicit Sync opens claim the Finder UI with a searching row before listing resolves');
-    assert.ok(/openFileExplorerAt\(plan\.root, \{[\s\S]*syncSelection: true,[\s\S]*user: options\.force === true,[\s\S]*showPending: options\.force === true,/.test(source), 'explicit Finder Sync opens bypass live push background suppression and show pending state');
+    assert.equal(source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab(')).includes('openFileExplorerAt('), false, 'cache-first Finder Sync never tears down the root through the manual-open transaction');
     assert.ok(/async function openFileExplorerAt\([\s\S]*if \(options\.manualSelection === true\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*fileExplorerManualSelectionActive = options\.manualSelection === true;[\s\S]*setFileExplorerPathDisplay\(root\);[\s\S]*renderFileExplorerRootModeControls\(\);[\s\S]*renderFileExplorerTreeSearching\(root\);[\s\S]*const entries = await fetchDirectory\(root,/.test(source), 'typed/manual Finder opens disable Sync, clears stale rows, and shows searching before slow directory listing resolves');
     assert.ok(source.includes("textWithMovingEllipsisHtml('searching...', 'file-tree-searching-dots')"), 'Finder searching row reuses the shared moving ellipsis helper');
     assert.ok(/\.file-tree-status-row\s*\{[\s\S]*cursor:\s*default/.test(css), 'Finder searching row is styled as passive status, not an interactive path');
@@ -5776,6 +5776,16 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(highlightSets.repoRoots), []);
     assert.deepStrictEqual(canonical(highlightSets.touchedDirs), []);
     assert.deepStrictEqual(canonical(highlightSets.expandedDirs), ['/home/test/dynamo/repo-a', '/home/test/dynamo/repo-b']);
+    assert.deepStrictEqual(canonical(highlightSets.syncTargetDirs), [
+      '/home/test/dynamo/repo-a',
+      '/home/test/dynamo/repo-b',
+      '/home/test/dynamo/repo-a/src',
+      '/home/test/dynamo/repo-b/lib',
+    ], 'every touched repo/working/file directory is starred, including touched ancestors; home-chain pass-through directories are not');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetDirsForTest({
+      root: '/tmp/outside',
+      affectedDirs: ['/tmp/outside', '/tmp/outside/src'],
+    })), ['/tmp/outside', '/tmp/outside/src'], 'the working directory remains a star target even when it is the Finder root');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a', 'dir', '1'), 'file-tree-row--sync-expanded');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a/src', 'dir', '1'), '');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a/src/a.js', 'file', '1'), '');
@@ -5788,6 +5798,10 @@ async function runShareThemeSuite() {
       files: [{repo: '/home/test/dynamo/repo-a', path: 'src/a.js', abs_path: '/home/test/dynamo/repo-a/src/a.js'}],
     });
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/dynamo/repo-a', 'dir', '1'), '');
+    assert.deepStrictEqual(canonical(api.fileExplorerSessionHighlightSetsForTest('2').syncTargetDirs), [
+      '/home/test/dynamo/repo-a',
+      '/home/test/dynamo/repo-a/src',
+    ], 'changing selected sessions removes the previous star set and derives the new session set');
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo1/src'}});
     api.setSessionFilesPayloadForTest({
       session: '1',
@@ -5815,7 +5829,13 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
       root: '/home/test',
-      affectedDirs: ['/home/test/ai-config', '/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks', '/home/test/ai-config/claude/skills'],
+      affectedDirs: [
+        '/home/test/ai-config',
+        '/home/test/ai-config/claude',
+        '/home/test/ai-config/claude/skills',
+        '/home/test/ai-config/claude/skills/a',
+        '/home/test/ai-config/hooks',
+      ],
       expandPaths: [
         '/home/test/ai-config',
         '/home/test/ai-config/claude',

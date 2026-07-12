@@ -3028,6 +3028,24 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   background: var(--panel2);
   font-weight: 800;
 }
+.file-editor-jsonl-preview table {
+  font-family: var(--mono-font);
+}
+.file-editor-jsonl-preview thead th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-layer-raised);
+}
+.file-editor-jsonl-preview td {
+  white-space: pre-wrap;
+}
+.file-editor-jsonl-preview .file-editor-jsonl-overflow {
+  color: var(--muted);
+}
+.file-editor-jsonl-unparsed td {
+  color: var(--code-invalid);
+  background: color-mix(in srgb, var(--code-invalid) 9%, var(--editor-preview-bg));
+}
 .file-editor-native-media {
   display: block;
   max-width: min(100%, 960px);

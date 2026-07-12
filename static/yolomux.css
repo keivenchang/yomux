@@ -4497,13 +4497,33 @@ body :is(
 }
 .js-debug-system-local-services-wrap {
   max-width: 100%;
+  overflow-x: auto;
+}
+.js-debug-system-local-services-table {
+  --js-debug-system-local-services-field-width: 10rem;
+  --js-debug-system-local-services-service-width: 9rem;
+  table-layout: fixed;
+  width: max(100%, var(--js-debug-system-local-services-min-width, 46rem));
+}
+.js-debug-system-table.js-debug-system-local-services-table th:first-child,
+.js-debug-system-table.js-debug-system-local-services-table td:first-child {
+  width: var(--js-debug-system-local-services-field-width);
+  min-width: var(--js-debug-system-local-services-field-width);
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 .js-debug-system-local-services-table th:not(:first-child) {
-  min-width: 8rem;
+  width: var(--js-debug-system-local-services-service-width);
+  min-width: var(--js-debug-system-local-services-service-width);
+  vertical-align: top;
+}
+.js-debug-system-local-services-table td:not(:first-child) {
+  width: var(--js-debug-system-local-services-service-width);
+  min-width: var(--js-debug-system-local-services-service-width);
   vertical-align: top;
 }
 .js-debug-system-local-services-table thead th:not(:first-child) {
-  text-align: center;
+  text-align: end;
 }
 .js-debug-system-service-name {
   display: block;
@@ -4515,6 +4535,10 @@ body :is(
 .js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
   border-block-end: 0;
   vertical-align: top;
+}
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .js-debug-system-service-cell--fresh {
   color: var(--text);
@@ -16392,6 +16416,24 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--text);
   background: var(--panel2);
   font-weight: 800;
+}
+.file-editor-jsonl-preview table {
+  font-family: var(--mono-font);
+}
+.file-editor-jsonl-preview thead th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-layer-raised);
+}
+.file-editor-jsonl-preview td {
+  white-space: pre-wrap;
+}
+.file-editor-jsonl-preview .file-editor-jsonl-overflow {
+  color: var(--muted);
+}
+.file-editor-jsonl-unparsed td {
+  color: var(--code-invalid);
+  background: color-mix(in srgb, var(--code-invalid) 9%, var(--editor-preview-bg));
 }
 .file-editor-native-media {
   display: block;

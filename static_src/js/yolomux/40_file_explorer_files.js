@@ -192,6 +192,15 @@ function fileExplorerFsResourceHasValue(type, path) {
   return record?.value !== undefined;
 }
 
+function cachedFileExplorerFsResourceValue(type, path) {
+  const key = fileExplorerFsBatchKey(type, path);
+  const record = fileExplorerFsResourceRecords.get(key);
+  if (!record || record.value === undefined) return undefined;
+  // Cache reads on the session-switch hot path count as use for the existing bounded LRU.
+  setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
+  return record.value;
+}
+
 function invalidateFileExplorerFsResourceRecord(key, record) {
   record.generation += 1;
   record.value = undefined;
@@ -893,7 +902,15 @@ function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payloa
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
-    if (dir) dirs.add(dir);
+    if (!dir) continue;
+    const rawRepo = String(file?.repo || '').trim();
+    const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
+    if (repo && pathIsInsideDirectory(dir, repo)) {
+      dirs.add(repo);
+      for (const ancestor of ancestorPathsUnderRoot(repo, dir)) dirs.add(ancestor);
+    } else {
+      dirs.add(dir);
+    }
   }
   return Array.from(dirs);
 }
@@ -1183,10 +1200,9 @@ function emptyFileExplorerSessionHighlightSets() {
 
 function fileExplorerSyncTargetDirs(plan) {
   const root = normalizeDirectoryPath(plan?.root || '');
-  const dirs = Array.from(new Set((plan?.affectedDirs || [])
+  return Array.from(new Set((plan?.affectedDirs || [])
     .map(path => normalizeDirectoryPath(path))
-    .filter(path => path && root && path !== root && pathIsInsideDirectory(path, root))));
-  return dirs.filter(path => !dirs.some(other => other !== path && pathIsInsideDirectory(other, path)));
+    .filter(path => path && root && pathIsInsideDirectory(path, root))));
 }
 
 function fileExplorerSessionHighlightSets(preferredItem = null) {
@@ -1606,10 +1622,96 @@ async function syncFileExplorerRootToActiveFile(path, options = {}) {
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
+function fileExplorerSyncRenderPaths(plan, rememberedExpandedPaths = []) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  if (!root) return [];
+  return fileExplorerExpandedPathsForRoot(root, [
+    ...rememberedExpandedPaths,
+    ...fileExplorerSyncExpansionPaths(plan),
+  ]).filter(path => !fileExplorerSyncPathSuppressed(path));
+}
+
+function fileExplorerSyncListingDirectories(plan, renderPaths = []) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const directories = new Set(root ? [root] : []);
+  for (const path of renderPaths) {
+    for (const ancestor of ancestorPathsUnderRoot(root, path)) directories.add(ancestor);
+  }
+  return Array.from(directories);
+}
+
+function cachedFileExplorerSyncListings(directories = []) {
+  const entriesByDir = new Map();
+  for (const directory of directories) {
+    const entries = cachedFileExplorerFsResourceValue('list', directory);
+    if (!Array.isArray(entries)) return null;
+    entriesByDir.set(normalizeDirectoryPath(directory), entries);
+  }
+  return entriesByDir;
+}
+
+function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const rootEntries = entriesByDir?.get(root);
+  if (!root || !Array.isArray(rootEntries)) return false;
+  fileExplorerRoot = root;
+  pruneFileExplorerSelectionForRoot(root);
+  fileExplorerManualSelectionActive = false;
+  setFileExplorerPathDisplay(root);
+  renderFileExplorerRootModeControls();
+  fileExplorerExpanded.clear();
+  for (const path of renderPaths) fileExplorerExpanded.add(path);
+  if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
+    const tree = panel.querySelector?.('.file-explorer-tree-panel');
+    if (tree) renderTreeChildren(tree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  }
+  updateFileExplorerCurrentFileHighlight();
+  scheduleShareTopologySnapshot('finder-root');
+  return true;
+}
+
+async function fetchFileExplorerSyncListings(directories = [], options = {}) {
+  const entriesByDir = new Map();
+  const queue = [...directories];
+  const workerCount = Math.min(8, queue.length);
+  await Promise.all(Array.from({length: workerCount}, async () => {
+    while (queue.length) {
+      const directory = queue.shift();
+      const entries = await fetchDirectory(directory, options);
+      if (Array.isArray(entries)) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+    }
+  }));
+  return entriesByDir;
+}
+
+function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
+  requestAnimationFrame(() => {
+    const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
+    const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
+    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true}).then(entriesByDir => {
+      if (
+        fileExplorerSyncPlanSignature(plan) !== signature
+        || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
+        || !fileExplorerSyncPlanTargetStillCurrent(plan)
+      ) return;
+      const changed = directories.some(path => previousSignatures.get(path) !== fileExplorerDirectoryRecord(path)?.signature);
+      if (!changed) return;
+      const currentRenderPaths = fileExplorerSyncRenderPaths(
+        plan,
+        rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root),
+      );
+      const currentDirectories = fileExplorerSyncListingDirectories(plan, currentRenderPaths);
+      const completeEntriesByDir = cachedFileExplorerSyncListings(currentDirectories) || entriesByDir;
+      renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir);
+      updateFileExplorerSessionHighlightRows(plan.session);
+    }).catch(error => console.warn('Finder sync background revalidation failed', error));
+  });
+}
+
 async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
-  const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncState.inFlightSignature === signature) return false;
   if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
   if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
@@ -1626,41 +1728,30 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (targetChanged) {
       rememberFileExplorerSyncExpandedState();
     }
-    if (plan.root !== currentFileExplorerRoot()) {
-      changed = await openFileExplorerAt(plan.root, {
-        preserveExpanded: false,
-        preserveScroll: false,
-        syncSelection: true,
-        user: options.force === true,
-        showPending: options.force === true,
-      });
-      if (!changed) return false;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    } else if (targetChanged) {
-      fileExplorerExpanded.clear();
-      await refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: false});
-      changed = true;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    }
-    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
-    if (rememberedExpandedPaths.length) {
-      changed = await restoreFileExplorerExpandedPaths(rememberedExpandedPaths, plan.root) || changed;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
+    const renderPaths = fileExplorerSyncRenderPaths(plan, rememberedExpandedPaths);
+    const listingDirectories = fileExplorerSyncListingDirectories(plan, renderPaths);
+    const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
+    if (cachedListings) {
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings) || changed;
+      setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+      rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+      markFileExplorerSyncPlanApplied(plan);
+      updateFileExplorerSessionHighlightRows(preferredItem);
+      scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature);
+      return changed;
     }
-    if (expandPaths.length) {
-      const generation = ++fileExplorerSyncState.generation;
-      for (const path of expandPaths) {
-        if (generation !== fileExplorerSyncState.generation) return changed;
-        changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true, user: options.force === true}) || changed;
-        if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-      }
-    }
+    const fetchedListings = await fetchFileExplorerSyncListings(listingDirectories, {force: true, user: options.force === true});
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    rememberFileExplorerSyncExpandedState(plan.session, plan.root);
-    markFileExplorerSyncPlanApplied(plan);
-    updateFileExplorerSessionHighlightRows(preferredItem);
-    return changed;
+    if (fetchedListings.has(normalizeDirectoryPath(plan.root))) {
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings) || changed;
+      setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+      rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+      markFileExplorerSyncPlanApplied(plan);
+      updateFileExplorerSessionHighlightRows(preferredItem);
+      return changed;
+    }
+    return false;
   } finally {
     if (fileExplorerSyncState.inFlightSignature === signature) fileExplorerSyncState.inFlightSignature = '';
   }
