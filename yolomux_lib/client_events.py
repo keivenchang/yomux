@@ -20,6 +20,7 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "background_owner_changed",
     "background_refresh_done",
     "background_refresh_requested",
+    "pricing_catalog_changed",
     "chat_messages_changed",
     "chat_typing_changed",
     "context_changed",

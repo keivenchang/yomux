@@ -55,6 +55,14 @@ SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fas
 YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
 CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
 STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
+# Reconstructible provider metadata belongs in the cache root, rather than in
+# STATE_DIR alongside user activity/history.  Keep this as the one owner of
+# the path so tests and future cache consumers do not grow ad-hoc ~/.cache
+# literals.
+_DEFAULT_XDG_CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+YOLOMUX_CACHE_DIR = Path(os.environ.get("YOLOMUX_CACHE_DIR", str(_DEFAULT_XDG_CACHE_HOME / "yolomux"))).expanduser()
+MODEL_PRICING_CACHE_DIR = YOLOMUX_CACHE_DIR / "model-pricing"
+MODEL_PRICING_DATABASE_PATH = MODEL_PRICING_CACHE_DIR / "pricing.sqlite3"
 YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME") or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
 STATE_PATH = CONFIG_DIR / "state.json"
 EVENT_LOG_PATH = STATE_DIR / "events.jsonl"

@@ -19,6 +19,7 @@ from typing import Any
 STATS_STORE_SCHEMA_VERSION = 2
 STATS_STORE_MAX_JSON_BYTES = 256 * 1024
 STATS_STORE_MAX_ROWS_PER_QUERY = 20_000
+STATS_COST_SUMMARY_MAX_COMPONENTS = 4096
 
 BROWSER_FIELDS = (
     "api_count",
@@ -95,6 +96,11 @@ def empty_bucket(start: int, duration: int) -> dict[str, Any]:
         "server_sequence": 0,
         **{field: 0.0 for field in SERVER_FIELDS},
         "agent_token_rates": {},
+        # Component-level model usage is intentionally retained beside the
+        # compatibility output-token projection.  It remains JSON because the
+        # grouping dimensions evolve with provider billing schemas; statsd is
+        # its single writer and bounds the list before persistence.
+        "cost_summary": {"components": [], "total_micro_usd": 0, "priced_components": 0, "unpriced_components": 0, "lower_bound": False},
         "host_metrics": empty_host_metrics(),
         "clients": {},
         "servers": {},
@@ -117,7 +123,7 @@ def normalize_bucket(value: Any) -> dict[str, Any]:
     result["server_sequence"] = int(_finite(raw.get("server_sequence")))
     for field in SERVER_FIELDS:
         result[field] = _finite(raw.get(field))
-    for mapping_field in ("agent_token_rates", "host_metrics", "clients", "servers"):
+    for mapping_field in ("agent_token_rates", "cost_summary", "host_metrics", "clients", "servers"):
         candidate = raw.get(mapping_field)
         if isinstance(candidate, dict):
             result[mapping_field] = copy.deepcopy(candidate)
@@ -134,6 +140,12 @@ def merge_bucket(target: dict[str, Any], source: dict[str, Any]) -> None:
     for mapping_field in ("agent_token_rates", "host_metrics", "clients", "servers"):
         if not target.get(mapping_field) and source.get(mapping_field):
             target[mapping_field] = copy.deepcopy(source[mapping_field])
+    if source.get("cost_summary"):
+        # The statsd service performs the dimension-aware merge.  This pure
+        # fallback retains data for legacy import callers that only need a
+        # lossless bucket round trip.
+        if not target.get("cost_summary"):
+            target["cost_summary"] = copy.deepcopy(source["cost_summary"])
 
 
 class StatsStore:

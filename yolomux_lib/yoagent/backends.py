@@ -444,7 +444,9 @@ class YoagentBackendsMixin:
         if stream_id:
             self.publish_yoagent_stream_delta(stream_id, "", backend=backend, phase="started")
         if backend == "codex":
-            stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
+            codex_model = str(settings.get("codex_model") or "").strip()
+            codex_effort = str(settings.get("codex_effort") or "").strip() or "unknown"
+            stream_callback = self.yoagent_stream_callback(stream_id, backend, model=codex_model, effort=codex_effort) if stream_id else None
             if require_external_tools:
                 answer, error, captured_session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False, settings=settings, enable_search=True)
                 backend_status = {"transport": "codex-exec", "persistent": False, "external_tools_enabled": True, "web_search_enabled": True}
@@ -478,7 +480,7 @@ class YoagentBackendsMixin:
         else:
             claude_model = str(settings.get("claude_model") or YOAGENT_CLAUDE_SUMMARY_MODEL).strip()
             claude_effort = str(settings.get("claude_effort") or "").strip()
-            stream_callback = self.yoagent_stream_callback(stream_id, backend) if stream_id else None
+            stream_callback = self.yoagent_stream_callback(stream_id, backend, model=claude_model, effort=claude_effort or "unknown") if stream_id else None
             cancel_event = self.yoagent_chat_request_cancel_event(request_id) if request_id else None
             tools = CLAUDE_STREAM_JSON_DEFAULT_TOOLS
             permission_mode = CLAUDE_STREAM_JSON_PERMISSION_MODE

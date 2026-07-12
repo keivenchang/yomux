@@ -469,6 +469,39 @@ def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):
         stop_server(server, thread)
 
 
+def test_pricing_catalog_routes_are_readonly_visible_admin_refresh_and_share_denied(monkeypatch, tmp_path):
+    refreshes = []
+    app = SimpleNamespace(
+        sessions=[],
+        dangerously_yolo=False,
+        pricing_catalog_status_payload=lambda: {"catalog": {"state": "seed-only"}, "refresh": {"status": "idle"}},
+        pricing_catalog_refresh_start=lambda: refreshes.append(True) or {"ok": True, "status": "running"},
+        verify_share_token=lambda token: {"session": "1"} if token == "valid-share-token" else None,
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/api/pricing-catalog", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.OK
+        assert json.loads(body)["catalog"]["state"] == "seed-only"
+
+        status, _headers, body = request(port, "POST", "/api/pricing-catalog/refresh", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["role"] == "readonly"
+        assert refreshes == []
+
+        status, _headers, body = request(port, "POST", "/api/pricing-catalog/refresh", headers=auth_header("keivenc", "random-password"))
+        assert status == HTTPStatus.ACCEPTED
+        assert json.loads(body)["status"] == "running"
+        assert refreshes == [True]
+
+        status, _headers, body = request(port, "GET", "/api/pricing-catalog?token=valid-share-token")
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["user_message"]["key"] == "share.error.pageScope"
+    finally:
+        stop_server(server, thread)
+
+
 def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
     app = SimpleNamespace(
         sessions=["6", "7"],

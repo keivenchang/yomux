@@ -2004,6 +2004,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         )
         env = codex_runtime_env()
         process: subprocess.Popen[bytes] | None = None
+        previous_usage_context = getattr(self, "_codex_summary_usage_context", None)
+        self._codex_summary_usage_context = {
+            "model": str(summary_settings.get("codex_model") or "").strip(),
+            "effort": str(summary_settings.get("codex_effort") or "").strip() or "unknown",
+            "service_tier": str(summary_settings.get("codex_service_tier") or "").strip() or "default",
+        }
         try:
             process = subprocess.Popen(
                 args,
@@ -2025,6 +2031,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             diagnostic = str(exc)
             self.write_sse_json("summary_error", user_message_payload("summary.error.runtime", diagnostic, error=diagnostic))
         finally:
+            if previous_usage_context is None:
+                self.__dict__.pop("_codex_summary_usage_context", None)
+            else:
+                self._codex_summary_usage_context = previous_usage_context
             if process is not None:
                 terminate_process_group(process)
 
@@ -2089,6 +2099,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_sse_json("log", {"text": str(event.get("type") or "").replace(".", " ")})
             return
         if event_kind == "completed":
+            self.record_codex_summary_usage(event)
             return
         if event_kind == "error":
             diagnostic = json.dumps(event, ensure_ascii=False)
@@ -2098,6 +2109,35 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         text = codex_event_text(event)
         if text:
             self.write_sse_json("delta", {"text": text})
+
+    def record_codex_summary_usage(self, event: dict[str, Any]) -> None:
+        """Submit only direct structured completion usage, never summary text."""
+        context = getattr(self, "_codex_summary_usage_context", None)
+        if not isinstance(context, dict):
+            return
+        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+        if not usage:
+            response = event.get("response") if isinstance(event.get("response"), dict) else {}
+            usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        if not usage:
+            return
+        event_identity = str(event.get("id") or event.get("turn_id") or event.get("turnId") or "summary")
+        digest = hashlib.sha256(json.dumps(usage, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+        try:
+            self.server.app.record_owned_usage_atoms(
+                provider="openai",
+                model=str(context.get("model") or ""),
+                usage=usage,
+                source="AI Summary",
+                event_id=f"ai-summary:{event_identity}:{digest}",
+                effort=str(context.get("effort") or "unknown"),
+                service_tier=str(context.get("service_tier") or "default"),
+                endpoint="codex-exec",
+            )
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            # Cost telemetry must not turn a successfully generated summary
+            # into a failed user-visible summary response.
+            return
 
     def follow_transcript_file(self, path: Path) -> None:
         last_ping = time.monotonic()

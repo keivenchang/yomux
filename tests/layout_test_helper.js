@@ -1233,14 +1233,22 @@ globalThis.__layoutTestApi = {
   compactJsDebugGraphBucketsForTest: compactJsDebugGraphBuckets,
   recordApiDebugResponseBytesForGraphForTest: recordApiDebugResponseBytesForGraph,
   debugGraphAgentTokenDisplayBucketsForTest: debugGraphAgentTokenDisplayBuckets,
+  debugGraphDisplayBucketsForTest: debugGraphDisplayBuckets,
   debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
   debugGraphTokenSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphAgentTokenDisplayBuckets(nowMs)),
+  setDebugGraphModelTokenDimensionForTest(value) {
+    const selected = String(value || '');
+    jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected) ? selected : 'output';
+  },
+  debugGraphModelTokenDimensionForTest() { return jsDebugGraphModelTokenDimension; },
+  debugGraphTokenAxisDescriptorForTest: nowMs => debugGraphTokenAxisDescriptor(debugGraphAgentTokenDisplayBuckets(nowMs)),
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
   debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
   debugGraphInnerHtmlForTest: debugGraphInnerHtml,
+  debugGraphCostSummaryForTest: debugGraphCostSummaryForBuckets,
   debugGraphGeometryForTest() { return {...jsDebugGraphGeometry}; },
   debugGraphPlotYForValueForTest: debugGraphPlotYForValue,
   debugGraphGridLineYForTest: debugGraphGridLineY,

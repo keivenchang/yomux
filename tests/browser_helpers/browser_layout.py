@@ -215,7 +215,18 @@ def remove_browser_test_new_document_scripts(driver):
 
 
 def new_chrome_driver(window_size: str | tuple[int, int] | None = None):
-    chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+    # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
+    # the Linux lookup first, then use the canonical executable inside either
+    # common macOS bundle so browser regressions do not silently skip there.
+    chrome = (
+        shutil.which("google-chrome")
+        or shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or next((str(path) for path in (
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ) if path.is_file()), None)
+    )
     if not chrome:
         pytest.skip("Chrome/Chromium is not installed")
     options = Options()
@@ -756,6 +767,7 @@ def _reset_browser_state(request):
     try:
         remove_browser_test_new_document_scripts(driver)
         driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
         driver.delete_all_cookies()
         driver.execute_script("try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}")
         driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)

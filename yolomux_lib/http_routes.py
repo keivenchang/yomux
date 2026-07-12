@@ -360,6 +360,20 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     request.write_json_bytes(encoded)
 
 
+def get_pricing_catalog(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    # This status path is intentionally local/instant: it may initialize an
+    # offline seed cache but never performs a provider request.
+    request.write_json(request.server.app.pricing_catalog_status_payload())
+
+
+def post_pricing_catalog_refresh(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    # The coordinator owns single-flight and starts its daemon worker; an HTTP
+    # handler must never wait for a provider crawl.
+    request.write_json(request.server.app.pricing_catalog_refresh_start(), status=HTTPStatus.ACCEPTED)
+
+
 def post_stats_history(request: Any, parsed: Any, route: Route) -> None:
     del parsed
     payload = _json_body(request, route)
@@ -1321,6 +1335,7 @@ CORE_ROUTES = (
     Route("GET", "/logout", PUBLIC, get_logout, group="core"),
     Route("GET", "/api/ping", "readonly", get_ping, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/stats-sample", "readonly", get_stats_sample, group="core"),
+    Route("GET", "/api/pricing-catalog", "readonly", get_pricing_catalog, group="core"),
     Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
     Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),
     Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
@@ -1349,6 +1364,7 @@ CORE_ROUTES = (
     Route("POST", "/login", PUBLIC, post_login, group="core"),
     Route("POST", "/api/self-update", "admin", post_self_update, group="core"),
     Route("POST", "/api/stats-history", "readonly", post_stats_history, body_limit=128 * 1024, group="core"),
+    Route("POST", "/api/pricing-catalog/refresh", "admin", post_pricing_catalog_refresh, group="core"),
     Route("POST", "/api/background/claim", "admin", post_background_claim, group="core"),
     Route("POST", "/api/ensure-session", "admin", post_ensure_session, group="core"),
     Route("POST", "/api/create-session", "admin", post_create_session, group="core"),

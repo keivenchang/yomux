@@ -383,6 +383,216 @@ def test_transcript_generated_token_events_preserve_codex_counters_and_claude_su
     assert len({event.source for event in claude_events}) == 2
 
 
+def test_normalized_codex_usage_atoms_subtract_cached_input_and_keep_effort_with_following_usage(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("\n".join(json.dumps(record) for record in [
+        {"type": "session_meta", "payload": {"id": "root"}},
+        {"timestamp": 1, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "low"}},
+        {"timestamp": 2, "payload": {"info": {"total_token_usage": {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10, "reasoning_output_tokens": 4}}}},
+        {"timestamp": 3, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high"}},
+        {"timestamp": 4, "payload": {"info": {"total_token_usage": {"input_tokens": 150, "cached_input_tokens": 70, "output_tokens": 25, "reasoning_output_tokens": 9}}}},
+    ]) + "\n", encoding="utf-8")
+
+    atoms = session_files.transcript_usage_atoms(transcript, "codex")
+    by_time = {
+        timestamp: {(atom.direction, atom.cache_role): atom for atom in atoms if atom.timestamp == timestamp}
+        for timestamp in {atom.timestamp for atom in atoms}
+    }
+
+    assert {(key, atom.quantity) for key, atom in by_time[2.0].items()} == {
+        (("input", "none"), 60.0), (("input", "read"), 40.0), (("output", "none"), 10.0),
+    }
+    assert {(key, atom.quantity) for key, atom in by_time[4.0].items()} == {
+        (("input", "none"), 20.0), (("input", "read"), 30.0), (("output", "none"), 15.0),
+    }
+    assert {atom.effort for atom in by_time[2.0].values()} == {"low"}
+    assert {atom.effort for atom in by_time[4.0].values()} == {"high"}
+    assert sum(atom.quantity for atom in atoms if atom.direction == "output") == 25.0
+
+
+def test_codex_usage_atoms_keep_explicit_pricing_profile_and_service_tier(tmp_path):
+    transcript = tmp_path / "codex-pricing-context.jsonl"
+    transcript.write_text("\n".join(json.dumps(item) for item in [
+        {"timestamp": 1, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high", "pricing_profile": "batch", "service_tier": "flex"}},
+        {"timestamp": 2, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
+    ]) + "\n", encoding="utf-8")
+
+    atoms = session_files.transcript_usage_atoms(transcript, "codex")
+
+    assert {atom.pricing_profile for atom in atoms} == {"batch"}
+    assert {atom.service_tier for atom in atoms} == {"flex"}
+
+
+def test_usage_component_delta_resets_all_reported_components_and_leaves_missing_unknown():
+    previous = {
+        ("input", "text", "none", "tokens"): 100.0,
+        ("input", "text", "read", "tokens"): 40.0,
+        ("output", "text", "none", "tokens"): 20.0,
+    }
+    current = {
+        ("input", "text", "none", "tokens"): 9.0,
+        ("input", "text", "read", "tokens"): None,
+        ("output", "text", "none", "tokens"): 4.0,
+    }
+
+    # A single counter rollback is a provider rollover, not a negative delta;
+    # both reported classes restart together and an omitted class stays absent.
+    assert session_files.usage_component_delta(current, previous) == {
+        ("input", "text", "none", "tokens"): 9.0,
+        ("output", "text", "none", "tokens"): 4.0,
+    }
+
+
+def test_normalized_claude_usage_atoms_dedupe_components_and_preserve_cache_write_duration(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+
+    def record(timestamp, input_tokens, output_tokens, write_5m, write_1h):
+        return {
+            "timestamp": timestamp,
+            "type": "assistant",
+            "message": {
+                "id": "message-1",
+                "model": "claude-opus-4-8",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": write_5m,
+                    "cache_creation_input_tokens_1h": write_1h,
+                    "output_tokens": output_tokens,
+                },
+            },
+        }
+
+    transcript.write_text("\n".join(json.dumps(item) for item in [
+        record(1, 10, 5, 30, 40), record(2, 12, 7, 35, 44),
+    ]) + "\n", encoding="utf-8")
+    atoms = session_files.transcript_usage_atoms(transcript, "claude")
+    quantities = {}
+    for atom in atoms:
+        key = (atom.direction, atom.cache_role)
+        quantities[key] = quantities.get(key, 0.0) + atom.quantity
+
+    assert quantities == {
+        ("input", "none"): 12.0,
+        ("input", "read"): 20.0,
+        ("input", "write_5m"): 35.0,
+        ("input", "write_1h"): 44.0,
+        ("output", "none"): 7.0,
+    }
+
+
+def test_claude_usage_atoms_prefer_nested_cache_creation_duration_split(tmp_path):
+    transcript = tmp_path / "claude-nested-cache.jsonl"
+    transcript.write_text(json.dumps({
+        "timestamp": 1,
+        "type": "assistant",
+        "message": {
+            "id": "message-1",
+            "model": "claude-opus-4-8",
+            "usage": {
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 999,
+                "cache_creation": {"ephemeral_5m_input_tokens": 30, "ephemeral_1h_input_tokens": 40},
+                "output_tokens": 5,
+            },
+        },
+    }) + "\n", encoding="utf-8")
+
+    atoms = session_files.transcript_usage_atoms(transcript, "claude")
+    quantities = {(atom.direction, atom.cache_role): atom.quantity for atom in atoms}
+
+    assert quantities[("input", "write_5m")] == 30
+    assert quantities[("input", "write_1h")] == 40
+    assert sum(atom.quantity for atom in atoms if atom.cache_role.startswith("write")) == 70
+    assert {atom.model for atom in atoms} == {"claude-opus-4-8"}
+
+
+def test_normalized_usage_atoms_keep_codex_subagents_structurally_separate(tmp_path, monkeypatch):
+    parent = tmp_path / "parent.jsonl"
+    child = tmp_path / "child.jsonl"
+
+    def rollout(thread_id, parent_thread_id, model, effort, output):
+        meta = {"id": thread_id}
+        if parent_thread_id:
+            meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+        return "\n".join(json.dumps(item) for item in [
+            {"type": "session_meta", "payload": meta},
+            {"timestamp": 1, "type": "turn_context", "payload": {"model": model, "effort": effort}},
+            {"timestamp": 2, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": output}}}},
+        ]) + "\n"
+
+    parent.write_text(rollout("parent", "", "gpt-parent", "med", 5), encoding="utf-8")
+    child.write_text(rollout("child", "parent", "gpt-child", "high", 7), encoding="utf-8")
+    monkeypatch.setattr(session_files, "codex_transcript_family_paths", lambda _path: [parent, child])
+
+    atoms = session_files.transcript_usage_atoms(parent, "codex")
+    output_atoms = [atom for atom in atoms if atom.direction == "output"]
+
+    assert {(atom.model, atom.root_thread_id, atom.agent_thread_id, atom.parent_thread_id, atom.depth, atom.quantity) for atom in output_atoms} == {
+        ("gpt-parent", "parent", "parent", "", 0, 5.0),
+        ("gpt-child", "parent", "child", "parent", 1, 7.0),
+    }
+
+
+def test_normalized_usage_atoms_keep_parent_child_grandchild_model_efforts_separate(tmp_path, monkeypatch):
+    parent, child, grandchild = (tmp_path / name for name in ("parent.jsonl", "child.jsonl", "grandchild.jsonl"))
+
+    def rollout(thread_id, parent_id, effort, output):
+        meta = {"id": thread_id}
+        if parent_id:
+            meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_id}}}
+        return "\n".join(json.dumps(row) for row in [
+            {"type": "session_meta", "payload": meta},
+            {"timestamp": 1, "type": "turn_context", "payload": {"model": "gpt-shared", "effort": effort}},
+            {"timestamp": 2, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": output}}}},
+        ]) + "\n"
+
+    parent.write_text(rollout("parent", "", "low", 3), encoding="utf-8")
+    child.write_text(rollout("child", "parent", "high", 5), encoding="utf-8")
+    grandchild.write_text(rollout("grandchild", "child", "xhigh", 7), encoding="utf-8")
+    monkeypatch.setattr(session_files, "codex_transcript_family_paths", lambda _path: [parent, child, grandchild])
+
+    output = [atom for atom in session_files.transcript_usage_atoms(parent, "codex") if atom.direction == "output"]
+    assert {(atom.model, atom.effort, atom.root_thread_id, atom.agent_thread_id, atom.parent_thread_id, atom.depth, atom.quantity) for atom in output} == {
+        ("gpt-shared", "low", "parent", "parent", "", 0, 3.0),
+        ("gpt-shared", "high", "parent", "child", "parent", 1, 5.0),
+        ("gpt-shared", "xhigh", "parent", "grandchild", "child", 2, 7.0),
+    }
+
+
+def test_direct_image_usage_atoms_require_a_correlated_request_model_and_do_not_add_total_tokens():
+    response = {
+        "id": "img-response",
+        "usage": {
+            "total_tokens": 100,
+            "input_tokens": 50,
+            "output_tokens": 50,
+            "input_tokens_details": {"text_tokens": 10, "image_tokens": 40},
+        },
+    }
+    atoms = session_files.direct_image_usage_atoms(
+        request={"model": "gpt-image-2"}, response=response, timestamp=100, source="direct-image", request_id="request-1", root_thread_id="root", agent_thread_id="child", parent_thread_id="root", depth=1,
+    )
+
+    assert {(atom.direction, atom.modality, atom.quantity) for atom in atoms} == {
+        ("input", "text", 10.0), ("input", "image", 40.0), ("output", "image", 50.0),
+    }
+    assert all(atom.model == "gpt-image-2" for atom in atoms)
+    assert {(atom.root_thread_id, atom.agent_thread_id, atom.parent_thread_id, atom.depth) for atom in atoms} == {("root", "child", "root", 1)}
+    assert session_files.direct_image_usage_atoms(request={}, response=response, timestamp=100, source="direct-image") == []
+
+
+def test_opaque_responses_image_tool_is_visible_but_has_no_invented_model_or_token_usage():
+    atoms = session_files.opaque_responses_image_tool_atoms(timestamp=100, source="responses", call_id="call-1", root_thread_id="root", agent_thread_id="child")
+
+    assert len(atoms) == 1
+    atom = atoms[0]
+    assert (atom.provider, atom.model, atom.modality, atom.unit, atom.quantity) == ("openai", "unknown", "image", "requests", 1)
+    assert atom.tool_name == "image_generation_call"
+    assert atom.telemetry_complete is False
+    assert session_files.opaque_responses_image_tool_atoms(timestamp=100, source="responses") == []
+
+
 def test_codex_transcript_scan_uses_incremental_append_cache(tmp_path, monkeypatch):
     session_files._TRANSCRIPT_SCAN_CACHE.clear()
     transcript = tmp_path / "rollout.jsonl"

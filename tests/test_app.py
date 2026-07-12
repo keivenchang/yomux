@@ -52,6 +52,69 @@ class StatsRoleOwner:
         self.follower_stale_reads.append(role)
 
 
+def test_record_owned_direct_image_usage_preserves_structured_image_token_classes():
+    submitted = []
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+
+    assert webapp.record_owned_usage_atoms(
+        provider="openai",
+        model="gpt-image-2",
+        usage={"input_tokens_details": {"text_tokens": 11, "image_tokens": 22}, "output_tokens": 33, "total_tokens": 66},
+        source="Image tool",
+        event_id="image-request-1",
+        endpoint="images",
+        thread_id="root-thread",
+        timestamp=1_000,
+    ) is True
+
+    atoms = submitted[0]["usage_atoms"]
+    assert {(atom["direction"], atom["modality"], atom["quantity"]) for atom in atoms} == {
+        ("input", "text", 11.0), ("input", "image", 22.0), ("output", "image", 33.0),
+    }
+    assert all(atom["model"] == "gpt-image-2" and atom["endpoint"] == "images" and atom["root_thread_id"] == "root-thread" for atom in atoms)
+
+
+def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_usage():
+    submitted = []
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+
+    # A partial image stream result carries no completed provider usage.  It
+    # cannot be priced from image bytes, a provisional total, or prose.
+    assert webapp.record_owned_usage_atoms(
+        provider="openai", model="gpt-image-2", usage={"partial_images": [{"id": "partial-1"}]},
+        source="Image stream", event_id="request-2", endpoint="images", timestamp=1_000,
+    ) is False
+    assert submitted == []
+    assert webapp.record_owned_usage_atoms(
+        provider="openai", model="gpt-image-2",
+        usage={"input_tokens_details": {"text_tokens": 3, "image_tokens": 7}, "output_tokens": 11},
+        source="Image stream", event_id="request-2", endpoint="images", timestamp=1_001,
+    ) is True
+    assert {(atom["direction"], atom["modality"], atom["quantity"]) for atom in submitted[0]["usage_atoms"]} == {
+        ("input", "text", 3.0), ("input", "image", 7.0), ("output", "image", 11.0),
+    }
+
+
+def test_record_owned_responses_image_tool_keeps_mainline_and_opaque_child_separate():
+    submitted = []
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+
+    assert webapp.record_owned_usage_atoms(
+        provider="openai", model="gpt-5.6", usage={"input_tokens": 10, "output_tokens": 5}, source="Responses",
+        event_id="response-1", endpoint="responses", opaque_image_tool=True, timestamp=1_000,
+    ) is True
+
+    atoms = submitted[0]["usage_atoms"]
+    assert {(atom["model"], atom["modality"], atom["unit"], atom["quantity"]) for atom in atoms} == {
+        ("gpt-5.6", "text", "tokens", 10.0), ("gpt-5.6", "text", "tokens", 5.0), ("unknown", "image", "requests", 1.0),
+    }
+    opaque = next(atom for atom in atoms if atom["model"] == "unknown")
+    assert opaque["tool_name"] == "image_generation_call" and opaque["telemetry_complete"] is False
+
+
 def test_state_services_own_independent_cache_and_watcher_records_without_app():
     session_files = state_services.SessionFilesService()
     first, first_owner = session_files.claim_work(("session", "1"), 10)
@@ -1462,9 +1525,16 @@ def test_statsd_agent_token_delta_is_claimed_once_across_owner_handoff(monkeypat
         first_owner.control_server.stop()
         replacement_owner.control_server.stop()
 
-    assert "_agent_token_records" not in baseline
-    assert sum(item["tokens"] for record in claimed["_agent_token_records"] for item in record["agent_token_rates"]) == pytest.approx(120.0)
-    assert "_agent_token_records" not in duplicate
+    baseline_records = baseline.get("_agent_token_records", [])
+    assert baseline_records and all("agent_token_rates" not in record for record in baseline_records)
+    assert all(record.get("usage_atoms") for record in baseline_records)
+    assert sum(
+        item["tokens"]
+        for record in claimed["_agent_token_records"]
+        for item in record.get("agent_token_rates", [])
+    ) == pytest.approx(120.0)
+    duplicate_records = duplicate.get("_agent_token_records", [])
+    assert duplicate_records and all("agent_token_rates" not in record for record in duplicate_records)
     assert history["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
     assert sum(
         item["tokens"]
@@ -1565,6 +1635,56 @@ def test_statsd_recovery_waits_for_every_active_agent_transcript(tmp_path):
         rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
         assert webapp.statsd_recover_agent_token_history(rows, 1_001.0) is True
         assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
+    finally:
+        webapp.control_server.stop()
+
+
+def test_statsd_usage_atom_migration_uses_only_a_complete_agent_roster(tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    calls = []
+    webapp.stats_client = SimpleNamespace(
+        migrate_usage_atom_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True}
+    )
+    rows = [
+        {"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")},
+        {"session": "1", "kind": "claude", "window_index": 1, "window_label": "1:claude", "transcript": ""},
+    ]
+    try:
+        assert webapp.statsd_migrate_usage_atom_history(rows, 1_000.0) is False
+        assert calls == []
+        rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
+        assert webapp.statsd_migrate_usage_atom_history(rows, 1_001.0) is True
+        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
+    finally:
+        webapp.control_server.stop()
+
+
+def test_statsd_sampler_not_api_path_triggers_usage_atom_migration(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    rows = [{"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")}]
+    migrated = []
+    try:
+        monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({"time": 1_000.0, "pid": 1, "started_at": 1.0, "cpu_percent": 0.0, "system_cpu_percent": 0.0}, True))
+        monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+        monkeypatch.setattr(webapp, "stats_agent_token_sampling_due", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(
+            webapp,
+            "stats_agent_activity_record",
+            lambda *_args, **kwargs: {"time": 1_000.0, **({"_usage_atom_migration_rows": rows} if kwargs.get("include_token_rates") else {})},
+        )
+        monkeypatch.setattr(webapp, "record_performance_sample", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {})
+        webapp.stats_client = SimpleNamespace(
+            merge_server_records=lambda *_args, **_kwargs: {"ok": True},
+            migrate_usage_atom_history_from_rows=lambda records, now: migrated.append((records, now)) or {"ok": True},
+        )
+
+        webapp.record_stats_global_sample(trigger="api", defer_token_scan=True)
+        assert migrated == []
+        webapp.record_stats_global_sample(trigger="statsd")
+
+        assert {row["key"] for row in migrated[0][0]} == {"1|0|codex"}
+        assert migrated[0][1] == 1_000.0
     finally:
         webapp.control_server.stop()
 

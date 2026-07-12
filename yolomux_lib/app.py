@@ -110,7 +110,10 @@ from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
 from .search_indexer import SearchIndexerClient
 from .jobd import JobClient
+from .pricing_catalog import PricingCatalog
+from .pricing_catalog import PricingRefreshCoordinator
 from .statsd import StatsClient
+from .statsd import normalized_usage_atom
 from .drop_actions import run_drop_action
 from .events import EventLog
 from .events import RunHistoryStore
@@ -785,6 +788,7 @@ BACKGROUND_CLIENT_EVENT_POLICIES: dict[str, dict[str, str]] = {
     "chat_messages_changed": {"truth": "chat database", "delivery": "push"},
     "chat_typing_changed": {"truth": "chat database", "delivery": "push"},
     "settings_changed": {"truth": "settings file", "delivery": "push"},
+    "pricing_catalog_changed": {"truth": "pricing catalog", "delivery": "push"},
     "yoagent_conversation_changed": {"truth": "yoagent conversation", "delivery": "push"},
 }
 BACKGROUND_CLIENT_EVENT_TYPES = frozenset(
@@ -1620,6 +1624,18 @@ class TmuxWebtermApp:
         self.background_refresh_event_log_lock = threading.Lock()
         self.background_refresh_event_log_records: dict[tuple[str, str], BackgroundRefreshEventLogRecord] = {}
         self.client_events = ClientEventBroker()
+        # Catalog startup is offline-only; the coordinator performs provider
+        # fetches exclusively in its explicit background Refresh worker.
+        self.pricing_catalog = PricingCatalog()
+        self.pricing_refresh_coordinator = PricingRefreshCoordinator(
+            self.pricing_catalog,
+            publish=lambda event_type, payload: self.publish_background_client_event(
+                event_type,
+                payload,
+                trigger="pricing-refresh",
+                cache="ready",
+            ),
+        )
         self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
         self.watch_root_index = SharedWatchRootIndex(WATCH_INDEX_PATH, owner_id=self.watch_root_owner_id)
         self.tmux_theme_color = ""
@@ -2040,6 +2056,21 @@ class TmuxWebtermApp:
             return False
         return bool(response.get("changed"))
 
+    def statsd_migrate_usage_atom_history(self, rows: list[dict[str, Any]], now: float) -> bool:
+        """Give the background statsd owner a complete transcript roster once.
+
+        This is deliberately reached only from the elected sampler's token
+        scan.  Browser/API history reads never parse transcripts or initiate a
+        retained-history migration.
+        """
+        token_rows = self.stats_agent_token_rows(rows)
+        expected_keys = {self.stats_agent_token_key(row, index) for index, row in enumerate(rows)}
+        migrated_keys = {str(row.get("key") or "") for row in token_rows}
+        if not expected_keys or migrated_keys != expected_keys:
+            return False
+        response = self.stats_client.migrate_usage_atom_history_from_rows(token_rows, now=now)
+        return bool(response.get("ok"))
+
     def stats_agent_token_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         token_rows: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
@@ -2138,6 +2169,11 @@ class TmuxWebtermApp:
         }
         if agent_token_records:
             record["_agent_token_records"] = agent_token_records
+        if include_token_rates:
+            # Preserve the full roster (including a temporarily missing
+            # transcript) so the one-time migration cannot mark itself done
+            # from a partial agent discovery snapshot.
+            record["_usage_atom_migration_rows"] = rows
         return record
 
     def current_stats_sample(self) -> tuple[dict[str, Any], bool]:
@@ -2196,6 +2232,7 @@ class TmuxWebtermApp:
         agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample and owns_expensive_stats else None
         phase_ms["agent_activity_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         agent_token_records = list(agent_record.pop("_agent_token_records", [])) if isinstance(agent_record, dict) else []
+        usage_atom_migration_rows = list(agent_record.pop("_usage_atom_migration_rows", [])) if isinstance(agent_record, dict) else []
         now = float(sample.get("time") or time.time())
         phase_started = time.perf_counter()
         shared_written = False
@@ -2225,6 +2262,8 @@ class TmuxWebtermApp:
             if not merged.get("ok"):
                 raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
             shared_written = True
+        if usage_atom_migration_rows:
+            self.statsd_migrate_usage_atom_history(usage_atom_migration_rows, now)
         phase_ms["history_merge_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         self.record_performance_sample(
             BACKGROUND_ROLE_STATS_SAMPLER,
@@ -3730,6 +3769,17 @@ class TmuxWebtermApp:
 
     def summary_settings(self) -> dict[str, Any]:
         return normalized_summary_settings(self.settings_payload().get("settings"))
+
+    def pricing_catalog_status_payload(self) -> dict[str, Any]:
+        """Return local catalog state; this never starts a provider fetch."""
+        return {
+            "catalog": self.pricing_catalog.public_payload(),
+            "refresh": self.pricing_refresh_coordinator.status(),
+        }
+
+    def pricing_catalog_refresh_start(self) -> dict[str, Any]:
+        """Start the explicit bounded Refresh worker and return immediately."""
+        return self.pricing_refresh_coordinator.start()
 
     def publish_client_event(
         self,
@@ -7485,8 +7535,116 @@ class TmuxWebtermApp:
     def sanitized_yoagent_stream_items(self, value: Any) -> list[dict[str, Any]]:
         return sanitized_yoagent_stream_items(value)
 
-    def yoagent_stream_callback(self, stream_id: str, backend: str) -> Any:
-        return self.yoagent_streams.callback_for(stream_id, backend)
+    def record_owned_usage_atoms(
+        self,
+        *,
+        provider: str,
+        model: str,
+        usage: Any,
+        source: str,
+        event_id: str,
+        effort: str = "unknown",
+        pricing_profile: str = "default",
+        service_tier: str = "default",
+        thread_id: str = "",
+        endpoint: str = "",
+        opaque_image_tool: bool = False,
+        timestamp: float | None = None,
+    ) -> bool:
+        """Submit structured YOLOmux-owned usage without reading rendered text."""
+        provider_name = str(provider or "").strip().lower()
+        if provider_name == "openai":
+            components = session_files.codex_usage_components(usage)
+        elif provider_name == "anthropic":
+            components = session_files.claude_record_usage(usage)
+        else:
+            return False
+        recorded_at = float(time.time() if timestamp is None else timestamp)
+        if not math.isfinite(recorded_at) or recorded_at <= 0:
+            recorded_at = time.time()
+        clean_source = str(source or "YOLOmux").strip() or "YOLOmux"
+        clean_thread = str(thread_id or "").strip()
+        if provider_name == "openai" and str(endpoint or "").strip().lower() == "images":
+            # Direct Images API usage identifies the exact image model in the
+            # structured request/configuration, while its response supplies
+            # text/image input and image output counters.  Do not route a
+            # Responses image-generation tool through this path: it may not
+            # expose the child model or usage envelope.
+            atoms = session_files.direct_image_usage_atoms(
+                request={"model": str(model or "").strip()},
+                response={"usage": usage, "id": str(event_id or "").strip()},
+                timestamp=recorded_at,
+                source=clean_source,
+                request_id=str(event_id or "").strip(),
+                root_thread_id=clean_thread or clean_source,
+                agent_thread_id=clean_thread or clean_source,
+            )
+        else:
+            atoms = session_files.usage_component_atoms(
+                source=clean_source,
+                timestamp=recorded_at,
+                event_id=str(event_id or "").strip(),
+                provider=provider_name,
+                model=str(model or "").strip(),
+                model_evidence="configured invocation model" if str(model or "").strip() else "unknown",
+                effort=effort,
+                pricing_profile=pricing_profile,
+                service_tier=service_tier,
+                components=components,
+                root_thread_id=clean_thread or clean_source,
+                agent_thread_id=clean_thread or clean_source,
+                endpoint=endpoint,
+                telemetry_complete=session_files.usage_telemetry_complete(components),
+            )
+        if opaque_image_tool:
+            atoms.extend(session_files.opaque_responses_image_tool_atoms(
+                timestamp=recorded_at,
+                source=clean_source,
+                call_id=str(event_id or "").strip(),
+                root_thread_id=clean_thread or clean_source,
+                agent_thread_id=clean_thread or clean_source,
+            ))
+        records = [normalized_usage_atom(atom) for atom in atoms]
+        records = [atom for atom in records if atom is not None]
+        if not records:
+            return False
+        try:
+            response = self.stats_client.merge_server_records([{"time": recorded_at, "usage_atoms": records}], now=recorded_at)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return bool(response.get("ok"))
+
+    def yoagent_stream_callback(self, stream_id: str, backend: str, *, model: str = "", effort: str = "unknown") -> Any:
+        callback = self.yoagent_streams.callback_for(stream_id, backend)
+        provider = "openai" if backend == "codex" else "anthropic" if backend == "claude" else ""
+
+        def record(event: dict[str, Any]) -> None:
+            callback(event)
+            if str(event.get("kind") or event.get("event") or "") != "usage" or not provider:
+                return
+            metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+            usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
+            model_usage = metadata.get("model_usage") if isinstance(metadata.get("model_usage"), dict) else {}
+            thread_id = str(event.get("thread_id") or "")
+            if usage:
+                digest = hashlib.sha256(json.dumps(usage, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+                self.record_owned_usage_atoms(
+                    provider=provider, model=model, usage=usage, source="YO!agent", event_id=f"yoagent:{stream_id}:{thread_id}:{digest}",
+                    effort=effort, thread_id=thread_id, endpoint="yoagent",
+                )
+            # Some clients emit a top-level aggregate alongside per-model
+            # detail.  The aggregate is authoritative for this turn; using
+            # both would bill the same invocation twice.
+            for usage_model, model_usage_value in (() if usage else model_usage.items()):
+                if not isinstance(model_usage_value, dict):
+                    continue
+                digest = hashlib.sha256(json.dumps(model_usage_value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+                self.record_owned_usage_atoms(
+                    provider=provider, model=str(usage_model or model), usage=model_usage_value, source="YO!agent",
+                    event_id=f"yoagent:{stream_id}:{thread_id}:{usage_model}:{digest}", effort=effort, thread_id=thread_id, endpoint="yoagent",
+                )
+
+        return record
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         previous_retention_days = settings_payload().get("settings", {}).get("chat", {}).get("retention_days", 7)

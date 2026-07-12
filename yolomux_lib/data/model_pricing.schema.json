@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "catalog_revision", "models"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "catalog_revision": {"type": "integer", "minimum": 1},
+    "models": {"type": "array", "items": {"type": "object", "required": ["provider", "model", "aliases", "rates"]}}
+  }
+}

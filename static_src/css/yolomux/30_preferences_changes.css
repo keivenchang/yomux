@@ -221,6 +221,14 @@
   color: inherit;
   font: inherit;
 }
+.js-debug-model-token-dimension {
+  flex: 0 1 auto;
+  justify-self: auto;
+}
+.js-debug-model-token-dimension select {
+  width: auto;
+  max-width: min(9rem, 32vw);
+}
 .js-debug-chart-layout-control,
 .js-debug-chart-toggle-control {
   display: inline-flex;
@@ -402,6 +410,7 @@
   gap: var(--space-10) 14px;
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
 }
 .js-debug-chart-grid[data-js-debug-chart-layout="1"] { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); --js-debug-chart-min-height: 150px; }
 .js-debug-chart-grid[data-js-debug-chart-layout="2"] { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); --js-debug-chart-min-height: 210px; }
@@ -481,6 +490,205 @@
 }
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-chart-body {
   grid-template-rows: minmax(72px, 1fr) minmax(20px, auto);
+}
+.js-debug-cost-summary {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  align-content: start;
+  min-block-size: 0;
+}
+.js-debug-cost-summary .js-debug-chart-head {
+  gap: var(--space-4);
+}
+.js-debug-cost-details {
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.js-debug-cost-details:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-cost-range,
+.js-debug-cost-models {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-compact {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-5);
+  margin: var(--space-6) 0 var(--space-4);
+}
+.js-debug-cost-compact div {
+  min-width: 0;
+}
+.js-debug-cost-compact dt {
+  overflow: hidden;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-compact dd {
+  overflow: hidden;
+  margin: var(--space-2) 0 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1.15 var(--mono-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-popover {
+  width: min(42rem, calc(100vw - (2 * var(--space-12))));
+  max-height: min(70vh, 42rem);
+  overflow: auto;
+  container-type: inline-size;
+}
+.js-debug-cost-popover-title {
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.js-debug-cost-details-section + .js-debug-cost-details-section {
+  margin-top: var(--space-8);
+}
+.js-debug-cost-details-section h4 {
+  margin: 0 0 var(--space-4);
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-cost-details-section table {
+  width: 100%;
+  border-collapse: collapse;
+  font: var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-cost-details-section th,
+.js-debug-cost-details-section td {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  text-align: start;
+}
+.js-debug-cost-details-section td {
+  font-family: var(--mono-font);
+  text-align: end;
+}
+.js-debug-cost-all-models th,
+.js-debug-cost-all-models td {
+  border-top-width: 2px;
+  color: var(--text);
+  font-weight: 700;
+}
+.js-debug-cost-catalog {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-5);
+  margin: var(--space-6) 0;
+}
+.js-debug-cost-catalog div {
+  min-width: 0;
+}
+.js-debug-cost-catalog dt {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+}
+.js-debug-cost-catalog dd {
+  overflow: hidden;
+  margin: var(--space-2) 0 0;
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-source-tree {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.js-debug-cost-source-tree li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  font: var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-cost-source-tree li[aria-level="2"] {
+  margin-inline-start: var(--space-8);
+}
+.js-debug-cost-source-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-source-subtotals {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-source-tree li:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+@container (max-width: 22rem) {
+  .js-debug-cost-summary .js-debug-chart-heading-row {
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+  .js-debug-cost-summary .js-debug-chart-title {
+    flex-basis: 100%;
+  }
+  .js-debug-cost-compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .js-debug-cost-catalog {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container (max-width: 34rem) {
+  .js-debug-cost-details-section table,
+  .js-debug-cost-details-section tbody,
+  .js-debug-cost-details-section tr,
+  .js-debug-cost-details-section th,
+  .js-debug-cost-details-section td {
+    display: block;
+  }
+  .js-debug-cost-details-section thead {
+    position: absolute;
+    overflow: hidden;
+    width: 1px;
+    height: 1px;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .js-debug-cost-details-section tr {
+    padding: var(--space-4) 0;
+    border-top: 1px solid var(--line);
+  }
+  .js-debug-cost-details-section th,
+  .js-debug-cost-details-section td {
+    border: 0;
+  }
+  .js-debug-cost-details-section td {
+    display: grid;
+    grid-template-columns: minmax(7rem, 42%) minmax(0, 1fr);
+    gap: var(--space-4);
+    text-align: end;
+  }
+  .js-debug-cost-details-section td::before {
+    content: attr(data-js-debug-cost-cell-label);
+    color: var(--muted);
+    font-family: var(--ui-font);
+    font-weight: 600;
+    text-align: start;
+  }
 }
 .js-debug-chart-unavailable {
   display: grid;

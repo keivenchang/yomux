@@ -341,7 +341,12 @@ def normalize_codex_app_server_message(message: dict[str, Any], *, backend: str 
         text = str(item.get("aggregatedOutput") or item.get("text") or "")
         return [stream_event(TOOL_CALL_FINISHED, text=text, tool_name=_codex_tool_name(item), item_id=str(item.get("id") or common["item_id"]), **{k: v for k, v in common.items() if k != "item_id"})]
     if method == "turn/completed":
-        return [stream_event(TURN_DONE, **common)]
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        usage = params.get("usage") if isinstance(params.get("usage"), dict) else turn.get("usage") if isinstance(turn.get("usage"), dict) else {}
+        events = [stream_event(TURN_DONE, **common)]
+        if usage:
+            events.insert(0, stream_event(USAGE, text=_json_compact(usage), metadata={"usage": usage}, **common))
+        return events
     if method == "thread/status/changed":
         status = params.get("status") if isinstance(params.get("status"), dict) else {}
         if status.get("type") == "idle":

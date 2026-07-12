@@ -98,6 +98,41 @@ class TranscriptUsageEvent:
 
 
 @dataclass(frozen=True)
+class TranscriptUsageAtom:
+    """One provider-reported billable usage component.
+
+    ``TranscriptUsageEvent`` is deliberately retained as the compatibility
+    projection consumed by the existing output-token chart.  New consumers use
+    this lossless-enough, component-level record instead: provider fields are
+    normalized before they reach any cost calculation, and unknown fields stay
+    unknown rather than being converted to a zero-valued component.
+    """
+
+    source: str
+    timestamp: float
+    event_id: str
+    provider: str
+    model: str
+    model_evidence: str
+    effort: str
+    direction: str
+    modality: str
+    cache_role: str
+    unit: str
+    quantity: float
+    root_thread_id: str = ""
+    agent_thread_id: str = ""
+    parent_thread_id: str = ""
+    depth: int = 0
+    endpoint: str = ""
+    tool_name: str = ""
+    call_id: str = ""
+    pricing_profile: str = "default"
+    service_tier: str = "default"
+    telemetry_complete: bool = False
+
+
+@dataclass(frozen=True)
 class HistoricalCodexTranscriptRecord:
     """One bounded, raw-parsed candidate used by historical cwd lookups."""
 
@@ -833,6 +868,162 @@ def codex_record_usage_generated_tokens(record: Any) -> tuple[float | None, floa
     return None, last_generated if last_generated else None
 
 
+def usage_number(usage: Any, *names: str) -> float | None:
+    """Return a reported non-negative usage field without manufacturing zeroes.
+
+    API payloads use both snake_case and camelCase.  A present zero is useful
+    telemetry, whereas an absent field means the collector cannot claim that
+    component was free, so the two must remain distinguishable.
+    """
+
+    if not isinstance(usage, dict):
+        return None
+    for name in names:
+        if name not in usage:
+            continue
+        try:
+            value = float(usage[name])
+        except (TypeError, ValueError):
+            continue
+        if value >= 0 and value == value and value != float("inf"):
+            return value
+    return None
+
+
+def transcript_effort(value: Any) -> str:
+    """Keep an explicit provider effort label; never infer it from token use."""
+
+    text = str(value or "").strip().lower()
+    return text[:64] if text else "unknown"
+
+
+def transcript_pricing_context(value: Any) -> str:
+    """Retain an explicit bounded billing selector; unknown defaults safely."""
+
+    text = str(value or "").strip().lower()
+    return text[:64] if text else "default"
+
+
+def usage_component_atoms(
+    *,
+    source: str,
+    timestamp: float,
+    event_id: str,
+    provider: str,
+    model: str,
+    model_evidence: str,
+    effort: str,
+    components: dict[tuple[str, str, str, str], float | None],
+    root_thread_id: str = "",
+    agent_thread_id: str = "",
+    parent_thread_id: str = "",
+    depth: int = 0,
+    endpoint: str = "",
+    tool_name: str = "",
+    call_id: str = "",
+    pricing_profile: str = "default",
+    service_tier: str = "default",
+    telemetry_complete: bool = False,
+) -> list[TranscriptUsageAtom]:
+    """Materialize only quantities explicitly reported by a provider."""
+
+    atoms: list[TranscriptUsageAtom] = []
+    for (direction, modality, cache_role, unit), raw_quantity in components.items():
+        if raw_quantity is None:
+            continue
+        quantity = positive_finite_number(raw_quantity)
+        # Keep reported zeroes out of the event log: their absence is equivalent
+        # for aggregation, while missing values are represented by no component
+        # and ``telemetry_complete`` remains false.
+        if quantity <= 0:
+            continue
+        atoms.append(TranscriptUsageAtom(
+            source=source,
+            timestamp=timestamp,
+            event_id=event_id,
+            provider=provider,
+            model=transcript_model_name(model),
+            model_evidence=model_evidence,
+            effort=transcript_effort(effort),
+            direction=direction,
+            modality=modality,
+            cache_role=cache_role,
+            unit=unit,
+            quantity=quantity,
+            root_thread_id=root_thread_id,
+            agent_thread_id=agent_thread_id,
+            parent_thread_id=parent_thread_id,
+            depth=max(0, int(depth)),
+            endpoint=endpoint,
+            tool_name=tool_name,
+            call_id=call_id,
+            pricing_profile=transcript_pricing_context(pricing_profile),
+            service_tier=transcript_pricing_context(service_tier),
+            telemetry_complete=telemetry_complete,
+        ))
+    return atoms
+
+
+def codex_usage_components(usage: Any) -> dict[tuple[str, str, str, str], float | None]:
+    """Normalize Codex/OpenAI token counters with cached input as a subset."""
+
+    input_tokens = usage_number(usage, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
+    cached_tokens = usage_number(usage, "cached_input_tokens", "cachedInputTokens")
+    details = usage.get("input_tokens_details") if isinstance(usage, dict) else None
+    if cached_tokens is None and isinstance(details, dict):
+        cached_tokens = usage_number(details, "cached_tokens", "cachedTokens")
+    # OpenAI reports cached input inside input_tokens.  Do not add both.
+    uncached_input = max(0.0, input_tokens - min(input_tokens, cached_tokens or 0.0)) if input_tokens is not None else None
+    return {
+        ("input", "text", "none", "tokens"): uncached_input,
+        ("input", "text", "read", "tokens"): cached_tokens,
+        ("output", "text", "none", "tokens"): usage_number(usage, "output_tokens", "outputTokens", "completion_tokens", "completionTokens", "generated_tokens", "generatedTokens"),
+    }
+
+
+def claude_usage_components(usage: Any) -> dict[tuple[str, str, str, str], float | None]:
+    """Normalize Anthropic's separate ordinary/read/write token counters."""
+
+    creation = usage.get("cache_creation") if isinstance(usage, dict) else None
+    nested_5m = usage_number(creation, "ephemeral_5m_input_tokens", "ephemeral5mInputTokens")
+    nested_1h = usage_number(creation, "ephemeral_1h_input_tokens", "ephemeral1hInputTokens")
+    return {
+        ("input", "text", "none", "tokens"): usage_number(usage, "input_tokens", "inputTokens"),
+        ("input", "text", "read", "tokens"): usage_number(usage, "cache_read_input_tokens", "cacheReadInputTokens"),
+        # When Claude provides the nested duration split, it is the exact
+        # component view.  The top-level creation total is an aggregate and
+        # must not be added alongside it.
+        ("input", "text", "write_5m", "tokens"): nested_5m if nested_5m is not None else usage_number(usage, "cache_creation_input_tokens", "cacheCreationInputTokens"),
+        ("input", "text", "write_1h", "tokens"): nested_1h if nested_1h is not None else usage_number(usage, "cache_creation_input_tokens_1h", "cacheCreationInputTokens1h"),
+        ("output", "text", "none", "tokens"): usage_number(usage, "output_tokens", "outputTokens", "completion_tokens", "completionTokens"),
+    }
+
+
+def usage_component_delta(current: dict[tuple[str, str, str, str], float | None], previous: dict[tuple[str, str, str, str], float]) -> dict[tuple[str, str, str, str], float | None]:
+    """Delta a cumulative component snapshot atomically, including resets."""
+
+    reported = {key: value for key, value in current.items() if value is not None}
+    if not reported:
+        return {}
+    # A provider rollover makes all counters a new snapshot.  Applying this
+    # decision once for the whole usage object avoids mixing pre/post-reset
+    # input and output components.
+    reset = any(float(value) < previous.get(key, 0.0) for key, value in reported.items())
+    return {
+        key: float(value) if reset else max(0.0, float(value) - previous.get(key, 0.0))
+        for key, value in reported.items()
+    }
+
+
+def usage_telemetry_complete(components: dict[tuple[str, str, str, str], float | None]) -> bool:
+    """An exact token price needs both ordinary input and output telemetry."""
+
+    return (
+        components.get(("input", "text", "none", "tokens")) is not None
+        and components.get(("output", "text", "none", "tokens")) is not None
+    )
+
+
 def reverse_transcript_lines(path: Path) -> Iterator[bytes]:
     try:
         size = path.stat().st_size
@@ -908,13 +1099,20 @@ def transcript_record_timestamp(record: dict[str, Any]) -> float | None:
     return parsed.timestamp()
 
 
-def transcript_json_records(path: Path) -> Iterator[dict[str, Any]]:
+def transcript_json_records(path: Path, *, max_bytes: int | None = None) -> Iterator[dict[str, Any]]:
+    """Yield complete JSONL records, optionally bounded by a captured offset.
+
+    Backfill captures byte high-water marks before it starts parsing.  Reading
+    only that prefix means a concurrent append belongs to the normal live
+    collector, not to both the historical and live paths.
+    """
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
+        with path.open("rb") as handle:
+            payload = handle.read(max(0, int(max_bytes))) if max_bytes is not None else handle.read()
+            for raw_line in payload.splitlines():
                 try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
+                    record = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if isinstance(record, dict):
                     yield record
@@ -996,6 +1194,262 @@ def transcript_generated_token_events(path: Path, kind: str) -> list[TranscriptU
     else:
         return []
     return sorted(events, key=lambda event: (event.source, event.timestamp))
+
+
+def codex_transcript_identity_context(path: Path) -> tuple[str, str]:
+    """Return the rollout's thread and explicit parent link, if present."""
+
+    thread_id = ""
+    parent_thread_id = ""
+    for record in transcript_json_records(path):
+        if record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        thread_id = str(payload.get("id") or payload.get("thread_id") or "").strip()[:256] or thread_id
+        source = payload.get("source")
+        subagent = source.get("subagent") if isinstance(source, dict) else None
+        spawned = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+        parent_thread_id = str(spawned.get("parent_thread_id") or "").strip()[:256] if isinstance(spawned, dict) else parent_thread_id
+        if thread_id or parent_thread_id:
+            break
+    return thread_id, parent_thread_id
+
+
+def transcript_family_context(paths: list[Path], kind: str) -> dict[str, tuple[str, str, str, int]]:
+    """Build bounded root/parent/depth context without attributing child use to a parent model."""
+
+    if str(kind or "").strip().lower() != "codex":
+        root = str(paths[0].expanduser().resolve(strict=False)) if paths else ""
+        return {
+            str(path.expanduser().resolve(strict=False)): (root, str(path.expanduser().resolve(strict=False)), "", 0 if index == 0 else 1)
+            for index, path in enumerate(paths)
+        }
+    raw = {
+        str(path.expanduser().resolve(strict=False)): codex_transcript_identity_context(path)
+        for path in paths
+    }
+    thread_to_source = {thread: source for source, (thread, _parent) in raw.items() if thread}
+    roots: dict[str, str] = {}
+    depths: dict[str, int] = {}
+    for source, (thread, parent) in raw.items():
+        cursor = thread
+        visited: set[str] = set()
+        depth = 0
+        while cursor and cursor not in visited:
+            visited.add(cursor)
+            candidate_source = thread_to_source.get(cursor)
+            candidate_parent = raw.get(candidate_source, ("", ""))[1] if candidate_source else ""
+            if not candidate_parent or candidate_parent not in thread_to_source:
+                break
+            cursor = candidate_parent
+            depth += 1
+        roots[source] = cursor or thread or source
+        depths[source] = depth
+    return {
+        source: (roots.get(source, thread or source), thread or source, parent, depths.get(source, 0))
+        for source, (thread, parent) in raw.items()
+    }
+
+
+def claude_record_usage(usage: Any) -> dict[tuple[str, str, str, str], float | None]:
+    """Use top-level Claude usage, or iteration usage only when top-level is absent."""
+
+    direct = claude_usage_components(usage)
+    if any(value is not None for value in direct.values()):
+        return direct
+    iterations = usage.get("iterations") if isinstance(usage, dict) else None
+    if not isinstance(iterations, list):
+        return direct
+    totals: dict[tuple[str, str, str, str], float] = {}
+    for iteration in iterations:
+        for key, value in claude_usage_components(iteration).items():
+            if value is not None:
+                totals[key] = totals.get(key, 0.0) + value
+    return {key: value for key, value in totals.items()}
+
+
+def claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None) -> list[TranscriptUsageAtom]:
+    source = str(path.expanduser().resolve(strict=False))
+    previous_by_message: dict[str, dict[tuple[str, str, str, str], float]] = {}
+    atoms: list[TranscriptUsageAtom] = []
+    for sequence, record in enumerate(transcript_json_records(path, max_bytes=max_bytes)):
+        if record.get("type") != "assistant":
+            continue
+        timestamp = transcript_record_timestamp(record)
+        message = record.get("message")
+        if timestamp is None or not isinstance(message, dict):
+            continue
+        components = claude_record_usage(message.get("usage"))
+        if not components:
+            continue
+        message_id = str(message.get("id") or f"line-{sequence}").strip()[:256]
+        previous = previous_by_message.get(message_id, {})
+        delta = usage_component_delta(components, previous)
+        previous_by_message[message_id] = {key: float(value) for key, value in components.items() if value is not None}
+        model = transcript_model_name(message.get("model"))
+        effort = message.get("effort") or record.get("effort")
+        atoms.extend(usage_component_atoms(
+            source=source,
+            timestamp=timestamp,
+            event_id=f"claude:{message_id}",
+            provider="anthropic",
+            model=model,
+            model_evidence="assistant.message.model" if model else "unknown",
+            effort=effort,
+            components=delta,
+            root_thread_id=root_thread_id or source,
+            agent_thread_id=agent_thread_id or source,
+            parent_thread_id=parent_thread_id,
+            depth=depth,
+            endpoint="messages",
+            pricing_profile=message.get("pricing_profile") or message.get("profile") or record.get("pricing_profile") or record.get("profile"),
+            service_tier=message.get("service_tier") or message.get("serviceTier") or record.get("service_tier") or record.get("serviceTier"),
+            telemetry_complete=usage_telemetry_complete(components),
+        ))
+    return atoms
+
+
+def codex_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None) -> list[TranscriptUsageAtom]:
+    source = str(path.expanduser().resolve(strict=False))
+    totals: dict[tuple[str, str, str, str], float] = {}
+    current_model = ""
+    current_effort = "unknown"
+    current_pricing_profile = "default"
+    current_service_tier = "default"
+    atoms: list[TranscriptUsageAtom] = []
+    for sequence, record in enumerate(transcript_json_records(path, max_bytes=max_bytes)):
+        if record.get("type") == "turn_context":
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                current_model = transcript_model_name(payload.get("model")) or current_model
+                current_effort = transcript_effort(payload.get("effort"))
+                current_pricing_profile = transcript_pricing_context(payload.get("pricing_profile") or payload.get("profile"))
+                current_service_tier = transcript_pricing_context(payload.get("service_tier") or payload.get("serviceTier"))
+            continue
+        timestamp = transcript_record_timestamp(record)
+        payload = record.get("payload")
+        info = payload.get("info") if isinstance(payload, dict) else None
+        if timestamp is None or not isinstance(info, dict):
+            continue
+        cumulative = info.get("total_token_usage")
+        last = info.get("last_token_usage")
+        usage = cumulative if isinstance(cumulative, dict) else last if isinstance(last, dict) else None
+        if usage is None:
+            continue
+        components = codex_usage_components(usage)
+        is_cumulative = isinstance(cumulative, dict)
+        delta = usage_component_delta(components, totals) if is_cumulative else components
+        if is_cumulative:
+            totals = {key: float(value) for key, value in components.items() if value is not None}
+        atoms.extend(usage_component_atoms(
+            source=source,
+            timestamp=timestamp,
+            event_id=f"codex:{agent_thread_id or source}:{sequence}",
+            provider="openai",
+            model=current_model,
+            model_evidence="turn_context.payload.model" if current_model else "unknown",
+            effort=current_effort,
+            components=delta,
+            root_thread_id=root_thread_id or agent_thread_id or source,
+            agent_thread_id=agent_thread_id or source,
+            parent_thread_id=parent_thread_id,
+            depth=depth,
+            endpoint="responses",
+            pricing_profile=current_pricing_profile,
+            service_tier=current_service_tier,
+            telemetry_complete=usage_telemetry_complete(components),
+        ))
+    return atoms
+
+
+def transcript_usage_atoms(path: Path, kind: str, *, family_paths: list[Path] | None = None, max_bytes_by_path: dict[str, int] | None = None) -> list[TranscriptUsageAtom]:
+    """Return normalized atoms for a root transcript and its discovered family."""
+
+    agent_kind = str(kind or "").strip().lower()
+    paths = family_paths if family_paths is not None else (claude_transcript_family_paths(path) if agent_kind == "claude" else codex_transcript_family_paths(path) if agent_kind == "codex" else [])
+    context = transcript_family_context(paths, agent_kind)
+    atoms: list[TranscriptUsageAtom] = []
+    for transcript_path in paths:
+        source = str(transcript_path.expanduser().resolve(strict=False))
+        root, agent, parent, depth = context.get(source, (source, source, "", 0))
+        max_bytes = (max_bytes_by_path or {}).get(source)
+        if agent_kind == "claude":
+            atoms.extend(claude_transcript_usage_atoms(transcript_path, root_thread_id=root, agent_thread_id=agent, parent_thread_id=parent, depth=depth, max_bytes=max_bytes))
+        elif agent_kind == "codex":
+            atoms.extend(codex_transcript_usage_atoms(transcript_path, root_thread_id=root, agent_thread_id=agent, parent_thread_id=parent, depth=depth, max_bytes=max_bytes))
+    return sorted(atoms, key=lambda atom: (atom.timestamp, atom.source, atom.event_id, atom.direction, atom.cache_role))
+
+
+def direct_image_usage_atoms(*, request: dict[str, Any], response: dict[str, Any], timestamp: float, source: str, request_id: str = "", root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0) -> list[TranscriptUsageAtom]:
+    """Normalize a correlated direct Images API completion without guessing its model.
+
+    This accepts only the structured request/response pair.  Responses API
+    image-tool children intentionally do not flow through here because their
+    documented result lacks the child model/usage identity needed to estimate a
+    cost honestly.
+    """
+
+    model = transcript_model_name(request.get("model"))
+    usage = response.get("usage") if isinstance(response, dict) else None
+    details = usage.get("input_tokens_details") if isinstance(usage, dict) else None
+    if not model or not isinstance(usage, dict) or not isinstance(details, dict):
+        return []
+    return usage_component_atoms(
+        source=str(source),
+        timestamp=timestamp,
+        event_id=f"image:{request_id or response.get('id') or hashlib.sha256(json.dumps(response, sort_keys=True).encode('utf-8')).hexdigest()[:16]}",
+        provider="openai",
+        model=model,
+        model_evidence="images.request.model",
+        effort="unknown",
+        components={
+            ("input", "text", "none", "tokens"): usage_number(details, "text_tokens"),
+            ("input", "image", "none", "tokens"): usage_number(details, "image_tokens"),
+            ("output", "image", "none", "tokens"): usage_number(usage, "output_tokens"),
+        },
+        endpoint="images",
+        call_id=str(request_id or response.get("id") or "")[:256],
+        root_thread_id=root_thread_id or source,
+        agent_thread_id=agent_thread_id or source,
+        parent_thread_id=parent_thread_id,
+        depth=depth,
+        telemetry_complete=True,
+    )
+
+
+def opaque_responses_image_tool_atoms(*, timestamp: float, source: str, call_id: str = "", root_thread_id: str = "", agent_thread_id: str = "") -> list[TranscriptUsageAtom]:
+    """Represent a Responses image tool call without inventing its model/cost.
+
+    The tool call itself proves one image-generation request happened, but the
+    public tool result can omit its internal image model and usage envelope.
+    A bounded unpriced request atom keeps that child visible in accounting
+    without charging the parent response model twice.
+    """
+
+    # A visible tool name alone is not a correlation key.  In particular,
+    # rendered/prose lookalikes and incomplete stream fragments must never
+    # create a synthetic child that could be confused with a real invocation.
+    identity = str(call_id or "").strip()[:256]
+    if not identity:
+        return []
+    return usage_component_atoms(
+        source=str(source),
+        timestamp=timestamp,
+        event_id=f"responses-image-tool:{identity}",
+        provider="openai",
+        model="unknown",
+        model_evidence="responses.image_generation_call.model_not_exposed",
+        effort="unknown",
+        components={("output", "image", "none", "requests"): 1},
+        root_thread_id=root_thread_id or source,
+        agent_thread_id=agent_thread_id or source,
+        endpoint="responses",
+        tool_name="image_generation_call",
+        call_id=identity,
+        telemetry_complete=False,
+    )
 
 
 def transcript_generated_tokens_by_model(path: Path, kind: str, cwd: str | None = None) -> dict[str, float]:

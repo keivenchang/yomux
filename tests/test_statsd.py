@@ -3,11 +3,68 @@ import os
 import sqlite3
 import threading
 import time
+import json
+from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
+
+
+class _FakePricingCatalog:
+    def __init__(self):
+        self.calls = []
+
+    def resolve_rate(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["model"] == "unknown":
+            return None
+        return SimpleNamespace(
+            usd=Decimal("2.5"),
+            scale=1_000_000,
+            catalog_revision=7,
+            source_url="https://prices.example/model",
+            effective_from="2026-01-01T00:00:00Z",
+        )
+
+
+class _MutablePricingCatalog(_FakePricingCatalog):
+    def __init__(self):
+        super().__init__()
+        self.usd = Decimal("2.5")
+        self.revision = 7
+
+    def status(self):
+        return {"state": "fresh", "catalog_revision": self.revision}
+
+    def resolve_rate(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            usd=self.usd,
+            scale=1_000_000,
+            catalog_revision=self.revision,
+            source_url="https://prices.example/model",
+            effective_from="2026-01-01T00:00:00Z",
+        )
+
+
+class _ContextPricingCatalog:
+    def __init__(self):
+        self.calls = []
+
+    def resolve_rate(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("profile") != "batch" or kwargs.get("service_tier") != "flex":
+            return None
+        return SimpleNamespace(
+            usd=Decimal("1.25"),
+            scale=1_000_000,
+            catalog_revision=9,
+            source_url="https://prices.example/batch",
+            effective_from="2026-07-01T00:00:00Z",
+        )
 
 
 def _bucket(start=100, duration=1, sequence=1):
@@ -53,6 +110,26 @@ def test_statsd_new_owner_negotiates_old_and_current_protocols(tmp_path):
     service.store.close()
 
 
+def test_statsd_daemon_constructs_the_shared_pricing_catalog(monkeypatch, tmp_path):
+    captured = {}
+
+    class Catalog:
+        pass
+
+    class Service:
+        def __init__(self, socket_path, database_path, *, idle_seconds, sampler_owner_path, pricing_catalog):
+            captured.update(socket_path=socket_path, database_path=database_path, idle_seconds=idle_seconds, sampler_owner_path=sampler_owner_path, pricing_catalog=pricing_catalog)
+
+        def run(self):
+            return 17
+
+    monkeypatch.setattr(statsd, "PricingCatalog", Catalog)
+    monkeypatch.setattr(statsd, "PersistentStatsService", Service)
+
+    assert statsd.main(["--serve", "--socket", str(tmp_path / "statsd.sock"), "--database", str(tmp_path / "stats.sqlite3")]) == 17
+    assert isinstance(captured["pricing_catalog"], Catalog)
+
+
 def test_statsd_claims_model_deltas_and_preserves_them_through_history(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     key = "1|0|codex"
@@ -91,6 +168,268 @@ def test_statsd_claims_model_deltas_and_preserves_them_through_history(tmp_path)
     stored_rates = [record["agent_token_rates"][0] for record in history["agent_token_history"]["records"]]
     assert sum(rate["model_rates"]["gpt-5.6-sol"]["tokens"] for rate in stored_rates) == pytest.approx(30.0)
     assert claimed["state"][key]["models"] == {"gpt-5.6-sol": 110.0, "gpt-5.6-terra": 40.0}
+    service.store.close()
+
+
+def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_history(tmp_path):
+    catalog = _FakePricingCatalog()
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=catalog)
+    atom = {
+        "event_id": "event-1", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+        "model_evidence": "turn_context.payload.model", "effort": "high", "direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens",
+        "quantity": 100, "root_thread_id": "root", "agent_thread_id": "child", "parent_thread_id": "root", "depth": 1, "telemetry_complete": True,
+    }
+    result = service.merge_server_records([
+        {"time": 1000, "usage_atoms": [atom]},
+        {"time": 1000, "usage_atoms": [atom]},  # stable event id makes replay idempotent
+        {"time": 1000, "usage_atoms": [{**atom, "event_id": "event-2", "model": "unknown", "quantity": 8, "telemetry_complete": False}]},
+    ], now=1000)
+    normal_history = service.handle({"action": "history"})
+    history = service.handle({"action": "history", "token_resolution_seconds": 60})
+    summary = normal_history["records"][0]["cost_summary"]
+    compact = history["agent_token_history"]["records"][0]["cost_summary"]
+
+    assert result["changed"] == 2
+    assert summary["total_micro_usd"] == 250
+    assert summary["known_micro_usd"] == 250
+    assert summary["complete"] is False
+    assert summary["unpriced_count"] == 1
+    assert summary["catalog_revision"] == 7
+    assert summary["active_catalog_revision"] == 0
+    assert summary["freshness"] == "unknown"
+    assert summary["components"][0]["effort"] == "high"
+    assert summary["components"][0]["source_url"] == "https://prices.example/model"
+    assert summary["components"][0]["effective_from"] == "2026-01-01T00:00:00Z"
+    assert summary["components"][0]["rate_usd"] == "2.5"
+    assert summary["models"][0]["model"] == "gpt-5.6"
+    assert summary["models"][0]["input_micro_usd"] == 250
+    assert summary["models"][0]["cache_micro_usd"] == 0
+    assert summary["models"][0]["output_micro_usd"] == 0
+    assert summary["models"][0]["other_micro_usd"] == 0
+    assert summary["sources"][0]["agent_thread_id"] == "child"
+    assert summary["sources"][0]["input_micro_usd"] == 250
+    assert compact == summary
+    assert catalog.calls[0]["timestamp"] == "1970-01-01T00:16:40Z"
+    service.store.close()
+
+
+def test_statsd_projects_observed_profile_and_service_tier_without_default_fallback():
+    catalog = _ContextPricingCatalog()
+    component = statsd.projected_usage_component({
+        "event_id": "profiled", "timestamp": 1_784_332_800, "source": "direct", "provider": "openai", "model": "gpt-5.6",
+        "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 1_000_000,
+        "pricing_profile": "batch", "service_tier": "flex", "telemetry_complete": True,
+    }, catalog)
+
+    assert component is not None and component["priced"] is True
+    assert component["micro_usd"] == 1_250_000
+    assert component["pricing_profile"] == "batch"
+    assert component["service_tier"] == "flex"
+    assert catalog.calls[0]["profile"] == "batch"
+    assert catalog.calls[0]["service_tier"] == "flex"
+
+
+def test_statsd_projects_billable_text_image_and_claude_cache_components_exactly():
+    class Catalog:
+        prices = {
+            ("openai", "input", "text", "none"): "2",
+            ("openai", "input", "image", "none"): "3",
+            ("openai", "output", "image", "none"): "4",
+            ("anthropic", "input", "text", "none"): "1",
+            ("anthropic", "input", "text", "read"): "0.1",
+            ("anthropic", "input", "text", "write_5m"): "1.25",
+            ("anthropic", "input", "text", "write_1h"): "2",
+            ("anthropic", "output", "text", "none"): "5",
+        }
+
+        def resolve_rate(self, **kwargs):
+            usd = self.prices.get((kwargs["provider"], kwargs["direction"], kwargs["modality"], kwargs["cache_role"]))
+            return None if usd is None else SimpleNamespace(usd=Decimal(usd), scale=1_000_000, catalog_revision=1, source_url="https://prices.example/exact", effective_from="2026-01-01T00:00:00Z")
+
+    catalog = Catalog()
+    atoms = [
+        {"event_id": "text", "timestamp": 1, "provider": "openai", "model": "gpt-image-2", "direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 1_000_000, "telemetry_complete": True},
+        {"event_id": "image-in", "timestamp": 1, "provider": "openai", "model": "gpt-image-2", "direction": "input", "modality": "image", "cache_role": "none", "unit": "tokens", "quantity": 1_000_000, "telemetry_complete": True},
+        {"event_id": "image-out", "timestamp": 1, "provider": "openai", "model": "gpt-image-2", "direction": "output", "modality": "image", "cache_role": "none", "unit": "tokens", "quantity": 1_000_000, "telemetry_complete": True},
+        *[{"event_id": role, "timestamp": 1, "provider": "anthropic", "model": "claude-test", "direction": direction, "modality": "text", "cache_role": role, "unit": "tokens", "quantity": 1_000_000, "telemetry_complete": True} for role, direction in (("none", "input"), ("read", "input"), ("write_5m", "input"), ("write_1h", "input"), ("none-output", "output"))],
+    ]
+    # The output component uses normal cache role ``none``; retain unique event
+    # ids without distorting the catalog lookup dimensions.
+    atoms[-1]["cache_role"] = "none"
+    components = [statsd.projected_usage_component(atom, catalog) for atom in atoms]
+    summary = statsd.cost_summary_response({"components": components})
+
+    assert all(component and component["priced"] for component in components)
+    assert summary["total_micro_usd"] == 18_350_000
+    assert sum(row["micro_usd"] for row in summary["models"]) == summary["total_micro_usd"]
+
+
+def test_statsd_projection_keeps_unknown_unpriced_and_rounds_tiny_nonzero_micro_usd():
+    class Catalog:
+        def resolve_rate(self, **_kwargs):
+            return SimpleNamespace(usd=Decimal("0.000001"), scale=1, catalog_revision=1, source_url="https://prices.example/tiny", effective_from="2026-01-01T00:00:00Z")
+
+    unknown = statsd.projected_usage_component({"event_id": "unknown", "timestamp": 1, "provider": "openai", "model": "unknown", "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 1}, Catalog())
+    tiny = statsd.projected_usage_component({"event_id": "tiny", "timestamp": 1, "provider": "openai", "model": "gpt-test", "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 1}, Catalog())
+    zero = statsd.projected_usage_component({"event_id": "zero", "timestamp": 1, "provider": "openai", "model": "gpt-test", "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 0}, Catalog())
+
+    assert unknown is not None and unknown["priced"] is False and unknown["micro_usd"] == 0
+    assert tiny is not None and tiny["priced"] is True and tiny["micro_usd"] == 1
+    assert zero is None
+
+
+def test_statsd_cost_summary_exposes_local_catalog_freshness_without_history_fetch(tmp_path):
+    catalog = _MutablePricingCatalog()
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=catalog)
+    atom = {
+        "event_id": "event-1", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+        "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 100,
+        "telemetry_complete": True,
+    }
+    service.merge_server_records([{"time": 1000, "usage_atoms": [atom]}], now=1000)
+    summary = service.handle({"action": "history"})["records"][0]["cost_summary"]
+
+    assert summary["catalog_revision"] == 7
+    assert summary["active_catalog_revision"] == 7
+    assert summary["freshness"] == "fresh"
+    service.store.close()
+
+
+def test_statsd_usage_atom_backfill_marks_only_complete_rosters_and_is_idempotent(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("\n".join(json.dumps(item) for item in [
+        {"type": "session_meta", "payload": {"id": "root"}},
+        {"timestamp": 990, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "med"}},
+        {"timestamp": 1000, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
+    ]) + "\n", encoding="utf-8")
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    rows = [{"transcript": str(transcript), "kind": "codex"}]
+
+    first = service.migrate_usage_atom_history_from_rows(rows, now=1010)
+    second = service.migrate_usage_atom_history_from_rows(rows, now=1010)
+    partial = statsd.PersistentStatsService(tmp_path / "partial.sock", tmp_path / "partial.sqlite3")
+    incomplete = partial.migrate_usage_atom_history_from_rows([{"transcript": str(tmp_path / "gone.jsonl"), "kind": "codex"}], now=1010)
+
+    assert first == {"ok": True, "changed": True, "sources": 1, "missing": 0, "complete": True}
+    assert second["reason"] == "already_migrated"
+    assert service.handle({"action": "history"})["records"][0]["cost_summary"]["total_micro_usd"] == 38
+    assert service.handle({"action": "history"})["usage_atom_backfill"] == {"state": "complete", "sources": 1, "missing": 0}
+    assert incomplete["complete"] is False
+    assert partial.store.metadata_value(statsd.STATSD_USAGE_ATOM_MIGRATION_MARKER) is None
+    assert partial.handle({"action": "history"})["usage_atom_backfill"] == {"state": "partial", "sources": 0, "missing": 1}
+    service.store.close()
+    partial.store.close()
+
+
+def test_statsd_usage_atom_backfill_uses_captured_family_byte_high_water(monkeypatch, tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    initial = [
+        {"type": "session_meta", "payload": {"id": "root"}},
+        {"timestamp": 1000, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high"}},
+        {"timestamp": 1001, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
+    ]
+    appended = {"timestamp": 1002, "payload": {"info": {"total_token_usage": {"input_tokens": 20, "output_tokens": 9}}}}
+    transcript.write_text("\n".join(json.dumps(item) for item in initial) + "\n", encoding="utf-8")
+    original = statsd.session_files.transcript_usage_atoms
+
+    def append_after_snapshot(path, kind, **kwargs):
+        transcript.write_text(transcript.read_text(encoding="utf-8") + json.dumps(appended) + "\n", encoding="utf-8")
+        return original(path, kind, **kwargs)
+
+    monkeypatch.setattr(statsd.session_files, "transcript_usage_atoms", append_after_snapshot)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    result = service.migrate_usage_atom_history_from_rows([{"transcript": str(transcript), "kind": "codex"}], now=1010)
+    components = service.handle({"action": "history"})["records"][0]["cost_summary"]["components"]
+
+    assert result["complete"] is True
+    assert {(item["direction"], item["quantity"]) for item in components} == {("input", 10.0), ("output", 5.0)}
+    service.store.close()
+
+
+def test_statsd_usage_atom_backfill_replaces_only_prior_staged_root_family_atoms(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+
+    def write(output):
+        transcript.write_text("\n".join(json.dumps(item) for item in [
+            {"type": "session_meta", "payload": {"id": "root"}},
+            {"timestamp": 1000, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high"}},
+            {"timestamp": 1001, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": output}}}},
+        ]) + "\n", encoding="utf-8")
+
+    write(5)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    # The missing sibling keeps the marker open, simulating an interrupted/
+    # partial roster that must safely resume with replacement.
+    assert service.migrate_usage_atom_history_from_rows([{"transcript": str(transcript), "kind": "codex"}, {"transcript": str(tmp_path / "missing.jsonl"), "kind": "codex"}], now=1010)["complete"] is False
+    write(7)
+    assert service.migrate_usage_atom_history_from_rows([{"transcript": str(transcript), "kind": "codex"}], now=1010)["complete"] is True
+    components = service.handle({"action": "history"})["records"][0]["cost_summary"]["components"]
+
+    assert {(item["direction"], item["quantity"]) for item in components} == {("input", 10.0), ("output", 7.0)}
+    service.store.close()
+
+
+def test_statsd_reprojects_retained_usage_when_catalog_revision_changes_without_rewriting_tokens(tmp_path):
+    catalog = _MutablePricingCatalog()
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=catalog)
+    atom = {
+        "event_id": "event-1", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+        "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 100,
+        "telemetry_complete": True,
+    }
+    service.merge_server_records([{"time": 1000, "usage_atoms": [atom], "tokens_per_agent_total": 11}], now=1000)
+    before = service.handle({"action": "history"})["records"][0]
+    catalog.usd = Decimal("3")
+    catalog.revision = 8
+
+    result = service._maybe_reproject_cost_summaries()
+    after = service.handle({"action": "history"})["records"][0]
+
+    assert result["changed"] == 1
+    assert before["cost_summary"]["total_micro_usd"] == 250
+    assert after["cost_summary"]["total_micro_usd"] == 300
+    assert int(after["cost_summary"]["components"][0]["catalog_revision"]) == 8
+    assert after["tokens_per_agent_total"] == 11
+    assert service._maybe_reproject_cost_summaries()["reason"] == "current_catalog"
+    service.store.close()
+
+
+def test_statsd_backfill_marks_counter_only_legacy_bucket_lower_bound_without_deleting_output_history(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.merge_server_records([{
+        "time": 1000,
+        "tokens_per_agent_total": 12,
+        "agent_token_samples": 1,
+        "agent_token_rates": [{"key": "s|0|codex", "label": "s:0", "total": 12, "samples": 1, "tokens": 12, "seconds": 1}],
+    }], now=1010)
+
+    result = service.migrate_usage_atom_history_from_rows([], now=1010)
+    bucket = service.handle({"action": "history"})["records"][0]
+
+    assert result["complete"] is True
+    assert bucket["tokens_per_agent_total"] == 12
+    assert bucket["cost_summary"]["complete"] is False
+    service.store.close()
+
+
+def test_statsd_live_transcript_claim_carries_atoms_without_changing_output_counter_projection(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("\n".join(json.dumps(item) for item in [
+        {"type": "session_meta", "payload": {"id": "root"}},
+        {"timestamp": 1000, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high"}},
+        {"timestamp": 1001, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
+    ]) + "\n", encoding="utf-8")
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    rows = [{"key": "s|0|codex", "label": "s:0", "transcript": str(transcript), "kind": "codex"}]
+
+    baseline = service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1002)
+    service.merge_server_records(baseline["records"], now=1002)
+    history = service.handle({"action": "history"})
+
+    assert [record for record in baseline["records"] if "agent_token_rates" in record] == []
+    assert len([record for record in baseline["records"] if "usage_atoms" in record]) == 2
+    assert history["records"][0]["tokens_per_agent_total"] == 0
+    assert history["records"][0]["cost_summary"]["total_micro_usd"] == 38
     service.store.close()
 
 
@@ -431,9 +770,10 @@ def test_statsd_history_wire_shape_for_mixed_bucket(tmp_path):
         "inactive_agent_total": 0.0,
         "agent_activity_samples": 0.0,
         "tokens_per_agent_total": 0.0,
-        "agent_token_samples": 0.0,
-        "agent_token_rates": [],
-        "host_metrics": stats_store.empty_host_metrics(),
+            "agent_token_samples": 0.0,
+            "agent_token_rates": [],
+            "cost_summary": statsd.cost_summary_response(stats_store.empty_bucket(0, 1)["cost_summary"]),
+            "host_metrics": stats_store.empty_host_metrics(),
     }]
     service.store.close()
 

@@ -1809,6 +1809,24 @@ def test_write_codex_summary_error_event_has_localizable_descriptor():
     )]
 
 
+def test_codex_summary_completed_usage_submits_structured_cost_atoms_without_emitting_text():
+    submitted = []
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_owned_usage_atoms=lambda **kwargs: submitted.append(kwargs) or True))
+    handler._codex_summary_usage_context = {"model": "gpt-5.6", "effort": "high", "service_tier": "flex"}
+    handler.write_sse_json = lambda *_args: pytest.fail("completed usage must not be rendered as summary text")
+
+    Handler.write_codex_summary_line(handler, json.dumps({
+        "type": "turn.completed", "turn_id": "turn-1", "usage": {"input_tokens": 12, "cached_input_tokens": 4, "output_tokens": 7},
+    }))
+
+    assert submitted == [{
+        "provider": "openai", "model": "gpt-5.6", "usage": {"input_tokens": 12, "cached_input_tokens": 4, "output_tokens": 7},
+        "source": "AI Summary", "event_id": submitted[0]["event_id"], "effort": "high", "service_tier": "flex", "endpoint": "codex-exec",
+    }]
+    assert submitted[0]["event_id"].startswith("ai-summary:turn-1:")
+
+
 def test_run_codex_summary_uses_configured_model_effort_service_tier_and_timeout(monkeypatch):
     calls = []
     stream_calls = []

@@ -315,7 +315,7 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
         page_html(f"""
       <button id="regular-tab" class="pane-tab active">{tab_body}</button>
       <button id="compact-tab" class="tmux-pane-tab-token active">{tab_body}</button>
-    """),
+        """),
     )
     metrics = browser.execute_script(
         """
@@ -2047,7 +2047,7 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
             {key: '6|0|codex', label: '6:0:codex', total: 70, samples: 1, tokens: 70, seconds: 60, source: 'transcript'},
           ],
         }]}}, {forceGraphRefresh: true});
-        setDebugGraphChartVisibleForTest('modelTokens', true);
+        setDebugGraphChartVisible('modelTokens', true);
         renderDebugPanels({force: true});
         const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
         const bars = [...chart.querySelectorAll('[data-js-debug-bar-series^="agentToken:"]')];
@@ -2114,7 +2114,8 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
     assert [item["pattern"] for item in metrics["legends"]] == [str(index) for index in range(7)], metrics
     assert all(item["fillAttr"].startswith("url(") for item in metrics["legends"]), metrics
     assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
-    assert [item["key"] for item in metrics["modelLegends"]] == ["modelToken:gpt-5.6-sol", "modelToken:gpt-5.6-terra"], metrics
+    assert [item["key"].endswith(model) for item, model in zip(metrics["modelLegends"], ["gpt-5.6-sol", "gpt-5.6-terra"])] == [True, True], metrics
+    assert all(item["key"].startswith("modelToken:legacy�") for item in metrics["modelLegends"]), metrics
     assert len({item["background"] for item in metrics["modelLegends"]}) == 2, metrics
     assert all(item["background"] == item["barFill"] for item in metrics["modelLegends"]), metrics
     assert all(item["swatchSeriesColor"] == item["barSeriesColor"] for item in metrics["modelLegends"]), metrics
@@ -2150,7 +2151,7 @@ def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_pat
             model_rates: {'gpt-5.6-sol': {total: tokens, samples: 1, tokens, seconds: 60}},
           }],
         }))}}, {forceGraphRefresh: true});
-        setDebugGraphChartVisibleForTest('modelTokens', true);
+        setDebugGraphChartVisible('modelTokens', true);
         renderDebugPanels({force: true});
         return ['agentTokens', 'modelTokens'].map(key => {
           const chart = document.querySelector(`[data-js-debug-chart="${key}"]`);
@@ -2180,6 +2181,168 @@ def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_pat
     assert 180 <= float(metrics[0]["threshold"]) < 5000, metrics
     assert all("≋" in item["breakGlyph"] for item in metrics), metrics
     assert all(item["ordinaryY"] > item["peakY"] for item in metrics), metrics
+
+
+def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_display_range(browser, tmp_path):
+    """The cost card follows the Model tokens bucket/range owner, not a second chart state."""
+    browser.set_window_size(375, 680)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && typeof setDebugGraphRange === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+          const records = Array.from({length: 6}, (_unused, index) => ({
+            start: nowSeconds - ((5 - index) * 60), duration: 60, sequence: index + 1,
+            tokens_per_agent_total: 100 + index, agent_token_samples: 1,
+            agent_token_rates: [{
+              key: 'root|0|codex', label: 'root:0:codex', total: 100 + index, samples: 1,
+              tokens: 100 + index, seconds: 60, source: 'transcript',
+              model_rates: {'gpt-5.6-terra': {total: 100 + index, samples: 1, tokens: 100 + index, seconds: 60}},
+            }],
+            cost_summary: {
+              total_micro_usd: 10000, known_micro_usd: 10000, priced_count: 3, complete: true, unpriced_count: 0,
+              components: [
+                {key: 'input', direction: 'input', quantity: 10, unit: 'tokens', micro_usd: 2000, provider: 'openai', model: 'gpt-5.6-terra'},
+                {key: 'cache', cache_role: 'read', quantity: 10, unit: 'tokens', micro_usd: 3000, provider: 'openai', model: 'gpt-5.6-terra'},
+                {key: 'output', direction: 'output', quantity: 10, unit: 'tokens', micro_usd: 5000, provider: 'openai', model: 'gpt-5.6-terra'},
+              ],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', micro_usd: 10000}],
+              sources: [{root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', model: 'gpt-5.6-terra', micro_usd: 10000}],
+              catalog_revision: 'test-catalog', freshness: 'verified',
+            },
+          }));
+          debugGraphApplyServerHistory({sequence: 6, records});
+          setDebugGraphChartVisible('modelTokens', true);
+          setDebugGraphRange(6 * 60);
+          renderDebugPanels({force: true});
+
+          const modelGroup = jsDebugGraphChartGroups.find(group => group.key === 'modelTokens');
+          const cardState = () => {
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const model = graph?.querySelector('[data-js-debug-chart="modelTokens"]');
+            const card = graph?.querySelector('[data-js-debug-summary-group="costSummary"]');
+            const buckets = debugGraphBucketsForChartGroup(modelGroup, debugGraphDisplayBuckets(), Date.now());
+            const expected = debugGraphCostSummaryForBuckets(buckets);
+            const exact = expected.complete === true && expected.unpricedCount === 0;
+            const expectedAmount = debugGraphCostUsdText(exact ? expected.totalMicroUsd : expected.knownMicroUsd);
+            return {
+              graph, model, card, buckets, expectedAmount,
+              renderedAmount: card?.querySelector('[data-js-debug-cost-details]')?.textContent || '',
+            };
+          };
+          const initial = cardState();
+          const gridChildren = [...initial.graph.querySelector('[data-js-debug-chart-grid]').children];
+          const initialOrder = {
+            model: gridChildren.indexOf(initial.model),
+            cost: gridChildren.indexOf(initial.card),
+          };
+          initial.card?.scrollIntoView({block: 'center'});
+          const details = initial.card?.querySelector('[data-js-debug-cost-details]');
+          details?.click();
+          await window.__yolomuxTestWaitFor(
+            () => details?.getAttribute('aria-expanded') === 'true',
+            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary details popover'},
+          );
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const popover = initial.card?.querySelector('.js-debug-cost-popover');
+          const popoverRect = popover?.getBoundingClientRect();
+          const compact = initial.card?.querySelector('.js-debug-cost-compact');
+          const compactStyle = compact ? getComputedStyle(compact) : null;
+          // A 21rem graph column represents the narrow Side Pane/card width. The
+          // card must reflow rather than overflow its display box.
+          const grid = initial.graph?.querySelector('[data-js-debug-chart-grid]');
+          if (grid) grid.style.inlineSize = '21rem';
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const narrowCard = initial.graph?.querySelector('[data-js-debug-summary-group="costSummary"]');
+              const narrowCompact = narrowCard?.querySelector('.js-debug-cost-compact');
+              const narrowRect = narrowCard?.getBoundingClientRect();
+              const narrowCells = [...(narrowCompact?.children || [])].map(element => { const rect = element.getBoundingClientRect(); return {left: rect.left, top: rect.top}; });
+          const narrowControls = [...(narrowCard?.querySelectorAll('.js-debug-chart-heading-row > *') || [])]
+            .map(element => {
+              const rect = element.getBoundingClientRect();
+              return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom};
+            });
+
+              setDebugGraphRange(2 * 60);
+              refreshDebugGraphElement(document.querySelector('[data-js-debug-graph]'), {force: true});
+          const ranged = cardState();
+
+          const svg = ranged.model?.querySelector('.js-debug-line-chart');
+          const svgRect = svg?.getBoundingClientRect();
+          const eventInit = clientX => ({bubbles: true, cancelable: true, pointerId: 31, pointerType: 'mouse', button: 0, buttons: 1, clientX, clientY: svgRect.top + (svgRect.height / 2)});
+              if (svg && svgRect) {
+                const startX = svgRect.left + (svgRect.width * 0.2);
+                const endX = svgRect.left + (svgRect.width * 0.7);
+                svg.dispatchEvent(new PointerEvent('pointerdown', eventInit(startX)));
+                svg.dispatchEvent(new PointerEvent('pointermove', eventInit(endX)));
+                svg.dispatchEvent(new PointerEvent('pointerup', eventInit(endX)));
+              }
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              refreshDebugGraphElement(document.querySelector('[data-js-debug-graph]'), {force: true});
+              const zoomed = cardState();
+          const zoomGrid = document.querySelector('[data-js-debug-chart-grid]');
+          done({
+            initialOrder,
+            initial: {amount: initial.renderedAmount, expected: initial.expectedAmount, buckets: initial.buckets.length},
+            ranged: {amount: ranged.renderedAmount, expected: ranged.expectedAmount, buckets: ranged.buckets.length},
+            zoomed: {amount: zoomed.renderedAmount, expected: zoomed.expectedAmount, buckets: zoomed.buckets.length, active: zoomGrid?.dataset.jsDebugZoomed === 'true'},
+            compact: {
+              columns: compactStyle?.gridTemplateColumns || '',
+              totalCount: initial.card?.querySelectorAll('.js-debug-cost-compact > div').length || 0,
+              hasChart: Boolean(initial.card?.querySelector('.js-debug-line-chart, [data-js-debug-axis], [data-js-debug-bar-series]')),
+            },
+                narrow: {
+                  columns: narrowCompact ? getComputedStyle(narrowCompact).gridTemplateColumns : '',
+                      cells: narrowCells,
+              scrollWidth: narrowCard?.scrollWidth || 0,
+              clientWidth: narrowCard?.clientWidth || 0,
+              card: narrowRect ? {left: narrowRect.left, right: narrowRect.right, top: narrowRect.top, bottom: narrowRect.bottom} : null,
+              controls: narrowControls,
+            },
+            popover: {
+              expanded: details?.getAttribute('aria-expanded'),
+              dialog: popover?.getAttribute('role'),
+              modelTable: popover?.textContent.includes('By model'),
+              sourceTree: popover?.textContent.includes('By agent/source'),
+              left: popoverRect?.left, right: popoverRect?.right, top: popoverRect?.top, bottom: popoverRect?.bottom,
+            },
+            viewport: {width: innerWidth, height: innerHeight},
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["initialOrder"]["cost"] == metrics["initialOrder"]["model"] + 1, metrics
+    for state in (metrics["initial"], metrics["ranged"], metrics["zoomed"]):
+        assert state["buckets"] > 0, metrics
+        assert state["expected"] in state["amount"], metrics
+    assert metrics["zoomed"]["active"] is True, metrics
+    assert metrics["compact"]["totalCount"] == 4, metrics
+    assert metrics["compact"]["hasChart"] is False, metrics
+    # Narrow card uses two visible compact columns (geometry is more robust
+    # than serializing Chromium's grid-template computed value).
+    narrow_cells = metrics["narrow"]["cells"]
+    assert len(narrow_cells) == 4 and narrow_cells[0]["top"] == narrow_cells[1]["top"] and narrow_cells[2]["top"] == narrow_cells[3]["top"] and narrow_cells[0]["top"] < narrow_cells[2]["top"], metrics
+    assert metrics["narrow"]["scrollWidth"] <= metrics["narrow"]["clientWidth"], metrics
+    assert all(
+        control["left"] >= metrics["narrow"]["card"]["left"]
+        and control["right"] <= metrics["narrow"]["card"]["right"]
+        for control in metrics["narrow"]["controls"]
+    ), metrics
+    assert metrics["popover"]["expanded"] == "true", metrics
+    assert metrics["popover"]["dialog"] == "dialog", metrics
+    assert metrics["popover"]["modelTable"] is True and metrics["popover"]["sourceTree"] is True, metrics
+    assert metrics["popover"]["left"] >= 0 and metrics["popover"]["right"] <= metrics["viewport"]["width"], metrics
+    assert metrics["popover"]["top"] >= 0 and metrics["popover"]["bottom"] <= metrics["viewport"]["height"], metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
@@ -2430,8 +2593,9 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
         "subTab": "events",
         "rangeSeconds": 14400,
         "resolutionOverrideSeconds": 0,
-        "chartLayout": 0,
-        "hiddenCharts": ["gpuMemory", "gpuUtil"],
+            "chartLayout": 0,
+            "modelTokenDimension": "output",
+            "hiddenCharts": ["gpuMemory", "gpuUtil"],
         "visibleCharts": ["cpu", "memory"],
     }, metrics
 
@@ -4650,6 +4814,7 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
 
 def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(browser, tmp_path):
     page = tmp_path / "agent-status-split.html"
+    browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "no-preference"}]})
     load_static_html_fixture(
         browser,
         page.parent,
@@ -4735,13 +4900,12 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
         assert item["rootDisplay"] == "flex", (name, item)
         assert item["iconAnimation"] == "none", (name, item)
         if name == "base":
-            assert "attention-ring-fade" in item["dotAnimation"], (name, item)
-            assert item["dotDelay"] == item["rootDelayVar"], (name, item)
+            assert item["dotAnimation"] == "attention-ring-fade", (name, item)
         else:
             assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, item)
             assert item["beforeAnimation"] == "none", (name, item)
-            assert item["dotDelay"] == item["rootDelayVar"], (name, item)
             assert item["dotBoxShadow"] in ("", "none"), (name, item)
+        assert item["dotDelay"] == item["rootDelayVar"], (name, item)
         assert item["leftGap"] >= -0.5, (name, item)
         assert item["centerDy"] <= 1, (name, item)
         assert item["dotWithinRoot"] is True, (name, item)
@@ -6302,7 +6466,9 @@ def test_terminal_app_modified_arrows_route_to_tmux_scrollback_boundaries(browse
         const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
         const pageLines = Math.max(1, Math.floor(terminals.get('1').term.rows * terminalWheelPageFraction));
         const dispatch = key => {
-          const event = new KeyboardEvent('keydown', {key, code: key, ctrlKey: true, bubbles: true, cancelable: true});
+          const event = new KeyboardEvent('keydown', {
+            key, code: key, ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true,
+          });
           const accepted = screen.dispatchEvent(event);
           return {key, accepted, defaultPrevented: event.defaultPrevented};
         };
@@ -6344,7 +6510,7 @@ def test_keyboard_shortcuts_overlay_fits_narrow_viewport(browser, tmp_path):
           viewport: {width: innerWidth, height: innerHeight},
           bodyScrollsHorizontally: body.scrollWidth > body.clientWidth + 1,
           rowsOverflow: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.scrollWidth > row.clientWidth + 1),
-          pageBinding: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.textContent.includes('Page tmux scrollback') && row.textContent.includes('Ctrl+↑ / Ctrl+↓')),
+          pageBinding: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.textContent.includes('Page tmux scrollback') && row.textContent.includes(`${appShortcutText('↑')} / ${appShortcutText('↓')}`)),
         };
         """
     )
@@ -8549,7 +8715,7 @@ def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrappi
     )
     metrics = browser.execute_script(
         """
-        const rect = id => document.getElementById(id).getBoundingClientRect();
+        const {rect} = window.__yolomuxTestHelpers;
         const fieldStyle = getComputedStyle(document.getElementById('branch-field'));
         const textStyle = getComputedStyle(document.getElementById('branch-text'));
         return {
@@ -8624,7 +8790,6 @@ def test_yoinfo_deep_narrow_record_and_toolbar_use_container_responsive_layout(b
         page.name,
         page_html(
             f"""
-            <script>document.body.className = 'theme-dark';</script>
             <div style="width: 940px">
               <div id="toolbar" class="info-actions-bar info-tree-actions-bar">
                 <div id="selects" class="info-tree-group-selects">
@@ -8651,28 +8816,34 @@ def test_yoinfo_deep_narrow_record_and_toolbar_use_container_responsive_layout(b
             extra_css="body { margin: 0; background: var(--bg); }",
         ),
     )
+    browser.execute_script("document.body.className = 'theme-dark';")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return ['record', 'branch-field', 'branch-label', 'branch-value', 'branch-text', 'branch-state', 'branch-time', 'order-label'].every(id => document.getElementById(id));"
+        )
+    )
     metrics = browser.execute_script(
         """
-        const rect = id => document.getElementById(id).getBoundingClientRect();
+        const {rect} = window.__yolomuxTestHelpers;
         const selects = [...document.querySelectorAll('.info-tree-order-select')];
         const separators = [...document.querySelectorAll('.info-tree-order-separator')];
         const textStyle = getComputedStyle(document.getElementById('branch-text'));
         return {
-          recordWidth: rect('record').width,
+          recordWidth: rect('#record').width,
           columns: getComputedStyle(document.getElementById('branch-field')).gridTemplateColumns,
-          labelBottom: rect('branch-label').bottom,
-          valueTop: rect('branch-value').top,
-          textWidth: rect('branch-text').width,
-          textHeight: rect('branch-text').height,
+          labelBottom: rect('#branch-label').bottom,
+          valueTop: rect('#branch-value').top,
+          textWidth: rect('#branch-text').width,
+          textHeight: rect('#branch-text').height,
           textLineHeight: Number.parseFloat(textStyle.lineHeight),
-          stateWidth: rect('branch-state').width,
-          stateHeight: rect('branch-state').height,
-          timeTop: rect('branch-time').top,
-          valueTopEdge: rect('branch-value').top,
+          stateWidth: rect('#branch-state').width,
+          stateHeight: rect('#branch-state').height,
+          timeTop: rect('#branch-time').top,
+          valueTopEdge: rect('#branch-value').top,
           separatorDisplays: separators.map(node => getComputedStyle(node).display),
           selectWidths: selects.map(node => rect(node).width),
           selectTops: selects.map(node => Math.round(rect(node).top)),
-          labelTop: rect('order-label').top,
+          labelTop: rect('#order-label').top,
         };
         """
     )
@@ -14641,7 +14812,7 @@ def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tm
         openFiles.set(path, {kind: 'text'});
         fileEditorViewModesForPath(path, true).set(item, 'preview');
         focusedPanelItem = item;
-        const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        const event = new KeyboardEvent('keydown', {key: 'f', ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true});
         host.dispatchEvent(event);
         return new Promise(resolve => setTimeout(() => {
           const find = host.querySelector('.file-editor-preview-find-panel');
@@ -14672,7 +14843,7 @@ def test_focused_panel_search_shortcut_routes_to_each_registered_search(browser,
           focusedPanelItem = item;
           const input = panel.querySelector(selector);
           input.value = 'existing query';
-          const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+          const event = new KeyboardEvent('keydown', {key: 'f', ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true});
           panel.dispatchEvent(event);
           return {
             prevented: event.defaultPrevented,
@@ -14690,7 +14861,7 @@ def test_focused_panel_search_shortcut_routes_to_each_registered_search(browser,
         };
         const unsupported = makePanel('debug-panel', debugPaneItemId, '<input>');
         focusedPanelItem = debugPaneItemId;
-        const unsupportedEvent = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        const unsupportedEvent = new KeyboardEvent('keydown', {key: 'f', ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true});
         unsupported.dispatchEvent(unsupportedEvent);
         results.unsupportedPrevented = unsupportedEvent.defaultPrevented;
         info.remove();

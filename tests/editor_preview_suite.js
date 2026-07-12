@@ -27,6 +27,7 @@ const {
   nestedSlots,
   parseUrl,
   canonical,
+  sourceBetween,
   makeFileTree,
   test: registerTest,
   testAsync: registerTestAsync,
@@ -5053,6 +5054,59 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(noTokenHtml.includes('data-js-debug-chart="activity"'), 'activity chart renders without token counters');
     assert.ok(noTokenHtml.includes('data-js-debug-chart="agentTokens"'), 'token chart renders without numeric token counters');
     assert.ok(/data-js-debug-displayed-token-sum="0"[^>]*>\(0, Σ displayed\)<\/span>/.test(noTokenHtml), 'empty Agent tokens/min charts report a zero displayed sum');
+  });
+
+  test('YO!stats Cost summary is a compact non-chart card with full accounting in its popover', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 201,
+      usage_atom_backfill: {state: 'running', sources: 2, missing: 0},
+      records: [{
+        start: Math.floor(now / 1000), duration: 1, sequence: 201,
+        tokens_per_agent_total: 12, agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 12, samples: 1, tokens: 12, seconds: 60, model_rates: {'gpt-5.6-terra': {total: 12, samples: 1, tokens: 12, seconds: 60}}}],
+        cost_summary: {
+          total_micro_usd: 256000, known_micro_usd: 256000, priced_count: 4, complete: true, unpriced_count: 0,
+          components: [
+            {key: 'uncached_input', label: 'Uncached input', micro_usd: 70500, quantity: 23500, unit: 'tokens', rate_usd: '3', rate_scale: 1000000, effective_from: '2026-07-01T00:00:00Z', source_url: 'https://platform.openai.com/pricing'},
+            {key: 'cache_read', label: 'Cached read', micro_usd: 37500},
+            {key: 'text_output', label: 'Text output', micro_usd: 95000},
+            {key: 'image_output', label: 'Image output', micro_usd: 53000},
+          ],
+          models: [
+            {provider: 'openai', model: 'gpt-5.6-terra', effort: 'med', input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
+            {provider: 'anthropic', model: 'claude-opus-4-8', effort: 'xhigh', input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
+          ],
+          sources: [
+            {source: 'Root Codex', root_thread_id: 'root', agent_thread_id: 'root', model: 'gpt-5.6-terra', input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
+            {source: 'Research subagent', root_thread_id: 'root', agent_thread_id: 'child', model: 'claude-opus-4-8', input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
+          ],
+          catalog_revision: 'seed-1', active_catalog_revision: 9, freshness: 'seed-only',
+        },
+      }],
+    });
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
+    const summary = canonical(api.debugGraphCostSummaryForTest(api.debugGraphAgentTokenDisplayBucketsForTest(now)));
+    assert.equal(summary.totalMicroUsd, 256000, 'Cost summary preserves integer micro-USD totals from the existing stats bucket');
+    assert.equal(summary.knownMicroUsd, 256000, 'Cost summary does not convert the total to a float before reconciliation');
+    assert.ok(/group\.key === 'modelTokens' \? \[chart, debugGraphCostSummaryHtml\(groupBuckets, domain\)\]/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Cost summary consumes the exact Model tokens/min bucket helper, including compact wide-range history');
+    const html = api.debugPanelHtmlForTest();
+    const modelIndex = html.indexOf('data-js-debug-chart="modelTokens"');
+    const costIndex = html.indexOf('data-js-debug-summary-group="costSummary"');
+    assert.ok(modelIndex >= 0 && costIndex > modelIndex, 'Cost summary is immediately ordered after Model tokens/min in the graph stack');
+    const cardBody = html.slice(costIndex).match(/<dl class="js-debug-cost-compact"[\s\S]*?<\/dl>\s*<p class="js-debug-cost-models">[\s\S]*?<\/p>/)?.[0] || '';
+    assert.ok(html.includes('(est. ≥$0.2560, Σ displayed)') && cardBody.includes('Input') && cardBody.includes('Cache') && cardBody.includes('Output') && cardBody.includes('Total'), 'the default card remains a lower bound while backfill is active and contains only compact input/cache/output/total accounting');
+    assert.ok(html.includes('Backfill in progress'), 'Cost summary marks a displayed estimate partial while retained transcript atoms are migrating');
+    assert.ok(cardBody.includes('Models: gpt-5.6-terra $0.1450 · claude-opus-4-8 $0.1110'), 'the compact card provides a bounded model synopsis');
+    assert.equal(cardBody.includes('js-debug-line-chart') || cardBody.includes('data-js-debug-axis') || cardBody.includes('data-js-debug-bar-'), false, 'Cost summary is not a cost-per-minute chart');
+    assert.ok(html.includes('data-js-debug-cost-details') && html.includes('aria-haspopup="dialog"') && html.includes('By token class') && html.includes('By model') && html.includes('By agent/source') && html.includes('>Other<') && html.includes('js-debug-cost-all-models') && html.includes('data-js-debug-cost-cell-label="Input"'), 'the amount button owns the complete token-class, model subtotal, All models, and source breakdown through the shared popover surface with narrow-row labels');
+    const costSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(costSource.includes('data-js-debug-cost-refresh') && costSource.includes("/api/pricing-catalog/refresh") && costSource.includes("/api/pricing-catalog', {cache: 'no-store'}") && costSource.includes('readOnlyMode ? \'\'') && costSource.includes('} catch (error) {\n    jsDebugPricingRefreshState.inFlight = false;'), 'the card exposes the server-owned Refresh control only to writable/admin sessions, polls its bounded status, clears a failed request state, and never crawls from the browser');
+    assert.ok(html.includes('Catalog revision') && html.includes('>9<') && html.includes('Catalog freshness') && html.includes('seed-only') && html.includes('Priced coverage') && html.includes('>4/4<') && html.includes('Formula') && html.includes('23,500 tokens × $3/1,000,000 tokens') && html.includes('2026-07-01T00:00:00Z') && html.includes('Unpriced exclusions') && html.includes('https://platform.openai.com/pricing') && html.includes('role="tree"') && html.includes('aria-level="2"') && html.includes('Input $0.0705 · Cache $0.0375 · Output $0.0370 · Other $0.00 · Total $0.1450') && /All models<\/th><td[^>]*>\$0\.0705<\/td><td[^>]*>\$0\.0375<\/td><td[^>]*>\$0\.0950<\/td><td[^>]*>\$0\.0530<\/td><td[^>]*>\$0\.2560<\/td>/.test(html), 'the popover discloses active catalog state, priced coverage, safe pricing evidence/arithmetic, and reconciled root/subagent and All models subtotal arithmetic');
+
+    assert.ok(costSource.includes("const heading = hasPricedUsage ? `${exact ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';"), 'an interval with no priceable component is distinctly unestimated rather than a misleading $0 lower bound');
   });
 
   test('YO!stats aligns server activity and latency samples by timestamp', () => {
@@ -10441,6 +10495,53 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     trackpadApi.setAutoFocusEnabledForTest(true);
     assert.equal(trackpadApi.browserHasCursorHoverForTest(), true, 'an iPad with a trackpad or mouse exposes hover capability');
     assert.equal(trackpadApi.autoFocusCanFollowCursorForTest(), true, 'cursor-capable iPads retain passive auto-focus');
+  });
+
+  test('Model tokens/min selects normalized billable token classes and retains exact effort grouping', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const start = Math.floor((now - 60000) / 1000 / 60) * 60;
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 991,
+      records: [{
+        start, duration: 60, sequence: 991, tokens_per_agent_total: 20, agent_token_samples: 1,
+        agent_token_rates: [{key: 'root|0|codex', label: 'root:0:codex', total: 20, samples: 1, tokens: 20, seconds: 60, model_rates: {'legacy-output': {total: 20, samples: 1, tokens: 20, seconds: 60}}}],
+        cost_summary: {
+          total_micro_usd: 0, known_micro_usd: 0, complete: true, unpriced_count: 0,
+          components: [
+            {provider: 'openai', model: 'gpt-5.6', effort: 'high', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 7},
+            {provider: 'openai', model: 'gpt-5.6', effort: 'low', direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 90},
+            {provider: 'openai', model: 'gpt-5.6', effort: 'low', direction: 'input', modality: 'text', cache_role: 'read', unit: 'tokens', quantity: 40},
+            {provider: 'anthropic', model: 'claude-opus', effort: 'xhigh', direction: 'input', modality: 'text', cache_role: 'write_5m', unit: 'tokens', quantity: 30},
+            {provider: 'openai', model: 'gpt-image-2', effort: 'unknown', direction: 'output', modality: 'image', cache_role: 'none', unit: 'images', quantity: 1},
+          ], models: [], sources: [],
+        },
+      }],
+    });
+    const labelsFor = dimension => {
+      api.setDebugGraphModelTokenDimensionForTest(dimension);
+      return api.debugGraphTokenSeriesDataForTest(now)
+        .filter(series => series.tokenDimension === 'model')
+        .map(series => [series.label, series.values.at(-1)]);
+    };
+    const hostLabelsFor = dimension => [...labelsFor(dimension)].map(item => [...item]);
+    assert.deepStrictEqual(hostLabelsFor('output'), [['gpt-5.6 · high', 7]], 'component-backed output replaces duplicate legacy counters and retains effort');
+    assert.deepStrictEqual(hostLabelsFor('input'), [['gpt-5.6 · low', 90]], 'Input excludes cached input');
+    assert.deepStrictEqual(hostLabelsFor('cacheRead'), [['gpt-5.6 · low', 40]], 'Cache read is independently selectable');
+    assert.deepStrictEqual(hostLabelsFor('cacheWrite'), [['claude-opus · xhigh', 30]], 'Cache writes retain their model and effort');
+    assert.deepStrictEqual(hostLabelsFor('all'), [['claude-opus · xhigh', 30], ['gpt-5.6 · high', 7], ['gpt-5.6 · low', 130]], 'All billable combines only billable token components, not image units');
+    const effortVariants = api.debugGraphTokenSeriesDataForTest(now).filter(series => series.label.startsWith('gpt-5.6 ·'));
+    assert.equal(effortVariants[0].color, effortVariants[1].color, 'exact-model color stays stable across effort variants');
+    assert.notEqual(effortVariants[0].agentTokenPatternIndex, effortVariants[1].agentTokenPatternIndex, 'effort variants retain a distinct stable pattern when available');
+    api.setDebugGraphModelTokenDimensionForTest('input');
+    const descriptor = api.debugGraphTokenAxisDescriptorForTest(now);
+    assert.ok(descriptor.axisMax >= 90, 'the shared token axis grows for selected model input instead of clipping it');
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
+    const html = api.debugPanelHtmlForTest();
+    assert.ok(html.includes('data-js-debug-model-token-dimension-select') && html.includes('>Cache write<') && fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8').includes("debug.modelTokens.cacheWrite"), 'the model chart owns a localized shared selector control');
+    const controlSource = sourceBetween(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8'), '  const modelDimension = event.target.closest', "  const chartLayout = event.target.closest");
+    assert.equal(/requestJsDebugHistory|apiFetchJson|fetch\(/.test(controlSource), false, 'switching the local model token class only rerenders retained buckets and never refetches history');
   });
 }
 

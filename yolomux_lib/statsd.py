@@ -15,6 +15,10 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime
+from datetime import timezone
+from decimal import Decimal
+from decimal import ROUND_HALF_UP
 from pathlib import Path
 from time import monotonic as monotonic_clock
 from typing import Any
@@ -23,6 +27,7 @@ from .control import send_yolomux_control_request
 from .common import STATE_DIR
 from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
+from .pricing_catalog import PricingCatalog
 from .local_services.stats_store import StatsStore
 from .local_services import stats_store
 from .local_services.client import LocalServiceClient
@@ -47,6 +52,10 @@ STATSD_LEGACY_IMPORT_MARKER = "legacy_import_version"
 STATSD_AGENT_TOKEN_STATE_KEY = "agent_token_state"
 STATSD_AGENT_TOKEN_RECOVERY_MARKER = "agent_token_history_recovery_version"
 STATSD_AGENT_TOKEN_RECOVERY_VERSION = 5
+STATSD_USAGE_ATOM_MIGRATION_MARKER = "usage_atom_migration_version"
+STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY = "usage_atom_migration_status"
+STATSD_USAGE_ATOM_MIGRATION_VERSION = 1
+STATSD_PRICING_REPROJECTION_MARKER = "pricing_reprojection_catalog_revision"
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
@@ -67,6 +76,8 @@ STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATSD_SAMPLE_INTERVAL_SECONDS = 1.0
 STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
+STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
+STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
 
 
 def stats_history_client_id(value: Any = "") -> str:
@@ -74,6 +85,182 @@ def stats_history_client_id(value: Any = "") -> str:
     if not raw:
         return ""
     return "".join(character if character.isalnum() or character in "_.:-" else "-" for character in raw)[:STATS_HISTORY_CLIENT_ID_MAX_LENGTH]
+
+
+def _usage_atom_text(value: Any, *, default: str = "", limit: int = 256) -> str:
+    return str(value if value is not None else default).strip()[:limit] or default
+
+
+def _usage_atom_number(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) and number >= 0 else 0.0
+
+
+def _usage_atom_timestamp_text(value: Any) -> str:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        timestamp = 0.0
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        return "9999-12-31T23:59:59Z"
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def normalized_usage_atom(value: Any) -> dict[str, Any] | None:
+    """Coerce a parser atom/dict into the bounded statsd storage contract."""
+
+    fields = value.__dict__ if hasattr(value, "__dict__") else value
+    if not isinstance(fields, dict):
+        return None
+    quantity = _usage_atom_number(fields.get("quantity"))
+    if quantity <= 0:
+        return None
+    provider = _usage_atom_text(fields.get("provider"), default="unknown")
+    model = _usage_atom_text(fields.get("model"), default="unknown")
+    direction = _usage_atom_text(fields.get("direction"), default="unknown", limit=32)
+    modality = _usage_atom_text(fields.get("modality"), default="unknown", limit=32)
+    cache_role = _usage_atom_text(fields.get("cache_role"), default="none", limit=32)
+    unit = _usage_atom_text(fields.get("unit"), default="tokens", limit=32)
+    timestamp = _usage_atom_number(fields.get("timestamp"))
+    event_id = _usage_atom_text(fields.get("event_id"), default="", limit=512)
+    if not event_id:
+        # Deliberately hash only structured dimensions, never raw prompt or
+        # response bodies.  It supports idempotent replay/backfill when a
+        # provider did not supply an event identifier.
+        event_id = json.dumps([provider, model, timestamp, direction, modality, cache_role, unit, quantity, _usage_atom_text(fields.get("source"), limit=512)], separators=(",", ":"))
+    return {
+        "event_id": event_id,
+        "timestamp": timestamp,
+        "provider": provider,
+        "model": model,
+        "model_evidence": _usage_atom_text(fields.get("model_evidence"), default="unknown"),
+        "effort": _usage_atom_text(fields.get("effort"), default="unknown", limit=64),
+        "direction": direction,
+        "modality": modality,
+        "cache_role": cache_role,
+        "unit": unit,
+        "quantity": quantity,
+        "root_thread_id": _usage_atom_text(fields.get("root_thread_id"), limit=256),
+        "agent_thread_id": _usage_atom_text(fields.get("agent_thread_id"), limit=256),
+        "parent_thread_id": _usage_atom_text(fields.get("parent_thread_id"), limit=256),
+        "depth": max(0, int(_usage_atom_number(fields.get("depth")))),
+        "endpoint": _usage_atom_text(fields.get("endpoint"), limit=128),
+        "tool_name": _usage_atom_text(fields.get("tool_name"), limit=128),
+        "call_id": _usage_atom_text(fields.get("call_id"), limit=256),
+        "pricing_profile": _usage_atom_text(fields.get("pricing_profile"), default="default", limit=64),
+        "service_tier": _usage_atom_text(fields.get("service_tier"), default="default", limit=64),
+        # Set only by the durable retained-history migrator.  Live collection
+        # never carries this marker, so a source replay can replace its own
+        # prior staged atoms without deleting concurrent live usage.
+        "backfill_source": _usage_atom_text(fields.get("backfill_source"), limit=512),
+        "telemetry_complete": bool(fields.get("telemetry_complete")),
+        "source": _usage_atom_text(fields.get("source"), limit=512),
+    }
+
+
+def projected_usage_component(atom: Any, catalog: Any = None) -> dict[str, Any] | None:
+    """Project one normalized atom to integer micro-USD via the catalog API."""
+
+    normalized = normalized_usage_atom(atom)
+    if normalized is None:
+        return None
+    result = {
+        **normalized,
+        "micro_usd": 0,
+        "priced": False,
+        "catalog_revision": 0,
+        "source_url": "",
+        "effective_from": "",
+        "rate_usd": "",
+        "rate_scale": 0,
+    }
+    if catalog is None or normalized["provider"] == "unknown" or normalized["model"] == "unknown":
+        return result
+    rate = catalog.resolve_rate(
+        provider=normalized["provider"], model=normalized["model"], direction=normalized["direction"], modality=normalized["modality"],
+        cache_role=normalized["cache_role"], unit=normalized["unit"], profile=normalized["pricing_profile"], service_tier=normalized["service_tier"], timestamp=_usage_atom_timestamp_text(normalized["timestamp"]),
+    )
+    if rate is None:
+        return result
+    micro_usd = (Decimal(str(normalized["quantity"])) * rate.usd * Decimal(1_000_000) / Decimal(rate.scale)).to_integral_value(rounding=ROUND_HALF_UP)
+    return {
+        **result,
+        "micro_usd": int(micro_usd),
+        "priced": True,
+        "catalog_revision": int(rate.catalog_revision),
+        "source_url": str(rate.source_url),
+        "effective_from": str(getattr(rate, "effective_from", "")),
+        "rate_usd": str(rate.usd),
+        "rate_scale": int(rate.scale),
+    }
+
+
+def cost_summary_response(value: Any) -> dict[str, Any]:
+    """Build the one public, range-summable cost-summary schema from atoms."""
+
+    raw = value if isinstance(value, dict) else {}
+    atoms = [atom for atom in raw.get("components", []) if isinstance(atom, dict)]
+
+    def billed_class(atom: dict[str, Any]) -> str:
+        # Model/source subtotals distinguish ordinary text token classes from
+        # image/audio/request units.  This is presentation-only; the retained
+        # atom remains the authoritative billable dimension tuple.
+        if str(atom.get("unit") or "tokens").lower() != "tokens" or str(atom.get("modality") or "text").lower() != "text":
+            return "other"
+        cache_role = str(atom.get("cache_role") or "none").lower()
+        if cache_role in {"read", "write_5m", "write_1h"}:
+            return "cache"
+        direction = str(atom.get("direction") or "unknown").lower()
+        if direction == "input":
+            return "input"
+        if direction == "output":
+            return "output"
+        return "other"
+
+    def aggregate(keys: tuple[str, ...]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+        for atom in atoms:
+            identity = tuple(str(atom.get(key) or "") for key in keys)
+            row = grouped.setdefault(identity, {key: identity[index] for index, key in enumerate(keys)} | {
+                "quantity": 0.0, "micro_usd": 0, "count": 0, "unpriced_count": 0,
+                "input_micro_usd": 0, "cache_micro_usd": 0, "output_micro_usd": 0, "other_micro_usd": 0,
+            })
+            row["quantity"] += _usage_atom_number(atom.get("quantity"))
+            row["micro_usd"] += int(atom.get("micro_usd") or 0)
+            row["count"] += 1
+            row["unpriced_count"] += 0 if atom.get("priced") else 1
+            row[f"{billed_class(atom)}_micro_usd"] += int(atom.get("micro_usd") or 0)
+        return sorted(grouped.values(), key=lambda row: (-int(row["micro_usd"]), tuple(str(row[key]) for key in keys)))
+
+    # A price revision is part of an atomic billable class.  Grouping events
+    # across an effective-date boundary would make the displayed rate and its
+    # source link dishonest even if the subtotal happened to remain correct.
+    components = aggregate(("provider", "model", "effort", "pricing_profile", "service_tier", "direction", "modality", "cache_role", "unit", "catalog_revision", "source_url", "effective_from", "rate_usd", "rate_scale"))
+    models = aggregate(("provider", "model", "effort"))
+    sources = aggregate(("root_thread_id", "agent_thread_id", "parent_thread_id", "endpoint", "tool_name", "source"))
+    known_micro_usd = sum(int(atom.get("micro_usd") or 0) for atom in atoms if atom.get("priced"))
+    priced_count = sum(1 for atom in atoms if atom.get("priced"))
+    unpriced_count = sum(1 for atom in atoms if not atom.get("priced"))
+    complete = not bool(raw.get("truncated")) and not bool(raw.get("lower_bound")) and unpriced_count == 0
+    revisions = sorted({int(atom.get("catalog_revision") or 0) for atom in atoms if int(atom.get("catalog_revision") or 0) > 0})
+    return {
+        # `total_micro_usd` intentionally equals the known sum when telemetry
+        # is incomplete; callers use `complete` to render `est. ≥$…`.
+        "total_micro_usd": known_micro_usd,
+        "known_micro_usd": known_micro_usd,
+        "priced_count": priced_count,
+        "complete": complete,
+        "unpriced_count": unpriced_count,
+        "components": components,
+        "models": models,
+        "sources": sources,
+        "catalog_revision": max(revisions, default=0),
+        "active_catalog_revision": max(0, int(raw.get("active_catalog_revision") or 0)),
+        "freshness": _usage_atom_text(raw.get("freshness"), default="unknown", limit=80),
+    }
 
 
 def default_socket_path() -> Path:
@@ -109,6 +296,7 @@ class PersistentStatsService:
         database_path: Path,
         idle_seconds: float = STATSD_DEFAULT_IDLE_SECONDS,
         sampler_owner_path: Path | None = None,
+        pricing_catalog: Any = None,
     ):
         self.socket_path = safe_socket_path(socket_path, prefix="yolomux-statsd")
         self.lock_path = self.socket_path.with_suffix(".lock")
@@ -128,6 +316,34 @@ class PersistentStatsService:
         self.last_sampler_attempt_at = 0.0
         self.sampler_thread: threading.Thread | None = None
         self.sampler_wake_event = threading.Event()
+        # Catalog ownership stays outside statsd.  Tests and the application
+        # may inject its public resolve_rate surface; absent catalog means
+        # usage remains visible but explicitly unpriced/lower-bound.
+        self.pricing_catalog = pricing_catalog
+
+    def _pricing_catalog_metadata(self) -> tuple[str, int]:
+        """Read local catalog status for a projection without fetching providers."""
+
+        status = getattr(self.pricing_catalog, "status", None)
+        if not callable(status):
+            return "unknown", 0
+        try:
+            payload = status()
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            return "unknown", 0
+        if not isinstance(payload, dict):
+            return "unknown", 0
+        state = _usage_atom_text(payload.get("state"), default="unknown", limit=80)
+        try:
+            revision = max(0, int(payload.get("catalog_revision") or 0))
+        except (TypeError, ValueError):
+            revision = 0
+        return state, revision
+
+    def _apply_pricing_catalog_metadata(self, summary: dict[str, Any]) -> None:
+        freshness, revision = self._pricing_catalog_metadata()
+        summary["freshness"] = freshness
+        summary["active_catalog_revision"] = revision
 
     def _durable_sampler_owner(self) -> dict[str, Any]:
         path = self.sampler_owner_path
@@ -186,6 +402,11 @@ class PersistentStatsService:
                 else:
                     self.last_sampler_success_at = self.last_sampler_attempt_at
                     self.last_sampler_failure = ""
+                    # Pricing is a derived projection.  The statsd owner
+                    # notices seed/override/Refresh revisions while it is
+                    # already doing its background sampling work; no HTTP
+                    # history request can trigger this retained-data rewrite.
+                    self._maybe_reproject_cost_summaries()
             self.sampler_wake_event.wait(STATSD_SAMPLE_INTERVAL_SECONDS)
             self.sampler_wake_event.clear()
 
@@ -438,6 +659,7 @@ class PersistentStatsService:
                         target["source"] = str(raw_rate["source"])
                     self._merge_agent_token_model_rates(target, raw_rate.get("model_rates"))
                     record_changed = True
+            record_changed = self._merge_usage_components(bucket, record.get("usage_atoms")) or record_changed
             record_changed = self._merge_host_metrics(bucket, record.get("host_metrics")) or record_changed
             process = record.get("process")
             if isinstance(process, dict):
@@ -474,6 +696,104 @@ class PersistentStatsService:
             self._compact_history(sample_now)
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
+
+    def _merge_usage_components(self, bucket: dict[str, Any], atoms: Any) -> bool:
+        """Persist a bounded, idempotent component projection in one bucket."""
+
+        if not isinstance(atoms, list):
+            return False
+        summary = bucket.setdefault("cost_summary", {})
+        existing = summary.get("components") if isinstance(summary.get("components"), list) else []
+        components = [item for item in existing if isinstance(item, dict)][-STATS_COST_SUMMARY_MAX_COMPONENTS:]
+        seen = {
+            (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
+            for item in components
+        }
+        changed = False
+        for atom in atoms:
+            component = projected_usage_component(atom, self.pricing_catalog)
+            if component is None:
+                continue
+            identity = (component["event_id"], component["direction"], component["modality"], component["cache_role"], component["unit"])
+            if identity in seen:
+                continue
+            if len(components) >= STATS_COST_SUMMARY_MAX_COMPONENTS:
+                # This cannot claim exactness after eviction because a future
+                # replay cannot prove the evicted event was absent.
+                summary["lower_bound"] = True
+                summary["truncated"] = True
+                continue
+            components.append(component)
+            seen.add(identity)
+            changed = True
+        if not changed:
+            return False
+        self._recalculate_usage_summary(summary, components)
+        self._apply_pricing_catalog_metadata(summary)
+        return True
+
+    @staticmethod
+    def _recalculate_usage_summary(summary: dict[str, Any], components: list[dict[str, Any]], *, legacy_output_only: bool = False) -> None:
+        """Keep projection totals derived from retained raw usage dimensions.
+
+        ``lower_bound`` is intentionally recomputed from durable facts rather
+        than carried forward from an older catalog: a formerly-unpriced atom
+        can become priceable after Refresh, whereas truncated and legacy
+        output-only history can never become exact without missing telemetry.
+        """
+        summary["components"] = components
+        summary["total_micro_usd"] = sum(int(item.get("micro_usd") or 0) for item in components)
+        summary["priced_components"] = sum(1 for item in components if item.get("priced"))
+        summary["unpriced_components"] = sum(1 for item in components if not item.get("priced"))
+        summary["lower_bound"] = bool(summary.get("truncated")) or legacy_output_only or any(
+            not item.get("priced") or not item.get("telemetry_complete") for item in components
+        )
+        summary["catalog_revisions"] = sorted({int(item.get("catalog_revision") or 0) for item in components if int(item.get("catalog_revision") or 0) > 0})
+
+    def reproject_cost_summaries(self) -> dict[str, Any]:
+        """Reprice retained components without modifying usage/output history."""
+        if self.pricing_catalog is None:
+            return {"ok": True, "changed": 0, "reason": "no_pricing_catalog"}
+        changed = 0
+        next_sequence = int(self.store.diagnostics().get("sequence") or 0)
+        connection = self.store._connection()
+        with connection:
+            for bucket in self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY):
+                summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
+                components = summary.get("components") if isinstance(summary.get("components"), list) else []
+                projected = [projected_usage_component(component, self.pricing_catalog) for component in components]
+                projected_components = [component for component in projected if component is not None]
+                legacy_output_only = not projected_components and bool(bucket.get("tokens_per_agent_total") or bucket.get("agent_token_rates"))
+                replacement = dict(summary)
+                self._recalculate_usage_summary(replacement, projected_components, legacy_output_only=legacy_output_only)
+                self._apply_pricing_catalog_metadata(replacement)
+                if replacement == summary:
+                    continue
+                next_sequence += 1
+                bucket["cost_summary"] = replacement
+                bucket["server_sequence"] = max(int(bucket.get("server_sequence") or 0), next_sequence)
+                bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
+                self.store._upsert_bucket(connection, bucket)
+                changed += 1
+        if changed:
+            self._encoded_query_cache.clear()
+        return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
+
+    def _maybe_reproject_cost_summaries(self) -> dict[str, Any]:
+        """Run at most once for each durable catalog revision in statsd."""
+        status = getattr(self.pricing_catalog, "status", None)
+        if not callable(status):
+            return {"ok": True, "reason": "catalog_has_no_status"}
+        try:
+            revision = int((status() or {}).get("catalog_revision") or 0)
+        except (TypeError, ValueError, sqlite3.Error, OSError):
+            return {"ok": True, "reason": "catalog_status_unavailable"}
+        if revision <= 0 or self.store.metadata_value(STATSD_PRICING_REPROJECTION_MARKER) == str(revision):
+            return {"ok": True, "changed": 0, "reason": "current_catalog"}
+        result = self.reproject_cost_summaries()
+        if result.get("ok"):
+            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(revision))
+        return result
 
     @staticmethod
     def _agent_token_state_snapshot(value: Any) -> dict[str, dict[str, Any]]:
@@ -656,6 +976,7 @@ class PersistentStatsService:
         fallback_state: Any = None,
     ) -> dict[str, Any]:
         measurements: list[dict[str, Any]] = []
+        atom_records: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -678,7 +999,22 @@ class PersistentStatsService:
                 "identity": session_files.transcript_usage_identity(transcript_path, kind),
                 "models": session_files.transcript_generated_tokens_by_model(transcript_path, kind),
             })
-        return self.claim_agent_token_deltas(measurements, seen_keys, sample_time, fallback_state=fallback_state)
+            # The old counter projection is deliberately retained above.  The
+            # component stream is separate and idempotent by event identity,
+            # so it cannot inflate the Output chart when both are present.
+            for atom in session_files.transcript_usage_atoms(transcript_path, kind):
+                if atom.timestamp <= sample_time:
+                    # This response crosses the statsd Unix-RPC boundary.
+                    # Dataclasses are useful inside the parser but are not a
+                    # wire format; convert here so a successful baseline
+                    # cannot kill the shared daemon while serializing its
+                    # claimed records.
+                    normalized = normalized_usage_atom(atom)
+                    if normalized is not None:
+                        atom_records.append({"time": atom.timestamp, "usage_atoms": [normalized]})
+        claimed = self.claim_agent_token_deltas(measurements, seen_keys, sample_time, fallback_state=fallback_state)
+        claimed["records"].extend(atom_records)
+        return claimed
 
     @staticmethod
     def _agent_token_rate_records(rates: Any) -> list[dict[str, Any]]:
@@ -908,6 +1244,182 @@ class PersistentStatsService:
                 ))
         return self.recover_agent_token_history(records, now=sample_now)
 
+    def _replace_backfill_source_atoms(self, source: str, atoms: list[dict[str, Any]], now: float) -> int:
+        """Atomically replace one transcript source's staged retained atoms.
+
+        The source marker is private migration provenance.  It deliberately
+        does not match normal live records, and identity comparison against
+        every retained component prevents a high-water handoff from charging a
+        turn that live collection already persisted.
+        """
+        staged: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for atom in atoms:
+            projected = projected_usage_component(atom, self.pricing_catalog)
+            if projected is None:
+                continue
+            duration = self._bucket_seconds(float(projected.get("timestamp") or now), now)
+            start = int(math.floor(float(projected.get("timestamp") or now) / duration) * duration)
+            staged.setdefault((start, duration), []).append(projected)
+        changed = 0
+        next_sequence = int(self.store.diagnostics().get("sequence") or 0)
+        connection = self.store._connection()
+        with connection:
+            existing = {(int(bucket["start"]), int(bucket["duration"])): bucket for bucket in self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY)}
+            for key in set(existing) | set(staged):
+                bucket = existing.get(key) or stats_store.empty_bucket(*key)
+                summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
+                old_components = [item for item in summary.get("components", []) if isinstance(item, dict)]
+                retained = [item for item in old_components if str(item.get("backfill_source") or "") != source]
+                identities = {(str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or "")) for item in retained}
+                for component in staged.get(key, []):
+                    identity = (str(component.get("event_id") or ""), str(component.get("direction") or ""), str(component.get("modality") or ""), str(component.get("cache_role") or ""), str(component.get("unit") or ""))
+                    if identity not in identities:
+                        retained.append(component)
+                        identities.add(identity)
+                if retained == old_components:
+                    continue
+                replacement = dict(summary)
+                self._recalculate_usage_summary(replacement, retained, legacy_output_only=not retained and bool(bucket.get("tokens_per_agent_total") or bucket.get("agent_token_rates")))
+                self._apply_pricing_catalog_metadata(replacement)
+                next_sequence += 1
+                bucket["cost_summary"] = replacement
+                bucket["server_sequence"] = max(int(bucket.get("server_sequence") or 0), next_sequence)
+                bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
+                self.store._upsert_bucket(connection, bucket)
+                changed += 1
+        if changed:
+            self._encoded_query_cache.clear()
+        return changed
+
+    def migrate_usage_atom_history_from_rows(self, rows: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
+        """Replay retained transcript families into component storage once.
+
+        The marker is written only after all currently discoverable rows have
+        been merged.  Missing transcripts retain their legacy output history
+        and therefore remain lower-bound/unpriced rather than being deleted.
+        A later high-water/resume coordinator can call this before marking a
+        complete roster; this first owner method is deliberately idempotent by
+        stable event/component identity.
+        """
+
+        if self.store.metadata_value(STATSD_USAGE_ATOM_MIGRATION_MARKER) == str(STATSD_USAGE_ATOM_MIGRATION_VERSION):
+            return {"ok": True, "changed": False, "reason": "already_migrated"}
+        sample_now = float(time.time() if now is None else now)
+        if not math.isfinite(sample_now):
+            raise ValueError("now must be finite")
+        self.store.set_metadata_value(
+            STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY,
+            json.dumps({"state": "running", "started_at": sample_now, "sources_total": len(rows)}, sort_keys=True),
+        )
+        cutoff = sample_now - STATS_HISTORY_RETENTION_SECONDS
+        missing = 0
+        sources = 0
+        changed = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            transcript = str(row.get("transcript") or "").strip()
+            kind = str(row.get("kind") or "").strip().lower()
+            if not transcript or kind not in {"codex", "claude"}:
+                missing += 1
+                continue
+            path = Path(transcript)
+            if not path.is_file():
+                missing += 1
+                continue
+            sources += 1
+            # The root transcript is the replay unit; descendants discovered
+            # from it share this tag and are atomically replaced together.
+            source = str(path.expanduser().resolve(strict=False))
+            # Capture the complete discovered family and each file's byte
+            # high-water mark before parsing.  A transcript that grows while
+            # this bounded replay runs is subsequently collected by the live
+            # sampler, never counted by both paths.
+            family = session_files.claude_transcript_family_paths(path) if kind == "claude" else session_files.codex_transcript_family_paths(path)
+            watermarks: dict[str, int] = {}
+            for family_path in family:
+                try:
+                    watermarks[str(family_path.expanduser().resolve(strict=False))] = int(family_path.stat().st_size)
+                except OSError:
+                    # A vanished descendant is a partial source, not a reason
+                    # to discard the captured siblings' durable atoms.
+                    missing += 1
+            source_atoms: list[dict[str, Any]] = []
+            for atom in session_files.transcript_usage_atoms(path, kind, family_paths=family, max_bytes_by_path=watermarks):
+                if atom.timestamp < cutoff or atom.timestamp > sample_now:
+                    continue
+                normalized = normalized_usage_atom(atom)
+                if normalized is not None:
+                    normalized["backfill_source"] = source
+                    source_atoms.append(normalized)
+            # One transaction replaces only this source's prior staged atoms.
+            # Untagged live atoms are retained and event identity suppresses a
+            # duplicate if the live sampler already observed the same turn.
+            changed += self._replace_backfill_source_atoms(source, source_atoms, sample_now)
+        # Output-only buckets predate billable atom telemetry.  Preserve their
+        # existing chart data but mark the cost as a lower bound rather than
+        # presenting an exact zero-dollar estimate.
+        legacy_changed = self._mark_legacy_output_only_buckets(sample_now)
+        # A partial roster must not consume the version marker: a future
+        # startup can still recover a transcript that was temporarily absent.
+        if missing:
+            status = {"state": "partial", "updated_at": sample_now, "sources": sources, "missing": missing}
+            self.store.set_metadata_value(STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY, json.dumps(status, sort_keys=True))
+            return {"ok": True, "changed": bool(changed or legacy_changed), "sources": sources, "missing": missing, "complete": False}
+        self.store.set_metadata_value(STATSD_USAGE_ATOM_MIGRATION_MARKER, str(STATSD_USAGE_ATOM_MIGRATION_VERSION))
+        self.store.set_metadata_value(
+            STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY,
+            json.dumps({"state": "complete", "completed_at": sample_now, "sources": sources, "missing": 0}, sort_keys=True),
+        )
+        return {"ok": True, "changed": bool(changed or legacy_changed), "sources": sources, "missing": 0, "complete": True}
+
+    def _usage_atom_migration_status(self) -> dict[str, Any]:
+        """Expose bounded durable backfill state without scanning transcripts."""
+
+        raw = self.store.metadata_value(STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY)
+        try:
+            value = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            value = {}
+        if not isinstance(value, dict):
+            value = {}
+        state = _usage_atom_text(value.get("state"), default="pending", limit=32)
+        if self.store.metadata_value(STATSD_USAGE_ATOM_MIGRATION_MARKER) == str(STATSD_USAGE_ATOM_MIGRATION_VERSION):
+            state = "complete"
+        return {
+            "state": state if state in {"pending", "running", "partial", "complete"} else "pending",
+            "sources": max(0, int(_usage_atom_number(value.get("sources")))),
+            "missing": max(0, int(_usage_atom_number(value.get("missing")))),
+        }
+
+    def _mark_legacy_output_only_buckets(self, now: float) -> int:
+        """Mark retained counter-only history partial without touching totals."""
+        cutoff = now - STATS_HISTORY_RETENTION_SECONDS
+        changed = 0
+        next_sequence = int(self.store.diagnostics().get("sequence") or 0)
+        connection = self.store._connection()
+        with connection:
+            for bucket in self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY):
+                if float(bucket.get("start") or 0) < cutoff:
+                    continue
+                summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
+                components = summary.get("components") if isinstance(summary.get("components"), list) else []
+                if components or not bool(bucket.get("tokens_per_agent_total") or bucket.get("agent_token_rates")):
+                    continue
+                replacement = dict(summary)
+                self._recalculate_usage_summary(replacement, [], legacy_output_only=True)
+                if replacement == summary:
+                    continue
+                next_sequence += 1
+                bucket["cost_summary"] = replacement
+                bucket["server_sequence"] = max(int(bucket.get("server_sequence") or 0), next_sequence)
+                bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
+                self.store._upsert_bucket(connection, bucket)
+                changed += 1
+        if changed:
+            self._encoded_query_cache.clear()
+        return changed
+
     def _compact_history(self, now: float) -> None:
         """Apply the bounded legacy retention tiers inside the durable owner."""
         sources = self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY)
@@ -1052,6 +1564,7 @@ class PersistentStatsService:
                 if isinstance(value, dict)
             ]
             record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
+            record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
         return record
 
     @staticmethod
@@ -1083,6 +1596,39 @@ class PersistentStatsService:
             if values.get("source"):
                 existing["source"] = str(values["source"])
             PersistentStatsService._merge_agent_token_model_rates(existing, values.get("model_rates"))
+        target_summary = target.setdefault("cost_summary", {})
+        source_summary = source.get("cost_summary") if isinstance(source.get("cost_summary"), dict) else {}
+        target_components = target_summary.get("components") if isinstance(target_summary.get("components"), list) else []
+        source_components = source_summary.get("components") if isinstance(source_summary.get("components"), list) else []
+        seen_components = {
+            (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
+            for item in target_components if isinstance(item, dict)
+        }
+        for item in source_components:
+            if not isinstance(item, dict):
+                continue
+            identity = (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
+            if identity in seen_components or len(target_components) >= STATS_COST_SUMMARY_MAX_COMPONENTS:
+                target_summary["lower_bound"] = True
+                target_summary["truncated"] = True
+                continue
+            target_components.append(copy.deepcopy(item))
+            seen_components.add(identity)
+        target_summary["components"] = target_components
+        target_summary["total_micro_usd"] = sum(int(item.get("micro_usd") or 0) for item in target_components if isinstance(item, dict))
+        target_summary["priced_components"] = sum(1 for item in target_components if isinstance(item, dict) and item.get("priced"))
+        target_summary["unpriced_components"] = sum(1 for item in target_components if isinstance(item, dict) and not item.get("priced"))
+        target_summary["lower_bound"] = bool(target_summary.get("lower_bound")) or bool(source_summary.get("lower_bound")) or any(not item.get("priced") or not item.get("telemetry_complete") for item in target_components if isinstance(item, dict))
+        target_summary["catalog_revisions"] = sorted({int(item.get("catalog_revision") or 0) for item in target_components if isinstance(item, dict) and int(item.get("catalog_revision") or 0) > 0})
+        try:
+            target_summary["active_catalog_revision"] = max(
+                int(target_summary.get("active_catalog_revision") or 0),
+                int(source_summary.get("active_catalog_revision") or 0),
+            )
+        except (TypeError, ValueError):
+            target_summary["active_catalog_revision"] = 0
+        if source_summary.get("freshness"):
+            target_summary["freshness"] = str(source_summary["freshness"])
         source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
         if source_metrics:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())
@@ -1205,6 +1751,7 @@ class PersistentStatsService:
             "rollup_bucket_seconds": STATS_HISTORY_ROLLUP_BUCKET_SECONDS,
             "tiers": [{"max_age_seconds": max_age, "bucket_seconds": duration} for max_age, duration in STATS_HISTORY_TIERS],
             "client_id": client_id,
+            "usage_atom_backfill": self._usage_atom_migration_status(),
         }
         if token_resolution:
             token_request = {
@@ -1221,7 +1768,7 @@ class PersistentStatsService:
                 "sequence": token_payload["sequence"],
                 "latest_sequence": token_payload["latest_sequence"],
                 "records": [
-                    {key: record[key] for key in ("start", "duration", "sequence", "tokens_per_agent_total", "agent_token_samples", "agent_token_rates")}
+                    {key: record[key] for key in ("start", "duration", "sequence", "tokens_per_agent_total", "agent_token_samples", "agent_token_rates", "cost_summary")}
                     for record in token_payload["records"]
                 ],
                 "resolution_seconds": token_request["resolution_seconds"],
@@ -1424,6 +1971,19 @@ class PersistentStatsService:
                 return self.recover_agent_token_history_from_rows([row for row in rows if isinstance(row, dict)], now=request.get("now")), b""
             except (TypeError, ValueError, sqlite3.Error, OSError) as exc:
                 return {"ok": False, "error": str(exc)}, b""
+        if action == "migrate_usage_atom_history_from_rows":
+            rows = request.get("rows")
+            if not isinstance(rows, list):
+                return {"ok": False, "error": "rows must be a list"}, b""
+            try:
+                return self.migrate_usage_atom_history_from_rows([row for row in rows if isinstance(row, dict)], now=request.get("now")), b""
+            except (TypeError, ValueError, sqlite3.Error, OSError) as exc:
+                return {"ok": False, "error": str(exc)}, b""
+        if action == "reproject_cost_summaries":
+            try:
+                return self.reproject_cost_summaries(), b""
+            except (TypeError, ValueError, sqlite3.Error, OSError) as exc:
+                return {"ok": False, "error": str(exc)}, b""
         if action == "replace_buckets":
             buckets = request.get("buckets")
             if not isinstance(buckets, list):
@@ -1495,6 +2055,7 @@ class PersistentStatsService:
 
     def run(self) -> int:
         self.import_legacy_history_once()
+        self._maybe_reproject_cost_summaries()
         self.sampler_thread = threading.Thread(target=self._sampler_loop, name="statsd-sampler", daemon=True)
         self.sampler_thread.start()
         return run_local_rpc_service(
@@ -1631,6 +2192,16 @@ class StatsClient(LocalServiceClient):
             return {"ok": False, "error": "statsd unavailable"}
         return self.request({"action": "recover_agent_token_history_from_rows", "rows": rows, "now": now}, timeout=3.0)
 
+    def migrate_usage_atom_history_from_rows(self, rows: list[dict[str, Any]], *, now: float) -> dict[str, Any]:
+        if not self.ensure_started():
+            return {"ok": False, "error": "statsd unavailable"}
+        return self.request({"action": "migrate_usage_atom_history_from_rows", "rows": rows, "now": now}, timeout=10.0)
+
+    def reproject_cost_summaries(self) -> dict[str, Any]:
+        if not self.ensure_started():
+            return {"ok": False, "error": "statsd unavailable"}
+        return self.request({"action": "reproject_cost_summaries"}, timeout=10.0)
+
     def set_sampler_owner(self, owner: dict[str, Any]) -> dict[str, Any]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
@@ -1675,11 +2246,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.serve:
         parser.error("--serve is required")
     apply_service_process_priority()
+    # The daemon, rather than an individual web process, owns projection onto
+    # the shared catalog.  Direct unit-service construction can still inject a
+    # fake catalog or leave it absent without touching a developer's cache.
     return PersistentStatsService(
         Path(args.socket),
         Path(args.database),
         idle_seconds=args.idle_seconds,
         sampler_owner_path=Path(args.sampler_owner),
+        pricing_catalog=PricingCatalog(),
     ).run()
 
 
