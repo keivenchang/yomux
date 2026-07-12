@@ -307,6 +307,8 @@ Closing the WebSocket before the initial resize payload is an expected disconnec
 
 Browser input is sent as JSON messages over the same WebSocket. Normal keyboard data becomes `{"type": "input", "data": "..."}`. Resize messages become `{"type": "resize", "cols": ..., "rows": ...}`. Scroll messages become `{"type": "tmux-scroll", "direction": "up|down", "lines": ...}`.
 
+Terminal image paste is latency-sensitive. The browser upload path inserts the `[Image #N] <path>` reference from the `/api/upload` response, repaints the terminal, and may refresh upload/event UI, but it must not force a transcript/session-metadata refresh. Upload-directory resolution likewise needs only a writable session cwd; it must not discover agents, resolve transcripts, or trigger macOS `lsof` process scans. On macOS, general agent cwd discovery tries `libproc.proc_pidinfo(PROC_PIDVNODEPATHINFO)` before falling back to bounded `lsof -d cwd`; Codex transcript fallback lsof must stay descriptor-filtered instead of scanning every process file, and discovery passes prime all selected Codex transcript lookups with one batched lsof call before per-agent reads consult the cache.
+
 Resizing is handled on the PTY slave file descriptor, then the server sends `SIGWINCH` to the tmux attach process group. The browser sends resize updates only after a debounce, except for an initial fast resize during WebSocket startup.
 
 The browser creates panel DOM nodes for visible sessions at boot, checks that the backing tmux sessions exist, and starts terminal connections for them. Visible layout changes move existing panel nodes into slot containers. Hidden panels move back to `#panelPool`. This keeps xterm instances and WebSocket connections alive while changing layout.

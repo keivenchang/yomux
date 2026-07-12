@@ -109,6 +109,14 @@ class ResolvedRate:
         }
 
 
+@dataclass(frozen=True)
+class EstimatedRateBand:
+    """Comparable low/high rates for an unpriced usage dimension."""
+
+    minimum: ResolvedRate
+    maximum: ResolvedRate
+
+
 def safe_source_url(value: object) -> str:
     """Return only a reviewed absolute HTTPS provider/corroboration link.
 
@@ -413,6 +421,39 @@ class PricingCatalog:
             if row is None:
                 return None
             return ResolvedRate(provider, str(row["model"]), model, direction, modality, cache_role, unit, int(row["scale"]), Decimal(str(row["usd"])), str(row["effective_from"]), str(row["source_kind"]), str(row["source_url"]), int(row["revision"]))
+
+    def estimate_rate_band(self, *, direction: str, modality: str = "text", cache_role: str = "none", unit: str = "tokens", profile: str = "default", service_tier: str = "default", timestamp: str = "9999-12-31T23:59:59Z") -> EstimatedRateBand | None:
+        """Return a defensible low/high comparable rate band for unknown models.
+
+        This intentionally does not guess a model identity. It compares active
+        catalog rows with the same billable dimension tuple and picks the
+        cheapest and most expensive current rates in that class. If no exact
+        profile/service-tier match exists, it falls back to the same
+        direction/modality/cache-role/unit class across profiles and tiers.
+        """
+        self.open()
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1 AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
+                (direction, modality, cache_role, unit, profile, service_tier, timestamp),
+            ).fetchall()
+            if not rows:
+                rows = connection.execute(
+                    "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND effective_from <= ? AND active = 1 AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
+                    (direction, modality, cache_role, unit, timestamp),
+                ).fetchall()
+            rates = [
+                ResolvedRate(
+                    str(row["provider"]), str(row["model"]), str(row["model"]), str(row["direction"]), str(row["modality"]),
+                    str(row["cache_role"]), str(row["unit"]), int(row["scale"]), Decimal(str(row["usd"])),
+                    str(row["effective_from"]), str(row["source_kind"]), str(row["source_url"]), int(row["revision"]),
+                )
+                for row in rows
+            ]
+            if not rates:
+                return None
+            key = lambda rate: rate.usd / Decimal(rate.scale)
+            return EstimatedRateBand(min(rates, key=key), max(rates, key=key))
 
     def set_override(self, catalog: dict[str, Any]) -> None:
         """Install an explicit local override, retaining its immutable rate rows."""

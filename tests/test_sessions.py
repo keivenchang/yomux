@@ -405,7 +405,7 @@ def test_codex_transcript_from_process_fd_uses_darwin_lsof_and_caches_result(tmp
 
     assert sessions.codex_transcript_from_process_fd(123, root=root, lsof_runner=lsof_runner) == live
     assert sessions.codex_transcript_from_process_fd(123, root=root, lsof_runner=lsof_runner) == live
-    assert calls == [(["lsof", "-p", "123", "-Fn"], sessions.CODEX_LSOF_TIMEOUT_SECONDS)]
+    assert calls == [(["lsof", "-p", "123", "-a", "-d", sessions.CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER, "-Fn"], sessions.CODEX_LSOF_TIMEOUT_SECONDS)]
 
 
 def test_codex_transcript_from_process_fd_keeps_linux_proc_path(tmp_path, monkeypatch):
@@ -425,7 +425,20 @@ def test_codex_transcript_from_process_fd_keeps_linux_proc_path(tmp_path, monkey
     assert sessions.codex_transcript_from_process_fd(123, root=root, fd_dir=fd_dir, lsof_runner=unexpected_lsof) == transcript
 
 
-def test_process_cwd_uses_darwin_lsof(tmp_path, monkeypatch):
+def test_process_cwd_uses_darwin_libproc_before_lsof(tmp_path, monkeypatch):
+    expected = tmp_path / "repo"
+    expected.mkdir()
+
+    def unexpected_lsof(*_args, **_kwargs):
+        raise AssertionError("Darwin process_cwd must not call lsof when libproc succeeds")
+
+    monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sessions, "_darwin_process_cwd", lambda pid: str(expected))
+
+    assert sessions.process_cwd(123, lsof_runner=unexpected_lsof) == str(expected)
+
+
+def test_process_cwd_falls_back_to_darwin_lsof(tmp_path, monkeypatch):
     expected = tmp_path / "repo"
     expected.mkdir()
     calls = []
@@ -435,9 +448,53 @@ def test_process_cwd_uses_darwin_lsof(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(args, 0, f"p123\nfwd\nn{expected}\n", "")
 
     monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sessions, "_darwin_process_cwd", lambda pid: None)
 
     assert sessions.process_cwd(123, lsof_runner=lsof_runner) == str(expected)
     assert calls == [(["lsof", "-p", "123", "-a", "-d", "cwd", "-Fn"], sessions.CODEX_LSOF_TIMEOUT_SECONDS)]
+
+
+def test_discover_sessions_batches_darwin_codex_transcript_lsof(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    root = tmp_path / ".codex" / "sessions"
+    first = root / "2026" / "07" / "rollout-first.jsonl"
+    second = root / "2026" / "07" / "rollout-second.jsonl"
+    for path, session_id in ((first, "codex-first"), (second, "codex-second")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"id": session_id}}) + "\n", encoding="utf-8")
+
+    panes = [
+        PaneInfo(session="1", window="0", pane="0", pane_id="%1", target="%1", current_path="/repo/one", command="bash", active=True, window_active=True, title="", pid=100),
+        PaneInfo(session="2", window="0", pane="0", pane_id="%2", target="%2", current_path="/repo/two", command="bash", active=True, window_active=True, title="", pid=200),
+    ]
+    processes = {
+        100: ProcessInfo(pid=100, ppid=1, command="bash"),
+        101: ProcessInfo(pid=101, ppid=100, command="codex"),
+        200: ProcessInfo(pid=200, ppid=1, command="bash"),
+        201: ProcessInfo(pid=201, ppid=200, command="codex"),
+    }
+    calls = []
+
+    def fake_lsof_paths_for_processes(pids, descriptor=None, runner=None):
+        calls.append((pids, descriptor))
+        return {101: [str(first)], 201: [str(second)]}
+
+    def unexpected_lsof(*_args, **_kwargs):
+        raise AssertionError("per-pid lsof should be satisfied by the batched cache")
+
+    monkeypatch.setattr(sessions.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: (panes, None))
+    monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
+    monkeypatch.setattr(sessions, "_darwin_process_cwd", lambda pid: "/repo")
+    monkeypatch.setattr(sessions, "lsof_paths_for_processes", fake_lsof_paths_for_processes)
+    monkeypatch.setattr(sessions, "lsof_paths_for_process", unexpected_lsof)
+
+    discovered, errors = sessions.discover_sessions(["1", "2"])
+
+    assert errors == []
+    assert calls == [([101, 201], sessions.CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER)]
+    assert [agent.session_id for agent in discovered["1"].agents + discovered["2"].agents] == ["codex-first", "codex-second"]
 
 
 def test_codex_transcript_session_id_reads_session_meta_payload_id(tmp_path):

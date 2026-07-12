@@ -2430,6 +2430,8 @@ async function runLayoutRestoreSuite() {
     api.setPinnedTabsForTest(['1']);
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 10}});
     api.setLayoutSlotsForTest(minimizeSlots);
+    assert.equal(api.minimizeBlockedByPinned('3'), false, 'a mixed pinned/unpinned generic pane can still minimize its unpinned residents');
+    assert.ok(api.panelControlsHtml('3').includes('data-pane-minimize="3"'), 'mixed generic pane keeps the minimize affordance visible');
     api.minimizePaneFromLayout('3');
     let afterMinimize = api.serialize(api.layoutSlotsForTest());
     assert.deepStrictEqual([...afterMinimize.panes.left.tabs], ['1'], 'mixed generic minimize leaves pinned tabs in the source pane');
@@ -2438,6 +2440,8 @@ async function runLayoutRestoreSuite() {
     minimizeSlots.right = api.paneStateWithTabs(['3'], '3');
     api.setPinnedTabsForTest(['1', '2']);
     api.setLayoutSlotsForTest(minimizeSlots);
+    assert.equal(api.minimizeBlockedByPinned('1'), true, 'an all-pinned generic pane blocks minimize through the shared predicate');
+    assert.equal(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), false, 'all-pinned generic pane hides the dead minimize affordance');
     api.minimizePaneFromLayout('1');
     afterMinimize = api.serialize(api.layoutSlotsForTest());
     assert.deepStrictEqual([...afterMinimize.panes.left.tabs], ['1', '2'], 'all-pinned generic minimize leaves the source pane unchanged');
@@ -2448,6 +2452,8 @@ async function runLayoutRestoreSuite() {
     sideMinimizeSlots.right = api.paneStateWithTabs(['3'], '3');
     api.setPinnedTabsForTest([api.infoItemId]);
     api.setLayoutSlotsForTest(sideMinimizeSlots);
+    assert.equal(api.minimizeBlockedByPinned(api.infoItemId), true, 'a pinned side-pane resident blocks side-pane minimize');
+    assert.equal(api.panelControlsHtml(api.infoItemId).includes(`data-pane-minimize="${api.infoItemId}"`), false, 'pinned side-pane resident hides the dead minimize affordance');
     api.minimizePaneFromLayout(api.infoItemId);
     const afterSideMinimize = api.serialize(api.layoutSlotsForTest());
     assert.deepStrictEqual([...afterSideMinimize.panes.left.tabs], [api.infoItemId], 'side-pane minimize refuses instead of discarding a pinned dual-role tab');

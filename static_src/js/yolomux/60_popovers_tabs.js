@@ -19,7 +19,7 @@ function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
 async function expandDirectoryRow(row, fullPath, options = {}) {
   fileExplorerPendingExpansions.add(fullPath);
   syncDirectoryRowExpansionVisual(row, true, true);
-  const entries = await fetchDirectory(fullPath);
+  const entries = await fetchDirectory(fullPath, {user: options.user === true});
   fileExplorerPendingExpansions.delete(fullPath);
   if (!entries) {
     if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);

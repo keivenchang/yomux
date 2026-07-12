@@ -733,6 +733,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       left: {active: '1', tabs: ['1', '2']},
     });
     api.setPinnedTabsForTest(['1']);
+    assert.equal(api.minimizeBlockedByPinned('1'), true, 'one-column active pinned tab shares the minimize-block predicate');
+    assert.equal(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), false, 'one-column active pinned tab hides the dead minimize affordance');
     api.minimizePaneFromLayout('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
@@ -740,6 +742,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }, 'one-column minimize refuses a selected pinned tab instead of hiding it');
     assert.equal(api.statusKindForTest(), 'danger', 'one-column pinned minimize reports a visible danger status');
     api.setPinnedTabsForTest([]);
+    assert.equal(api.minimizeBlockedByPinned('1'), false, 'one-column unpinned active tab can still be minimized');
+    assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'one-column unpinned active tab shows minimize again');
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
       left: {active: '1', tabs: [api.finderItemId, '1', '2']},
@@ -828,13 +832,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {coarsePointer: true});
     const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
-    assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'interrupt'[\s\S]*action: 'tmux-prefix'[\s\S]*action: 'tab'[\s\S]*action: 'copy'[\s\S]*action: 'command-v'[\s\S]*action: 'tmux-scroll-up'[\s\S]*action: 'tmux-scroll-down'[\s\S]*action: 'arrow-up'[\s\S]*action: 'enter'/.test(source), 'touch terminal key definitions put Ctrl-B, Tab, Copy/Paste, and direct tmux scrolling on the first palette page');
-    assert.ok(/terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['escape', 'tab', 'tmux-prefix', 'more'\]\)[\s\S]*terminalMobileAccessorySideActions = Object\.freeze\(\['ctrl', 'interrupt'\]\)/.test(source), 'the smart-key utility column keeps Ctrl and direct Ctrl-C together immediately left of the D-pad');
+    assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'alt'[\s\S]*action: 'shift'[\s\S]*action: 'cmd'[\s\S]*action: 'interrupt'[\s\S]*action: 'tmux-prefix'[\s\S]*action: 'tab'[\s\S]*action: 'copy'[\s\S]*action: 'command-v'[\s\S]*action: 'tmux-scroll-up'[\s\S]*action: 'tmux-scroll-down'[\s\S]*action: 'arrow-up'[\s\S]*action: 'enter'/.test(source), 'touch terminal key definitions put modifiers, Ctrl-B, Tab, Copy/Paste, and direct tmux scrolling on the first palette page');
+    assert.ok(/terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['tab', 'tmux-prefix', 'more'\]\)[\s\S]*terminalMobileAccessorySideActions = Object\.freeze\(\['escape', 'ctrl', 'shift', 'alt', 'cmd', 'interrupt'\]\)/.test(source), 'the smart-key utility column keeps Esc, Ctrl, Shift, Alt, Cmd, and direct Ctrl-C together while the top row keeps Tab/Ctrl-B');
     assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'touch terminal overflow retains Cmd-P and secondary navigation while Paste stays visible in the primary grid');
-    assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*state\.ctrl = false[\s\S]*state\.alt = false/.test(source), 'Ctrl and Alt latches are one-shot and share terminal input handling');
-    assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*queueTmuxScroll\(item, signedLines\)[\s\S]*queueLocalTerminalScroll\(term, signedLines\)[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true, bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; direct scroll controls use the wheel-owned tmux protocol with a local read-only fallback; ordinary smart keys keep using terminal transport');
-    assert.ok(/function terminalMobileAccessoryHtml[\s\S]*primaryKeys[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*state\.open \? '×' : '⌨'[\s\S]*mobile-terminal-keybar[\s\S]*mobile-terminal-keyrow-shell[\s\S]*key\('more'\)[\s\S]*state\.open/.test(source) && /function syncTerminalMobileAccessoryState[\s\S]*mobile-terminal-keybar--more[\s\S]*launcher\.textContent = open \? '×' : '⌨'/.test(source) && /function terminalMobileAccessoryPalettePlacement[\s\S]*side = 'below'[\s\S]*side = 'left'[\s\S]*side = 'right'/.test(source) && /function beginTerminalMobileAccessoryLauncherPress[\s\S]*setPointerCapture[\s\S]*function moveTerminalMobileAccessoryLauncherPress[\s\S]*terminalMobileAccessoryLauncherDragPosition\(press, event\)[\s\S]*function endTerminalMobileAccessoryLauncherPress/.test(source), 'the touch key palette opens on demand, uses the launcher as the close and drag owner, keeps the More control outside the scrolling primary row, replaces its base keys with a bounded overflow grid, and derives palette placement from launcher geometry');
-    assert.ok(/delegate\(panel, 'click', '\[data-terminal-mobile-toggle\]'[\s\S]*sendTerminalMobileAccessoryInput\(targetSession, 'open'\)/.test(source) && /function sendTerminalMobileAccessoryInput[\s\S]*action === 'ctrl' \|\| action === 'alt' \|\| action === 'more' \|\| action === 'open'[\s\S]*toggleTerminalMobileAccessoryState\(session, action\)/.test(source), 'the launcher X closes by reusing the existing open-toggle owner rather than a separate close path');
+    assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*terminalMobileAccessoryModifierActive\(state\)[\s\S]*terminalMobileAccessoryClearModifiers\(state, \{session\}\)[\s\S]*terminalMobileAccessoryShiftText\(value\)[\s\S]*terminalMobileAccessoryControlText\(value\)/.test(source) && /function toggleTerminalMobileAccessoryModifier[\s\S]*terminalMobileAccessoryModifierDoubleTapMs[\s\S]*state\[lockedKey\] = true/.test(source), 'Ctrl/Alt/Shift/Cmd latches share terminal input handling, and double-tap locks modifiers through the shared lock path');
+    assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*queueTmuxScroll\(item, signedLines\)[\s\S]*queueLocalTerminalScroll\(term, signedLines\)[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; direct scroll controls use the wheel-owned tmux protocol with a local read-only fallback; ordinary smart keys keep using terminal transport and modifier mapping');
+    assert.ok(/function terminalMobileAccessoryHtml[\s\S]*primaryKeys[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*state\.open \? '×' : '⌨'[\s\S]*mobile-terminal-keybar[\s\S]*mobile-terminal-keyrow-shell[\s\S]*key\('more'\)[\s\S]*state\.open/.test(source) && /function syncTerminalMobileAccessoryState[\s\S]*mobile-terminal-keybar--more[\s\S]*launcher\.textContent = open \? '×' : '⌨'/.test(source) && /function terminalMobileAccessoryPalettePlacement[\s\S]*side = 'below'[\s\S]*side = 'left'[\s\S]*side = 'right'/.test(source) && /function beginTerminalMobileAccessoryLauncherPress[\s\S]*setPointerCapture[\s\S]*function moveTerminalMobileAccessoryLauncherPress[\s\S]*terminalMobileAccessoryLauncherDragPosition\(press, event\)[\s\S]*function endTerminalMobileAccessoryLauncherPress/.test(source) && /function beginTerminalMobileAccessoryPalettePress[\s\S]*event\.target\?\.closest\?\.\('\[data-terminal-mobile-key\]'\)[\s\S]*function moveTerminalMobileAccessoryPalettePress[\s\S]*terminalMobileAccessoryLauncherDragPosition\(press, event\)[\s\S]*function endTerminalMobileAccessoryPalettePress/.test(source) && !source.includes('paletteX') && !source.includes('paletteY'), 'the touch key palette opens on demand, uses launcher position as the single close/drag owner, lets palette background drag the attached launcher without stealing key taps, keeps the More control outside the scrolling primary row, replaces its base keys with a bounded overflow grid, and derives palette placement from launcher geometry');
+    assert.ok(/delegate\(panel, 'click', '\[data-terminal-mobile-toggle\]'[\s\S]*sendTerminalMobileAccessoryInput\(targetSession, 'open'\)/.test(source) && /function sendTerminalMobileAccessoryInput[\s\S]*terminalMobileAccessoryModifierActions\.includes\(action\) \|\| action === 'more' \|\| action === 'open'[\s\S]*toggleTerminalMobileAccessoryState\(session, action\)/.test(source), 'the launcher X closes by reusing the existing open-toggle owner rather than a separate close path');
     assert.ok(!source.includes('data-terminal-mobile-close') && !source.includes('mobile-terminal-key-close') && !source.includes('data-terminal-mobile-drag') && !source.includes('beginTerminalMobileAccessoryDrag'), 'the retired palette X and drag handle do not leave an alternate behavior path');
     assert.ok(/async function pasteTerminalMobileAccessoryClipboard[\s\S]*clipboard\.read[\s\S]*uploadFiles\(session, imageFiles, \{source: 'paste'\}\)[\s\S]*handleTerminalData\(session, text/.test(source), 'mobile Cmd-V reads clipboard text or images and routes both through the existing paste/terminal parents');
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
@@ -882,9 +886,25 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {startClientX: 292, startClientY: 212, startX: 272, startY: 192, paneWidth: 320, paneHeight: 240, launcherWidth: 40, launcherHeight: 40},
       {clientX: 500, clientY: 500},
     )), {x: 280, y: 200}, 'launcher drag position clamps to the pane bottom-right');
+    const modifiedMobileInput = (mods, data) => {
+      for (const mod of mods) api.toggleTerminalMobileAccessoryStateForTest('mods', mod);
+      const value = api.terminalDataWithMobileAccessoryModifiersForTest('mods', data);
+      return {value, state: api.terminalMobileAccessoryStateForTest('mods')};
+    };
+    assert.deepStrictEqual(modifiedMobileInput(['ctrl'], 'c').value, '\x03', 'Ctrl maps the next printable key to its control byte');
+    assert.deepStrictEqual(modifiedMobileInput(['alt'], 'x').value, '\x1bx', 'Alt prefixes the next key with ESC');
+    assert.deepStrictEqual(modifiedMobileInput(['cmd'], 'x').value, '\x1bx', 'Cmd/Meta prefixes the next key with ESC');
+    assert.deepStrictEqual(modifiedMobileInput(['shift'], 'a').value, 'A', 'Shift uppercases the next letter');
+    assert.deepStrictEqual(modifiedMobileInput(['shift'], '2').value, '@', 'Shift applies the keyboard shifted symbol map');
+    assert.deepStrictEqual(modifiedMobileInput(['shift'], '\t').value, '\x1b[Z', 'Shift+Tab sends the standard reverse-tab escape sequence');
+    const shiftedCtrl = modifiedMobileInput(['shift', 'ctrl'], '2');
+    assert.deepStrictEqual(shiftedCtrl.value, '\x00', 'Shift applies before Ctrl, so Ctrl+Shift+2 produces Ctrl-@');
+    assert.equal(shiftedCtrl.state.ctrl || shiftedCtrl.state.alt || shiftedCtrl.state.shift || shiftedCtrl.state.cmd, false, 'mobile modifiers clear after one transformed key');
     api.toggleTerminalMobileAccessoryStateForTest('1', 'open');
     assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'the palette opens for its terminal');
-    assert.ok(/mobile-terminal-key-launcher--open[\s\S]*aria-expanded="true"[\s\S]*>×<\/button>/.test(api.terminalMobileAccessoryHtmlForTest('1')), 'initial HTML renders the launcher as the close button while open');
+    const openKeyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
+    assert.ok(/mobile-terminal-key-launcher--open[\s\S]*aria-expanded="true"[\s\S]*>×<\/button>/.test(openKeyboardHtml), 'initial HTML renders the launcher as the close button while open');
+    assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"/.test(openKeyboardHtml), 'rendered mobile keyboard puts Esc/Ctrl/Shift/Alt/Cmd/Ctrl-C in the left column before the slim Tab/Ctrl-B primary row');
     assert.equal(api.dismissTerminalMobileAccessoriesForTest(), true, 'one shared outside-action dismissal closes the open terminal palette');
     assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'outside interaction closes the palette');
     api.toggleTerminalMobileAccessoryStateForTest('1', 'open');
@@ -895,12 +915,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const readOnlyTouchHtml = readOnlyTouchApi.terminalMobileAccessoryHtmlForTest('1');
     assert.ok(readOnlyTouchHtml.includes('data-terminal-mobile-toggle="1"'), 'read-only coarse-pointer terminals still expose the movable launcher');
     assert.ok(/data-terminal-mobile-key="copy"[\s\S]*>Copy<\/button>/.test(readOnlyTouchHtml) && !/data-terminal-mobile-key="copy"[^>]* disabled/.test(readOnlyTouchHtml), 'read-only Copy remains enabled');
-    assert.ok(/data-terminal-mobile-key="tab"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="interrupt"[^>]* disabled/.test(readOnlyTouchHtml), 'read-only mutating smart keys remain disabled');
+    assert.ok(/data-terminal-mobile-key="escape"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="tab"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="interrupt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="alt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="shift"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="cmd"[^>]* disabled/.test(readOnlyTouchHtml), 'read-only mutating smart keys and modifiers remain disabled');
     const readOnlyDesktopApi = loadYolomux('', ['1'], 'http:', 'MacIntel', 'viewer');
     assert.equal(readOnlyDesktopApi.terminalMobileAccessoryHtmlForTest('1'), '', 'desktop-pointer read-only terminals do not render the touch launcher');
+    assert.ok(source.includes("const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'more']);") && source.includes("const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'alt', 'cmd', 'interrupt']);"), 'the touch palette source keeps Esc/Ctrl/Shift/Alt/Cmd/Ctrl-C in the left side column and removes duplicates from the top row');
     assert.ok(/function installTerminalMobileAccessoryDismissal\(\)[\s\S]*pointerdown[\s\S]*data-terminal-mobile-keybar[\s\S]*data-terminal-mobile-toggle[\s\S]*dismissTerminalMobileAccessories\(\)[\s\S]*function bindTerminalContainerForSession[\s\S]*installTerminalMobileAccessoryDismissal\(\)[\s\S]*keydown[\s\S]*dismissTerminalMobileAccessory\(session\)/.test(source), 'the shared palette closes on outside app interaction and physical terminal input, while its own launcher and keys remain usable');
-    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*position:\s*absolute[\s\S]*touch-action:\s*none[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*position:\s*absolute[\s\S]*grid-auto-rows:\s*max-content[\s\S]*\.mobile-terminal-key-side\s*\{[\s\S]*grid-template-rows:\s*repeat\(2, 36px\)[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the touch key palette stacks Ctrl/Ctrl-C left of the D-pad, pins More to the top-right, and keeps Ctrl-B/Tab on the first page');
-    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*inset-block-end:\s*calc\([\s\S]*padding:\s*var\(--space-5\)[\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-key-side\s*\{[\s\S]*grid-column:\s*1[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the non-selectable touch palette opens immediately above its launcher and preserves the utility-column/D-pad geometry without extra top chrome');
+    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*position:\s*absolute[\s\S]*touch-action:\s*none[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*position:\s*absolute[\s\S]*grid-auto-rows:\s*max-content[\s\S]*max-height:\s*calc\(100% - var\(--space-4\)\)[\s\S]*padding:\s*var\(--space-2\)[\s\S]*\.mobile-terminal-key-side\s*\{[\s\S]*grid-template-rows:\s*repeat\(6, 36px\)[\s\S]*gap:\s*var\(--space-1\)[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the touch key palette stacks Esc/Ctrl/Shift/Alt/Cmd/Ctrl-C left of the D-pad, pins More to the top-right, and keeps Ctrl-B/Tab on the first page');
+    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*inset-block-end:\s*calc\([\s\S]*padding:\s*var\(--space-2\)[\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-key-side\s*\{[\s\S]*grid-column:\s*1[\s\S]*grid-template-rows:\s*repeat\(6, 36px\)[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the non-selectable touch palette opens immediately above its launcher and preserves the six-key utility-column/D-pad geometry without extra top chrome');
   });
 
   test('search history pane renders search results and compact runs', () => {
@@ -1524,6 +1545,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(differRows['/repo/just.md'].dataset.recency, 'just-updated', 'Differ Date rows preserve the recency signal');
     assert.equal(dateCell(differRows['/repo/just.md']).classList.contains('attention-pulse'), true, 'Differ Date rows keep the shared pulse');
     api.setFileTreeRecencyNowForTest(null);
+  });
+
+  test('Finder row date text uses Finder mode when Differ mode is none', () => {
+    const api = loadYolomux('', ['1']);
+    const entry = {name: 'report.md', kind: 'file', mtime: 2_000};
+    const dateText = tree => tree.querySelector('.file-tree-row[data-path="/repo/report.md"]')?.querySelector('.file-tree-date')?.textContent || '';
+    const render = (options = {}) => {
+      const tree = new TestElement('finder-date-mode-tree');
+      tree.setAttribute('role', 'tree');
+      tree.classList.add('file-explorer-tree-panel');
+      api.renderTreeChildrenForTest(tree, '/repo', [entry], 0, [], options);
+      return tree;
+    };
+    api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'relative');
+    api.setFileExplorerViewSettingForTest('differ', 'treeDateMode', 'none');
+    assert.match(dateText(render()), /ago$/, 'Finder rows default to the Finder date mode instead of leaking Differ none');
+    assert.equal(dateText(render({differMode: true})), '', 'Differ rows keep their independent none mode');
+    api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'date');
+    assert.equal(dateText(render()), api.sessionFileTimeText(entry.mtime), 'Finder Date mode renders an absolute timestamp with Differ still none');
+    api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'none');
+    api.setFileExplorerViewSettingForTest('differ', 'treeDateMode', 'relative');
+    assert.equal(dateText(render()), '', 'Finder none remains independent from Differ Ago');
+    assert.match(dateText(render({differMode: true})), /ago$/, 'Differ Ago renders through the differMode-aware fallback');
+    const changesSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
+    const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    assert.ok(/fileExplorerTreeDateModeForView\(options\.view \|\| \(options\.differMode \? 'differ' : 'finder'\)\)/.test(changesSource), 'date text fallback mirrors the recency path instead of defaulting missing view to Differ');
+    assert.ok(/renderTreeChildren\(fileExplorerTree, fileExplorerRoot, entries, 0, \{view: 'finder'\}\)/.test(finderSource) && /renderTreeChildren\(container, root, entries, 0, \{view: 'finder'\}\)/.test(finderSource), 'Finder top-level renders thread their view into shared row rendering');
   });
 
   test('pane tabs and YO!info share mixed agent-window status precedence', () => {
@@ -3864,6 +3912,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(html.includes('data-js-debug-subview="system" hidden') && html.includes('data-js-debug-system'), 'YO!stats keeps its System dashboard in a separate lazy subview');
     const systemSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(systemSource.includes("apiFetchJsonQuiet('/api/system-status', {cache: 'no-store'})") && /jsDebugSubTab !== 'system' \|\| !jsDebugStatsPanelVisible\(\)/.test(systemSource), 'System status uses the bounded quiet endpoint and remains visibility-gated');
+    assert.equal(/function debugSystemServicesHtml/.test(systemSource), false, 'Local Services no longer has the obsolete per-service card renderer');
+    assert.ok(systemSource.includes('debugSystemLocalServicesState = {records: new Map()') && systemSource.includes('data-js-debug-local-services-card'), 'Local Services keeps client-side service state and a stable card host');
+    assert.ok(systemSource.includes('oldLocalServicesCard') && systemSource.includes('replaceWith(oldLocalServicesCard)'), 'System refresh preserves the Local Services card so the table updates in place');
+    assert.ok(systemSource.includes('updateDebugSystemLocalServiceCell') && systemSource.includes('if (cell.textContent !== value.display) cell.textContent = value.display'), 'Local Services mutates stable cells instead of rebuilding unchanged text nodes');
+    assert.ok(systemSource.includes('DEBUG_SYSTEM_SERVICE_FRESH_MS = 60_000') && systemSource.includes('js-debug-system-service-cell--fresh') && systemSource.includes('js-debug-system-service-cell--stale'), 'Local Services has the 60s fresh/stale recency classes');
+    assert.ok(systemSource.includes("key: 'started'") && systemSource.includes("key: 'lastRan'") && systemSource.indexOf("key: 'queues'") > systemSource.indexOf("key: 'lastFailure'"), 'Local Services table includes Started/Last ran and keeps Queues last');
+    assert.ok(systemSource.includes("t('debug.system.localServices.prevValue'") && systemSource.includes("t('debug.system.localServices.exitedAgo'"), 'Local Services prev/exited labels are localized');
+    const systemCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.ok(systemCss.includes('.js-debug-system-local-services-wrap') && systemCss.includes('.js-debug-system-service-cell--prev') && systemCss.includes('color: var(--muted)'), 'Local Services CSS covers narrow overflow and muted prev/stale cells');
     assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
     assert.ok(html.includes('data-js-debug-stat="api">2<'), 'debug panel surfaces the API call count');
     assert.ok(html.includes('data-js-debug-graph'), 'YO!stats graph sub-tab renders a graph container');
@@ -3914,6 +3971,114 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       bandwidth: 'Client bandwidth/sec',
     };
     assert.deepStrictEqual(chartKeys, Object.keys(chartLabels), 'YO!stats chart groups retain the documented host-first source-key order');
+    const chartGroups = api.jsDebugGraphChartGroupsForTest();
+    assert.deepStrictEqual(canonical(chartGroups.map(group => group.key)), chartKeys, 'YO!stats chart group test API exposes the rendered chart order');
+    const chartDescKeys = Object.fromEntries(chartGroups.map(group => [group.key, group.descKey || '']));
+    assert.deepStrictEqual(Object.keys(chartDescKeys), chartKeys, 'YO!stats chart descriptions cover every chart group');
+    for (const [key, descKey] of Object.entries(chartDescKeys)) {
+      assert.ok(descKey, `YO!stats chart ${key} has a description key`);
+      assert.ok(descKey.startsWith('debug.graph.chart.') && descKey.endsWith('.desc'), `YO!stats chart ${key} uses a graph chart desc key`);
+    }
+    const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
+    for (const file of localeFiles) {
+      const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
+      for (const [key, descKey] of Object.entries(chartDescKeys)) {
+        assert.ok(catalog[descKey] && catalog[descKey] !== descKey, `${file} localizes ${key} chart description ${descKey}`);
+      }
+    }
+    const escapeAttr = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const enCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
+    for (const key of chartKeys) api.setDebugGraphChartVisibleForTest(key, true);
+    const allChartTitleHtml = api.debugPanelHtmlForTest();
+    for (const [key, descKey] of Object.entries(chartDescKeys)) {
+      const desc = enCatalog[descKey];
+      const titlePattern = new RegExp(`<span class="js-debug-chart-title" title="${escapeRegExp(escapeAttr(desc))}" aria-label="[^"]*${escapeRegExp(escapeAttr(desc))}" data-js-debug-chart-desc="${escapeRegExp(escapeAttr(descKey))}">`);
+      assert.ok(titlePattern.test(allChartTitleHtml), `YO!stats ${key} chart title exposes localized hover and accessible description`);
+    }
+    assert.ok(allChartTitleHtml.includes('js-debug-hover-tooltip'), 'YO!stats keeps the data-point hover tooltip separate from chart title explanations');
+    const descriptionMap = api.jsDebugGraphDescriptionKeyByLabelKeyForTest();
+    const expectedDescriptionLabels = [
+      'debug.graph.metric.api',
+      'debug.graph.metric.sse',
+      'debug.graph.metric.bandwidth',
+      'debug.graph.meta.removal',
+      'debug.graph.meta.rss',
+      'debug.graph.meta.serverSequence',
+      'debug.graph.meta.totalTraffic',
+      'debug.graph.meta.uptime',
+      'debug.graph.status.attention',
+      'debug.graph.status.transition',
+      'debug.graph.series.allAgentsTotal',
+      'debug.graph.series.allClientsApiSseTotal',
+      'debug.graph.series.defaultProcessCpu',
+      'debug.graph.series.otherClientsAverage',
+      'debug.graph.series.processCpu',
+      'debug.graph.series.systemCpu',
+      'debug.graph.series.systemMemory',
+      'debug.graph.series.thisClient',
+      'debug.graph.series.tokensPerAgent',
+      'debug.graph.sumDisplayed',
+      'debug.graph.sumDisplayedClientRequests',
+      'debug.modelTokens.allBillable',
+      'debug.modelTokens.cacheRead',
+      'debug.modelTokens.cacheWrite',
+      'state.idle',
+      'state.working',
+    ];
+    assert.deepStrictEqual(Object.keys(descriptionMap), expectedDescriptionLabels, 'YO!stats cryptic sub-label descriptions have one shared label-key lookup');
+    for (const file of localeFiles) {
+      const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
+      for (const [labelKey, descKey] of Object.entries(descriptionMap)) {
+        assert.ok(catalog[labelKey] && catalog[labelKey] !== labelKey, `${file} localizes YO!stats label ${labelKey}`);
+        assert.ok(catalog[descKey] && catalog[descKey] !== descKey, `${file} localizes YO!stats explanation ${descKey}`);
+      }
+      for (const descKey of ['debug.graph.series.agentToken.desc', 'debug.graph.series.modelToken.desc', 'debug.graph.series.gpuDevice.desc']) {
+        assert.ok(catalog[descKey] && catalog[descKey] !== descKey, `${file} localizes direct YO!stats series explanation ${descKey}`);
+      }
+    }
+    assert.ok(allChartTitleHtml.includes('data-js-debug-summary-desc="debug.graph.sumDisplayed.desc"'), 'YO!stats displayed-value summaries expose a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-summary-desc="debug.graph.sumDisplayedClientRequests.desc"'), 'YO!stats displayed request summaries expose a localized explanation');
+    const graphLegendHtml = `${html}\n${allChartTitleHtml}`;
+    assert.ok(/data-js-debug-legend="api"[\s\S]*data-js-debug-legend-label-desc="debug\.graph\.series\.thisClient\.desc"[\s\S]*>API \(this client\)<\/span>/.test(graphLegendHtml), 'YO!stats API legend explains this-client API traffic');
+    assert.ok(/data-js-debug-legend="sse"[\s\S]*data-js-debug-legend-label-desc="debug\.graph\.series\.thisClient\.desc"[\s\S]*>SSE \(this client\)<\/span>/.test(graphLegendHtml), 'YO!stats SSE legend explains this-client SSE traffic');
+    assert.ok(/data-js-debug-legend="bandwidth"[\s\S]*data-js-debug-legend-label-desc="debug\.graph\.series\.thisClient\.desc"[\s\S]*>Bandwidth \(this client\)<\/span>/.test(graphLegendHtml), 'YO!stats bandwidth legend explains this-client bandwidth');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.attention.desc"'), 'YO!stats Attention status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.transition.desc"'), 'YO!stats Transition status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.working.desc"'), 'YO!stats Working status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.idle.desc"'), 'YO!stats Idle status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-model-token-dimension-desc="debug.modelTokens.allBillable.desc"'), 'YO!stats model-token all-billable selector exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-model-token-dimension-desc="debug.modelTokens.cacheRead.desc"'), 'YO!stats model-token cache-read selector exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-model-token-dimension-desc="debug.modelTokens.cacheWrite.desc"'), 'YO!stats model-token cache-write selector exposes a localized explanation');
+    assert.ok(/function debugGraphExplainAttrs[\s\S]*title="\$\{esc\(text\)\}"[\s\S]*aria-label="\$\{esc\(`\$\{label\}: \$\{text\}`\)\}"/.test(debugPaneSource), 'YO!stats explanation helper always exposes native hover text plus an accessible label');
+    assert.equal(/\b(pointerenter|mouseenter|touchstart|touchend)\b[\s\S]{0,240}data-js-debug-(?:legend-label|chart|summary|meta|model-token-dimension)-desc/.test(debugPaneSource), false, 'YO!stats explanations do not install passive hover or touch-only handlers');
+    for (const descKey of [
+      'debug.graph.status.attention.desc',
+      'debug.graph.status.transition.desc',
+      'debug.graph.status.idle.desc',
+      'debug.graph.status.working.desc',
+      'debug.graph.series.thisClient.desc',
+      'debug.graph.series.systemCpu.desc',
+    ]) {
+      assert.ok(graphLegendHtml.includes(`data-js-debug-legend-label-desc="${descKey}"`), `YO!stats legend label exposes ${descKey}`);
+    }
+    for (const descKey of [
+      'debug.graph.meta.uptime.desc',
+      'debug.graph.meta.rss.desc',
+      'debug.graph.meta.serverSequence.desc',
+      'debug.graph.meta.totalTraffic.desc',
+    ]) {
+      assert.ok(allChartTitleHtml.includes(`data-js-debug-meta-desc="${descKey}"`), `YO!stats metadata line exposes ${descKey}`);
+    }
+    assert.ok(debugPaneSource.includes('data-js-debug-meta-desc') && debugPaneSource.includes('debugGraphMetaItem') && debugPaneSource.includes('jsDebugGraphDescriptionKeyByLabelKey[labelKey]'), 'YO!stats meta lines route through the shared description lookup');
+    const hasAccessibleDesc = (htmlText, attr, descKey) => new RegExp(`title="[^"]+" aria-label="[^"]+" ${attr}="${escapeRegExp(descKey)}"`).test(htmlText);
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-chart-desc', 'debug.graph.chart.cpu.desc'), 'chart-title explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(graphLegendHtml, 'data-js-debug-legend-label-desc', 'debug.graph.series.thisClient.desc'), 'legend explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-summary-desc', 'debug.graph.sumDisplayed.desc'), 'summary explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-meta-desc', 'debug.graph.meta.uptime.desc'), 'metadata explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-model-token-dimension-desc', 'debug.modelTokens.allBillable.desc'), 'model-token option explanations expose an accessible name without pointer hover');
+    const descListenerLines = debugPaneSource.split('\n').filter(line => /addEventListener\(['"](pointerenter|mouseenter|mouseover|touchstart)['"]/.test(line) && /data-js-debug-(chart|summary|meta|legend-label|model-token-dimension)-desc/.test(line));
+    assert.deepStrictEqual(descListenerLines, [], 'YO!stats explanations do not add passive hover/touch listeners on touch-only devices');
     const chartOrderText = `${chartKeys.slice(0, 4).map(key => chartLabels[key]).join(', ')}, then ${chartKeys.slice(4, -1).map(key => chartLabels[key]).join(', ')}, and ${chartLabels[chartKeys.at(-1)]}`;
     assert.equal(guiSpec.split(chartOrderText).length - 1, 1, 'YO!stats GUI spec has one canonical prose chart-order contract matching the source');
     const sourceKeyOrderText = chartKeys.map(key => `\`${key}\``).join(', ');
@@ -4172,7 +4337,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(datedTicks.length >= 3, true, '24-hour X axes include local calendar dates on every tick');
     assert.notEqual(datedTicks[0][2], datedTicks[2][2], '24-hour start and end ticks identify different local dates even when their clock times match');
     assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart headers carry per-second units');
-    assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title">Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
+    assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title"[^>]*>Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
     assert.ok(html.includes('API (this client)') && html.includes('Client latency (this client)'), 'client legends identify this browser separately');
     assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client API keeps the stable solid line');
     assert.match(html, /data-js-debug-series="sse"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client SSE keeps the stable solid line');
@@ -4791,6 +4956,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(debugPaneCss, /\.js-debug-chart-summary\s*\{[\s\S]*color:\s*var\(--active-accent-bright\);[\s\S]*font:\s*700 var\(--ui-font-size-xs\)/, 'all displayed chart sums share a contrasty treatment');
     assert.match(html, /other clients avg/, 'the peer comparison is visible in the legend when peer samples exist');
     assert.match(html, /--js-debug-series-color: var\(--bad\)/, 'the peer comparison uses the same red token as system-average CPU');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.thisClient.desc"'), 'this-client legend labels explain their browser-client scope');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.otherClientsAverage.desc"'), 'other-client average legend labels explain the peer aggregation');
   });
 
   test('YO!stats graph keeps stable this-client series before client history arrives', () => {
@@ -4863,6 +5030,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(html.includes('System memory') && html.includes('GPU utilization') && html.includes('GPU memory'), 'the host graph quartet is labeled');
     assert.ok(html.includes('CPU (Intel Xeon · 16 cores / 32 threads · 3.6GHz)') && html.includes('System memory (DDR5)'), 'CPU and memory chart headings identify the sampled host hardware');
     assert.ok(html.includes('GPU 0 (GPU Model A)'), 'both GPU charts retain the device model in their legends');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.defaultProcessCpu.desc"'), 'fallback YOLOmux process CPU legend explains its process scope');
+    if (html.includes('data-js-debug-legend="cpu:port:')) {
+      assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.processCpu.desc"'), 'peer process CPU legends explain the specific process scope');
+    }
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.systemCpu.desc"'), 'system CPU legend explains host-wide utilization');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.systemMemory.desc"'), 'system memory legend explains host memory usage');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.gpuDevice.desc"'), 'GPU device legends explain the device metric scope');
     assert.ok(html.includes('data-js-debug-chart-toggle="cpu"') && html.includes('data-js-debug-chart-toggle="memory"') && html.includes('data-js-debug-chart-close="cpu"'), 'every graph name is available in the persistent chart-toggle group while its heading retains a compact X');
     const debugPaneSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(debugPaneSource.includes("jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1'") && debugPaneSource.includes('data-js-debug-chart-toggle'), 'YO!stats preferences persist browser-local chart visibility through named toggle markup');
@@ -4973,6 +5147,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const agentTop = agentTokenChartHtml.match(/data-js-debug-bar-total="210"[^>]* y="([0-9.]+)"/);
     const modelTop = modelTokenChartHtml.match(/data-js-debug-bar-total="210"[^>]* y="([0-9.]+)"/);
     assert.ok(agentTop && modelTop && agentTop[1] === modelTop[1], 'Agent and Model token stack tops use identical geometry for the same bucket total');
+    assert.ok(agentTokenChartHtml.includes('data-js-debug-legend-label-desc="debug.graph.series.agentToken.desc"'), 'agent token legends explain the specific agent series');
+    assert.ok(modelTokenChartHtml.includes('data-js-debug-legend-label-desc="debug.graph.series.modelToken.desc"'), 'model token legends explain the specific model series');
     assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-title') < agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:'), 'agent token legend renders below the title');
     assert.ok(agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:') < agentTokenChartHtml.indexOf('js-debug-chart-body'), 'agent token legend uses the shared position above the plot body');
 
@@ -5089,14 +5265,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function debugGraphAgentTokenPatternDefinitionHtml\(series, options = \{\}\)[\s\S]*debugGraphAgentTokenPatternShapeHtml\(patternIndex\)[\s\S]*function debugGraphAgentTokenPatternDefsHtml[\s\S]*debugGraphAgentTokenPatternDefinitionHtml\(series\)[\s\S]*function debugGraphAgentTokenLegendSwatchHtml[\s\S]*debugGraphAgentTokenPatternDefinitionHtml\(series, \{legend: true\}\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'agent token bars and legend swatches consume one SVG pattern-definition helper');
     assert.ok(/const jsDebugGraphAgentTokenPatternShapes = Object\.freeze\(\[[\s\S]*<path d="M0 1H6"[\s\S]*const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenPatternShapes\.length/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'agent token infill variants come from one horizontal-only pattern owner');
     assert.equal(/js-debug-legend-item\[data-js-debug-token-pattern=/.test(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8')), false, 'agent token legend does not maintain a duplicate CSS pattern map');
-    assert.ok(/data-js-debug-legend="agentToken:[^"]+"[\s\S]*<span>1:0:claude<\/span>/.test(html), 'per-agent token legend keeps the agent label');
+    assert.ok(/data-js-debug-legend="agentToken:[^"]+"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.series\.agentToken\.desc"[^>]*>1:0:claude<\/span>/.test(html), 'per-agent token legend keeps the agent label and explanation');
     assert.equal(/data-js-debug-legend="agentToken:[^"]+"[\s\S]{0,240}<strong>/.test(html), false, 'per-agent token legend omits current token/min values');
     assert.ok(/data-js-debug-bar-series="transitionAgents"[\s\S]{0,220}data-js-debug-bar-stacked="transitionAgents"[\s\S]{0,220}data-js-debug-bar-total="3"/.test(html), 'transition bars are only yellow transition, not idle agents');
     assert.ok(/data-js-debug-bar-series="idleAgents"[\s\S]{0,220}data-js-debug-bar-stacked="idleAgents"[\s\S]{0,220}data-js-debug-bar-total="3"/.test(html), 'idle bars stack above active status so the top remains the total agent count');
-    assert.ok(/data-js-debug-legend="askAgents"[\s\S]*<span>Attention<\/span>/.test(html), 'prompted agents render an attention legend label');
-    assert.ok(/data-js-debug-legend="workingAgents"[\s\S]*<span>Working<\/span>/.test(html), 'working agents render a working legend label');
-    assert.ok(/data-js-debug-legend="transitionAgents"[\s\S]*<span>Transition<\/span>/.test(html), 'yellow stopped agents render a Transition legend label');
-    assert.ok(/data-js-debug-legend="idleAgents"[\s\S]*<span>Idle<\/span>/.test(html), 'idle agents render a grey idle legend label');
+    assert.ok(/data-js-debug-legend="askAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.attention\.desc"[^>]*>Attention<\/span>/.test(html), 'prompted agents render an attention legend label with an explanation');
+    assert.ok(/data-js-debug-legend="workingAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.working\.desc"[^>]*>Working<\/span>/.test(html), 'working agents render a working legend label with an explanation');
+    assert.ok(/data-js-debug-legend="transitionAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.transition\.desc"[^>]*>Transition<\/span>/.test(html), 'yellow stopped agents render a Transition legend label with an explanation');
+    assert.ok(/data-js-debug-legend="idleAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.idle\.desc"[^>]*>Idle<\/span>/.test(html), 'idle agents render a grey idle legend label with an explanation');
     assert.equal(/data-js-debug-legend="workingAgents"[\s\S]{0,180}<strong>/.test(html), false, 'activity legends omit current counts');
 
     const noTokenApi = loadYolomux('?debug=1&sessions=debug', ['1']);
@@ -5137,12 +5313,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         tokens_per_agent_total: 12, agent_token_samples: 1,
         agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 12, samples: 1, tokens: 12, seconds: 60, model_rates: {'gpt-5.6-terra': {total: 12, samples: 1, tokens: 12, seconds: 60}}}],
         cost_summary: {
-          total_micro_usd: 256000, known_micro_usd: 256000, priced_count: 4, complete: true, unpriced_count: 0,
+          total_micro_usd: 256000, known_micro_usd: 256000, lower_micro_usd: 256000, upper_micro_usd: 330000, priced_count: 4, complete: true, unpriced_count: 0,
           components: [
             {key: 'uncached_input', label: 'Uncached input', provider: 'openai', model: 'gpt-5.6-terra', micro_usd: 70500, quantity: 23500, unit: 'tokens', rate_usd: '3', rate_scale: 1000000, effective_from: '2026-07-01T00:00:00Z', source_url: 'https://platform.openai.com/pricing'},
-            {key: 'cache_read', label: 'Cached read', direction: 'input', cache_role: 'read', quantity: 125000, unit: 'tokens', micro_usd: 37500},
-            {key: 'text_output', label: 'Text output', direction: 'output', quantity: 3700, unit: 'tokens', micro_usd: 95000},
-            {key: 'image_output', label: 'Image output', direction: 'output', modality: 'image', quantity: 2, unit: 'images', micro_usd: 53000},
+            {key: 'cache_read', label: 'Cached read', provider: 'openai', model: 'gpt-5.6-terra', direction: 'input', cache_role: 'read', quantity: 125000, unit: 'tokens', micro_usd: 37500, source_url: 'https://platform.openai.com/pricing'},
+            {key: 'text_output', label: 'Text output', provider: 'anthropic', model: 'claude-opus-4-8', direction: 'output', quantity: 3700, unit: 'tokens', micro_usd: 95000, source_url: 'https://platform.claude.com/docs/en/about-claude/pricing'},
+            {key: 'image_output', label: 'Image output', direction: 'output', modality: 'image', quantity: 2, unit: 'images', micro_usd: 53000, source_url: 'javascript:alert(1)'},
           ],
           models: [
             {provider: 'openai', model: 'gpt-5.6-terra', effort: 'med', token_quantity: 148500, input_tokens: 23500, cache_tokens: 125000, output_tokens: 0, input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
@@ -5152,8 +5328,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             {provider: 'openai', model: 'gpt-image-2', effort: '', token_quantity: 0, input_tokens: 0, cache_tokens: 0, output_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0, micro_usd: 0},
           ],
           sources: [
-            {source: 'Root Codex', root_thread_id: 'root', agent_thread_id: 'root', model: 'gpt-5.6-terra', token_quantity: 148500, input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
-            {source: 'Research subagent', root_thread_id: 'root', agent_thread_id: 'child', model: 'claude-opus-4-8', token_quantity: 3700, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
+            {source: 'Root Codex', tmux_key: 's|2|codex', tmux_label: 's:build', tmux_session: 's', tmux_window: '2', tmux_window_label: 'build', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'root', model: 'gpt-5.6-terra', token_quantity: 148500, input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000, lower_micro_usd: 145000, upper_micro_usd: 180000},
+            {source: 'Research subagent', tmux_key: 's|2|codex', tmux_label: 's:build', tmux_session: 's', tmux_window: '2', tmux_window_label: 'build', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'child', model: 'claude-opus-4-8', token_quantity: 3700, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000, lower_micro_usd: 111000, upper_micro_usd: 150000},
           ],
           catalog_revision: 'seed-1', active_catalog_revision: 9, freshness: 'seed-only',
         },
@@ -5166,6 +5342,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const summary = canonical(api.debugGraphCostSummaryForTest(api.debugGraphAgentTokenDisplayBucketsForTest(now)));
     assert.equal(summary.totalMicroUsd, 256000, 'Cost summary preserves integer micro-USD totals from the existing stats bucket');
     assert.equal(summary.knownMicroUsd, 256000, 'Cost summary does not convert the total to a float before reconciliation');
+    assert.equal(summary.lowerMicroUsd, 256000, 'Cost summary exposes the lower edge of the displayed estimate range');
+    assert.equal(summary.upperMicroUsd, 330000, 'Cost summary exposes the upper edge of the displayed estimate range');
     assert.ok(/group\.key === 'modelTokens' && debugGraphChartVisible\('costSummary'\)[\s\S]*items\.push\(debugGraphCostSummaryHtml\(groupBuckets, domain\)\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Cost summary consumes the exact Model tokens/min bucket helper, including compact wide-range history');
     const html = api.debugPanelHtmlForTest();
     const modelIndex = html.indexOf('data-js-debug-chart="modelTokens"');
@@ -5180,24 +5358,72 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setDebugGraphChartVisibleForTest('costSummary', true);
     assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-summary-group="costSummary"'), 'Cost control restores the summary card');
     const cardBody = html.slice(costIndex).match(/<dl class="js-debug-cost-compact"[\s\S]*?<\/dl>/)?.[0] || '';
-    assert.ok(html.includes('(est. ≥$0.2560, Σ displayed)') && cardBody.includes('Input') && cardBody.includes('Cache') && cardBody.includes('Output') && cardBody.includes('Total'), 'the default card remains a lower bound while backfill is active and contains only compact input/cache/output/total accounting');
+    assert.ok(html.includes('(est. $0.2560 – $0.3300, Σ displayed)') && cardBody.includes('Input') && cardBody.includes('Cache') && cardBody.includes('Output') && cardBody.includes('Total'), 'the default card shows a lower-upper range while backfill/unknown usage is active and contains only compact input/cache/output/total accounting');
     assert.ok(html.includes('Backfill in progress'), 'Cost summary marks a displayed estimate partial while retained transcript atoms are migrating');
-    assert.ok(cardBody.includes('Input') && cardBody.includes('$0.0705') && cardBody.includes('23.5k tokens') && cardBody.includes('Cache') && cardBody.includes('$0.0375') && cardBody.includes('125k tokens') && cardBody.includes('Output') && cardBody.includes('3.7k tokens') && cardBody.includes('Total') && cardBody.includes('152k tokens'), 'the compact card pairs every cost class and total with token-only usage');
+    assert.ok(cardBody.includes('Input') && cardBody.includes('$0.0705') && cardBody.includes('23.5k tokens') && cardBody.includes('Cache') && cardBody.includes('$0.0375') && cardBody.includes('125k tokens') && cardBody.includes('Output') && cardBody.includes('3.7k tokens') && cardBody.includes('Total') && cardBody.includes('$0.2560 – $0.3300') && cardBody.includes('152k tokens'), 'the compact card pairs every cost class and total range with token-only usage');
     const cardHeader = html.slice(costIndex, html.indexOf('<dl class="js-debug-cost-compact"', costIndex));
     assert.ok(cardHeader.includes('js-debug-cost-estimate'), 'the Cost card heading carries the plain estimate text');
-    assert.ok(/<button[^>]*class="[^"]*\bjs-debug-cost-details\b[^"]*\bcontrol-active-hover\b[^"]*"[^>]*data-js-debug-cost-details[^>]*aria-haspopup="dialog"[^>]*>More Info<\/button>/.test(cardHeader), 'the Cost card exposes More Info as an explicit modal button, not a hover-only text affordance');
+    assert.equal(cardHeader.includes('data-js-debug-cost-details'), false, 'the Cost card header keeps More Info out of the title/control row');
+    const cardFooter = html.slice(html.indexOf('</dl>', costIndex), html.indexOf('</section>', costIndex));
+    assert.ok(/<span class="js-debug-cost-modal-host"><button[^>]*class="[^"]*\bjs-debug-cost-details\b[^"]*\bcontrol-active-hover\b[^"]*"[^>]*data-js-debug-cost-details[^>]*aria-haspopup="dialog"[^>]*>More Info<\/button><template data-js-debug-cost-modal-template>/.test(cardFooter), 'the Cost card exposes More Info below the Total row with its sibling modal template');
     assert.equal(cardBody.includes('<a '), false, 'the Cost card compact accounting list contains no pricing links');
     assert.equal(cardBody.includes('js-debug-cost-usage-chart'), false, 'the Cost card compact accounting list contains no model usage chart');
-    assert.ok(html.includes('<template data-js-debug-cost-modal-template>') && html.includes('>Model Usages<') && html.includes('js-debug-cost-usage-chart') && html.includes('gpt-5.6-terra · med') && html.includes('149k tokens · $0.1450') && html.includes('claude-opus-4-8 · xhigh') && html.includes('gpt-5.6-sol · high') && html.includes('gpt-5.6-sol · low') && html.includes('gpt-image-2') && !html.includes('· +'), 'the full report is stored as modal template content and charts every model and effort instead of truncating to a +N suffix');
-    assert.ok(html.includes('js-debug-cost-usage-segment--input') && html.includes('js-debug-cost-usage-segment--cache') && html.includes('js-debug-cost-usage-values') && html.includes('Input') && html.includes('Cached') && html.includes('Output') && html.includes('Other') && html.includes('23.5k tokens') && html.includes('$0.0705') && html.includes('125k tokens') && html.includes('$0.0375'), 'report Model Usages combines comparable stacked bars with exact per-class token and cost values');
+    assert.ok(html.includes('<template data-js-debug-cost-modal-template>') && html.includes('>Model Usages<') && html.includes('js-debug-cost-usage-chart') && html.includes('gpt-5.6-terra · med') && html.includes('claude-opus-4-8 · xhigh') && html.includes('gpt-5.6-sol · high') && html.includes('gpt-5.6-sol · low') && html.includes('gpt-image-2') && !html.includes('· +'), 'the full report is stored as modal template content and charts every model and effort instead of truncating to a +N suffix');
+    const modelUsagesSection = html.slice(html.indexOf('<section class="js-debug-cost-model-usages'), html.indexOf('<section class="js-debug-cost-details-section">\n    <h2>Cost calculation</h2>'));
+    assert.ok(modelUsagesSection.includes('js-debug-cost-usage-header') && modelUsagesSection.includes('js-debug-cost-usage-head-cell--input') && modelUsagesSection.includes('js-debug-cost-usage-head-cell--cache') && modelUsagesSection.includes('js-debug-cost-usage-head-cell--output') && modelUsagesSection.includes('js-debug-cost-usage-head-cell--other') && modelUsagesSection.includes('js-debug-cost-usage-head-cell--total'), 'report Model Usages carries one shared header with class labels and total');
+    assert.equal(modelUsagesSection.includes('js-debug-cost-usage-legend'), false, 'Model Usages no longer emits a detached legend');
+    assert.equal(modelUsagesSection.includes('js-debug-cost-usage-values'), false, 'Model Usages no longer repeats labels in per-row value lists');
+    assert.ok(modelUsagesSection.includes('js-debug-cost-usage-segment--input') && modelUsagesSection.includes('js-debug-cost-usage-segment--cache') && modelUsagesSection.includes('js-debug-cost-usage-metric--input') && modelUsagesSection.includes('js-debug-cost-usage-metric--cache') && modelUsagesSection.includes('js-debug-cost-usage-metric--total') && modelUsagesSection.includes('23.5k tokens') && modelUsagesSection.includes('$0.0705') && modelUsagesSection.includes('125k tokens') && modelUsagesSection.includes('$0.0375') && modelUsagesSection.includes('<strong>0</strong><small>$0</small>'), 'report Model Usages combines comparable stacked bars with aligned exact per-class token/cost cells and plain zero cells');
+    assert.ok(modelUsagesSection.includes('aria-label="gpt-5.6-terra · med: Total 149k tokens $0.1450; Input 23.5k tokens $0.0705; Cached 125k tokens $0.0375; Output 0 $0; Other 0 $0"'), 'each compact usage row keeps an accessible per-class summary after labels move to the header');
     assert.equal(cardBody.includes('js-debug-line-chart') || cardBody.includes('data-js-debug-axis') || cardBody.includes('data-js-debug-bar-'), false, 'Cost summary is not a cost-per-minute chart');
-    assert.ok(html.includes('data-js-debug-cost-details') && html.includes('aria-haspopup="dialog"') && html.includes('<article class="js-debug-cost-modal-dialog js-debug-cost-report"') && html.includes('data-js-debug-cost-modal-close') && html.includes('class="js-debug-cost-report-body"') && html.includes('152k tokens') && html.includes('Input: 23.5k tokens') && html.includes('Cache: 125k tokens') && html.includes('Output: 3.7k tokens') && html.includes('Other: 0 tokens') && html.includes('Cost calculation') && html.includes('Model Usages') && html.includes('Agent and source attribution') && !html.includes('<table'), 'More Info opens a bounded Markdown-like modal report whose inner body owns complete token, model, calculation, and source content instead of a spreadsheet table');
+    assert.ok(html.includes('data-js-debug-cost-details') && html.includes('aria-haspopup="dialog"') && html.includes('<article class="js-debug-cost-modal-dialog js-debug-cost-report"') && html.includes('data-js-debug-cost-modal-close') && html.includes('class="js-debug-cost-report-body"') && html.includes('152k tokens') && html.includes('Input: 23.5k tokens') && html.includes('Cache: 125k tokens') && html.includes('Output: 3.7k tokens') && html.includes('Other: 0 tokens') && html.includes('Cost calculation') && html.includes('Cost by tmux window') && html.includes('Model Usages') && html.includes('Agent and source attribution') && !html.includes('<table'), 'More Info opens a bounded Markdown-like modal report whose inner body owns complete token, tmux, model, calculation, and source content instead of a spreadsheet table');
+    const sourceTreeIndex = html.indexOf('Agent and source attribution');
+    const pricingSourcesIndex = html.indexOf('Pricing sources');
+    const pricingSourcesSection = html.slice(pricingSourcesIndex, html.indexOf('</article>', pricingSourcesIndex));
+    assert.ok(pricingSourcesIndex > sourceTreeIndex, 'the consolidated Pricing sources section is rendered last after source attribution');
+    assert.equal((pricingSourcesSection.match(/href="https:\/\/platform\.openai\.com\/pricing"/g) || []).length, 1, 'duplicate component pricing URLs collapse to one bottom-section source link');
+    assert.equal((pricingSourcesSection.match(/href="https:\/\/platform\.claude\.com\/docs\/en\/about-claude\/pricing"/g) || []).length, 1, 'distinct authoritative pricing URLs stay visible in the bottom section');
+    assert.equal(pricingSourcesSection.includes('javascript:alert'), false, 'unsafe component source URLs are filtered from the consolidated pricing sources list');
     const costSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(costSource.includes('data-js-debug-cost-refresh') && costSource.includes("/api/pricing-catalog/refresh") && costSource.includes("/api/pricing-catalog', {cache: 'no-store'}") && costSource.includes('readOnlyMode ? \'\'') && costSource.includes('} catch (error) {\n    jsDebugPricingRefreshState.inFlight = false;'), 'the card exposes the server-owned Refresh control only to writable/admin sessions, polls its bounded status, clears a failed request state, and never crawls from the browser');
-    assert.ok(html.includes('Catalog revision') && html.includes('>9<') && html.includes('Catalog freshness') && html.includes('seed-only') && html.includes('Priced coverage') && html.includes('>4/4<') && html.includes('Formula:') && html.includes('23,500 tokens × $3/1,000,000 tokens') && html.includes('2026-07-01T00:00:00Z') && html.includes('Unpriced exclusions') && html.includes('href="https://platform.openai.com/pricing"') && html.includes('>openai · gpt-5.6-terra<') && html.includes('role="tree"') && html.includes('aria-level="2"') && html.includes('149k tokens · Input $0.0705 · Cache $0.0375 · Output $0.0370 · Other $0.00 · Total $0.1450'), 'the report discloses active catalog state, every safe pricing link and formula, token totals, and reconciled root/subagent arithmetic');
+    assert.ok(html.includes('Catalog revision') && html.includes('>9<') && html.includes('Catalog freshness') && html.includes('seed-only') && html.includes('Priced coverage') && html.includes('>4/4<') && html.includes('Formula:') && html.includes('23,500 tokens × $3/1,000,000 tokens') && html.includes('2026-07-01T00:00:00Z') && html.includes('Unpriced exclusions') && html.includes('Estimated API list-price range $0.2560 – $0.3300') && html.includes('href="https://platform.openai.com/pricing"') && html.includes('>openai · gpt-5.6-terra<') && html.includes('>s:build<') && html.includes('152k tokens · Input $0.0705 · Cache $0.0375 · Output $0.0950 · Other $0.0530 · Total $0.2560 – $0.3300') && html.includes('role="tree"') && html.includes('aria-level="2"') && html.includes('149k tokens · Input $0.0705 · Cache $0.0375 · Output $0.0370 · Other $0.00 · Total $0.1450 – $0.1800'), 'the report discloses active catalog state, every safe pricing link and formula, token totals, range, and reconciled root/subagent arithmetic');
+    const tmuxSection = html.slice(html.indexOf('Cost by tmux window'), html.indexOf('Model Usages'));
+    assert.equal((tmuxSection.match(/>s:build</g) || []).length, 1, 'parent and subagent costs under one tmux window render as one combined tmux row');
+    assert.ok(tmuxSection.includes('152k tokens · Input $0.0705 · Cache $0.0375 · Output $0.0950 · Other $0.0530 · Total $0.2560 – $0.3300'), 'tmux row total equals parent plus subagent once with the shared lower-upper range');
     assert.equal((html.match(/<li>/g) || []).length > 24, true, 'the Cost report renders all available rows without the former 24-row caps');
 
-    assert.ok(costSource.includes("const heading = hasPricedUsage ? `${exact ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';"), 'an interval with no priceable component is distinctly unestimated rather than a misleading $0 lower bound');
+    assert.ok(costSource.includes("debugGraphCostRangeUsdText(summary)") && costSource.includes("debug.cost.range") && costSource.includes("'est. —, Σ displayed'"), 'an interval with no priceable component is distinctly unestimated while incomplete priced ranges render as low-high estimates');
+  });
+
+  test('YO!stats Cost summary renders a single exact total when lower and upper match', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 202,
+      usage_atom_backfill: {state: 'complete', sources: 1, missing: 0},
+      records: [{
+        start: Math.floor(now / 1000), duration: 1, sequence: 202,
+        tokens_per_agent_total: 10, agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 10, samples: 1, tokens: 10, seconds: 60, model_rates: {'gpt-5.6-terra': {total: 10, samples: 1, tokens: 10, seconds: 60}}}],
+        cost_summary: {
+          total_micro_usd: 420000, known_micro_usd: 420000, lower_micro_usd: 420000, upper_micro_usd: 420000, priced_count: 1, complete: true, unpriced_count: 0,
+          components: [{key: 'exact', provider: 'openai', model: 'gpt-5.6-terra', direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 10, micro_usd: 420000}],
+          models: [{provider: 'openai', model: 'gpt-5.6-terra', token_quantity: 10, input_tokens: 10, input_micro_usd: 420000, micro_usd: 420000}],
+          sources: [{source: 'Root Codex', root_thread_id: 'root', agent_thread_id: 'root', token_quantity: 10, input_micro_usd: 420000, micro_usd: 420000}],
+        },
+      }],
+    });
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
+    api.setDebugGraphChartVisibleForTest('costSummary', true);
+    const html = api.debugPanelHtmlForTest();
+    const costIndex = html.indexOf('data-js-debug-summary-group="costSummary"');
+    const cardHeader = html.slice(costIndex, html.indexOf('<dl class="js-debug-cost-compact"', costIndex));
+    const estimateText = cardHeader.match(/<span class="js-debug-chart-summary js-debug-cost-estimate">\(([^<]+)\)<\/span>/)?.[1] || '';
+
+    assert.ok(cardHeader.includes('(est. $0.4200, Σ displayed)'), 'complete priced usage renders one exact estimate instead of a range');
+    assert.equal(estimateText.includes(' – '), false, 'complete priced usage does not render a low-high separator in the estimate text');
+    assert.ok(html.includes('Estimated API list-price total $0.4200'), 'the details report describes exact usage as a total');
   });
 
   test('YO!stats aligns server activity and latency samples by timestamp', () => {
@@ -5660,6 +5886,70 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(debugSource.includes("clientPerfStart('statsHistoryRender')"), 'retained chart rendering uses the shared phase counter owner');
+  });
+
+  await testAsync('YO!stats missing history coverage reaches error instead of retrying forever', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({history: {
+      sequence: 1,
+      latest_sequence: 1,
+      records: [],
+    }})));
+    await api.pollJsDebugStatsSampleForTest();
+    const state = api.jsDebugHistoryReadinessForTest();
+    assert.equal(state.phase, 'error', 'missing history coverage is a bounded explicit error, not a permanent retrying state');
+    assert.match(state.error, /coverage/, 'the error names the malformed coverage envelope');
+    const html = api.debugPanelHtmlForTest();
+    assert.ok(html.includes('data-js-debug-history-retry'), 'malformed history still exposes the manual Retry action');
+  });
+
+  await testAsync('YO!stats history errors back off automatic polls but manual Retry remains immediate', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('error', {
+      requestedRangeSeconds: 3600,
+      targetStartSeconds: 100,
+      targetEndSeconds: 200,
+      requestedStartSeconds: 100,
+      requestedEndSeconds: 0,
+      requestedResolutionSeconds: 1,
+      attemptCount: 2,
+      error: 'history unavailable',
+      generation: 12,
+      nextAutoRetryAtMs: Number.MAX_SAFE_INTEGER,
+    });
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        return Promise.resolve(jsonResponse({
+          pid: 123,
+          uptime_seconds: 10,
+          history: {sequence: 1, records: []},
+        }));
+      }
+      return Promise.resolve(jsonResponse({history: {
+        sequence: 2,
+        records: [],
+        coverage: statsHistoryCoverageForRequest(url, {covered_start: 0, covered_end: 0}),
+      }}));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'error', 'automatic poll keeps the visible error during backoff');
+    assert.equal(new URL(requests[0], 'http://localhost').searchParams.get('history'), '0', 'automatic poll disables history during backoff');
+    assert.equal(api.debugPanelHtmlForTest().includes('Retrying history'), false, 'automatic backoff does not flash the retrying overlay');
+
+    assert.equal(api.retryJsDebugHistoryForTest(), true, 'manual Retry bypasses automatic backoff');
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'retrying', 'manual Retry still exposes the in-progress state');
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'manual Retry can clear the backed-off error');
+    assert.notEqual(new URL(requests[1], 'http://localhost').searchParams.get('history_start'), '0', 'manual Retry requests the current history window immediately');
   });
 
   await testAsync('YO!stats follows has-more coverage until the requested history window is complete', async () => {
@@ -8861,7 +9151,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     const topbarOwnerHtml = api.topbarOwnerStatusHtmlForTest();
     assert.ok(topbarOwnerHtml.includes('topbar-owner-status-shared') && topbarOwnerHtml.includes('IDX|STATS|SESS') && topbarOwnerHtml.includes('follower'), 'topbar owner chip shows shared background follower status');
-    assert.ok(api.topbarOwnerStatusTitleForTest(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload), api.backgroundOwnerStatsSummaryForTest(readerPayload), api.backgroundOwnerSessionFilesSummaryForTest(readerPayload)).includes('STATS leader: devhost:8002'), 'topbar title names the YO!stats leader');
+    const ownerTitle = api.topbarOwnerStatusTitleForTest(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload), api.backgroundOwnerStatsSummaryForTest(readerPayload), api.backgroundOwnerSessionFilesSummaryForTest(readerPayload));
+    assert.ok(ownerTitle.includes('IDX = Index: Search / Quick Open index owner; builds the file index.'), 'topbar title defines the IDX abbreviation');
+    assert.ok(ownerTitle.includes('STATS = Stats: Stats sampler (statsd / YO!stats); samples usage and metrics history.'), 'topbar title defines the STATS abbreviation');
+    assert.ok(ownerTitle.includes('SESS = Session files: Session-file owner; stores session-file state.'), 'topbar title defines the SESS abbreviation');
+    assert.ok(ownerTitle.includes('Leader means this server owns the role; follower means another connected server owns it.'), 'topbar title explains leader/follower state');
+    assert.ok(ownerTitle.includes('STATS leader: devhost:8002'), 'topbar title names the YO!stats leader');
+    assert.ok(ownerTitle.includes('IDX state: follower') && ownerTitle.includes('STATS state: follower') && ownerTitle.includes('SESS state: follower'), 'topbar title includes payload-derived state for every owner role');
+    assert.ok(ownerTitle.includes('Right-click this status to take over as leader.'), 'topbar title explains the right-click takeover affordance');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes("new EventSource(`/api/client-events?${params.toString()}`)"), 'client subscribes to the demand-filtered server event stream');
     assert.ok(source.includes('function clientEventDemandDescriptor()') && source.includes("channels.add('files')") && source.includes("channels.add('yoagent')"), 'one browser demand descriptor owns pane-specific channels');
@@ -9081,8 +9378,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes('function applyFileTreeRowDataset('), 'RA4: row dataset/class work has a named applier');
     assert.ok(source.includes('function bindFinderRowHandlers('), 'RA4: Finder handlers have a named binder');
     assert.ok(source.includes('function bindDifferRowData('), 'RA4: Differ row data has a named binder');
-    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState[\s\S]*applyFileTreeRowDataset[\s\S]*applyFileTreeRowDerivedState[\s\S]*bindDifferRowData[\s\S]*bindFinderRowHandlers/.test(source), 'RA4: updateFileTreeRow is the short dispatcher over the row helpers');
+    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState[\s\S]*applyFileTreeRowDataset[\s\S]*applyFileTreeRowDerivedState[\s\S]*applyFileExplorerSessionHighlightRow[\s\S]*bindDifferRowData[\s\S]*bindFinderRowHandlers/.test(source), 'RA4: updateFileTreeRow is the short dispatcher over the row helpers');
     assert.ok(source.includes('syncFileTreeRowKindClass(row, entry.kind)'), 'Finder row kind classes update through stable toggles');
+    assert.ok(/function fileExplorerSyncTargetDirs\(plan\)[\s\S]*dirs\.filter\(path => !dirs\.some\(other => other !== path && pathIsInsideDirectory\(other, path\)\)\)/.test(source), 'Finder Sync stars the deepest affected working dirs instead of every ancestor repo root');
+    assert.ok(source.includes("marker.className = 'file-tree-sync-target'")
+      && /function applyFileExplorerSessionHighlightRow\([\s\S]*updateFileTreeSyncTargetMarker\(row, isSyncTarget, sets\.syncTargetTitle/.test(source), 'Finder Sync star is a real row marker with localized title updates');
     assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'rows flag symlinks');
     assert.ok(source.includes("row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken')"), 'rows flag broken symlinks');
     assert.ok(/entry\.is_symlink === true && entry\.symlink_target[\s\S]{0,160}→ \$\{entry\.symlink_target\}/.test(source), 'a symlink row title shows name → target');

@@ -371,7 +371,6 @@ async function expandSyncFileExplorerAffectedDirectories() {
   if (!root) return false;
   resetFileExplorerSyncManualCollapsesIfNeeded(plan);
   const paths = fileExplorerSyncExplicitExpansionTargets(plan, root);
-  for (const path of paths) forgetFileExplorerSyncManualCollapse(path);
   resetFileExplorerAppliedSyncPlan();
   if (root !== currentFileExplorerRoot()) {
     const opened = await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});

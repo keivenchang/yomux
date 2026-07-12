@@ -2159,17 +2159,19 @@ async function runLayoutAsyncSuite() {
       });
       assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
         session: '1',
-        root: '/home/test/project',
+        root: '/home/test',
         expandPaths: [
+          '/home/test/project',
           '/home/test/project/1',
           '/home/test/project/2',
+          '/home/test/project/1/src',
         ],
         affectedDirs: [
           '/home/test/project/1',
           '/home/test/project/2',
           '/home/test/project/1/src',
         ],
-      }, 'Finder sync opens the nearest common project root and expands the active tab working repos under it');
+      }, 'Finder sync opens home for home-contained tabs and expands the full active-tab working chain under it');
 
       api.setTranscriptInfoForTest('2', {
         project: {git: {cwd: '/tmp/outside/src', root: '/tmp/outside'}},
@@ -2212,17 +2214,22 @@ async function runLayoutAsyncSuite() {
       api.scheduleFileExplorerActiveTabSyncForTest('1', {explicit: true});
       await flushAsyncWork();
       await flushAsyncWork();
-      assert.equal(api.fileExplorerRootForTest(), '/home/test/project', 'syncing a home tab opens the nearest common project root');
+      assert.equal(api.fileExplorerRootForTest(), '/home/test', 'syncing a home tab opens the home root');
+      assert.equal(api.fileExplorerPathDisplayForTest(), '~', 'the Finder path display shows the home-compacted sync root');
       assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
         '/home/test/project/1',
+        '/home/test/project/1/src',
         '/home/test/project/2',
-      ], 'sync expands the working repo roots for the focused home tab');
+      ], 'sync expands the full working chain for the focused home tab');
 
       const collapseParent = new TestElement('collapse-parent');
       const collapseRow = new TestElement('collapse-row');
       collapseParent.appendChild(collapseRow);
       api.collapseDirectoryRowForTest(collapseRow, '/home/test/project/1', {manual: true});
       assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
+        '/home/test/project/1/src',
         '/home/test/project/2',
       ], 'manual collapse removes the collapsed folder from the active tab expanded set');
 
@@ -2238,7 +2245,10 @@ async function runLayoutAsyncSuite() {
       api.scheduleFileExplorerActiveTabSyncForTest('2', {explicit: true});
       await flushAsyncWork();
       await flushAsyncWork();
-      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'focusing another tab swaps to the single-repo root without carrying previous expanded folders');
+      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
+        '/home/test/project/3',
+      ], 'focusing another home tab swaps to that tab chain without carrying previous expanded folders');
 
       api.setSessionFilesPayloadForTest({
         session: '1',
@@ -2252,6 +2262,7 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       await flushAsyncWork();
       assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
         '/home/test/project/2',
       ], 'returning to the tab restores its in-memory state without auto-reopening the manually collapsed working folder');
     }
@@ -2326,6 +2337,11 @@ async function runLayoutAsyncSuite() {
         type: 'input',
         data: `[Image #1] '/home/test/${generatedName}'`,
       }, 'pasted image upload inserts the image reference into xterm without trailing whitespace');
+      assert.equal(
+        calls.some(call => String(call.url).startsWith('/api/session-metadata')),
+        false,
+        'pasted image upload does not force a transcript/session-metadata rescan on the latency-sensitive path',
+      );
     }
 
     // DOIT.78 payload-matrix contract (78.5): the ONE shared image-payload detector/extractor used by BOTH
@@ -3447,11 +3463,31 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
       assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
       assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
-      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, more: false, open: false, x: null, y: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
+      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: false, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
       assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
       assert.equal(frames.at(-1).data, '\x1bx', 'Alt prefixes the next key with Escape');
-      assert.ok(api.terminalMobileAccessoryHtmlForTest('1').includes('⌘P') && api.terminalMobileAccessoryHtmlForTest('1').includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'shift'), true, 'mobile Shift latch turns on independently');
+      assert.equal(api.handleTerminalDataForTest('1', 'a'), true, 'Shift-modified phone input follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, 'A', 'Shift uppercases the next lowercase character');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'shift'), true, 'mobile Shift latch can shift punctuation');
+      assert.equal(api.handleTerminalDataForTest('1', '1'), true, 'Shift-modified punctuation follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, '!', 'Shift maps number-row punctuation to the shifted glyph');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'cmd'), true, 'mobile Cmd/Meta latch turns on independently');
+      assert.equal(api.handleTerminalDataForTest('1', 'k'), true, 'Cmd/Meta-modified phone input follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, '\x1bk', 'Cmd/Meta prefixes the next key with Escape like terminal Meta');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'first Ctrl tap arms a one-shot modifier');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'second Ctrl tap inside the double-tap window locks the modifier');
+      assert.equal(api.handleTerminalDataForTest('1', 'a'), true, 'locked Ctrl applies to the first typed key');
+      assert.equal(api.handleTerminalDataForTest('1', 'b'), true, 'locked Ctrl persists for another typed key');
+      assert.equal(frames.at(-2).data, '\x01', 'locked Ctrl maps A to SOH');
+      assert.equal(frames.at(-1).data, '\x02', 'locked Ctrl maps B to STX');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, true, 'locked Ctrl stays visibly locked after terminal input');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
+      const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
+      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"/.test(keyboardHtml), 'the touch palette exposes Esc/Ctrl/Shift/Alt/Cmd/Ctrl-C in the left column before the slim Tab/Ctrl-B top row');
+      assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 
     await testAsync('server/client version mismatch asks whether to reload the browser', async () => {

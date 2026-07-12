@@ -334,6 +334,7 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
     history_end, history_end_error = parse_query_int(qs, "history_end", 0, min_value=0)
     history_resolution, history_resolution_error = parse_query_int(qs, "history_resolution", 0, min_value=0, max_value=24 * 60 * 60)
     history_max_points, history_max_points_error = parse_query_int(qs, "history_max_points", 0, min_value=0, max_value=100_000)
+    history_enabled = (qs.get("history") or ["1"])[0] != "0" and not query_bool(qs, "history_disabled")
     if token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error:
         request_error = token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
         request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
@@ -350,6 +351,7 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
         history_end=history_end or 0,
         history_resolution_seconds=history_resolution or 0,
         history_max_points=history_max_points or 0,
+        include_history=history_enabled,
     )
     build_ms = (time.perf_counter() - started) * 1000
     setattr(request, "_http_response_compute_ms", build_ms)

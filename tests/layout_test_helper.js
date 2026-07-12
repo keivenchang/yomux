@@ -932,6 +932,7 @@ globalThis.__layoutTestApi = {
   createAppMenuCommand,
   backgroundTabItems,
   canPaneExpand,
+  minimizeBlockedByPinned,
   codeMirrorHtmlSemanticEmphasisExtension,
   codeMirrorApiIsUsable,
   codeMirrorLanguageExtension,
@@ -1219,6 +1220,8 @@ globalThis.__layoutTestApi = {
   debugModeExplicitUrlEnabledForTest() { return debugModeExplicitUrlEnabled; },
   debugPaneItemId,
   debugPanelHtmlForTest: debugPanelHtml,
+  jsDebugGraphChartGroupsForTest() { return jsDebugGraphChartGroups.map(group => ({...group})); },
+  jsDebugGraphDescriptionKeyByLabelKeyForTest() { return {...jsDebugGraphDescriptionKeyByLabelKey}; },
   debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
   debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
@@ -1517,6 +1520,7 @@ globalThis.__layoutTestApi = {
   handleTerminalDataForTest: handleTerminalData,
   terminalMobileAccessoryHtmlForTest: terminalMobileAccessoryHtml,
   terminalMobileAccessoryDataForTest: terminalMobileAccessoryData,
+  terminalDataWithMobileAccessoryModifiersForTest: terminalDataWithMobileAccessoryModifiers,
   terminalMobileAccessoryPalettePlacementForTest: terminalMobileAccessoryPalettePlacement,
   terminalMobileAccessoryLauncherDragPositionForTest: terminalMobileAccessoryLauncherDragPosition,
   terminalMobileAccessoryStateForTest(session) {
@@ -2472,6 +2476,7 @@ globalThis.__layoutTestApi = {
   fileExplorerExpandedForTest() { return Array.from(fileExplorerExpanded).sort(); },
   setFileExplorerRootForTest(path) { fileExplorerRoot = normalizeDirectoryPath(path); },
   fileExplorerRootForTest() { return fileExplorerRoot; },
+  fileExplorerPathDisplayForTest() { return fileExplorerPath?.value || fileExplorerPath?.textContent || ''; },
   setFileExplorerDirListingForTest(path, entries) {
     setFileExplorerFsResourceValue('list', path, entries);
   },

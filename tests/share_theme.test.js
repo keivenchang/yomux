@@ -667,9 +667,9 @@ async function runShareThemeSuite() {
       assert.equal(hoverApi.activeTmuxDirectoryPath(), '/home/test/yolomux.dev/src', 'hover/autofocus does not become the Finder tmux-directory source');
       assert.deepStrictEqual(canonical(hoverApi.fileExplorerSyncPlanForTest()), {
         session: '5',
-        root: '/home/test/yolomux.dev',
-        affectedDirs: ['/home/test/yolomux.dev'],
-        expandPaths: [],
+        root: '/home/test',
+        affectedDirs: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/src'],
+        expandPaths: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/src'],
       }, 'hover/autofocus keeps Finder Sync planned from the explicit session');
       hoverApi.setFocusedTerminal('6');
       assert.equal(hoverApi.activeTmuxDirectoryPath(), '/home/test/yolomux.dev/src', 'passive xterm focus does not become the Finder tmux-directory source');
@@ -4428,7 +4428,8 @@ async function runShareThemeSuite() {
     assert.ok(source.includes('fileExplorerSyncManualCollapsedPaths'), 'Finder Sync tracks manually collapsed auto-expanded paths');
     assert.ok(/function fileExplorerSyncExpansionPaths\(plan\)[\s\S]*filter\(path => !fileExplorerSyncPathSuppressed\(path\)\)/.test(source), 'Finder Sync filters manually collapsed paths out of future auto-expansion');
     assert.ok(source.includes('function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [])'), 'Finder Sync expansion targets are centralized');
-    assert.ok(source.includes('const candidates = repoTargets.length ? repoTargets : affectedTargets;'), 'Finder Sync expands direct repo roots when available, otherwise direct affected path children');
+    assert.ok(source.includes('function ancestorPathsUnderRoot(root, path)') && source.includes('const candidates = [...repoTargets, ...affectedTargets];'), 'Finder Sync expands full ancestor chains for repo roots and affected paths');
+    assert.ok(source.includes('const expansionPaths = fileExplorerSyncExpansionPaths(plan);'), 'explicit Finder Sync expansion shares manual-collapse suppression with automatic sync');
     assert.ok(source.includes('function commonAncestorPath(paths)') && source.includes('function focusedRepoRootForSync(focusedDir, repoRoots = sessionFilesRepoRoots())'), 'Finder Sync root selection is centralized through common-ancestor and focused-repo helpers');
     const viewMenu = menus.find(menu => menu.id === 'view');
     assert.equal(viewMenu.items.find(item => item.label === 'Hide tab metadata').iconHtml.includes('app-menu-ui-icon-tab-meta active'), true);
@@ -5714,11 +5715,11 @@ async function runShareThemeSuite() {
     });
     assert.equal(api.fileExplorerRootModeValue(), 'sync');
     assert.equal(api.activeTmuxDirectoryPath('1'), '/home/test/yolomux.dev');
-    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test/yolomux.dev');
+    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test');
     api.setSessionFilesPayloadForTest({session: '1', repos: [{repo: '/repo/app'}], files: []});
     api.setFileExplorerRootMode('sync', {sync: false});
     assert.equal(api.fileExplorerRootModeValue(), 'sync');
-    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test/yolomux.dev');
+    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test');
     api.setTranscriptInfoForTest('1', {
       project: {git: {cwd: '/home/test/yolomux.dev/static_src/js', root: '/home/test/yolomux.dev'}},
       selected_pane: {current_path: '/home/test/yolomux.dev/static_src/js'},
@@ -5726,9 +5727,13 @@ async function runShareThemeSuite() {
     api.setSessionFilesPayloadForTest({session: '1', repos: [], files: []});
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/yolomux.dev',
-      affectedDirs: ['/home/test/yolomux.dev'],
-      expandPaths: [],
+      root: '/home/test',
+      affectedDirs: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/static_src/js'],
+      expandPaths: [
+        '/home/test/yolomux.dev',
+        '/home/test/yolomux.dev/static_src',
+        '/home/test/yolomux.dev/static_src/js',
+      ],
     });
     assert.equal(api.finderDirectoryForItem('1'), '');
     assert.equal(api.activeFinderDirectoryPath('1'), '');
@@ -5757,9 +5762,15 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/dynamo',
+      root: '/home/test',
       affectedDirs: ['/home/test/dynamo/repo-a', '/home/test/dynamo/repo-b', '/home/test/dynamo/repo-a/src', '/home/test/dynamo/repo-b/lib'],
-      expandPaths: ['/home/test/dynamo/repo-a', '/home/test/dynamo/repo-b'],
+      expandPaths: [
+        '/home/test/dynamo',
+        '/home/test/dynamo/repo-a',
+        '/home/test/dynamo/repo-b',
+        '/home/test/dynamo/repo-a/src',
+        '/home/test/dynamo/repo-b/lib',
+      ],
     });
     const highlightSets = api.fileExplorerSessionHighlightSetsForTest('1');
     assert.deepStrictEqual(canonical(highlightSets.repoRoots), []);
@@ -5788,9 +5799,9 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/dynamo1',
+      root: '/home/test',
       affectedDirs: ['/home/test/dynamo1', '/tmp/x', '/home/test/dynamo1/src'],
-      expandPaths: ['/home/test/dynamo1/src'],
+      expandPaths: ['/home/test/dynamo1', '/home/test/dynamo1/src'],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/ai-config/claude/skills'}});
     api.setSessionFilesPayloadForTest({
@@ -5803,9 +5814,15 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/ai-config',
-      affectedDirs: ['/home/test/ai-config', '/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks'],
-      expandPaths: ['/home/test/ai-config/claude', '/home/test/ai-config/hooks'],
+      root: '/home/test',
+      affectedDirs: ['/home/test/ai-config', '/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks', '/home/test/ai-config/claude/skills'],
+      expandPaths: [
+        '/home/test/ai-config',
+        '/home/test/ai-config/claude',
+        '/home/test/ai-config/hooks',
+        '/home/test/ai-config/claude/skills',
+        '/home/test/ai-config/claude/skills/a',
+      ],
     });
     api.setSessionFilesPayloadForTest({
       session: '1',
@@ -5817,9 +5834,15 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/ai-config',
-      affectedDirs: ['/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks'],
-      expandPaths: ['/home/test/ai-config/claude', '/home/test/ai-config/hooks'],
+      root: '/home/test',
+      affectedDirs: ['/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks', '/home/test/ai-config/claude/skills'],
+      expandPaths: [
+        '/home/test/ai-config',
+        '/home/test/ai-config/claude',
+        '/home/test/ai-config/hooks',
+        '/home/test/ai-config/claude/skills',
+        '/home/test/ai-config/claude/skills/a',
+      ],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: ''}});
     api.setSessionFilesPayloadForTest({session: '1', repos: [], files: []});

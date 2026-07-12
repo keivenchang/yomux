@@ -128,6 +128,47 @@ def test_registry_failure_rows_are_visible_bounded_and_backed_off(tmp_path, monk
     assert mismatch.status()["healthy"] is False
 
 
+def test_registry_retires_incompatible_socket_owner_without_sidecar_record(tmp_path, monkeypatch):
+    clock = [200.0]
+    stale_alive = {424_242: True}
+    shutdowns = []
+    spawned = []
+
+    monkeypatch.setattr("yolomux_lib.local_services.registry.pid_is_alive", lambda pid: stale_alive.get(pid, False))
+
+    class RunningProcess:
+        def poll(self):
+            return None
+
+    class MissingRecordMismatchRegistry(LocalServiceRegistry):
+        def _request(self, method, payload=None, timeout=0.2):
+            if stale_alive[424_242]:
+                if method in {"ping", "status"}:
+                    return {"ok": True, "pid": 424_242, "version": 6, "socket": str(self.socket_path)}
+                if method == "shutdown":
+                    shutdowns.append(method)
+                    stale_alive[424_242] = False
+                    return {"ok": True}
+                return {}
+            if spawned and method in {"ping", "status"}:
+                return {"ok": True, "pid": 777, "version": 7, "socket": str(self.socket_path)}
+            return {}
+
+    registry = MissingRecordMismatchRegistry(
+        tmp_path,
+        LocalServiceSpec("mismatchd", "missing.module", "mismatch.sock", 7),
+        popen=lambda *args, **kwargs: spawned.append((args, kwargs)) or RunningProcess(),
+        clock=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    assert registry.record_path.exists() is False
+    assert registry.ensure_started() is True
+    assert shutdowns == ["shutdown"]
+    assert len(spawned) == 1
+    assert registry.healthy() is True
+
+
 def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     stale = service._queue_record("text_facts", {"text": "old"}, "maintenance", 1, "same")

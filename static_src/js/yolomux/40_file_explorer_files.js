@@ -50,7 +50,7 @@ async function openFileExplorerAt(path, options = {}) {
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
-    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0);
+    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder'});
   }
   if (options.refreshPanels !== false) {
     await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false});
@@ -944,6 +944,18 @@ function firstChildPathUnderRoot(root, path) {
   return parts.length ? childPath(root, parts[0]) : '';
 }
 
+function ancestorPathsUnderRoot(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const normalizedPath = normalizeDirectoryPath(path || '');
+  if (!normalizedRoot || !normalizedPath || normalizedPath === normalizedRoot || !pathIsInsideDirectory(normalizedPath, normalizedRoot)) return [];
+  const parts = childPathParts(normalizedRoot, normalizedPath);
+  const result = [];
+  for (let index = 1; index <= parts.length; index += 1) {
+    result.push(childPath(normalizedRoot, parts.slice(0, index).join('/')));
+  }
+  return result;
+}
+
 function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = []) {
   const normalizedRoot = normalizeDirectoryPath(root || '');
   if (!normalizedRoot) return [];
@@ -953,11 +965,9 @@ function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [
   const normalizedAffectedDirs = Array.from(new Set(affectedDirs
     .map(path => normalizeDirectoryPath(path))
     .filter(Boolean)));
-  const repoTargets = normalizedRepoRoots.filter(path => path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const affectedTargets = normalizedAffectedDirs
-    .map(path => firstChildPathUnderRoot(normalizedRoot, path))
-    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const candidates = repoTargets.length ? repoTargets : affectedTargets;
+  const repoTargets = normalizedRepoRoots.flatMap(path => ancestorPathsUnderRoot(normalizedRoot, path));
+  const affectedTargets = normalizedAffectedDirs.flatMap(path => ancestorPathsUnderRoot(normalizedRoot, path));
+  const candidates = [...repoTargets, ...affectedTargets];
   return Array.from(new Set(candidates
     .map(path => normalizeDirectoryPath(path))
     .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
@@ -978,12 +988,24 @@ function fileExplorerSyncPlan(preferredItem = null) {
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
   if (!affectedDirs.length && focusedGitRoot && (!focusedDir || pathIsInsideDirectory(focusedDir, focusedGitRoot))) affectedDirs.push(focusedGitRoot);
   if (!affectedDirs.length && focusedDir) affectedDirs.push(focusedDir);
+  if (
+    focusedDir
+    && (!focusedGitRoot || pathIsInsideDirectory(focusedDir, focusedGitRoot))
+    && !affectedDirs.includes(focusedDir)
+  ) {
+    affectedDirs.push(focusedDir);
+  }
   const repoRoots = payloadUsable ? sessionFilesRepoRoots(payload) : [];
   if (focusedGitRoot && !repoRoots.includes(focusedGitRoot)) repoRoots.push(focusedGitRoot);
   let root = commonAncestorPath(affectedDirs);
   if (!root) root = normalizeDirectoryPath(homePath || '/');
   if (root && pathIsShallowerThanHome(root)) {
     root = focusedRepoRootForSync(focusedDir, repoRoots) || normalizeDirectoryPath(homePath || '/');
+  }
+  const normalizedHome = normalizeDirectoryPath(homePath || '');
+  const rootBeforeHomeLift = normalizeDirectoryPath(root || '');
+  if (normalizedHome && rootBeforeHomeLift && rootBeforeHomeLift !== normalizedHome && pathIsInsideDirectory(rootBeforeHomeLift, normalizedHome)) {
+    root = normalizedHome;
   }
   const normalizedRoot = normalizeDirectoryPath(root || '');
   const expandPaths = fileExplorerSyncExpansionTargets(normalizedRoot, affectedDirs, repoRoots);
@@ -999,6 +1021,11 @@ function fileExplorerSyncPlanForFile(path) {
   let root = repo && pathIsInsideDirectory(target, repo) ? repo : '';
   if (!root && currentRoot && pathIsInsideDirectory(target, currentRoot) && target !== currentRoot) root = currentRoot;
   if (!root) root = targetDir;
+  const normalizedHome = normalizeDirectoryPath(homePath || '');
+  const rootBeforeHomeLift = normalizeDirectoryPath(root || '');
+  if (normalizedHome && rootBeforeHomeLift && rootBeforeHomeLift !== normalizedHome && pathIsInsideDirectory(rootBeforeHomeLift, normalizedHome)) {
+    root = normalizedHome;
+  }
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
   const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
   return {
@@ -1096,12 +1123,18 @@ function fileExplorerSyncExpansionPaths(plan) {
 function fileExplorerSyncExplicitExpansionTargets(plan, root = plan?.root || currentFileExplorerRoot()) {
   const normalizedRoot = normalizeDirectoryPath(root || '');
   if (!normalizedRoot) return [];
+  const expansionPaths = fileExplorerSyncExpansionPaths(plan);
   return Array.from(new Set([
-    ...(plan?.expandPaths || []),
+    ...expansionPaths,
     ...(plan?.affectedDirs || []),
   ]
     .map(path => normalizeDirectoryPath(path))
-    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
+    .filter(path => (
+      path
+      && path !== normalizedRoot
+      && pathIsInsideDirectory(path, normalizedRoot)
+      && !fileExplorerSyncPathSuppressed(path)
+    ))))
     .sort((left, right) => (
       childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
       || left.localeCompare(right)
@@ -1145,7 +1178,15 @@ function forgetFileExplorerSyncManualCollapse(path) {
 }
 
 function emptyFileExplorerSessionHighlightSets() {
-  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs: new Set()};
+  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs: new Set(), syncTargetDirs: new Set(), syncTargetTitle: ''};
+}
+
+function fileExplorerSyncTargetDirs(plan) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const dirs = Array.from(new Set((plan?.affectedDirs || [])
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && root && path !== root && pathIsInsideDirectory(path, root))));
+  return dirs.filter(path => !dirs.some(other => other !== path && pathIsInsideDirectory(other, path)));
 }
 
 function fileExplorerSessionHighlightSets(preferredItem = null) {
@@ -1162,8 +1203,17 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
     return emptyFileExplorerSessionHighlightSets();
   }
   const repoRoots = new Set(sessionFilesRepoRoots(payload));
-  const expandedDirs = new Set(fileExplorerSyncHighlightedRepoRoots(fileExplorerSyncPlan(targetSession), repoRoots));
-  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs};
+  const plan = fileExplorerSyncPlan(targetSession);
+  const expandedDirs = new Set(fileExplorerSyncHighlightedRepoRoots(plan, repoRoots));
+  const syncTargetDirs = new Set(fileExplorerSyncTargetDirs(plan));
+  const sessionLabel = targetSession || plan.session || '';
+  return {
+    repoRoots: new Set(),
+    touchedDirs: new Set(),
+    expandedDirs,
+    syncTargetDirs,
+    syncTargetTitle: t('finder.syncTarget.title', {session: sessionLabel}),
+  };
 }
 
 function fileExplorerSessionHighlightClassForPath(path, kind = 'dir', options = {}) {
@@ -1179,8 +1229,13 @@ function fileExplorerSessionHighlightClassForPath(path, kind = 'dir', options = 
 
 function applyFileExplorerSessionHighlightRow(row, sets = fileExplorerSessionHighlightSets()) {
   if (!row) return;
-  const highlightClass = fileExplorerSessionHighlightClassForPath(row.dataset?.path || '', row.dataset?.kind || '', {sessionHighlightSets: sets});
+  const path = normalizeDirectoryPath(row.dataset?.path || '');
+  const kind = row.dataset?.kind || '';
+  const highlightClass = fileExplorerSessionHighlightClassForPath(path, kind, {sessionHighlightSets: sets});
   applySessionHighlightRowClass(row, highlightClass);
+  const isSyncTarget = kind === 'dir' && Boolean(path && sets.syncTargetDirs?.has(path));
+  row.classList.toggle('file-tree-row--sync-target', isSyncTarget);
+  updateFileTreeSyncTargetMarker(row, isSyncTarget, sets.syncTargetTitle);
 }
 
 function updateFileExplorerSessionHighlightRows(preferredItem = null) {
@@ -1199,8 +1254,9 @@ function fileExplorerPathInputs() {
 
 function setFileExplorerPathElementValue(node, path) {
   if (!node) return;
-  if ('value' in node) node.value = path;
-  else node.textContent = path;
+  const display = typeof compactHomePath === 'function' ? (compactHomePath(path) || path) : path;
+  if ('value' in node) node.value = display;
+  else node.textContent = display;
 }
 
 function setFileExplorerPathError(node, message = '') {
@@ -1596,7 +1652,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       const generation = ++fileExplorerSyncState.generation;
       for (const path of expandPaths) {
         if (generation !== fileExplorerSyncState.generation) return changed;
-        changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true}) || changed;
+        changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true, user: options.force === true}) || changed;
         if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
       }
     }
@@ -1750,17 +1806,17 @@ function createFileTreeChildContainer(fullPath) {
   return children;
 }
 
-async function ensureFileTreeRootRendered(container, root) {
+async function ensureFileTreeRootRendered(container, root, options = {}) {
   if (!container) return false;
   const firstRow = container.querySelector?.('.file-tree-row[data-path]');
   if (firstRow) {
     if (pathIsInsideDirectory(firstRow.dataset.path, root) && childPathParts(root, firstRow.dataset.path).length === 1) return true;
     container.replaceChildren();
   }
-  const entries = await fetchDirectory(root);
+  const entries = await fetchDirectory(root, {user: options.user === true});
   if (!entries) return false;
   container.replaceChildren();
-  renderTreeChildren(container, root, entries, 0);
+  renderTreeChildren(container, root, entries, 0, {view: 'finder'});
   return true;
 }
 
@@ -1801,7 +1857,7 @@ function scrollFileTreeRowIntoView(container, row) {
 async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncState.generation, options = {}) {
   const parts = childPathParts(root, path);
   if (!parts.length) return false;
-  const rendered = await ensureFileTreeRootRendered(container, root);
+  const rendered = await ensureFileTreeRootRendered(container, root, options);
   if (!rendered) return false;
   if (generation !== fileExplorerSyncState.generation) return false;
   let scope = container;
@@ -1821,7 +1877,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
       if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
         return false;
       }
-      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true});
+      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true, user: options.user === true});
       if (generation !== fileExplorerSyncState.generation) return false;
       if (fullPath !== path) {
         if (!childScope) return false;
@@ -2165,6 +2221,29 @@ const GIT_STATUS_ROW_CLASSES = Object.freeze(['git-modified', 'git-untracked', '
 // two places (applyFileExplorerSessionHighlightRow + updateFileTreeRow).
 const SESSION_HIGHLIGHT_ROW_CLASSES = Object.freeze(['file-tree-row--sync-expanded', 'file-tree-row--session-repo', 'file-tree-row--session-touched']);
 
+function updateFileTreeSyncTargetMarker(row, active, title = '') {
+  if (!row) return;
+  const enabled = active === true;
+  let marker = row.querySelector(':scope > .file-tree-sync-target');
+  if (!enabled) {
+    marker?.remove();
+    return;
+  }
+  if (!marker) {
+    marker = document.createElement('span');
+    marker.className = 'file-tree-sync-target';
+  }
+  const anchor = row.querySelector(':scope > .file-tree-agent') || row.querySelector(':scope > .file-tree-name');
+  const before = anchor?.nextElementSibling || null;
+  if (marker.parentElement !== row || marker.previousElementSibling !== anchor) {
+    row.insertBefore(marker, before);
+  }
+  marker.hidden = false;
+  if (marker.textContent !== '★') marker.textContent = '★';
+  marker.setAttribute('aria-label', title);
+  marker.setAttribute('title', title);
+}
+
 function applyGitStatusRowClass(row, gitClass) {
   for (const className of GIT_STATUS_ROW_CLASSES) {
     row.classList.toggle(className, className === gitClass);
@@ -2305,6 +2384,8 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     row.appendChild(date);
   }
   // Keep DOM order: icon → name → agent → diff → dir-count → status → date.
+  // updateFileTreeSyncTargetMarker inserts a star only for starred sync rows, so ordinary rows
+  // keep the established Finder/Differ column ownership with no hidden spacer.
   if (name.nextElementSibling !== agent) row.insertBefore(agent, name.nextElementSibling);
   if (agent.nextElementSibling !== diff) row.insertBefore(diff, agent.nextElementSibling);
   if (diff.nextElementSibling !== dirCount) row.insertBefore(dirCount, diff.nextElementSibling);
@@ -2668,6 +2749,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   applyFileTreeRowDataset(row, rowState);
   applyFileTreeRowDerivedState(row, rowState.derivedState);
+  applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
   applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
   bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);

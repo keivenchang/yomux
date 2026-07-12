@@ -43,8 +43,8 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 8
-STATSD_COMPAT_PROTOCOL_VERSION = 7
+STATSD_PROTOCOL_VERSION = 11
+STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
@@ -76,6 +76,8 @@ STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_sampl
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATSD_SAMPLE_INTERVAL_SECONDS = 1.0
+STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS = 5.0
+STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS = 60.0
 STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
 STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
@@ -108,6 +110,30 @@ def _usage_atom_timestamp_text(value: Any) -> str:
     if not math.isfinite(timestamp) or timestamp <= 0:
         return "9999-12-31T23:59:59Z"
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _rate_micro_usd(quantity: Any, rate: Any) -> int:
+    try:
+        value = (Decimal(str(_usage_atom_number(quantity))) * rate.usd * Decimal(1_000_000) / Decimal(int(rate.scale))).to_integral_value(rounding=ROUND_HALF_UP)
+    except Exception:
+        return 0
+    return max(0, int(value))
+
+
+def _component_lower_micro_usd(component: dict[str, Any]) -> int:
+    if "lower_micro_usd" in component:
+        return max(0, int(component.get("lower_micro_usd") or 0))
+    if "estimated_lower_micro_usd" in component:
+        return max(0, int(component.get("estimated_lower_micro_usd") or 0))
+    return max(0, int(component.get("micro_usd") or 0)) if component.get("priced") else 0
+
+
+def _component_upper_micro_usd(component: dict[str, Any]) -> int:
+    if "upper_micro_usd" in component:
+        return max(0, int(component.get("upper_micro_usd") or 0))
+    if "estimated_upper_micro_usd" in component:
+        return max(0, int(component.get("estimated_upper_micro_usd") or 0))
+    return max(0, int(component.get("micro_usd") or 0)) if component.get("priced") else _component_lower_micro_usd(component)
 
 
 def normalized_usage_atom(value: Any) -> dict[str, Any] | None:
@@ -151,6 +177,12 @@ def normalized_usage_atom(value: Any) -> dict[str, Any] | None:
         "endpoint": _usage_atom_text(fields.get("endpoint"), limit=128),
         "tool_name": _usage_atom_text(fields.get("tool_name"), limit=128),
         "call_id": _usage_atom_text(fields.get("call_id"), limit=256),
+        "tmux_key": _usage_atom_text(fields.get("tmux_key"), limit=256),
+        "tmux_label": _usage_atom_text(fields.get("tmux_label"), limit=256),
+        "tmux_session": _usage_atom_text(fields.get("tmux_session"), limit=128),
+        "tmux_window": _usage_atom_text(fields.get("tmux_window"), limit=64),
+        "tmux_window_label": _usage_atom_text(fields.get("tmux_window_label"), limit=128),
+        "agent_kind": _usage_atom_text(fields.get("agent_kind"), limit=32),
         "pricing_profile": _usage_atom_text(fields.get("pricing_profile"), default="default", limit=64),
         "service_tier": _usage_atom_text(fields.get("service_tier"), default="default", limit=64),
         # Set only by the durable retained-history migrator.  Live collection
@@ -168,34 +200,77 @@ def projected_usage_component(atom: Any, catalog: Any = None) -> dict[str, Any] 
     normalized = normalized_usage_atom(atom)
     if normalized is None:
         return None
+
+    def estimated_rate_fields() -> dict[str, Any]:
+        estimate_rate_band = getattr(catalog, "estimate_rate_band", None)
+        if catalog is None or not callable(estimate_rate_band):
+            return {}
+        band = estimate_rate_band(
+            direction=normalized["direction"], modality=normalized["modality"], cache_role=normalized["cache_role"],
+            unit=normalized["unit"], profile=normalized["pricing_profile"], service_tier=normalized["service_tier"], timestamp=_usage_atom_timestamp_text(normalized["timestamp"]),
+        )
+        if band is None:
+            return {}
+        minimum = getattr(band, "minimum", None)
+        maximum = getattr(band, "maximum", None)
+        if minimum is None or maximum is None:
+            return {}
+        upper = _rate_micro_usd(normalized["quantity"], maximum)
+        return {
+            "lower_micro_usd": 0,
+            "upper_micro_usd": upper,
+            "estimated": True,
+            "estimated_lower_micro_usd": 0,
+            "estimated_upper_micro_usd": upper,
+            "estimate_rate_min_usd": str(getattr(minimum, "usd", "")),
+            "estimate_rate_max_usd": str(getattr(maximum, "usd", "")),
+            "estimate_rate_scale": int(getattr(maximum, "scale", 0) or 0),
+            "estimate_source_url": str(getattr(maximum, "source_url", "")),
+            "estimate_catalog_revision": int(getattr(maximum, "catalog_revision", 0) or 0),
+        }
+
     result = {
         **normalized,
         "micro_usd": 0,
+        "lower_micro_usd": 0,
+        "upper_micro_usd": 0,
         "priced": False,
+        "estimated": False,
         "catalog_revision": 0,
         "source_url": "",
         "effective_from": "",
         "rate_usd": "",
         "rate_scale": 0,
+        "estimated_lower_micro_usd": 0,
+        "estimated_upper_micro_usd": 0,
+        "estimate_rate_min_usd": "",
+        "estimate_rate_max_usd": "",
+        "estimate_rate_scale": 0,
+        "estimate_source_url": "",
+        "estimate_catalog_revision": 0,
     }
     if catalog is None or normalized["provider"] == "unknown" or normalized["model"] == "unknown":
-        return result
+        return {**result, **estimated_rate_fields()}
     rate = catalog.resolve_rate(
         provider=normalized["provider"], model=normalized["model"], direction=normalized["direction"], modality=normalized["modality"],
         cache_role=normalized["cache_role"], unit=normalized["unit"], profile=normalized["pricing_profile"], service_tier=normalized["service_tier"], timestamp=_usage_atom_timestamp_text(normalized["timestamp"]),
     )
     if rate is None:
-        return result
-    micro_usd = (Decimal(str(normalized["quantity"])) * rate.usd * Decimal(1_000_000) / Decimal(rate.scale)).to_integral_value(rounding=ROUND_HALF_UP)
+        return {**result, **estimated_rate_fields()}
+    micro_usd = _rate_micro_usd(normalized["quantity"], rate)
     return {
         **result,
-        "micro_usd": int(micro_usd),
+        "micro_usd": micro_usd,
+        "lower_micro_usd": micro_usd,
+        "upper_micro_usd": micro_usd,
         "priced": True,
         "catalog_revision": int(rate.catalog_revision),
         "source_url": str(rate.source_url),
         "effective_from": str(getattr(rate, "effective_from", "")),
         "rate_usd": str(rate.usd),
         "rate_scale": int(rate.scale),
+        "estimated_lower_micro_usd": micro_usd,
+        "estimated_upper_micro_usd": micro_usd,
     }
 
 
@@ -227,16 +302,26 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
             identity = tuple(str(atom.get(key) or "") for key in keys)
             row = grouped.setdefault(identity, {key: identity[index] for index, key in enumerate(keys)} | {
                 "quantity": 0.0, "micro_usd": 0, "count": 0, "unpriced_count": 0,
+                "lower_micro_usd": 0, "upper_micro_usd": 0,
                 "input_micro_usd": 0, "cache_micro_usd": 0, "output_micro_usd": 0, "other_micro_usd": 0,
+                "input_lower_micro_usd": 0, "cache_lower_micro_usd": 0, "output_lower_micro_usd": 0, "other_lower_micro_usd": 0,
+                "input_upper_micro_usd": 0, "cache_upper_micro_usd": 0, "output_upper_micro_usd": 0, "other_upper_micro_usd": 0,
                 "token_quantity": 0.0, "input_tokens": 0.0, "cache_tokens": 0.0, "output_tokens": 0.0, "other_tokens": 0.0,
             })
             quantity = _usage_atom_number(atom.get("quantity"))
             item_class = billed_class(atom)
+            micro_usd = int(atom.get("micro_usd") or 0)
+            lower_micro_usd = _component_lower_micro_usd(atom)
+            upper_micro_usd = max(lower_micro_usd, _component_upper_micro_usd(atom))
             row["quantity"] += quantity
-            row["micro_usd"] += int(atom.get("micro_usd") or 0)
+            row["micro_usd"] += micro_usd
+            row["lower_micro_usd"] += lower_micro_usd
+            row["upper_micro_usd"] += upper_micro_usd
             row["count"] += 1
             row["unpriced_count"] += 0 if atom.get("priced") else 1
-            row[f"{item_class}_micro_usd"] += int(atom.get("micro_usd") or 0)
+            row[f"{item_class}_micro_usd"] += micro_usd
+            row[f"{item_class}_lower_micro_usd"] += lower_micro_usd
+            row[f"{item_class}_upper_micro_usd"] += upper_micro_usd
             if str(atom.get("unit") or "tokens").lower() == "tokens":
                 row["token_quantity"] += quantity
                 row[f"{item_class}_tokens"] += quantity
@@ -247,8 +332,11 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
     # source link dishonest even if the subtotal happened to remain correct.
     components = aggregate(("provider", "model", "effort", "pricing_profile", "service_tier", "direction", "modality", "cache_role", "unit", "catalog_revision", "source_url", "effective_from", "rate_usd", "rate_scale"))
     models = aggregate(("provider", "model", "effort"))
-    sources = aggregate(("root_thread_id", "agent_thread_id", "parent_thread_id", "endpoint", "tool_name", "source"))
+    sources = aggregate(("tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind", "root_thread_id", "agent_thread_id", "parent_thread_id", "endpoint", "tool_name", "source"))
+    tmux_windows = [row for row in aggregate(("tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind")) if row.get("tmux_key") or row.get("tmux_session") or row.get("tmux_window")]
     known_micro_usd = sum(int(atom.get("micro_usd") or 0) for atom in atoms if atom.get("priced"))
+    lower_micro_usd = sum(_component_lower_micro_usd(atom) for atom in atoms)
+    upper_micro_usd = sum(max(_component_lower_micro_usd(atom), _component_upper_micro_usd(atom)) for atom in atoms)
     priced_count = sum(1 for atom in atoms if atom.get("priced"))
     unpriced_count = sum(1 for atom in atoms if not atom.get("priced"))
     complete = not bool(raw.get("truncated")) and not bool(raw.get("lower_bound")) and unpriced_count == 0
@@ -258,15 +346,43 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
         # is incomplete; callers use `complete` to render `est. ≥$…`.
         "total_micro_usd": known_micro_usd,
         "known_micro_usd": known_micro_usd,
+        "lower_micro_usd": lower_micro_usd,
+        "upper_micro_usd": max(lower_micro_usd, upper_micro_usd),
         "priced_count": priced_count,
         "complete": complete,
         "unpriced_count": unpriced_count,
         "components": components,
         "models": models,
         "sources": sources,
+        "tmux_windows": tmux_windows,
         "catalog_revision": max(revisions, default=0),
         "active_catalog_revision": max(0, int(raw.get("active_catalog_revision") or 0)),
         "freshness": _usage_atom_text(raw.get("freshness"), default="unknown", limit=80),
+    }
+
+
+def _tmux_usage_fields_from_row(row: dict[str, Any], *, key: str = "", label: str = "", kind: str = "") -> dict[str, str]:
+    """Extract Agent-token tmux identity for cost attribution.
+
+    ``key`` is the existing Agent-token identity produced by the web process
+    (`session|window|kind`).  The explicit row fields win, but parsing the key
+    keeps older/direct statsd callers aligned with the same identity instead of
+    inventing a second resolver.
+    """
+
+    clean_key = str(key or row.get("key") or "").strip()
+    clean_label = str(label or row.get("label") or clean_key).strip()
+    parts = clean_key.split("|")
+    session = str(row.get("session") or (parts[0] if len(parts) > 0 else "")).strip()
+    window = str(row.get("window") or (parts[1] if len(parts) > 1 else "")).strip()
+    agent_kind = str(kind or row.get("kind") or (parts[2] if len(parts) > 2 else "")).strip().lower()
+    return {
+        "tmux_key": clean_key,
+        "tmux_label": clean_label,
+        "tmux_session": session,
+        "tmux_window": window,
+        "tmux_window_label": str(row.get("window_label") or clean_label or window).strip(),
+        "agent_kind": agent_kind,
     }
 
 
@@ -321,6 +437,7 @@ class PersistentStatsService:
         self.last_sampler_success_at = 0.0
         self.last_sampler_failure = ""
         self.last_sampler_attempt_at = 0.0
+        self.sampler_failure_count = 0
         self.sampler_thread: threading.Thread | None = None
         self.sampler_wake_event = threading.Event()
         # Catalog ownership stays outside statsd.  Tests and the application
@@ -397,8 +514,15 @@ class PersistentStatsService:
         # An elected sampler is active work even while no browser reads YO!stats.
         return not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
+    def _sampler_delay_seconds(self) -> float:
+        if self.sampler_failure_count <= 0:
+            return STATSD_SAMPLE_INTERVAL_SECONDS
+        multiplier = 2 ** min(6, self.sampler_failure_count - 1)
+        return min(STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS, STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS * multiplier)
+
     def _sampler_loop(self) -> None:
         while not self.stop_event.is_set():
+            cycle_failed = False
             try:
                 owner = self._sampler_owner_for_cycle()
                 if owner:
@@ -410,6 +534,7 @@ class PersistentStatsService:
                     )
                     if not response.get("ok"):
                         self.last_sampler_failure = redact_local_service_text(response.get("error") or "stats owner unavailable")
+                        cycle_failed = True
                     else:
                         self.last_sampler_success_at = self.last_sampler_attempt_at
                         self.last_sampler_failure = ""
@@ -419,9 +544,12 @@ class PersistentStatsService:
                         maintenance = StatsClient(self.socket_path, self.store.path).maybe_reproject_cost_summaries()
                         if maintenance.get("ok") is False:
                             self.last_sampler_failure = redact_local_service_text(maintenance.get("error") or "stats pricing maintenance unavailable")
+                            cycle_failed = True
             except Exception as exc:  # the persistent sampler must survive one failed owner/maintenance cycle
                 self.last_sampler_failure = redact_local_service_text(exc)
-            self.sampler_wake_event.wait(STATSD_SAMPLE_INTERVAL_SECONDS)
+                cycle_failed = True
+            self.sampler_failure_count = self.sampler_failure_count + 1 if cycle_failed else 0
+            self.sampler_wake_event.wait(self._sampler_delay_seconds())
             self.sampler_wake_event.clear()
 
     @staticmethod
@@ -756,7 +884,13 @@ class PersistentStatsService:
         output-only history can never become exact without missing telemetry.
         """
         summary["components"] = components
-        summary["total_micro_usd"] = sum(int(item.get("micro_usd") or 0) for item in components)
+        known_micro_usd = sum(int(item.get("micro_usd") or 0) for item in components if item.get("priced"))
+        lower_micro_usd = sum(_component_lower_micro_usd(item) for item in components)
+        upper_micro_usd = sum(max(_component_lower_micro_usd(item), _component_upper_micro_usd(item)) for item in components)
+        summary["total_micro_usd"] = known_micro_usd
+        summary["known_micro_usd"] = known_micro_usd
+        summary["lower_micro_usd"] = lower_micro_usd
+        summary["upper_micro_usd"] = max(lower_micro_usd, upper_micro_usd)
         summary["priced_components"] = sum(1 for item in components if item.get("priced"))
         summary["unpriced_components"] = sum(1 for item in components if not item.get("priced"))
         summary["lower_bound"] = bool(summary.get("truncated")) or legacy_output_only or any(
@@ -1018,6 +1152,7 @@ class PersistentStatsService:
             # component stream is separate and idempotent by event identity,
             # so it cannot inflate the Output chart when both are present.
             previous_time = float(previous_state.get(key, {}).get("time") or sample_time)
+            tmux_fields = _tmux_usage_fields_from_row(row, key=key, label=str(row.get("label") or key), kind=kind)
             for atom in session_files.transcript_usage_atoms(transcript_path, kind):
                 if previous_time < atom.timestamp <= sample_time:
                     # This response crosses the statsd Unix-RPC boundary.
@@ -1027,6 +1162,7 @@ class PersistentStatsService:
                     # claimed records.
                     normalized = normalized_usage_atom(atom)
                     if normalized is not None:
+                        normalized.update(tmux_fields)
                         atom_records.append({"time": atom.timestamp, "usage_atoms": [normalized]})
         claimed = self.claim_agent_token_deltas(measurements, seen_keys, sample_time, fallback_state=fallback_state)
         records = [*claimed.get("records", []), *atom_records]
@@ -1333,8 +1469,11 @@ class PersistentStatsService:
         dimension_fields = (
             "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
             "root_thread_id", "agent_thread_id", "parent_thread_id", "depth", "endpoint", "tool_name",
+            "tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind",
             "pricing_profile", "service_tier", "backfill_source", "telemetry_complete", "source", "priced",
             "catalog_revision", "source_url", "effective_from", "rate_usd", "rate_scale",
+            "estimated", "estimate_rate_min_usd", "estimate_rate_max_usd", "estimate_rate_scale",
+            "estimate_source_url", "estimate_catalog_revision",
         )
         grouped: dict[tuple[str, ...], dict[str, Any]] = {}
         for component in components:
@@ -1348,9 +1487,19 @@ class PersistentStatsService:
                 current["call_id"] = ""
                 current["quantity"] = 0.0
                 current["micro_usd"] = 0
+                current["lower_micro_usd"] = 0
+                current["upper_micro_usd"] = 0
+                current["estimated_lower_micro_usd"] = 0
+                current["estimated_upper_micro_usd"] = 0
                 grouped[identity] = current
             current["quantity"] += _usage_atom_number(component.get("quantity"))
             current["micro_usd"] += int(component.get("micro_usd") or 0)
+            lower_micro_usd = _component_lower_micro_usd(component)
+            upper_micro_usd = max(lower_micro_usd, _component_upper_micro_usd(component))
+            current["lower_micro_usd"] += lower_micro_usd
+            current["upper_micro_usd"] += upper_micro_usd
+            current["estimated_lower_micro_usd"] += lower_micro_usd
+            current["estimated_upper_micro_usd"] += upper_micro_usd
         return list(grouped.values())
 
     def migrate_usage_atom_history_from_rows(self, rows: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
@@ -1390,6 +1539,7 @@ class PersistentStatsService:
                 missing += 1
                 continue
             sources += 1
+            tmux_fields = _tmux_usage_fields_from_row(row, kind=kind)
             # The root transcript is the replay unit; descendants discovered
             # from it share this tag and are atomically replaced together.
             source = str(path.expanduser().resolve(strict=False))
@@ -1413,6 +1563,7 @@ class PersistentStatsService:
                 normalized = normalized_usage_atom(atom)
                 if normalized is not None:
                     normalized["backfill_source"] = source
+                    normalized.update(tmux_fields)
                     source_atoms.append(normalized)
             # One transaction replaces only this source's prior staged atoms.
             # Untagged live atoms are retained and event identity suppresses a
@@ -1677,7 +1828,14 @@ class PersistentStatsService:
             target_components.append(copy.deepcopy(item))
             seen_components.add(identity)
         target_summary["components"] = target_components
-        target_summary["total_micro_usd"] = sum(int(item.get("micro_usd") or 0) for item in target_components if isinstance(item, dict))
+        valid_target_components = [item for item in target_components if isinstance(item, dict)]
+        known_micro_usd = sum(int(item.get("micro_usd") or 0) for item in valid_target_components if item.get("priced"))
+        lower_micro_usd = sum(_component_lower_micro_usd(item) for item in valid_target_components)
+        upper_micro_usd = sum(max(_component_lower_micro_usd(item), _component_upper_micro_usd(item)) for item in valid_target_components)
+        target_summary["total_micro_usd"] = known_micro_usd
+        target_summary["known_micro_usd"] = known_micro_usd
+        target_summary["lower_micro_usd"] = lower_micro_usd
+        target_summary["upper_micro_usd"] = max(lower_micro_usd, upper_micro_usd)
         target_summary["priced_components"] = sum(1 for item in target_components if isinstance(item, dict) and item.get("priced"))
         target_summary["unpriced_components"] = sum(1 for item in target_components if isinstance(item, dict) and not item.get("priced"))
         target_summary["lower_bound"] = bool(target_summary.get("lower_bound")) or bool(source_summary.get("lower_bound")) or any(not item.get("priced") or not item.get("telemetry_complete") for item in target_components if isinstance(item, dict))
@@ -1715,6 +1873,14 @@ class PersistentStatsService:
 
     def _encoded_history(self, request: dict[str, Any]) -> dict[str, Any]:
         after_sequence = max(0, int(request.get("after_sequence", request.get("since", 0)) or 0))
+        if request.get("include_history") is False:
+            generation = int(self.store.diagnostics().get("sequence") or 0)
+            return {
+                "sequence": after_sequence,
+                "latest_sequence": generation,
+                "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
+                "records": [],
+            }
         start = max(0, int(request.get("start") or 0))
         end = max(0, int(request.get("end") or 0))
         resolution = max(0, int(request.get("resolution_seconds") or 0))
@@ -1850,7 +2016,8 @@ class PersistentStatsService:
         """Encode the complete public stats response without an HTTP round-trip through Python objects."""
         payload: dict[str, Any] = {"ok": True}
         payload.update(sample)
-        payload["history"] = self._encoded_history(query)
+        if query.get("include_history") is not False:
+            payload["history"] = self._encoded_history(query)
         payload["shared_stats"] = shared_stats
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 

@@ -1173,7 +1173,7 @@ function sessionFileMissingTimeText() {
 }
 
 function sessionFileDisplayTimeText(mtime, options = {}) {
-  const mode = fileExplorerTreeDateModeForView(options.view || 'differ');
+  const mode = fileExplorerTreeDateModeForView(options.view || (options.differMode ? 'differ' : 'finder'));
   if (mode === 'none') return '';
   const text = mode === 'date' ? sessionFileTimeText(mtime)
     : mode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)

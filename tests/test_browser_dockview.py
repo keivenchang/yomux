@@ -4683,9 +4683,18 @@ def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser,
         """
         const done = arguments[arguments.length - 1];
         setTabPinned('1', true);
+        const visible = node => {
+          if (!node) return false;
+          const style = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview');
+        const beforeMinimizeButtons = Array.from(group?.querySelectorAll('[data-pane-minimize]') || []).filter(visible).length;
         minimizePaneFromLayout('3');
         requestAnimationFrame(() => requestAnimationFrame(() => {
           done({
+            beforeMinimizeButtons,
             left: paneTabs('left'),
             right: paneTabs('right'),
             status: document.getElementById('status').textContent,
@@ -4694,6 +4703,7 @@ def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser,
         }));
         """
     )
+    assert mixed["beforeMinimizeButtons"] == 1, mixed
     assert mixed["left"] == ["1"], mixed
     assert mixed["right"] == ["4", "2", "3"], mixed
     assert mixed["kind"] == "", mixed
@@ -4712,25 +4722,99 @@ def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser,
         const done = arguments[arguments.length - 1];
         setTabPinned('1', true);
         setTabPinned('2', true);
-        const before = JSON.stringify({left: paneTabs('left'), right: paneTabs('right')});
-        minimizePaneFromLayout('1');
         requestAnimationFrame(() => requestAnimationFrame(() => {
-          const status = document.getElementById('status');
-          done({
-            before,
-            after: JSON.stringify({left: paneTabs('left'), right: paneTabs('right')}),
-            text: status.textContent,
-            classes: Array.from(status.classList),
-            kind: status.dataset.layoutStatusKind || '',
-          });
+          const visible = node => {
+            if (!node) return false;
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          };
+          const group = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]')?.closest('.dv-groupview');
+          const beforeMinimizeButtons = Array.from(group?.querySelectorAll('[data-pane-minimize]') || []).filter(visible).length;
+          const before = JSON.stringify({left: paneTabs('left'), right: paneTabs('right')});
+          minimizePaneFromLayout('1');
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const status = document.getElementById('status');
+            done({
+              beforeMinimizeButtons,
+              before,
+              after: JSON.stringify({left: paneTabs('left'), right: paneTabs('right')}),
+              text: status.textContent,
+              classes: Array.from(status.classList),
+              kind: status.dataset.layoutStatusKind || '',
+            });
+          }));
         }));
         """
     )
+    assert refused["beforeMinimizeButtons"] == 0, refused
     assert refused["before"] == refused["after"], refused
     assert refused["kind"] == "danger", refused
     assert "cannot be minimized" in refused["text"], refused
     assert "layout-status-visible" in refused["classes"], refused
     assert "layout-status-danger" in refused["classes"], refused
+
+
+def test_dockview_narrow_pinned_active_tab_hides_minimize_affordance(browser, tmp_path):
+    try:
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,2&layout=left&tabs=left:1,2",
+            sessions=["1", "2"],
+            grid_width=390,
+            grid_height=700,
+        )
+        browser.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": False},
+        )
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+        browser.execute_script("dispatchEvent(new Event('resize'))")
+        wait_for_dockview(browser, min_tabs=2)
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return narrowSingleColumnMode() === true"))
+        metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const visible = node => {
+              if (!node) return false;
+              const style = getComputedStyle(node);
+              const rect = node.getBoundingClientRect();
+              return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const activeMinimizeCount = () => {
+              const active = document.querySelector('.dockview-pane-tab[data-pane-tab="' + activeItemForSide('left') + '"]');
+              const group = active?.closest('.dv-groupview');
+              return Array.from(group?.querySelectorAll('[data-pane-minimize]') || []).filter(visible).length;
+            };
+            setTabPinned('1', true);
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const pinnedActive = {
+                active: activeItemForSide('left'),
+                singleColumn: narrowSingleColumnMode(),
+                minimizeButtons: activeMinimizeCount(),
+              };
+              selectSession('2', {userInitiated: true});
+              requestAnimationFrame(() => requestAnimationFrame(() => {
+                done({
+                  pinnedActive,
+                  unpinnedActive: {
+                    active: activeItemForSide('left'),
+                    minimizeButtons: activeMinimizeCount(),
+                  },
+                  errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+                });
+              }));
+            }));
+            """
+        )
+        assert metrics["errors"] == [], metrics
+        assert metrics["pinnedActive"]["singleColumn"] is True, metrics
+        assert metrics["pinnedActive"]["active"] == "1" and metrics["pinnedActive"]["minimizeButtons"] == 0, metrics
+        assert metrics["unpinnedActive"]["active"] == "2" and metrics["unpinnedActive"]["minimizeButtons"] == 1, metrics
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
 
 
 def test_dockview_first_pinned_tab_drags_after_second_pinned_tab(browser, tmp_path):
@@ -7788,6 +7872,11 @@ def test_dockview_side_pane_single_yoinfo_keeps_intrinsic_tab_and_minimize_only_
                 minimize: button.dataset.paneMinimize || '',
                 className: button.className,
               })),
+              visibleActionButtons: Array.from(actions?.querySelectorAll('button') || []).filter(button => {
+                const style = getComputedStyle(button);
+                const rect = button.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+              }).length,
               paneDragHandles: side?.querySelectorAll('[data-pane-drag]').length || 0,
               errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
             };
@@ -7803,7 +7892,20 @@ def test_dockview_side_pane_single_yoinfo_keeps_intrinsic_tab_and_minimize_only_
     assert 0 <= result["tabMinimizeLeft"] - result["labelRight"] <= 20, result
     assert len(result["actionButtons"]) == 1 and result["actionButtons"][0]["minimize"] == "__info__", result
     assert "pane-minimize" in result["actionButtons"][0]["className"], result
+    assert result["visibleActionButtons"] == 1, result
     assert result["paneDragHandles"] == 0, result
+
+    browser.execute_script("setTabPinned(infoItemId, true)")
+    pinned = WebDriverWait(browser, 5).until(
+        lambda driver: (state if (state := metrics(driver))["item"] == "__info__" and state["visibleActionButtons"] == 0 else False)
+    )
+    assert pinned["actionButtons"] == [] and pinned["visibleActionButtons"] == 0, pinned
+
+    browser.execute_script("setTabPinned(infoItemId, false)")
+    unpinned = WebDriverWait(browser, 5).until(
+        lambda driver: (state if (state := metrics(driver))["visibleActionButtons"] == 1 else False)
+    )
+    assert len(unpinned["actionButtons"]) == 1 and unpinned["actionButtons"][0]["minimize"] == "__info__", unpinned
 
 
 def test_dockview_right_side_pane_sash_cannot_expand_past_one_third(browser, tmp_path):

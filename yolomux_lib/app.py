@@ -129,7 +129,6 @@ from .chat_service import CHAT_YOAGENT_USERNAME
 from .chat_service import ChatService
 from .chat_store import CHAT_TYPING_LEASE_SECONDS
 from .metadata import MetadataCache
-from .metadata import candidate_session_cwds
 from .metadata import focus_root_for_session
 from .metadata import github_checks_unknown
 from .metadata import git_inventory
@@ -2081,7 +2080,15 @@ class TmuxWebtermApp:
             kind = str(row.get("kind") or "").strip().lower()
             if not transcript and not include_missing:
                 continue
-            token_rows.append({"key": key, "label": self.stats_agent_token_label(row), "transcript": transcript, "kind": kind})
+            token_rows.append({
+                "key": key,
+                "label": self.stats_agent_token_label(row),
+                "transcript": transcript,
+                "kind": kind,
+                "session": str(row.get("session") or "").strip(),
+                "window": str(row.get("window_index") if isinstance(row.get("window_index"), int) else row.get("window") or "").strip(),
+                "window_label": str(row.get("window_label") or row.get("label") or row.get("window") or "").strip(),
+            })
         return token_rows
 
     def stats_agent_token_claim_durable_delta_records_locked(
@@ -2122,10 +2129,12 @@ class TmuxWebtermApp:
         inactive_agents = 0
         agent_token_records: list[dict[str, Any]] = []
         token_rows: list[dict[str, Any]] = []
+        token_rows_by_key: dict[str, dict[str, Any]] = {}
         seen_keys: set[str] = set()
         transition_seconds = self.notification_transition_seconds()
         if include_token_rates:
             self.statsd_recover_agent_token_history(rows, sample_time)
+            token_rows_by_key = {str(row.get("key") or ""): row for row in self.stats_agent_token_rows(rows)}
         with self.stats_history_service.agent_token_lock:
             for index, row in enumerate(rows):
                 key = self.stats_agent_token_key(row, index)
@@ -2142,12 +2151,8 @@ class TmuxWebtermApp:
                 else:
                     idle_agents += 1
                     inactive_agents += 1
-                if include_token_rates:
-                    label = self.stats_agent_token_label(row)
-                    transcript = str(row.get("transcript") or "").strip()
-                    kind = str(row.get("kind") or "").strip().lower()
-                    if transcript:
-                        token_rows.append({"key": key, "label": label, "transcript": transcript, "kind": kind})
+                if include_token_rates and key in token_rows_by_key:
+                    token_rows.append(token_rows_by_key[key])
             if include_token_rates:
                 if token_rows:
                     agent_token_records = self.stats_agent_token_claim_durable_delta_records_locked(token_rows, seen_keys, sample_time)
@@ -2318,8 +2323,10 @@ class TmuxWebtermApp:
         history_end: int = 0,
         history_resolution_seconds: int = 0,
         history_max_points: int = 0,
+        include_history: bool = True,
     ) -> dict[str, Any]:
         return {
+            "include_history": bool(include_history),
             "since": max(0, since),
             "client_id": client_id,
             "token_since": max(0, token_since),
@@ -2345,6 +2352,7 @@ class TmuxWebtermApp:
         history_end: int = 0,
         history_resolution_seconds: int = 0,
         history_max_points: int = 0,
+        include_history: bool = True,
     ) -> dict[str, Any]:
         sample, shared_stats, endpoint_profile, build_started = self.stats_sample_context(token_consumer=token_consumer)
         encode_started = time.perf_counter()
@@ -2359,8 +2367,9 @@ class TmuxWebtermApp:
             history_end=history_end,
             history_resolution_seconds=history_resolution_seconds,
             history_max_points=history_max_points,
+            include_history=include_history,
         ))
-        if not history.get("ok"):
+        if include_history and not history.get("ok"):
             raise RuntimeError(str(history.get("error") or "statsd unavailable"))
         history.pop("ok", None)
         endpoint_profile["stats_history_encode_ms"] = round((time.perf_counter() - encode_started) * 1000, 3)
@@ -2387,6 +2396,7 @@ class TmuxWebtermApp:
         history_end: int = 0,
         history_resolution_seconds: int = 0,
         history_max_points: int = 0,
+        include_history: bool = True,
     ) -> tuple[dict[str, Any], bytes]:
         sample, shared_stats, endpoint_profile, build_started = self.stats_sample_context(token_consumer=token_consumer)
         encode_started = time.perf_counter()
@@ -2404,6 +2414,7 @@ class TmuxWebtermApp:
                 history_end=history_end,
                 history_resolution_seconds=history_resolution_seconds,
                 history_max_points=history_max_points,
+                include_history=include_history,
             ),
         )
         if not response.get("ok"):
@@ -10738,22 +10749,13 @@ class TmuxWebtermApp:
         if ok:
             return resolved, "session_workdir"
 
-        sessions, _ = discover_sessions([session])
-        info = sessions.get(session)
-        if info is None:
-            return None, "session_workdir"
-        work = activity_work_summary_from_graph(session_work_graph(info, self.metadata_cache, allow_network=False))
-        git_data = work.get("git") if isinstance(work.get("git"), dict) else {}
-        for key in ("root", "cwd"):
-            value = git_data.get(key)
-            if isinstance(value, str):
-                resolved, ok = resolved_upload_dir(Path(value))
+        result = tmux(["display-message", "-p", "-t", tmux_session_target(session), "#{pane_current_path}"], timeout=1.0)
+        if result.returncode == 0:
+            pane_path = result.stdout.strip()
+            if pane_path:
+                resolved, ok = resolved_upload_dir(Path(pane_path), allow_home=True)
                 if ok:
-                    return resolved, f"git_{key}"
-        for cwd in candidate_session_cwds(info):
-            resolved, ok = resolved_upload_dir(Path(cwd), allow_home=True)
-            if ok:
-                return resolved, "pane_current_path"
+                    return resolved, "pane_current_path"
         return None, "session_workdir"
 
     @requires_known_session()

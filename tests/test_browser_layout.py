@@ -1049,6 +1049,72 @@ def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(bro
     assert metrics["zeroStyle"] == "100.000%", metrics
 
 
+def test_yostats_chart_title_descriptions_cover_theme_and_pane_role(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyLayoutSlots === 'function'
+              && typeof emptyLayoutSlots === 'function'
+              && typeof paneStateWithTabs === 'function'
+              && typeof paneRoleDefinition === 'function'
+              && typeof renderDebugPanels === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        const collect = label => {
+          renderDebugPanels({force: true});
+          const slot = slotForItem(debugPaneItemId);
+          const role = paneRoleForSlot(slot);
+          const panel = panelNodes.get(debugPaneItemId);
+          const title = panel?.querySelector('[data-js-debug-chart="latency"] .js-debug-chart-title');
+          return {
+            label,
+            slot,
+            role: role.kind,
+            side: role.side || '',
+            light: document.body.classList.contains('theme-light'),
+            text: title?.textContent || '',
+            title: title?.getAttribute('title') || '',
+            aria: title?.getAttribute('aria-label') || '',
+            descKey: title?.dataset.jsDebugChartDesc || '',
+            pointTooltipCount: panel?.querySelectorAll('[data-js-debug-hover-tooltip]').length || 0,
+          };
+        };
+        const cases = [];
+        document.body.classList.remove('theme-light');
+        cases.push(collect('generic-dark'));
+        document.body.classList.add('theme-light');
+        cases.push(collect('generic-light'));
+        const next = emptyLayoutSlots();
+        next[layoutTreeKey] = splitNode('row', leafNode('stats'), leafNode('main'), 28);
+        next.stats = paneStateWithTabs([debugPaneItemId], debugPaneItemId, paneRoleDefinition(paneRoleSide, paneSideLeft));
+        next.main = paneStateWithTabs(['1'], '1', paneRoleDefinition(paneRoleGeneric));
+        applyLayoutSlots(next, {focusSession: debugPaneItemId, forceFull: true});
+        document.body.classList.remove('theme-light');
+        cases.push(collect('side-dark'));
+        document.body.classList.add('theme-light');
+        cases.push(collect('side-light'));
+        return cases;
+        """
+    )
+    assert {case["label"] for case in metrics} == {"generic-dark", "generic-light", "side-dark", "side-light"}, metrics
+    assert {case["role"] for case in metrics[:2]} == {"generic"}, metrics
+    assert {case["role"] for case in metrics[2:]} == {"side"}, metrics
+    assert {case["light"] for case in metrics} == {False, True}, metrics
+    for case in metrics:
+        assert case["text"] == "Client latency", metrics
+        assert case["descKey"] == "debug.graph.chart.latency.desc", metrics
+        assert case["title"] and "round-trip latency" in case["title"], metrics
+        assert case["aria"].startswith("Client latency: "), metrics
+        assert case["title"] in case["aria"], metrics
+        assert case["pointTooltipCount"] >= 1, metrics
+
+
 def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, tmp_path):
     load_static_html_fixture(browser, tmp_path, "debug-graph-cpu-compact-row.html", page_html("""
       <div class="js-debug-chart-grid" style="width:690px">
@@ -1273,9 +1339,19 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
         });
         renderDebugPanels({force: true});
         const graph = document.querySelector('[data-js-debug-graph]');
+        const view = graph.closest('.js-debug-graph-view');
+        const shell = graph.querySelector('.js-debug-chart-shell');
+        view.style.height = '260px';
+        view.style.maxHeight = '260px';
+        view.style.overflow = 'auto';
+        shell.style.minHeight = '1200px';
+        view.scrollTop = 420;
         const meta = graph.querySelector('.js-debug-graph-meta');
         const overlay = graph.querySelector('[data-js-debug-history-overlay]');
+        const message = overlay.querySelector('.js-debug-history-overlay-message');
         const dots = Array.from(overlay.querySelectorAll('.moving-ellipsis > span'));
+        const viewRect = view.getBoundingClientRect();
+        const messageRect = message.getBoundingClientRect();
         return {
           busy: graph.getAttribute('aria-busy'),
           phase: graph.dataset.jsDebugHistoryState,
@@ -1284,6 +1360,12 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
           dotCount: dots.length,
           animationNames: dots.map(dot => getComputedStyle(dot).animationName),
           labelText: Array.from(overlay.querySelector('.js-debug-history-overlay-message > span').childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join(''),
+          viewCenterY: viewRect.top + viewRect.height / 2,
+          messageCenterY: messageRect.top + messageRect.height / 2,
+          messageLeft: messageRect.left,
+          messageRight: messageRect.right,
+          viewLeft: viewRect.left,
+          viewRight: viewRect.right,
         };
         """
     )
@@ -1294,6 +1376,8 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
     assert metrics["dotCount"] == 3, metrics
     assert all(name == "moving-ellipsis-dot" for name in metrics["animationNames"]), metrics
     assert metrics["labelText"] == "Loading history", metrics
+    assert abs(metrics["messageCenterY"] - metrics["viewCenterY"]) <= 12, metrics
+    assert metrics["messageLeft"] >= metrics["viewLeft"] - 0.5 and metrics["messageRight"] <= metrics["viewRight"] + 0.5, metrics
 
 
 @pytest.mark.boot
@@ -1586,9 +1670,15 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
               const finder = panelNodes.get(fileExplorerItemId);
               const editor = panelNodes.get(editorItem);
               const terminal = panelNodes.get('1');
-              const expectedChartTitles = jsDebugGraphChartGroups
-                .filter(group => debugGraphChartVisible(group.key))
-                .map(group => catalog[group.labelKey]);
+              const visibleChartGroups = jsDebugGraphChartGroups
+                .filter(group => debugGraphChartVisible(group.key));
+              const expectedChartTitles = visibleChartGroups.map(group => catalog[group.labelKey]);
+              const expectedChartTitleDescriptions = visibleChartGroups.map(group => ({
+                text: catalog[group.labelKey],
+                title: catalog[group.descKey],
+                ariaLabel: `${catalog[group.labelKey]}: ${catalog[group.descKey]}`,
+                descKey: group.descKey,
+              }));
               return {
                 activeLocale: i18nActiveLocale,
                 resolvedHelpHeading: t('common.keyboardShortcuts'),
@@ -1596,6 +1686,12 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
                 helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
                 statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
                 chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+                chartTitleDescriptions: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => ({
+                  text: node.textContent,
+                  title: node.getAttribute('title') || '',
+                  ariaLabel: node.getAttribute('aria-label') || '',
+                  descKey: node.getAttribute('data-js-debug-chart-desc') || '',
+                })),
                 languageTitle: document.querySelector('.topbar-language')?.title || '',
                 lang: document.documentElement.lang,
                 dir: document.documentElement.dir,
@@ -1611,6 +1707,7 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
                   helpHeading: catalog['common.keyboardShortcuts'],
                   statsTitle: catalog['tab.debug'],
                   chartTitles: expectedChartTitles,
+                  chartTitleDescriptions: expectedChartTitleDescriptions,
                   languageTitle: catalog['common.language'],
                 },
               };
@@ -1729,6 +1826,15 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
         assert surface["helpAria"] == surface["expected"]["helpHeading"], (locale, surface)
         assert surface["statsTitle"] == surface["expected"]["statsTitle"], (locale, surface)
         assert set(surface["expected"]["chartTitles"]).issubset(set(surface["chartTitles"])), (locale, surface)
+        chart_title_descriptions = {
+            (entry["text"], entry["descKey"]): entry
+            for entry in surface["chartTitleDescriptions"]
+        }
+        for expected in surface["expected"]["chartTitleDescriptions"]:
+            actual = chart_title_descriptions.get((expected["text"], expected["descKey"]))
+            assert actual is not None, (locale, expected, surface["chartTitleDescriptions"])
+            assert actual["title"] == expected["title"], (locale, expected, actual)
+            assert actual["ariaLabel"] == expected["ariaLabel"], (locale, expected, actual)
         assert surface["languageTitle"] == surface["expected"]["languageTitle"], (locale, surface)
         assert surface["lang"] == locale, (locale, surface)
         assert surface["dir"] == ("rtl" if locale in {"ar", "he"} else "ltr"), (locale, surface)
@@ -2270,12 +2376,13 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             cost_summary: {
               total_micro_usd: 10000, known_micro_usd: 10000, priced_count: 3, complete: true, unpriced_count: 0,
               components: [
-                {key: 'input', direction: 'input', quantity: 10, unit: 'tokens', micro_usd: 2000, provider: 'openai', model: 'gpt-5.6-terra'},
-                {key: 'cache', cache_role: 'read', quantity: 10, unit: 'tokens', micro_usd: 3000, provider: 'openai', model: 'gpt-5.6-terra'},
-                {key: 'output', direction: 'output', quantity: 10, unit: 'tokens', micro_usd: 5000, provider: 'openai', model: 'gpt-5.6-terra'},
+                {key: 'input', direction: 'input', quantity: 10, unit: 'tokens', micro_usd: 2000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://platform.openai.com/pricing'},
+                {key: 'cache', cache_role: 'read', quantity: 10, unit: 'tokens', micro_usd: 3000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://platform.openai.com/pricing'},
+                {key: 'output', direction: 'output', quantity: 10, unit: 'tokens', micro_usd: 5000, provider: 'anthropic', model: 'claude-opus-4-8', source_url: 'https://platform.claude.com/docs/en/about-claude/pricing'},
+                {key: 'bad', direction: 'output', quantity: 1, unit: 'tokens', micro_usd: 0, provider: 'bad', model: 'bad', source_url: 'javascript:alert(1)'},
               ],
-              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, micro_usd: 10000}],
-              sources: [{root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', model: 'gpt-5.6-terra', token_quantity: 30, micro_usd: 10000}],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000}],
+              sources: [{tmux_key: 'root|0|codex', tmux_label: 'root:0', tmux_session: 'root', tmux_window: '0', tmux_window_label: '0', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', model: 'gpt-5.6-terra', token_quantity: 30, micro_usd: 10000, lower_micro_usd: 10000, upper_micro_usd: 10000}],
               catalog_revision: 'test-catalog', freshness: 'verified',
             },
           }));
@@ -2292,8 +2399,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             const card = graph?.querySelector('[data-js-debug-summary-group="costSummary"]');
             const buckets = debugGraphBucketsForChartGroup(modelGroup, debugGraphDisplayBuckets(), Date.now());
             const expected = debugGraphCostSummaryForBuckets(buckets);
-            const exact = expected.complete === true && expected.unpricedCount === 0;
-            const expectedAmount = debugGraphCostUsdText(exact ? expected.totalMicroUsd : expected.knownMicroUsd);
+            const expectedAmount = debugGraphCostRangeUsdText(expected);
             return {
               graph, model, card, buckets, expectedAmount,
               renderedAmount: card?.querySelector('.js-debug-cost-estimate')?.textContent || '',
@@ -2334,13 +2440,29 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             costCalculation: popover?.textContent.includes('Cost calculation'),
             modelUsages: popover?.textContent.includes('Model Usages'),
             sourceAttribution: popover?.textContent.includes('Agent and source attribution'),
+            pricingSources: popover?.textContent.includes('Pricing sources'),
+            tmuxBreakdown: popover?.textContent.includes('Cost by tmux window'),
+            tmuxBreakdownRows: popover?.querySelectorAll('.js-debug-cost-tmux-breakdown [role="treeitem"]').length || 0,
+            tmuxBreakdownText: popover?.querySelector('.js-debug-cost-tmux-breakdown')?.textContent || '',
             report: popover?.matches('article.js-debug-cost-report.js-debug-cost-modal-dialog'),
             headings: [...(popover?.querySelectorAll('h1, h2') || [])].map(node => node.textContent.trim()),
+            pricingSourcesLast: (() => {
+              const sections = [...(popover?.querySelectorAll('.js-debug-cost-details-section') || [])];
+              return sections.length > 0 && sections[sections.length - 1]?.classList.contains('js-debug-cost-pricing-sources');
+            })(),
+            pricingSourceLinks: [...(popover?.querySelectorAll('.js-debug-cost-pricing-sources a') || [])].map(node => ({text: node.textContent.trim(), href: node.getAttribute('href')})),
+            pricingSourcesText: popover?.querySelector('.js-debug-cost-pricing-sources')?.textContent || '',
             hasTable: Boolean(popover?.querySelector('table')),
             usageTitle: popover?.querySelector('.js-debug-cost-model-usages h2')?.textContent || '',
+            usageHeaderLabels: [...(popover?.querySelectorAll('.js-debug-cost-usage-header .js-debug-cost-usage-head-cell') || [])].map(node => node.textContent.trim()),
+            usageHeaderRects: [...(popover?.querySelectorAll('.js-debug-cost-usage-header > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
             usageRows: popover?.querySelectorAll('.js-debug-cost-usage-row').length || 0,
             usageSegments: popover?.querySelectorAll('.js-debug-cost-usage-segment').length || 0,
-            usageValues: [...(popover?.querySelectorAll('.js-debug-cost-usage-values li') || [])].map(node => node.textContent.trim()),
+            usageLegendCount: popover?.querySelectorAll('.js-debug-cost-usage-legend').length || 0,
+            usageValueListCount: popover?.querySelectorAll('.js-debug-cost-usage-values').length || 0,
+            usageRowAria: popover?.querySelector('.js-debug-cost-usage-row')?.getAttribute('aria-label') || '',
+            usageMetricTexts: [...(popover?.querySelectorAll('.js-debug-cost-usage-row:first-of-type .js-debug-cost-usage-metric') || [])].map(node => node.textContent.trim()),
+            usageMetricRects: [...(popover?.querySelectorAll('.js-debug-cost-usage-row:first-of-type > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
             outerOverflow: popover ? getComputedStyle(popover).overflowY : '',
             bodyOverflow: reportBody ? getComputedStyle(reportBody).overflowY : '',
             scrollTop: reportBody?.scrollTop || 0,
@@ -2371,6 +2493,10 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
           const compact = initial.card?.querySelector('.js-debug-cost-compact');
           const compactStyle = compact ? getComputedStyle(compact) : null;
           const detailsStyle = details ? getComputedStyle(details) : null;
+          const detailsHost = initial.card?.querySelector('.js-debug-cost-modal-host');
+          const detailsRect = details?.getBoundingClientRect();
+          const detailsHostStyle = detailsHost ? getComputedStyle(detailsHost) : null;
+          const compactLastRect = compact?.lastElementChild?.getBoundingClientRect();
           // A 21rem graph column represents the narrow Side Pane/card width. The
           // card must reflow rather than overflow its display box.
           const grid = initial.graph?.querySelector('[data-js-debug-chart-grid]');
@@ -2421,6 +2547,9 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
               moreInfoBorder: detailsStyle?.borderTopWidth || '',
               moreInfoPadding: detailsStyle?.paddingInlineStart || '',
               moreInfoBackground: detailsStyle?.backgroundColor || '',
+              moreInfoHostBorder: detailsHostStyle?.borderTopWidth || '',
+              moreInfoHostMarginTop: detailsHostStyle?.marginTop || '',
+              moreInfoBelowTotal: Boolean(detailsRect && compactLastRect && detailsRect.top > compactLastRect.bottom),
             },
                 narrow: {
                   columns: narrowCompact ? getComputedStyle(narrowCompact).gridTemplateColumns : '',
@@ -2450,6 +2579,8 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["compact"]["moreInfoTag"] == "BUTTON" and "control-active-hover" in metrics["compact"]["moreInfoClasses"], metrics
     assert metrics["compact"]["moreInfoBorder"] != "0px" and metrics["compact"]["moreInfoPadding"] != "0px", metrics
     assert metrics["compact"]["moreInfoBackground"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert metrics["compact"]["moreInfoBelowTotal"] is True, metrics
+    assert metrics["compact"]["moreInfoHostBorder"] != "0px" and metrics["compact"]["moreInfoHostMarginTop"] != "0px", metrics
     # The condensed card stays one simple vertical accounting list.
     narrow_cells = metrics["narrow"]["cells"]
     assert len(narrow_cells) == 4 and len({cell["left"] for cell in narrow_cells}) == 1, metrics
@@ -2464,12 +2595,25 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["popover"]["dialog"] == "dialog", metrics
     assert metrics["popover"]["modal"] == "true" and metrics["popover"]["overlay"] is True and metrics["popover"]["closeButton"] is True, metrics
     assert metrics["popover"]["insideClickKeptOpen"] is True and metrics["popover"]["backdropClosed"] is True and metrics["popover"]["xClosed"] is True, metrics
-    assert metrics["popover"]["costCalculation"] is True and metrics["popover"]["modelUsages"] is True and metrics["popover"]["sourceAttribution"] is True, metrics
+    assert metrics["popover"]["costCalculation"] is True and metrics["popover"]["modelUsages"] is True and metrics["popover"]["sourceAttribution"] is True and metrics["popover"]["pricingSources"] is True and metrics["popover"]["tmuxBreakdown"] is True, metrics
+    assert metrics["popover"]["tmuxBreakdownRows"] == 1 and "root:0" in metrics["popover"]["tmuxBreakdownText"] and "Total $0.0600" in metrics["popover"]["tmuxBreakdownText"], metrics
     assert metrics["popover"]["report"] is True and metrics["popover"]["hasTable"] is False, metrics
-    assert metrics["popover"]["headings"][0] == "Cost summary details" and "Model Usages" in metrics["popover"]["headings"], metrics
+    assert metrics["popover"]["headings"][0] == "Cost summary details" and "Model Usages" in metrics["popover"]["headings"] and metrics["popover"]["headings"][-1] == "Pricing sources", metrics
+    assert metrics["popover"]["pricingSourcesLast"] is True, metrics
+    assert sorted(metrics["popover"]["pricingSourceLinks"], key=lambda item: item["href"]) == sorted([
+        {"text": "https://platform.openai.com/pricing", "href": "https://platform.openai.com/pricing"},
+        {"text": "https://platform.claude.com/docs/en/about-claude/pricing", "href": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    ], key=lambda item: item["href"]), metrics
+    assert "javascript:alert" not in metrics["popover"]["pricingSourcesText"], metrics
     assert metrics["popover"]["usageTitle"] == "Model Usages" and metrics["popover"]["usageRows"] == 1, metrics
-    assert metrics["popover"]["usageSegments"] == 3 and len(metrics["popover"]["usageValues"]) == 4, metrics
-    assert all(label in " ".join(metrics["popover"]["usageValues"]) for label in ("Input", "Cached", "Output", "Other")), metrics
+    assert metrics["popover"]["usageHeaderLabels"] == ["Model", "", "Input", "Cached", "Output", "Other", "Total"], metrics
+    assert metrics["popover"]["usageLegendCount"] == 0 and metrics["popover"]["usageValueListCount"] == 0, metrics
+    assert metrics["popover"]["usageSegments"] == 3, metrics
+    assert metrics["popover"]["usageMetricTexts"] == ["60 tokens$0.0120", "60 tokens$0.0180", "60 tokens$0.0300", "0$0", "180 tokens$0.0600"], metrics
+    assert all(label in metrics["popover"]["usageRowAria"] for label in ("gpt-5.6-terra", "Input 60 tokens $0.0120", "Cached 60 tokens $0.0180", "Output 60 tokens $0.0300", "Other 0 $0", "Total 180 tokens $0.0600")), metrics
+    assert len(metrics["popover"]["usageHeaderRects"]) == len(metrics["popover"]["usageMetricRects"]) == 7, metrics
+    for header_rect, row_rect in zip(metrics["popover"]["usageHeaderRects"], metrics["popover"]["usageMetricRects"]):
+        assert abs(header_rect["left"] - row_rect["left"]) <= 1 and abs(header_rect["right"] - row_rect["right"]) <= 1, metrics
     assert metrics["popover"]["outerOverflow"] == "hidden" and metrics["popover"]["bodyOverflow"] == "auto", metrics
     assert metrics["popover"]["scrollHeight"] > metrics["popover"]["clientHeight"] and metrics["popover"]["scrollTop"] > 0, metrics
     assert metrics["popover"]["left"] >= 0 and metrics["popover"]["right"] <= metrics["viewport"]["width"], metrics
@@ -2802,9 +2946,12 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
         """
         const done = arguments[0];
         const originalFetch = window.fetch;
+        const originalDateNow = Date.now;
+        let fakeNow = 2_000_000;
+        Date.now = () => fakeNow;
         let requests = 0;
         const payload = {
-          ok: true, generated_at: Date.now() / 1000, state_dir: '/tmp/yolomux',
+          ok: true, generated_at: fakeNow / 1000, state_dir: '/tmp/yolomux',
           server: {version: '0.6.0', pid: 8881, uptime_seconds: 125, cpu_percent: 3.5, system_cpu_percent: 20, rss_bytes: 104857600},
           owner: {status: 'owner', owner: true, current_owner: {port: 8881, pid: 8881}, search_index: {mode: 'indexing-server'}, debug: {generation_count: 2}},
           refresh: {roles: {'stats-sampler': {status: 'owner', owner: true, refresh_requests: 7}}, local_refreshing: {session_files: 1}, coalescing: {recent_pending_count: 2}, counters: {coalesced_refresh_requests: 7}},
@@ -2814,9 +2961,9 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
           chat: {subscribers: 1, store: {message_rows: 4, typing_leases: 0}},
           local_services: {totals: {processes: 2, cpu_percent: 1.5, rss_bytes: 2048}, services: [
             {service: 'indexd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
-            {service: 'statsd', pid: 222, healthy: true, uptime_seconds: 55, resources: {cpu_percent: .5, rss_bytes: 1024}},
+            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}},
             {service: 'jobd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
-            {service: 'approvald', pid: 333, healthy: false, uptime_seconds: 12, resources: {cpu_percent: 1, rss_bytes: 1024}},
+            {service: 'approvald', pid: 333, healthy: false, started_at: fakeNow / 1000 - 12, uptime_seconds: 12, resources: {cpu_percent: 1, rss_bytes: 1024}},
           ]},
           top_endpoints: [{surface: 'GET /api/session-files', count: 5, compute_ms_max: 12, payload_bytes_total: 4096}],
           top_background_work: [{role: 'stats-sampler', surface: 'global-sample', count: 3, compute_ms_max: 8, payload_bytes_total: 1024}],
@@ -2844,17 +2991,52 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
           const cards = [...view.querySelectorAll('.js-debug-system-card')];
           const viewRect = view.getBoundingClientRect();
           const columns = getComputedStyle(grid).gridTemplateColumns.trim().split(/\\s+/).filter(Boolean).length;
+          const table = view.querySelector('.js-debug-system-local-services-table');
+          const pidCell = table.querySelector('[data-service="statsd"][data-field="pid"]');
+          const pidBeforeText = pidCell?.textContent.trim();
+          const startedCell = table.querySelector('[data-service="statsd"][data-field="started"]');
+          const lastRanCell = table.querySelector('[data-service="statsd"][data-field="lastRan"]');
+          const queueCell = table.querySelector('[data-service="statsd"][data-field="queues"]');
+          const startedBeforeText = startedCell?.textContent.trim();
+          const lastRanBeforeText = lastRanCell?.textContent.trim();
+          const queueTextBefore = queueCell?.textContent.trim();
+          const statusCell = table.querySelector('[data-service="approvald"][data-field="status"]');
+          const headers = [...table.querySelectorAll('thead th:not(:first-child)')].map(node => ({
+            name: node.querySelector('.js-debug-system-service-name')?.textContent.trim(),
+            state: node.querySelector('.js-debug-system-state')?.textContent.trim(),
+            bad: node.querySelector('.js-debug-system-state')?.classList.contains('js-debug-system-state--bad'),
+          }));
+          jsDebugSystemState.payload.local_services.services[1] = {...jsDebugSystemState.payload.local_services.services[1], pid: 0, resources: {cpu_percent: null, rss_bytes: null}};
+          refreshDebugSystemViews();
+          const nextPidCell = view.querySelector('.js-debug-system-local-services-table [data-service="statsd"][data-field="pid"]');
+          const approvalPidCell = view.querySelector('.js-debug-system-local-services-table [data-service="approvald"][data-field="pid"]');
+          const approvalFresh = approvalPidCell?.classList.contains('js-debug-system-service-cell--fresh');
+          fakeNow += 61_000;
+          refreshDebugSystemViews();
+          const approvalPidCellAfter = view.querySelector('.js-debug-system-local-services-table [data-service="approvald"][data-field="pid"]');
+          const nextLastRanCell = view.querySelector('.js-debug-system-local-services-table [data-service="statsd"][data-field="lastRan"]');
           done({
             requests, before, after, columns,
-            services: [...view.querySelectorAll('.js-debug-system-service')].map(node => ({
-              name: node.querySelector('strong')?.textContent.trim(),
-              state: node.querySelector('.js-debug-system-state')?.textContent.trim(),
-              bad: node.querySelector('.js-debug-system-state')?.classList.contains('js-debug-system-state--bad'),
-            })),
+            headers,
+            rows: [...table.querySelectorAll('tbody tr')].map(node => node.getAttribute('data-js-debug-service-row')),
+            fieldLabels: [...table.querySelectorAll('tbody th')].map(node => node.textContent.trim()),
+            pidBefore: pidBeforeText,
+            pidAfter: nextPidCell?.textContent.trim(),
+            pidPreserved: pidCell === nextPidCell,
+            pidPrev: nextPidCell?.classList.contains('js-debug-system-service-cell--prev'),
+            startedText: startedBeforeText,
+            lastRanText: lastRanBeforeText,
+            nextLastRanText: nextLastRanCell?.textContent.trim(),
+            queueText: queueTextBefore,
+            approvalFresh,
+            approvalStaleAfterClock: approvalPidCellAfter?.classList.contains('js-debug-system-service-cell--stale'),
+            approvalPidPreserved: approvalPidCell === approvalPidCellAfter,
+            approvalStatus: statusCell?.textContent.trim(),
             cardsInside: cards.every(card => card.getBoundingClientRect().right <= viewRect.right + 1),
             selected: document.querySelector('[data-js-debug-subtab="system"]').getAttribute('aria-selected'),
           });
         }).catch(error => done({error: String(error?.stack || error)})).finally(() => {
+          Date.now = originalDateNow;
           window.fetch = originalFetch;
           clearRuntimeInterval('debug-system');
         });
@@ -2863,12 +3045,26 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert "error" not in metrics, metrics
     assert metrics["requests"] == 1, metrics
     assert metrics["selected"] == "true", metrics
-    assert metrics["services"] == [
+    assert metrics["headers"] == [
         {"name": "indexd", "state": "Idle", "bad": False},
         {"name": "statsd", "state": "Running", "bad": False},
         {"name": "jobd", "state": "Idle", "bad": False},
         {"name": "approvald", "state": "Issue", "bad": True},
     ], metrics
+    assert metrics["rows"][-1] == "queues", metrics
+    assert metrics["fieldLabels"][:4] == ["Status", "PID", "Started", "Last ran"], metrics
+    assert metrics["pidBefore"] == "222", metrics
+    assert metrics["pidAfter"] == "prev: 222", metrics
+    assert metrics["pidPreserved"] is True, metrics
+    assert metrics["pidPrev"] is True, metrics
+    assert "minute" in metrics["startedText"], metrics
+    assert "minute" in metrics["lastRanText"], metrics
+    assert metrics["nextLastRanText"].startswith("exited "), metrics
+    assert "interactive 1" in metrics["queueText"] and "maintenance 0" in metrics["queueText"], metrics
+    assert metrics["approvalFresh"] is True, metrics
+    assert metrics["approvalStaleAfterClock"] is True, metrics
+    assert metrics["approvalPidPreserved"] is True, metrics
+    assert metrics["approvalStatus"] == "Issue", metrics
     assert metrics["columns"] == 1, metrics
     assert metrics["cardsInside"] is True, metrics
     assert metrics["before"] > 0 and metrics["after"] == metrics["before"], metrics
@@ -7402,8 +7598,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <div id="terminal" class="terminal"><div class="xterm"></div></div>
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
-            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button></div>
-            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button></div>
+            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
             <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
             <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
           </div>
@@ -7432,7 +7628,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const shell = document.getElementById('smart-key-shell');
         const moreRow = document.getElementById('smart-key-more-row');
         const side = document.getElementById('smart-key-side');
-        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        const sideButtons = [...side.querySelectorAll('.mobile-terminal-key')];
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
         const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display};
@@ -7450,7 +7647,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           shell: normal.shell,
           movedInsetEnd: bar.style.insetBlockEnd,
           initiallyHidden: hidden,
-              side: normal.side, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
           hasClose: Boolean(document.querySelector('.mobile-terminal-key-close, [data-terminal-mobile-close]')),
           hasDrag: Boolean(document.querySelector('.mobile-terminal-key-drag, [data-terminal-mobile-drag]')),
@@ -7467,8 +7664,9 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["hasClose"] is False and metrics["hasDrag"] is False, metrics
     assert metrics["key"]["height"] >= 36, metrics
     assert metrics["overflowX"] == "visible", metrics
-    assert metrics["primaryColumns"].startswith("repeat(3,"), metrics
-    assert metrics["primaryLabels"] == ["Esc", "Tab", "^B"], metrics
+    assert metrics["primaryColumns"].startswith("repeat(2,") or len(metrics["primaryColumns"].split()) == 2, metrics
+    assert metrics["primaryLabels"] == ["Tab", "^B"], metrics
+    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "Alt", "Cmd", "^C"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
     assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
     assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
@@ -7482,8 +7680,9 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
     assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
-    assert metrics["ctrl"]["top"] < metrics["interrupt"]["top"], metrics
-    assert metrics["ctrl"]["right"] <= metrics["dpad"]["left"] and metrics["interrupt"]["right"] <= metrics["dpad"]["left"], metrics
+    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(5)), metrics
+    assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["sideKeys"]), metrics
+    assert all(key["right"] <= metrics["dpad"]["left"] for key in metrics["sideKeys"]), metrics
     assert metrics["up"]["top"] < metrics["left"]["top"] and metrics["up"]["top"] < metrics["right"]["top"], metrics
     assert metrics["left"]["left"] < metrics["up"]["left"] < metrics["right"]["left"], metrics
     assert metrics["down"]["top"] > metrics["left"]["top"] and metrics["down"]["top"] > metrics["right"]["top"], metrics
@@ -7539,7 +7738,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
               node.dispatchEvent(new PointerEvent('pointerup', {...init, buttons: 0}));
               node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
             };
-            const dragLauncherTo = (x, y) => {
+            const dragLauncherTo = (x, y, emitClick = true) => {
               const rect = launcher.getBoundingClientRect();
               const startX = rect.left + rect.width / 2;
               const startY = rect.top + rect.height / 2;
@@ -7548,13 +7747,25 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
               launcher.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
               launcher.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
               launcher.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
-              launcher.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
+              if (emitClick) launcher.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
+            };
+            const dragPaletteTo = (x, y) => {
+              const rect = bar.getBoundingClientRect();
+              const startX = rect.left + Math.min(12, Math.max(4, rect.width / 4));
+              const startY = rect.top + Math.min(12, Math.max(4, rect.height / 4));
+              const pointerId = 73;
+              const base = {bubbles: true, cancelable: true, pointerId, pointerType: 'touch', button: 0, buttons: 1, isPrimary: true};
+              bar.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
+              bar.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
+              bar.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
             };
             const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             (async () => {
               const coarse = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
               launcher.setPointerCapture = () => {};
               launcher.releasePointerCapture = () => {};
+              bar.setPointerCapture = () => {};
+              bar.releasePointerCapture = () => {};
               const initial = {launcher: box(launcher), barHidden: bar.hidden, state: stateSnapshot()};
               tap(launcher);
               await settle();
@@ -7569,6 +7780,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
                 state: stateSnapshot(),
               };
               const paneRect = pane.getBoundingClientRect();
+              const initialPane = box(pane);
               dragLauncherTo(paneRect.left + 18, paneRect.top + 18);
               await settle();
               const dragged = {
@@ -7589,6 +7801,34 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
                 hidden: bar.hidden,
                 state: stateSnapshot(),
               };
+              dragLauncherTo(paneRect.left + paneRect.width - 18, paneRect.top + paneRect.height - 18, false);
+              await settle();
+              const draggedClosedNoClick = {
+                launcher: box(launcher),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                state: stateSnapshot(),
+              };
+              const staleState = terminalMobileAccessoryState('1');
+              staleState.x = pane.clientWidth + 200;
+              staleState.y = pane.clientHeight + 200;
+              syncTerminalMobileAccessoryState('1');
+              await settle();
+              const staleClamped = {
+                pane: box(pane),
+                launcher: box(launcher),
+                state: stateSnapshot(),
+              };
+              pane.style.setProperty('width', `${Math.max(220, Math.floor(staleClamped.pane.width / 2))}px`, 'important');
+              pane.style.setProperty('height', `${Math.max(180, Math.floor(staleClamped.pane.height / 2))}px`, 'important');
+              window.dispatchEvent(new Event('resize'));
+              await new Promise(resolve => setTimeout(resolve, 80));
+              await settle();
+              const resized = {
+                pane: box(pane),
+                launcher: box(launcher),
+                state: stateSnapshot(),
+              };
               tap(launcher);
               await settle();
               const reopened = {
@@ -7599,7 +7839,63 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
                 placement: bar.dataset.terminalMobilePlacement,
                 state: stateSnapshot(),
               };
-              done({coarse, pane: box(pane), initial, opened, dragged, closed, reopened, errors: window.__bootErrors || []});
+              const frames = [];
+              const item = terminals.get('1');
+              item.socket = {
+                readyState: WebSocket.OPEN,
+                send(frame) { frames.push(JSON.parse(frame)); },
+              };
+              dragPaletteTo(resized.pane.left + 24, resized.pane.bottom - 24);
+              await settle();
+              const paletteDragged = {
+                bar: box(bar),
+                launcher: box(launcher),
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              const edgeTargets = [
+                ['top-left', resized.pane.left + 8, resized.pane.top + 8],
+                ['top-right', resized.pane.right - 8, resized.pane.top + 8],
+                ['bottom-right', resized.pane.right - 8, resized.pane.bottom - 8],
+                ['bottom-left', resized.pane.left + 8, resized.pane.bottom - 8],
+              ];
+              const paletteEdgeDrags = [];
+              for (const [name, x, y] of edgeTargets) {
+                dragPaletteTo(x, y);
+                await settle();
+                paletteEdgeDrags.push({
+                  name,
+                  bar: box(bar),
+                  launcher: box(launcher),
+                  hidden: bar.hidden,
+                  placement: bar.dataset.terminalMobilePlacement,
+                  state: stateSnapshot(),
+                });
+              }
+              tap(launcher);
+              await settle();
+              const closedAfterPaletteDrag = {
+                launcher: box(launcher),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                state: stateSnapshot(),
+              };
+              tap(launcher);
+              await settle();
+              const reopenedAfterPaletteDrag = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              const beforeKeyTapState = stateSnapshot();
+              tap(bar.querySelector('[data-terminal-mobile-key="tab"]'));
+              await settle();
+              const afterKeyTapState = stateSnapshot();
+              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
             })().catch(error => done({error: String(error?.stack || error)}));
             """
         )
@@ -7622,10 +7918,126 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     assert metrics["closed"]["hidden"] is True and metrics["closed"]["text"] == "⌨" and metrics["closed"]["expanded"] == "false", metrics
     assert metrics["closed"]["state"]["x"] == metrics["dragged"]["state"]["x"], metrics
     assert metrics["closed"]["state"]["y"] == metrics["dragged"]["state"]["y"], metrics
+    assert metrics["draggedClosedNoClick"]["hidden"] is True and metrics["draggedClosedNoClick"]["text"] == "⌨", metrics
+    assert metrics["draggedClosedNoClick"]["state"]["x"] >= metrics["closed"]["state"]["x"], metrics
+    assert metrics["draggedClosedNoClick"]["state"]["y"] >= metrics["closed"]["state"]["y"], metrics
+    assert metrics["staleClamped"]["launcher"]["right"] <= metrics["staleClamped"]["pane"]["right"] + 0.5, metrics
+    assert metrics["staleClamped"]["launcher"]["bottom"] <= metrics["staleClamped"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["resized"]["pane"]["width"] < metrics["staleClamped"]["pane"]["width"], metrics
+    assert metrics["resized"]["pane"]["height"] < metrics["staleClamped"]["pane"]["height"], metrics
+    assert metrics["resized"]["launcher"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["resized"]["launcher"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["resized"]["launcher"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["resized"]["launcher"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
     assert metrics["reopened"]["hidden"] is False and metrics["reopened"]["text"] == "×", metrics
-    assert metrics["reopened"]["placement"] == "below", metrics
-    assert metrics["reopened"]["state"]["x"] == metrics["dragged"]["state"]["x"], metrics
-    assert metrics["reopened"]["state"]["y"] == metrics["dragged"]["state"]["y"], metrics
+    assert metrics["reopened"]["placement"] in ("above", "below", "left", "right"), metrics
+    assert metrics["reopened"]["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5 and metrics["reopened"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["reopened"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5 and metrics["reopened"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["reopened"]["state"]["x"] == metrics["resized"]["state"]["x"], metrics
+    assert metrics["reopened"]["state"]["y"] == metrics["resized"]["state"]["y"], metrics
+    assert metrics["paletteDragged"]["hidden"] is False and metrics["paletteDragged"]["placement"] in ("above", "below", "left", "right"), metrics
+    assert metrics["paletteDragged"]["state"]["x"] != metrics["reopened"]["state"]["x"] or metrics["paletteDragged"]["state"]["y"] != metrics["reopened"]["state"]["y"], metrics
+    assert "paletteX" not in metrics["paletteDragged"]["state"] and "paletteY" not in metrics["paletteDragged"]["state"], metrics
+    assert metrics["paletteDragged"]["launcher"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["paletteDragged"]["launcher"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["paletteDragged"]["launcher"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["paletteDragged"]["launcher"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    palette = metrics["paletteDragged"]["bar"]
+    launcher = metrics["paletteDragged"]["launcher"]
+    inline_gap = min(abs(palette["right"] - launcher["left"]), abs(launcher["right"] - palette["left"]))
+    block_gap = min(abs(palette["bottom"] - launcher["top"]), abs(launcher["bottom"] - palette["top"]))
+    assert inline_gap <= 16 or block_gap <= 16, metrics
+    for edge_drag in metrics["paletteEdgeDrags"]:
+        assert edge_drag["hidden"] is False and edge_drag["placement"] in ("above", "below", "left", "right"), metrics
+        assert edge_drag["launcher"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+        assert edge_drag["launcher"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+        assert edge_drag["launcher"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+        assert edge_drag["launcher"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+        assert edge_drag["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+        assert edge_drag["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+        assert edge_drag["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+        assert edge_drag["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+        palette = edge_drag["bar"]
+        launcher = edge_drag["launcher"]
+        inline_gap = min(abs(palette["right"] - launcher["left"]), abs(launcher["right"] - palette["left"]))
+        block_gap = min(abs(palette["bottom"] - launcher["top"]), abs(launcher["bottom"] - palette["top"]))
+        assert inline_gap <= 16 or block_gap <= 16, metrics
+    assert metrics["closedAfterPaletteDrag"]["hidden"] is True and metrics["closedAfterPaletteDrag"]["text"] == "⌨", metrics
+    assert metrics["closedAfterPaletteDrag"]["state"]["x"] == metrics["paletteEdgeDrags"][-1]["state"]["x"], metrics
+    assert metrics["closedAfterPaletteDrag"]["state"]["y"] == metrics["paletteEdgeDrags"][-1]["state"]["y"], metrics
+    assert metrics["reopenedAfterPaletteDrag"]["hidden"] is False and metrics["reopenedAfterPaletteDrag"]["text"] == "×", metrics
+    assert metrics["reopenedAfterPaletteDrag"]["state"]["x"] == metrics["closedAfterPaletteDrag"]["state"]["x"], metrics
+    assert metrics["reopenedAfterPaletteDrag"]["state"]["y"] == metrics["closedAfterPaletteDrag"]["state"]["y"], metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["beforeKeyTapState"]["x"] == metrics["afterKeyTapState"]["x"], metrics
+    assert metrics["beforeKeyTapState"]["y"] == metrics["afterKeyTapState"]["y"], metrics
+    assert {"type": "input", "data": "\t"} in metrics["keyFrames"], metrics
+
+
+def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+    )
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1&layout=slot1&tabs=slot1:1",
+            sessions=["1"],
+        )
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return typeof sendTerminalMobileAccessoryInput === 'function' && typeof handleTerminalData === 'function' && terminals.get('1')"
+            )
+        )
+        metrics = browser.execute_script(
+            """
+            window.__mobileModifierFrames = [];
+            const item = terminals.get('1');
+            item.socket = {
+              readyState: WebSocket.OPEN,
+              send(frame) { window.__mobileModifierFrames.push(JSON.parse(frame)); },
+            };
+            item.term = item.term || {modes: {}, focus() {}};
+            const firstTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
+            const secondTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
+            const lockedHtml = terminalMobileAccessoryHtml('1');
+            const lockedBefore = {...terminalMobileAccessoryState('1')};
+            const firstKey = handleTerminalData('1', 'a');
+            const secondKey = handleTerminalData('1', 'b');
+            const lockedAfterKeys = {...terminalMobileAccessoryState('1')};
+            const offTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
+            const offState = {...terminalMobileAccessoryState('1')};
+            return {firstTap, secondTap, firstKey, secondKey, offTap, lockedBefore, lockedAfterKeys, offState, lockedHtml, frames: window.__mobileModifierFrames, errors: window.__bootErrors || []};
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+    assert metrics["errors"] == [], metrics
+    assert metrics["firstTap"] is True and metrics["secondTap"] is True, metrics
+    assert metrics["lockedBefore"]["ctrl"] is True and metrics["lockedBefore"]["ctrlLocked"] is True, metrics
+    assert re.search(r'class="[^"]*\bactive\b[^"]*\blocked\b[^"]*\bmobile-terminal-key--ctrl\b[^"]*"[^>]*data-terminal-mobile-key="ctrl"', metrics["lockedHtml"]), metrics
+    assert metrics["firstKey"] is True and metrics["secondKey"] is True, metrics
+    assert metrics["frames"] == [{"type": "input", "data": "\x01"}, {"type": "input", "data": "\x02"}], metrics
+    assert metrics["lockedAfterKeys"]["ctrl"] is True and metrics["lockedAfterKeys"]["ctrlLocked"] is True, metrics
+    assert metrics["offTap"] is True, metrics
+    assert metrics["offState"]["ctrl"] is False and metrics["offState"]["ctrlLocked"] is False, metrics
 
 
 def test_phone_single_pane_uses_one_pixel_active_ring_without_changing_tablets(browser, tmp_path):
@@ -7917,8 +8329,16 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
     assert metrics["languageBeforeOwner"] is True
     assert metrics["ownerBeforeActivity"] is True
     assert metrics["ownerRect"]["right"] <= metrics["activityRect"]["left"] + 1
+    assert "IDX = Index: Search / Quick Open index owner; builds the file index." in metrics["title"]
+    assert "STATS = Stats: Stats sampler (statsd / YO!stats); samples usage and metrics history." in metrics["title"]
+    assert "SESS = Session files: Session-file owner; stores session-file state." in metrics["title"]
+    assert "Leader means this server owns the role; follower means another connected server owns it." in metrics["title"]
     assert "STATS leader: devhost:8002" in metrics["title"]
     assert "SESS leader: devhost:8002" in metrics["title"]
+    assert "IDX state: leader" in metrics["title"]
+    assert "STATS state: follower" in metrics["title"]
+    assert "SESS state: follower" in metrics["title"]
+    assert "Right-click this status to take over as leader." in metrics["title"]
 
 @pytest.mark.e2e
 def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):

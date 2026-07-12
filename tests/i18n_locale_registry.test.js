@@ -11,6 +11,7 @@ const shareSource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 
 const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
 const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const englishCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 
 class ChromeNode {
   constructor(classes = []) {
@@ -221,6 +222,7 @@ vm.runInContext(
 async function runI18nLocaleRegistrySuite() {
   await testAsync('locale registry normalizes locales and relocalizes global chrome', async () => {
   const api = context.api;
+  assert.equal(englishCatalog['app.latencyTitle'], 'Browser ↔ YOLOmux round-trip latency (ms)', 'latency hover explains browser round-trip units');
   assert.deepEqual([...api.i18nSupportedLocales()], ['en', 'he', 'pt-BR']);
   assert.deepEqual(
     [...api.i18nLocaleChoices()].map(choice => [choice.value, choice.label]),

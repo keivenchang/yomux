@@ -340,7 +340,7 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-1') !== null;
             """
         )
@@ -351,7 +351,9 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
             """
             const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
             const rows = new Map(Array.from(tree?.querySelectorAll('.file-tree-row') || []).map(row => [row.dataset.path, row]));
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/dynamo'
+            return fileExplorerSyncState.inFlightSignature === ''
+              && document.querySelector('.file-explorer-path-inline')?.value === '~'
+              && rows.get('/home/test/dynamo')?.getAttribute('aria-expanded') === 'true'
               && rows.get('/home/test/dynamo/repo-a')?.getAttribute('aria-expanded') === 'true'
               && rows.get('/home/test/dynamo/repo-b')?.getAttribute('aria-expanded') === 'true'
               && rows.has('/home/test/dynamo/repo-a/src')
@@ -362,14 +364,17 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     metrics = browser.execute_script(
         """
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-        const rows = Array.from(tree?.querySelectorAll('.file-tree-row') || []).map(row => ({
-          path: row.dataset.path,
-          kind: row.dataset.kind,
-          expanded: row.getAttribute('aria-expanded') === 'true',
-          classes: Array.from(row.classList),
-          background: getComputedStyle(row).backgroundColor,
-          nameWeight: Number(getComputedStyle(row.querySelector(':scope > .file-tree-name')).fontWeight),
-        }));
+	        const rows = Array.from(tree?.querySelectorAll('.file-tree-row') || []).map(row => ({
+	          path: row.dataset.path,
+	          kind: row.dataset.kind,
+	          expanded: row.getAttribute('aria-expanded') === 'true',
+	          classes: Array.from(row.classList),
+	          syncStar: row.querySelector(':scope > .file-tree-sync-target')?.textContent || '',
+	          syncStarHidden: row.querySelector(':scope > .file-tree-sync-target')?.hidden ?? true,
+	          syncStarTitle: row.querySelector(':scope > .file-tree-sync-target')?.getAttribute('title') || '',
+	          background: getComputedStyle(row).backgroundColor,
+	          nameWeight: Number(getComputedStyle(row.querySelector(':scope > .file-tree-name')).fontWeight),
+	        }));
         return {
           errors: window.__bootErrors,
           rejections: window.__bootRejections,
@@ -383,24 +388,29 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     )
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["root"] == "/home/test/dynamo", metrics
+    assert metrics["root"] == "~", metrics
+    assert metrics["plan"]["root"] == "/home/test", metrics
     row_paths = {row["path"] for row in metrics["rows"]}
     assert {"/home/test/dynamo/repo-a", "/home/test/dynamo/repo-a/src", "/home/test/dynamo/repo-b", "/home/test/dynamo/repo-b/lib"}.issubset(row_paths), metrics
     expanded_paths = {row["path"] for row in metrics["rows"] if row["expanded"]}
-    assert {"/home/test/dynamo/repo-a", "/home/test/dynamo/repo-b"}.issubset(expanded_paths), metrics
-    assert "/home/test/dynamo/repo-a/src" not in expanded_paths, metrics
-    assert "/home/test/dynamo/repo-b/lib" not in expanded_paths, metrics
+    assert {"/home/test/dynamo", "/home/test/dynamo/repo-a", "/home/test/dynamo/repo-a/src", "/home/test/dynamo/repo-b", "/home/test/dynamo/repo-b/lib"}.issubset(expanded_paths), metrics
     rows_by_path = {row["path"]: row for row in metrics["rows"]}
     for path in ["/home/test/dynamo/repo-a", "/home/test/dynamo/repo-b"]:
         assert "file-tree-row--sync-expanded" in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-repo" not in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-touched" not in rows_by_path[path]["classes"], metrics
+        assert "file-tree-row--sync-target" not in rows_by_path[path]["classes"], metrics
+        assert rows_by_path[path]["syncStarHidden"] is True, metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
         assert rows_by_path[path]["nameWeight"] >= 700, metrics
     for path in ["/home/test/dynamo/repo-a/src", "/home/test/dynamo/repo-b/lib"]:
         assert "file-tree-row--sync-expanded" not in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-repo" not in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-touched" not in rows_by_path[path]["classes"], metrics
+        assert "file-tree-row--sync-target" in rows_by_path[path]["classes"], metrics
+        assert rows_by_path[path]["syncStar"] == "★", metrics
+        assert rows_by_path[path]["syncStarHidden"] is False, metrics
+        assert "1" in rows_by_path[path]["syncStarTitle"], metrics
         assert "file-tree-row--changed-ancestor" in rows_by_path[path]["classes"], metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
         assert rows_by_path[path]["nameWeight"] >= 700, metrics
@@ -424,7 +434,7 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         });
         """
     )
-    assert manual_collapse["root"] == "/home/test/dynamo", manual_collapse
+    assert manual_collapse["root"] == "~", manual_collapse
     assert manual_collapse["expanded"] == "false", manual_collapse
     assert manual_collapse["childVisible"] is False, manual_collapse
     payload_change = browser.execute_async_script(
@@ -445,6 +455,8 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
               repoAChildVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]') !== null,
               repoCExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c"]')?.getAttribute('aria-expanded') || '',
               repoCChildVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c/docs"]') !== null,
+              repoCStar: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c/docs"] > .file-tree-sync-target')?.textContent || '',
+              repoCStarHidden: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c/docs"] > .file-tree-sync-target')?.hidden ?? true,
               manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
             });
           }));
@@ -452,13 +464,49 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         """,
         updated_session_files_payload,
     )
-    assert payload_change["root"] == "/home/test/dynamo", payload_change
-    assert payload_change["plan"]["expandPaths"] == ["/home/test/dynamo/repo-a", "/home/test/dynamo/repo-b", "/home/test/dynamo/repo-c"], payload_change
+    assert payload_change["root"] == "~", payload_change
+    assert payload_change["plan"]["root"] == "/home/test", payload_change
+    assert payload_change["plan"]["expandPaths"] == [
+        "/home/test/dynamo",
+        "/home/test/dynamo/repo-a",
+        "/home/test/dynamo/repo-b",
+        "/home/test/dynamo/repo-c",
+        "/home/test/dynamo/repo-a/src",
+        "/home/test/dynamo/repo-b/lib",
+        "/home/test/dynamo/repo-c/docs",
+    ], payload_change
     assert payload_change["repoAExpanded"] == "false", payload_change
     assert payload_change["repoAChildVisible"] is False, payload_change
     assert payload_change["repoCExpanded"] == "true", payload_change
     assert payload_change["repoCChildVisible"] is True, payload_change
+    assert payload_change["repoCStar"] == "★", payload_change
+    assert payload_change["repoCStarHidden"] is False, payload_change
     assert "/home/test/dynamo/repo-a" in payload_change["manualCollapsed"], payload_change
+    collapsed_starred = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const row = tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c/docs"]');
+        row.click();
+        syncFileExplorerRootToActiveTmux('1').then(() => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const current = tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c/docs"]');
+            done({
+              expanded: current?.getAttribute('aria-expanded') || '',
+              childVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c/docs/c.md"]') !== null,
+              syncStar: current?.querySelector(':scope > .file-tree-sync-target')?.textContent || '',
+              syncStarHidden: current?.querySelector(':scope > .file-tree-sync-target')?.hidden ?? true,
+              manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
+            });
+          }));
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert collapsed_starred["expanded"] == "false", collapsed_starred
+    assert collapsed_starred["childVisible"] is False, collapsed_starred
+    assert collapsed_starred["syncStar"] == "★", collapsed_starred
+    assert collapsed_starred["syncStarHidden"] is False, collapsed_starred
+    assert "/home/test/dynamo/repo-c/docs" in collapsed_starred["manualCollapsed"], collapsed_starred
     cleared = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -515,19 +563,13 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
     )
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test' && document.getElementById('panel-1') !== null;"
+            "return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value) && document.getElementById('panel-1') !== null;"
         )
     )
     click_visible_panel(browser, "panel-1")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            """
-            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            const rows = new Map(Array.from(tree?.querySelectorAll('.file-tree-row') || []).map(row => [row.dataset.path, row]));
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/dynamo'
-              && rows.get('/home/test/dynamo/repo-a')?.getAttribute('aria-expanded') === 'true'
-              && rows.get('/home/test/dynamo/repo-b')?.getAttribute('aria-expanded') === 'true';
-            """
+            "return fileExplorerSyncState.inFlightSignature === '';"
         )
     )
     result = browser.execute_async_script(
@@ -653,7 +695,7 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.querySelector('.file-editor-panel[data-file-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]');
             """
         )
@@ -663,7 +705,7 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
         lambda driver: driver.execute_script(
             """
             const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/dynamo/frontend-crates'
+            return document.querySelector('.file-explorer-path-inline')?.value === '~'
               && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]') !== null;
             """
         )
@@ -686,9 +728,9 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
     )
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["root"] == "/home/test/dynamo/frontend-crates", metrics
+    assert metrics["root"] == "~", metrics
     assert metrics["mode"] == "sync", metrics
-    assert metrics["plan"]["root"] == "/home/test/dynamo/frontend-crates", metrics
+    assert metrics["plan"]["root"] == "/home/test", metrics
     assert metrics["plan"]["session"] == "2", metrics
     assert metrics["plan"]["expandPaths"] == [path], metrics
     assert metrics["fileVisible"] is True, metrics
@@ -765,7 +807,7 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-1') !== null;
             """
         )
@@ -775,7 +817,7 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
         lambda driver: driver.execute_script(
             """
             const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return document.querySelector('.file-explorer-path-inline')?.value === '~'
               && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo"]')?.getAttribute('aria-expanded') === 'true'
               && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]')?.getAttribute('aria-expanded') === 'true'
               && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev"]')?.getAttribute('aria-expanded') === 'true';
@@ -805,8 +847,14 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
         }).catch(error => done({error: String(error)}));
         """
     )
-    assert collapsed_parent["root"] == "/home/test", collapsed_parent
-    assert set(collapsed_parent["plan"]["expandPaths"]) == {"/home/test/dynamo/repo-a", "/home/test/yolomux.dev"}, collapsed_parent
+    assert collapsed_parent["root"] == "~", collapsed_parent
+    assert set(collapsed_parent["plan"]["expandPaths"]) == {
+        "/home/test/dynamo",
+        "/home/test/dynamo/repo-a",
+        "/home/test/dynamo/repo-a/src",
+        "/home/test/yolomux.dev",
+        "/home/test/yolomux.dev/static",
+    }, collapsed_parent
     assert collapsed_parent["visibleSession"] == "1", collapsed_parent
     assert "/home/test/dynamo" in collapsed_parent["manualCollapsed"], collapsed_parent
     assert collapsed_parent["dynamoExpanded"] == "false", collapsed_parent
@@ -844,7 +892,7 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-5') !== null;
             """
         )
@@ -853,8 +901,8 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
-              && currentFileExplorerRoot() === '/home/test/yolomux.dev';
+            return document.querySelector('.file-explorer-path-inline')?.value === '~'
+              && currentFileExplorerRoot() === '/home/test';
             """
         )
     )
@@ -934,7 +982,7 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
         "mode": "fixed",
         "syncPressed": "false",
         "manual": True,
-        "currentRoot": "/home/test/yolomux.dev",
+        "currentRoot": "/home/test",
         "oldPathVisible": False,
         "searchingVisible": True,
         "treeText": "searching...",
@@ -983,7 +1031,7 @@ def test_sync_mode_stale_session_root_open_cannot_override_typed_manual_path(bro
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-5') !== null;
             """
         )
@@ -1123,7 +1171,7 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-5') !== null
               && document.getElementById('panel-8002') !== null;
             """
@@ -1170,14 +1218,20 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
               dev2Visible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') !== null,
               heldFetch: releaseDev2 !== null,
             };
-            if (pending.root === '/home/test/yolomux.dev2' && pending.searchingVisible && releaseDev2) {
+            if (pending.root === '~' && releaseDev2) {
               releaseDev2();
               let finalAttempts = 0;
               const waitForFinal = () => {
                 finalAttempts += 1;
                 const finalRoot = document.querySelector('.file-explorer-path-inline')?.value || '';
                 const finalTree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-                if (finalTree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]') || finalAttempts > 180) {
+                if (
+                  (
+                    finalTree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]')
+                    && fileExplorerSyncState.inFlightSignature === ''
+                  )
+                  || finalAttempts > 180
+                ) {
                   const plan = fileExplorerSyncPlan('8002');
                   const result = {
                     pending,
@@ -1228,29 +1282,29 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
     )
     assert "error" not in metrics, metrics
     assert metrics["pending"] == {
-        "root": "/home/test/yolomux.dev2",
+        "root": "~",
         "mode": "sync",
         "manual": False,
         "explicitSession": "8002",
         "targetSession": "8002",
         "currentPath": "/home/test/yolomux.dev2/src",
         "gitRoot": "/home/test/yolomux.dev2",
-        "planRoot": "/home/test/yolomux.dev2",
-        "searchingVisible": True,
+        "planRoot": "/home/test",
+        "searchingVisible": False,
         "dev2Visible": False,
         "heldFetch": True,
     }, metrics
     assert metrics["final"] == {
-        "root": "/home/test/yolomux.dev2",
+        "root": "~",
         "mode": "sync",
         "manual": False,
         "explicitSession": "8002",
         "targetSession": "8002",
         "currentPath": "/home/test/yolomux.dev2/src",
         "gitRoot": "/home/test/yolomux.dev2",
-        "planRoot": "/home/test/yolomux.dev2",
+        "planRoot": "/home/test",
         "syncInFlight": "",
-        "appliedKey": "8002\x1f/home/test/yolomux.dev2",
+        "appliedKey": "8002\x1f/home/test\x1f/home/test/yolomux.dev2\x1f/home/test/yolomux.dev2/src",
         "searchingVisible": False,
         "dev2Visible": True,
     }, metrics
@@ -1285,7 +1339,7 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-5') !== null;
             """
         )
@@ -1305,7 +1359,7 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
     click_visible_panel(browser, "panel-5")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
+            "return document.querySelector('.file-explorer-path-inline')?.value === '~'"
         )
     )
     manual_metrics = browser.execute_async_script(
@@ -1331,11 +1385,11 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
         """
     )
     assert "error" not in manual_metrics, manual_metrics
-    assert manual_metrics["root"] == "/home/test", manual_metrics
+    assert manual_metrics["root"] == "~", manual_metrics
     assert manual_metrics["manual"] is True, manual_metrics
     assert manual_metrics["mode"] == "fixed", manual_metrics
     assert manual_metrics["explicitSession"] == "5", manual_metrics
-    assert manual_metrics["planRoot"] == "/home/test/yolomux.dev", manual_metrics
+    assert manual_metrics["planRoot"] == "/home/test", manual_metrics
     assert manual_metrics["syncPressed"] == "false", manual_metrics
     browser.execute_script(
         """
@@ -1357,7 +1411,7 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
         """
     )
     assert unchanged_metrics == {
-        "root": "/home/test",
+        "root": "~",
         "mode": "fixed",
         "syncPressed": "false",
     }, unchanged_metrics
@@ -1367,7 +1421,7 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
+            return document.querySelector('.file-explorer-path-inline')?.value === '~'
               && fileExplorerRootModeValue() === 'sync'
               && fileExplorerManualSelectionActive === false
               && document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') === 'true';
@@ -1420,7 +1474,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-5') !== null
               && document.getElementById('panel-6') !== null;
             """
@@ -1430,7 +1484,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     click_visible_panel(browser, "panel-5")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
+            "return document.querySelector('.file-explorer-path-inline')?.value === '~'"
         )
     )
     click_visible_selector(browser, '.file-explorer-panel .file-tree-row[data-path="/home/test/yolomux.dev/other"]')
@@ -1472,12 +1526,12 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
         }));
         """
     )
-    assert hover_metrics["root"] == "/home/test/yolomux.dev", hover_metrics
+    assert hover_metrics["root"] == "~", hover_metrics
     assert hover_metrics["activeTmux"] == "/home/test/yolomux.dev/src", hover_metrics
     assert hover_metrics["planSession"] == "5", hover_metrics
-    assert hover_metrics["planRoot"] == "/home/test/yolomux.dev", hover_metrics
+    assert hover_metrics["planRoot"] == "/home/test", hover_metrics
     assert hover_metrics["otherVisible"] is True, hover_metrics
-    assert hover_metrics["otherRepoVisible"] is False, hover_metrics
+    assert hover_metrics["otherRepoVisible"] is True, hover_metrics
     assert hover_metrics["otherExpanded"] == "true", hover_metrics
     focus_report_metrics = browser.execute_async_script(
         """
@@ -1497,7 +1551,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert focus_report_metrics["target"] == "5", focus_report_metrics
     assert focus_report_metrics["activeTmux"] == "/home/test/yolomux.dev/src", focus_report_metrics
     assert focus_report_metrics["planSession"] == "5", focus_report_metrics
-    assert focus_report_metrics["planRoot"] == "/home/test/yolomux.dev", focus_report_metrics
+    assert focus_report_metrics["planRoot"] == "/home/test", focus_report_metrics
     assert focus_report_metrics["payloadSession"] == "5", focus_report_metrics
     passive_select_metrics = browser.execute_async_script(
         """
@@ -1519,11 +1573,11 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
         }).catch(error => done({error: String(error)}));
         """
     )
-    assert passive_select_metrics["root"] == "/home/test/yolomux.dev", passive_select_metrics
+    assert passive_select_metrics["root"] == "~", passive_select_metrics
     assert passive_select_metrics["target"] == "5", passive_select_metrics
     assert passive_select_metrics["payloadSession"] == "5", passive_select_metrics
     assert passive_select_metrics["activeTmux"] == "/home/test/yolomux.dev/src", passive_select_metrics
-    assert passive_select_metrics["planRoot"] == "/home/test/yolomux.dev", passive_select_metrics
+    assert passive_select_metrics["planRoot"] == "/home/test", passive_select_metrics
     assert passive_select_metrics["otherExpanded"] == "true", passive_select_metrics
     typed_metrics = browser.execute_async_script(
         """
@@ -1544,7 +1598,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert typed_metrics["planSession"] == "6", typed_metrics
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/other.dev'"
+            "return document.querySelector('.file-explorer-path-inline')?.value === '~'"
         )
     )
     browser.execute_script(
@@ -1557,7 +1611,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
         lambda driver: driver.execute_script(
             """
             const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
+            return document.querySelector('.file-explorer-path-inline')?.value === '~'
               && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') === 'true'
               && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]') !== null;
             """
@@ -1577,7 +1631,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
         };
         """
     )
-    assert restored_metrics["root"] == "/home/test/yolomux.dev", restored_metrics
+    assert restored_metrics["root"] == "~", restored_metrics
     assert restored_metrics["target"] == "5", restored_metrics
     assert restored_metrics["activeTmux"] == "/home/test/yolomux.dev/src", restored_metrics
     assert restored_metrics["planSession"] == "5", restored_metrics
@@ -1614,7 +1668,7 @@ def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_p
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.getElementById('panel-5') !== null
               && document.getElementById('panel-6') !== null;
             """
@@ -1670,7 +1724,8 @@ def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_p
                 return;
               }
             const root = document.querySelector('.file-explorer-path-inline')?.value || '';
-            if (root === '/home/test/yolomux.dev2') {
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            if (root === '~' && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev2/src"]')) {
               done({
                 root,
                 explicitSession: fileExplorerExplicitSyncSessionTarget(),
@@ -1689,10 +1744,10 @@ def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_p
     )
     assert "error" not in metrics, metrics
     assert metrics == {
-        "root": "/home/test/yolomux.dev2",
+        "root": "~",
         "explicitSession": "6",
         "manual": False,
-        "planRoot": "/home/test/yolomux.dev2",
+        "planRoot": "/home/test",
     }, metrics
 
 
@@ -1759,7 +1814,7 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
             const wait = () => {
               attempts += 1;
               const root = document.querySelector('.file-explorer-path-inline')?.value || '';
-              if (heldFetch && root === '/home/test/yolomux.dev2') {
+              if (heldFetch && root === '~') {
                 const result = {
                   changed,
                   heldFetch,
@@ -1802,11 +1857,11 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
     assert metrics == {
         "changed": True,
         "heldFetch": True,
-        "root": "/home/test/yolomux.dev2",
+        "root": "~",
         "explicitSession": "6",
         "payloadSession": "6",
         "loading": True,
-        "planRoot": "/home/test/yolomux.dev2",
+        "planRoot": "/home/test",
     }, metrics
 
 
@@ -1877,7 +1932,7 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
             const wait = () => {
               attempts += 1;
               const root = document.querySelector('.file-explorer-path-inline')?.value || '';
-              if (heldFetch && root === '/home/test/yolomux.dev2') {
+              if (heldFetch && root === '~') {
                 const result = {
                   changed,
                   heldFetch,
@@ -1920,11 +1975,11 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
     assert metrics == {
         "changed": True,
         "heldFetch": True,
-        "root": "/home/test/yolomux.dev2",
+        "root": "~",
         "explicitSession": "6",
         "payloadSession": "6",
         "loading": False,
-        "planRoot": "/home/test/yolomux.dev2",
+        "planRoot": "/home/test",
     }, metrics
 
 
@@ -1949,7 +2004,7 @@ def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser,
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && document.querySelector('.file-editor-panel[data-file-path="/home/test/repo-a/src/a.md"]')
               && document.querySelector('.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]');
             """
@@ -1979,7 +2034,7 @@ def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser,
         """
     )
     assert click_a_metrics == {
-        "root": "/home/test",
+        "root": "~",
         "mode": "fixed",
         "syncPressed": "false",
         "repoAExpanded": "true",
@@ -2000,7 +2055,7 @@ def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser,
         }));
         """
     )
-    assert hover_metrics["root"] == "/home/test", hover_metrics
+    assert hover_metrics["root"] == "~", hover_metrics
     assert hover_metrics["repoBExpanded"] == "false", hover_metrics
     assert hover_metrics["otherVisible"] is False, hover_metrics
     click_visible_selector(browser, '.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]')
@@ -2027,7 +2082,7 @@ def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser,
         """
     )
     assert click_b_metrics == {
-        "root": "/home/test",
+        "root": "~",
         "mode": "fixed",
         "syncPressed": "false",
         "repoBExpanded": "true",
@@ -2059,7 +2114,7 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+            return ['/home/test', '~'].includes(document.querySelector('.file-explorer-path-inline')?.value)
               && Array.from(document.querySelectorAll('.file-tree-row')).some(row => row.dataset.path === '/home/test/stale');
             """
         )
@@ -2082,6 +2137,6 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
     )
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["root"] == "/home/test", metrics
+    assert metrics["root"] == "~", metrics
     assert "/home/test/stale" in {row["path"] for row in metrics["rows"]}, metrics
     assert not any(row["hasRepo"] or row["hasTouched"] for row in metrics["rows"]), metrics

@@ -2938,14 +2938,33 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
+  const roleExplainers = [
+    {abbr: 'IDX', role: t('backgroundOwner.index'), description: t('backgroundOwner.desc.index'), summary: indexSummary},
+    {abbr: 'STATS', role: t('tab.debug.short'), description: t('backgroundOwner.desc.stats'), summary: statsSummary},
+    {abbr: 'SESS', role: t('backgroundOwner.sessionFiles'), description: t('backgroundOwner.desc.sessionFiles'), summary: sessionSummary},
+  ];
+  const roleDefinitionLines = roleExplainers.map(item => t('backgroundOwner.summaryRole', {
+    abbr: item.abbr,
+    role: item.role,
+    description: item.description,
+  }));
+  const roleStateLines = roleExplainers.map(item => {
+    const state = item.summary?.mode;
+    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
+    return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
+  });
   const lines = [
     t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
+    ...roleDefinitionLines,
+    t('backgroundOwner.desc.leaderFollower'),
     indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
     statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
     sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
+    ...roleStateLines,
     indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
     statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
     sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
+    t('backgroundOwner.desc.takeOver'),
     indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');

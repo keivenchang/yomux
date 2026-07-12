@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import platform
@@ -29,10 +30,66 @@ TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
 CODEX_LSOF_TIMEOUT_SECONDS = 1.0
 CODEX_LSOF_CACHE_SECONDS = 15.0
+CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER = "0-999"
 CLAUDE_SUBAGENTS_DIRNAME = "subagents"
+DARWIN_PROC_PIDVNODEPATHINFO = 9
+DARWIN_MAXPATHLEN = 1024
 # the shared TtlCache instead of a hand-rolled dict+lock+TTL. get_or_miss() preserves the
 # _CACHE_MISS-vs-cached-None distinction the callers rely on.
 _TRANSCRIPT_LOOKUP_CACHE = TtlCache(ttl_seconds=TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS)
+
+
+class DarwinVinfoStat(ctypes.Structure):
+    _fields_ = [
+        ("vst_dev", ctypes.c_uint32),
+        ("vst_mode", ctypes.c_uint16),
+        ("vst_nlink", ctypes.c_uint16),
+        ("vst_ino", ctypes.c_uint64),
+        ("vst_uid", ctypes.c_uint32),
+        ("vst_gid", ctypes.c_uint32),
+        ("vst_atime", ctypes.c_int64),
+        ("vst_atimensec", ctypes.c_int64),
+        ("vst_mtime", ctypes.c_int64),
+        ("vst_mtimensec", ctypes.c_int64),
+        ("vst_ctime", ctypes.c_int64),
+        ("vst_ctimensec", ctypes.c_int64),
+        ("vst_birthtime", ctypes.c_int64),
+        ("vst_birthtimensec", ctypes.c_int64),
+        ("vst_size", ctypes.c_int64),
+        ("vst_blocks", ctypes.c_int64),
+        ("vst_blksize", ctypes.c_int32),
+        ("vst_flags", ctypes.c_uint32),
+        ("vst_gen", ctypes.c_uint32),
+        ("vst_rdev", ctypes.c_uint32),
+        ("vst_qspare", ctypes.c_int64 * 2),
+    ]
+
+
+class DarwinFsid(ctypes.Structure):
+    _fields_ = [("val", ctypes.c_int32 * 2)]
+
+
+class DarwinVnodeInfo(ctypes.Structure):
+    _fields_ = [
+        ("vi_stat", DarwinVinfoStat),
+        ("vi_type", ctypes.c_int),
+        ("vi_pad", ctypes.c_int),
+        ("vi_fsid", DarwinFsid),
+    ]
+
+
+class DarwinVnodeInfoPath(ctypes.Structure):
+    _fields_ = [
+        ("vip_vi", DarwinVnodeInfo),
+        ("vip_path", ctypes.c_char * DARWIN_MAXPATHLEN),
+    ]
+
+
+class DarwinProcVnodePathInfo(ctypes.Structure):
+    _fields_ = [
+        ("pvi_cdir", DarwinVnodeInfoPath),
+        ("pvi_rdir", DarwinVnodeInfoPath),
+    ]
 
 
 def transcript_lookup_cache_key(kind: str, root: Path, needle: str) -> str:
@@ -607,18 +664,76 @@ def lsof_paths_for_process(pid: int, descriptor: str | None = None, runner: Any 
     return [line[1:] for line in result.stdout.splitlines() if line.startswith("n") and len(line) > 1]
 
 
+def lsof_paths_for_processes(pids: list[int], descriptor: str | None = None, runner: Any = None) -> dict[int, list[str]]:
+    unique_pids = sorted({int(pid) for pid in pids if int(pid) > 0})
+    if not unique_pids:
+        return {}
+    args = ["lsof", "-p", ",".join(str(pid) for pid in unique_pids)]
+    if descriptor:
+        args.extend(["-a", "-d", descriptor])
+    args.append("-Fn")
+    try:
+        result = (runner or run_cmd)(args, timeout=CODEX_LSOF_TIMEOUT_SECONDS)
+    except OSError:
+        return {pid: [] for pid in unique_pids}
+    paths_by_pid: dict[int, list[str]] = {pid: [] for pid in unique_pids}
+    if result.returncode != 0:
+        return paths_by_pid
+    current_pid: int | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("p"):
+            try:
+                current_pid = int(line[1:])
+            except ValueError:
+                current_pid = None
+            if current_pid is not None:
+                paths_by_pid.setdefault(current_pid, [])
+        elif line.startswith("n") and len(line) > 1 and current_pid is not None:
+            paths_by_pid.setdefault(current_pid, []).append(line[1:])
+    return paths_by_pid
+
+
+def codex_lsof_cache_key_pid(pid: int) -> str:
+    return str(pid)
+
+
 def codex_transcript_from_lsof(pid: int, root: Path, runner: Any = None) -> Path | None:
-    cached = cached_transcript_lookup("codex-lsof-pid", root, str(pid))
+    cache_pid = codex_lsof_cache_key_pid(pid)
+    cached = cached_transcript_lookup("codex-lsof-pid", root, cache_pid)
     if cached is not _CACHE_MISS:
         return cached
-    candidates = codex_rollout_paths(lsof_paths_for_process(pid, runner=runner), root)
+    candidates = codex_rollout_paths(
+        lsof_paths_for_process(pid, descriptor=CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER, runner=runner),
+        root,
+    )
     return set_cached_transcript_lookup(
         "codex-lsof-pid",
         root,
-        str(pid),
+        cache_pid,
         newest_codex_transcript(candidates),
         ttl=CODEX_LSOF_CACHE_SECONDS,
     )
+
+
+def prime_codex_transcript_lsof_cache(pids: list[int], root: Path | None = None, runner: Any = None) -> None:
+    root = root or Path.home() / ".codex" / "sessions"
+    missing = [
+        pid
+        for pid in sorted({int(pid) for pid in pids if int(pid) > 0})
+        if cached_transcript_lookup("codex-lsof-pid", root, codex_lsof_cache_key_pid(pid)) is _CACHE_MISS
+    ]
+    if not missing:
+        return
+    paths_by_pid = lsof_paths_for_processes(missing, descriptor=CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER, runner=runner)
+    for pid in missing:
+        candidates = codex_rollout_paths(paths_by_pid.get(pid, []), root)
+        set_cached_transcript_lookup(
+            "codex-lsof-pid",
+            root,
+            codex_lsof_cache_key_pid(pid),
+            newest_codex_transcript(candidates),
+            ttl=CODEX_LSOF_CACHE_SECONDS,
+        )
 
 
 def codex_transcript_from_process_fd(
@@ -663,16 +778,22 @@ def read_codex_agent(session: str, pane: TmuxPaneInfo, process: ProcessInfo) -> 
     )
 
 
-def select_codex_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+def selected_codex_process(processes: list[ProcessInfo]) -> ProcessInfo | None:
     candidates = [process for process in processes if classify_agent(process.command) == "codex"]
     if not candidates:
         return None
     # The Node launcher and native Codex binary are one interactive client. Prefer the native
     # process because it owns the rollout file; fall back to the wrapper for mocks/other clients.
-    process = next(
+    return next(
         (candidate for candidate in candidates if command_basename(candidate.command) == "codex"),
         candidates[0],
     )
+
+
+def select_codex_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+    process = selected_codex_process(processes)
+    if process is None:
+        return None
     return read_codex_agent(session, pane, process)
 
 
@@ -687,8 +808,27 @@ def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessI
     return select_codex_agent(session, pane, processes)
 
 
+def _darwin_process_cwd(pid: int) -> str | None:
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        libproc.proc_pidinfo.restype = ctypes.c_int
+        info = DarwinProcVnodePathInfo()
+        size = ctypes.sizeof(info)
+        result = libproc.proc_pidinfo(pid, DARWIN_PROC_PIDVNODEPATHINFO, 0, ctypes.byref(info), size)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if result < size:
+        return None
+    path = bytes(info.pvi_cdir.vip_path).split(b"\0", 1)[0].decode("utf-8", errors="surrogateescape").strip()
+    return path or None
+
+
 def process_cwd(pid: int, lsof_runner: Any = None) -> str | None:
     if platform.system() == "Darwin":
+        cwd = _darwin_process_cwd(pid)
+        if cwd:
+            return cwd
         paths = lsof_paths_for_process(pid, descriptor="cwd", runner=lsof_runner)
         return paths[0] if paths else None
     try:
@@ -751,6 +891,20 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
     for pane in panes:
         if pane.session in by_session:
             by_session[pane.session].append(pane)
+
+    if platform.system() == "Darwin":
+        codex_pids: list[int] = []
+        for raw_panes in by_session.values():
+            for raw_pane in raw_panes:
+                candidates = []
+                root_process = processes.get(raw_pane.pid)
+                if root_process:
+                    candidates.append(root_process)
+                candidates.extend(descendants(raw_pane.pid, children))
+                process = selected_codex_process(candidates)
+                if process is not None:
+                    codex_pids.append(process.pid)
+        prime_codex_transcript_lsof_cache(codex_pids)
 
     result: dict[str, SessionInfo] = {}
     for session in sessions:

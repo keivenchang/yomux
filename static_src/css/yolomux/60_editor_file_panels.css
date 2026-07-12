@@ -1618,6 +1618,23 @@ body :is(
 .file-tree-row.file-tree-row--changed-ancestor > .file-tree-name {
   font-weight: 800;
 }
+.file-tree-sync-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--accent-gold);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent-gold) 60%, transparent);
+}
+.file-tree-sync-target[hidden] {
+  display: none;
+}
+.file-tree-row.file-tree-row--sync-target > .file-tree-sync-target {
+  opacity: 1;
+}
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
 }

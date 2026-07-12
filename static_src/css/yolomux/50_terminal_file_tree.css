@@ -65,12 +65,13 @@
   align-content: start;
   gap: var(--space-4);
   width: min(18rem, calc(100vw - var(--space-12)));
-  max-height: calc(100% - var(--space-12));
-  padding: var(--space-5);
+  max-height: calc(100% - var(--space-4));
+  padding: var(--space-2);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   box-shadow: var(--shadow-elevated), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -82,9 +83,10 @@
   grid-column: 1;
   grid-row: 1 / span 2;
   display: grid;
-  grid-template-rows: repeat(2, 36px);
+  grid-template-rows: repeat(6, 36px);
+  align-self: start;
   align-content: start;
-  gap: var(--space-3);
+  gap: var(--space-1);
 }
 .mobile-terminal-key-side .mobile-terminal-key {
   width: 36px;
@@ -102,7 +104,7 @@
 }
 .mobile-terminal-keyrow--primary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   overflow: visible;
 }
 .mobile-terminal-keyrow-shell {
@@ -187,6 +189,9 @@
 .mobile-terminal-key--interrupt {
   color: var(--danger-text);
   border-color: var(--danger-border);
+}
+.mobile-terminal-key.locked {
+  box-shadow: inset 0 0 0 2px var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
 }
 .mobile-terminal-key:disabled {
   opacity: 0.48;

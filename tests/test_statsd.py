@@ -28,6 +28,12 @@ class _FakePricingCatalog:
             effective_from="2026-01-01T00:00:00Z",
         )
 
+    def estimate_rate_band(self, **_kwargs):
+        return SimpleNamespace(
+            minimum=SimpleNamespace(usd=Decimal("0.5"), scale=1_000_000, catalog_revision=7, source_url="https://prices.example/min"),
+            maximum=SimpleNamespace(usd=Decimal("5.0"), scale=1_000_000, catalog_revision=7, source_url="https://prices.example/max"),
+        )
+
 
 class _MutablePricingCatalog(_FakePricingCatalog):
     def __init__(self):
@@ -63,6 +69,25 @@ class _ContextPricingCatalog:
             catalog_revision=9,
             source_url="https://prices.example/batch",
             effective_from="2026-07-01T00:00:00Z",
+        )
+
+
+class _EstimatedPricingCatalog:
+    def resolve_rate(self, **kwargs):
+        if kwargs.get("model") == "known":
+            return SimpleNamespace(
+                usd=Decimal("2.0"),
+                scale=1_000_000,
+                catalog_revision=3,
+                source_url="https://prices.example/known",
+                effective_from="2026-01-01T00:00:00Z",
+            )
+        return None
+
+    def estimate_rate_band(self, **_kwargs):
+        return SimpleNamespace(
+            minimum=SimpleNamespace(usd=Decimal("1.0"), scale=1_000_000, catalog_revision=3, source_url="https://prices.example/min"),
+            maximum=SimpleNamespace(usd=Decimal("7.5"), scale=1_000_000, catalog_revision=3, source_url="https://prices.example/max"),
         )
 
 
@@ -220,6 +245,7 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
         "event_id": "event-1", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
         "model_evidence": "turn_context.payload.model", "effort": "high", "direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens",
         "quantity": 100, "root_thread_id": "root", "agent_thread_id": "child", "parent_thread_id": "root", "depth": 1, "telemetry_complete": True,
+        "tmux_key": "s|0|codex", "tmux_label": "s:0:codex", "tmux_session": "s", "tmux_window": "0", "tmux_window_label": "0:codex", "agent_kind": "codex",
     }
     result = service.merge_server_records([
         {"time": 1000, "usage_atoms": [atom]},
@@ -234,6 +260,8 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
     assert result["changed"] == 2
     assert summary["total_micro_usd"] == 250
     assert summary["known_micro_usd"] == 250
+    assert summary["lower_micro_usd"] == 250
+    assert summary["upper_micro_usd"] == 290
     assert summary["complete"] is False
     assert summary["unpriced_count"] == 1
     assert summary["catalog_revision"] == 7
@@ -254,10 +282,69 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
     assert summary["models"][0]["other_micro_usd"] == 0
     assert summary["sources"][0]["agent_thread_id"] == "child"
     assert summary["sources"][0]["input_micro_usd"] == 250
+    assert summary["sources"][0]["lower_micro_usd"] == 250
+    assert summary["sources"][0]["upper_micro_usd"] == 290
     assert summary["sources"][0]["token_quantity"] == 108
+    assert summary["tmux_windows"] == [{
+        "tmux_key": "s|0|codex",
+        "tmux_label": "s:0:codex",
+        "tmux_session": "s",
+        "tmux_window": "0",
+        "tmux_window_label": "0:codex",
+        "agent_kind": "codex",
+        "quantity": 108.0,
+        "micro_usd": 250,
+        "count": 2,
+        "unpriced_count": 1,
+        "lower_micro_usd": 250,
+        "upper_micro_usd": 290,
+        "input_micro_usd": 250,
+        "cache_micro_usd": 0,
+        "output_micro_usd": 0,
+        "other_micro_usd": 0,
+        "input_lower_micro_usd": 250,
+        "cache_lower_micro_usd": 0,
+        "output_lower_micro_usd": 0,
+        "other_lower_micro_usd": 0,
+        "input_upper_micro_usd": 290,
+        "cache_upper_micro_usd": 0,
+        "output_upper_micro_usd": 0,
+        "other_upper_micro_usd": 0,
+        "token_quantity": 108.0,
+        "input_tokens": 108.0,
+        "cache_tokens": 0.0,
+        "output_tokens": 0.0,
+        "other_tokens": 0.0,
+    }]
     assert compact == summary
     assert catalog.calls[0]["timestamp"] == "1970-01-01T00:16:40Z"
     service.store.close()
+
+
+def test_statsd_cost_summary_exposes_lower_upper_bounds_for_unpriced_usage():
+    catalog = _EstimatedPricingCatalog()
+    known = statsd.projected_usage_component({
+        "event_id": "known", "timestamp": 1, "provider": "openai", "model": "known", "direction": "input",
+        "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 100, "telemetry_complete": True,
+    }, catalog)
+    unknown = statsd.projected_usage_component({
+        "event_id": "unknown", "timestamp": 1, "provider": "openai", "model": "unknown-new-model", "direction": "output",
+        "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 100, "telemetry_complete": True,
+    }, catalog)
+    summary = statsd.cost_summary_response({"components": [known, unknown]})
+
+    assert known is not None and known["priced"] is True and known["estimated_lower_micro_usd"] == known["micro_usd"] == 200
+    assert unknown is not None and unknown["priced"] is False and unknown["micro_usd"] == 0
+    assert unknown["estimated_lower_micro_usd"] == 0
+    assert unknown["estimated_upper_micro_usd"] == 750
+    assert summary["lower_micro_usd"] == 200
+    assert summary["known_micro_usd"] == 200
+    assert summary["total_micro_usd"] == 200
+    assert summary["upper_micro_usd"] == 950
+    assert summary["lower_micro_usd"] <= summary["known_micro_usd"] <= summary["upper_micro_usd"]
+    assert summary["complete"] is False
+    assert summary["models"][0]["lower_micro_usd"] == 200
+    assert sum(row["upper_micro_usd"] for row in summary["models"]) == summary["upper_micro_usd"]
 
 
 def test_statsd_projects_observed_profile_and_service_tier_without_default_fallback():
@@ -308,6 +395,8 @@ def test_statsd_projects_billable_text_image_and_claude_cache_components_exactly
 
     assert all(component and component["priced"] for component in components)
     assert summary["total_micro_usd"] == 18_350_000
+    assert summary["lower_micro_usd"] == summary["upper_micro_usd"] == summary["total_micro_usd"]
+    assert summary["complete"] is True
     assert sum(row["micro_usd"] for row in summary["models"]) == summary["total_micro_usd"]
 
 
@@ -511,7 +600,7 @@ def test_statsd_live_transcript_baseline_does_not_replay_historical_atoms(tmp_pa
         {"timestamp": 1001, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
     ]) + "\n", encoding="utf-8")
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
-    rows = [{"key": "s|0|codex", "label": "s:0", "transcript": str(transcript), "kind": "codex"}]
+    rows = [{"key": "s|0|codex", "label": "s:0", "transcript": str(transcript), "kind": "codex", "session": "s", "window": "0", "window_label": "0"}]
 
     baseline = service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1002)
     history = service.handle({"action": "history"})
@@ -530,7 +619,7 @@ def test_statsd_live_claim_persists_delta_before_returning_compact_response(tmp_
         {"timestamp": 1001, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
     ]) + "\n", encoding="utf-8")
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
-    rows = [{"key": "s|0|codex", "label": "s:0", "transcript": str(transcript), "kind": "codex"}]
+    rows = [{"key": "s|0|codex", "label": "s:0", "transcript": str(transcript), "kind": "codex", "session": "s", "window": "0", "window_label": "0"}]
     service.claim_agent_token_deltas_from_rows(rows, {"s|0|codex"}, 1002)
     transcript.write_text(transcript.read_text(encoding="utf-8") + json.dumps(
         {"timestamp": 1061, "payload": {"info": {"total_token_usage": {"input_tokens": 12, "output_tokens": 25}}}}
@@ -544,6 +633,84 @@ def test_statsd_live_claim_persists_delta_before_returning_compact_response(tmp_
     assert len(json.dumps(claimed)) < 256 * 1024
     assert sum(record["tokens_per_agent_total"] for record in history["records"]) == pytest.approx(20)
     assert sum(sum(rate["model_rates"]["gpt-5.6"]["tokens"] for rate in record["agent_token_rates"]) for record in history["records"]) == pytest.approx(20)
+    cost_source = next(record["cost_summary"]["sources"][0] for record in history["records"] if record.get("cost_summary", {}).get("sources"))
+    assert cost_source["tmux_key"] == "s|0|codex"
+    assert cost_source["tmux_label"] == "s:0"
+    assert cost_source["tmux_session"] == "s"
+    assert cost_source["tmux_window"] == "0"
+    assert cost_source["agent_kind"] == "codex"
+    cost_window = next(record["cost_summary"]["tmux_windows"][0] for record in history["records"] if record.get("cost_summary", {}).get("tmux_windows"))
+    assert cost_window["tmux_key"] == "s|0|codex"
+    assert cost_window["tmux_session"] == "s"
+    assert cost_window["tmux_window"] == "0"
+    assert cost_window["token_quantity"] > 0
+    service.store.close()
+
+
+def test_statsd_cost_components_are_idempotent_for_subagent_family_event_ids(monkeypatch, tmp_path):
+    claude = tmp_path / "session.jsonl"
+    claude_child = tmp_path / "session" / "subagents" / "agent.jsonl"
+    claude_child.parent.mkdir(parents=True)
+    codex = tmp_path / "rollout-parent.jsonl"
+    codex_child = tmp_path / "rollout-child.jsonl"
+
+    def claude_line(output_tokens):
+        return json.dumps({
+            "timestamp": 100,
+            "type": "assistant",
+            "message": {"id": "provider-message-1", "model": "claude-opus-4-8", "usage": {"output_tokens": output_tokens}, "content": []},
+        }) + "\n"
+
+    def codex_lines(thread_id, parent_thread_id, output_tokens):
+        meta = {"id": thread_id}
+        if parent_thread_id:
+            meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+        return "\n".join(json.dumps(row) for row in [
+            {"type": "session_meta", "payload": meta},
+            {"timestamp": 100, "type": "turn_context", "payload": {"model": "gpt-5.6"}},
+            {"timestamp": 101, "payload": {"info": {"total_token_usage": {"output_tokens": output_tokens}}}},
+        ]) + "\n"
+
+    claude.write_text(claude_line(11), encoding="utf-8")
+    claude_child.write_text(claude_line(13), encoding="utf-8")
+    codex.write_text(codex_lines("root", "", 17), encoding="utf-8")
+    codex_child.write_text(codex_lines("child", "root", 19), encoding="utf-8")
+    monkeypatch.setattr(statsd.session_files, "codex_transcript_family_paths", lambda _path: [codex, codex_child])
+    atoms = statsd.session_files.transcript_usage_atoms(claude, "claude") + statsd.session_files.transcript_usage_atoms(codex, "codex")
+    records = [{"time": atom.timestamp, "usage_atoms": [statsd.normalized_usage_atom(atom)]} for atom in atoms]
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+
+    first = service.merge_server_records(records, now=200)
+    before = [component for bucket in service.store.query_buckets() for component in bucket["cost_summary"]["components"]]
+    second = service.merge_server_records(records, now=200)
+    after = [component for bucket in service.store.query_buckets() for component in bucket["cost_summary"]["components"]]
+
+    assert first["changed"] > 0
+    assert second["changed"] == 0
+    assert len(before) == len(atoms)
+    assert len({(item["provider"], item["model"], item["source"], item["agent_thread_id"]) for item in before}) == len(atoms)
+    assert sum(item["micro_usd"] for item in after) == sum(item["micro_usd"] for item in before)
+    assert after == before
+    service.store.close()
+
+
+def test_statsd_cost_summary_truncation_marks_incomplete_lower_bound(monkeypatch, tmp_path):
+    monkeypatch.setattr(statsd, "STATS_COST_SUMMARY_MAX_COMPONENTS", 1)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    atoms = [
+        {"event_id": "kept", "timestamp": 1000, "provider": "openai", "model": "gpt-5.6", "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 10, "telemetry_complete": True},
+        {"event_id": "evicted", "timestamp": 1000, "provider": "openai", "model": "gpt-5.6", "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 99, "telemetry_complete": True},
+    ]
+
+    service.merge_server_records([{"time": 1000, "usage_atoms": atoms}], now=1000)
+    raw_summary = service.store.bucket(1000, 1)["cost_summary"]
+    public_summary = service.handle({"action": "history"})["records"][0]["cost_summary"]
+
+    assert raw_summary["truncated"] is True
+    assert raw_summary["lower_bound"] is True
+    assert len(raw_summary["components"]) == 1
+    assert public_summary["complete"] is False
+    assert public_summary["known_micro_usd"] == public_summary["lower_micro_usd"] == public_summary["upper_micro_usd"]
     service.store.close()
 
 
@@ -784,6 +951,37 @@ def test_stats_client_registry_spawns_statsd_with_its_requested_database(tmp_pat
     assert client.history(client_id="browser-a")["records"]
     assert database_path.exists() is True
     assert client.request({"action": "shutdown"}) == {"ok": True}
+
+
+def test_statsd_encoded_sample_can_omit_history_payload(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.store.upsert_bucket(_bucket(sequence=1))
+
+    encoded = service.encoded_sample(
+        {"time": 123.0, "pid": 456, "cpu_percent": 1.25},
+        {"enabled": True},
+        {"include_history": False, "since": 0, "client_id": "browser-a", "start": 0, "end": 0, "resolution_seconds": 0, "max_points": 0},
+    )
+    payload = json.loads(encoded.decode("utf-8"))
+
+    assert payload["ok"] is True
+    assert payload["pid"] == 456
+    assert payload["shared_stats"] == {"enabled": True}
+    assert "history" not in payload
+    service.store.close()
+
+
+def test_statsd_sampler_failure_delay_backs_off(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+
+    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_INTERVAL_SECONDS
+    service.sampler_failure_count = 1
+    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS
+    service.sampler_failure_count = 2
+    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS * 2
+    service.sampler_failure_count = 99
+    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS
+    service.store.close()
 
 
 def test_stats_store_does_not_leave_a_partial_sqlite_transaction(tmp_path):

@@ -163,25 +163,6 @@
   text-align: end;
   font-family: var(--mono-font);
 }
-.js-debug-system-services {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
-  gap: var(--space-8);
-}
-.js-debug-system-service {
-  min-width: 0;
-  padding: var(--space-8);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.js-debug-system-service header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-8);
-  margin-block-end: var(--space-7);
-}
 .js-debug-system-state {
   flex: 0 0 auto;
   padding: var(--space-2) var(--space-6);
@@ -195,6 +176,37 @@
 }
 .js-debug-system-state--bad {
   color: var(--bad);
+}
+.js-debug-system-local-services-wrap {
+  max-width: 100%;
+}
+.js-debug-system-local-services-table th:not(:first-child) {
+  min-width: 8rem;
+  vertical-align: top;
+}
+.js-debug-system-local-services-table thead th:not(:first-child) {
+  text-align: center;
+}
+.js-debug-system-service-name {
+  display: block;
+  margin-block-end: var(--space-3);
+  color: var(--text);
+  font-family: var(--ui-font);
+}
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] th,
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
+  border-block-end: 0;
+  vertical-align: top;
+}
+.js-debug-system-service-cell--fresh {
+  color: var(--text);
+}
+.js-debug-system-service-cell--stale,
+.js-debug-system-service-cell--prev {
+  color: var(--muted);
+}
+.js-debug-system-service-cell--prev {
+  font-style: italic;
 }
 .js-debug-system-table-wrap {
   max-width: 100%;
@@ -493,8 +505,8 @@
 .js-debug-history-overlay {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: block;
+  min-height: 100%;
   padding: var(--space-12);
   color: var(--text);
   background: color-mix(in srgb, var(--panel) 76%, transparent);
@@ -504,7 +516,13 @@
   display: none;
 }
 .js-debug-history-overlay-message {
-  display: inline-flex;
+  position: sticky;
+  top: 50%;
+  display: flex;
+  width: max-content;
+  max-width: min(100%, 42rem);
+  margin-inline: auto;
+  transform: translateY(-50%);
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
@@ -652,20 +670,6 @@
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.25 var(--ui-font);
 }
-.js-debug-cost-usage-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3) var(--space-6);
-  margin-bottom: var(--space-5);
-  color: var(--muted);
-  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
-}
-.js-debug-cost-usage-legend span,
-.js-debug-cost-usage-values li {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-}
 .js-debug-cost-usage-swatch {
   flex: none;
   width: var(--space-4);
@@ -690,32 +694,45 @@
   background: var(--js-debug-agent-token-beige);
 }
 .js-debug-cost-usage-chart {
+  --js-debug-cost-usage-grid-template: minmax(9rem, 1.45fr) minmax(4.5rem, 0.85fr) repeat(5, minmax(4.6rem, 0.7fr));
   display: grid;
-  gap: var(--space-7);
+  gap: var(--space-3);
+  overflow-x: auto;
+  padding-bottom: var(--space-1);
 }
+.js-debug-cost-usage-header,
 .js-debug-cost-usage-row {
+  display: grid;
+  grid-template-columns: var(--js-debug-cost-usage-grid-template);
+  gap: var(--space-3);
+  align-items: center;
   min-width: 0;
 }
-.js-debug-cost-usage-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-5);
+.js-debug-cost-usage-header {
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--line);
   color: var(--muted);
-  font: 600 var(--ui-font-size-2xs)/1.35 var(--mono-font);
+  font: 700 var(--ui-font-size-2xs)/1.2 var(--ui-font);
 }
-.js-debug-cost-usage-heading > span {
+.js-debug-cost-usage-head-cell {
+  display: inline-flex;
   min-width: 0;
-  overflow-wrap: anywhere;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
 }
-.js-debug-cost-usage-heading > span:last-child {
-  flex: none;
-  color: var(--text);
-  text-align: end;
+.js-debug-cost-usage-head-cell--input,
+.js-debug-cost-usage-head-cell--cache,
+.js-debug-cost-usage-head-cell--output,
+.js-debug-cost-usage-head-cell--other,
+.js-debug-cost-usage-head-cell--total {
+  justify-content: flex-end;
+}
+.js-debug-cost-usage-head-cell--bar {
+  min-height: var(--space-4);
 }
 .js-debug-cost-usage-track {
   height: var(--space-6);
-  margin-top: var(--space-3);
   overflow: hidden;
   background: var(--line);
   border-radius: var(--radius-sm);
@@ -732,29 +749,34 @@
   min-width: 1px;
   height: 100%;
 }
-.js-debug-cost-usage-values {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
-  margin: var(--space-3) 0 0;
-  padding: 0;
-  list-style: none;
-}
-.js-debug-cost-usage-values li {
+.js-debug-cost-usage-model {
   min-width: 0;
-  flex-wrap: wrap;
+  overflow-wrap: anywhere;
   color: var(--muted);
-  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+  font: 600 var(--ui-font-size-2xs)/1.35 var(--mono-font);
 }
-.js-debug-cost-usage-values strong,
-.js-debug-cost-usage-values small {
+.js-debug-cost-usage-model strong,
+.js-debug-cost-usage-metric strong,
+.js-debug-cost-usage-metric small {
   font-family: var(--mono-font);
 }
-.js-debug-cost-usage-values strong {
+.js-debug-cost-usage-model strong,
+.js-debug-cost-usage-metric strong {
   color: var(--text);
 }
-.js-debug-cost-usage-values small {
+.js-debug-cost-usage-metric {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+  text-align: end;
+  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+}
+.js-debug-cost-usage-metric small {
   color: var(--muted);
+}
+.js-debug-cost-usage-metric--total {
+  padding-inline-start: var(--space-2);
+  border-inline-start: 1px solid var(--line);
 }
 .js-debug-cost-model-list > li {
   overflow-wrap: anywhere;
@@ -786,6 +808,14 @@
   margin-inline-start: var(--space-4);
   color: var(--muted);
   font: 600 var(--ui-font-size-2xs)/1.15 var(--mono-font);
+}
+.js-debug-cost-summary > .js-debug-cost-modal-host {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
 }
 .js-debug-cost-token-summary {
   color: var(--text);
@@ -964,8 +994,12 @@
   .js-debug-cost-summary .js-debug-chart-title {
     flex-basis: 100%;
   }
-  .js-debug-cost-usage-values {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .js-debug-cost-usage-chart {
+    --js-debug-cost-usage-grid-template: minmax(7.5rem, 1.3fr) repeat(5, minmax(3.9rem, 0.7fr));
+  }
+  .js-debug-cost-usage-head-cell--bar,
+  .js-debug-cost-usage-track {
+    display: none;
   }
   .js-debug-cost-catalog {
     grid-template-columns: repeat(2, minmax(0, 1fr));

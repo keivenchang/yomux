@@ -122,7 +122,8 @@ class LocalServiceRegistry:
         if not response.get("ok") or not service_pid or service_version == self.spec.protocol_version:
             return
         record = self._read_record()
-        if int(record.get("pid") or 0) != service_pid:
+        record_pid = int(record.get("pid") or 0)
+        if record_pid and record_pid != service_pid:
             return
         self._request("shutdown", timeout=0.25)
         deadline = self.clock() + 0.5

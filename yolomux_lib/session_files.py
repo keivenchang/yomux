@@ -1293,7 +1293,7 @@ def claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent
         atoms.extend(usage_component_atoms(
             source=source,
             timestamp=timestamp,
-            event_id=f"claude:{message_id}",
+            event_id=f"claude:{agent_thread_id or source}:{message_id}",
             provider="anthropic",
             model=model,
             model_evidence="assistant.message.model" if model else "unknown",

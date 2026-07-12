@@ -532,6 +532,75 @@ def test_normalized_usage_atoms_keep_codex_subagents_structurally_separate(tmp_p
         ("gpt-parent", "parent", "parent", "", 0, 5.0),
         ("gpt-child", "parent", "child", "parent", 1, 7.0),
     }
+    # Provider transcript usage is self-only for each rollout. If a provider
+    # starts reporting parent counters cumulatively including child work, this
+    # invariant must be revisited before cost atoms can remain exact.
+    assert sum(atom.quantity for atom in output_atoms) == 12.0
+
+
+def test_usage_atom_family_event_ids_are_stable_and_distinct_across_subagents(tmp_path, monkeypatch):
+    claude = tmp_path / "session.jsonl"
+    claude_child = tmp_path / "session" / "subagents" / "agent.jsonl"
+    claude_child.parent.mkdir(parents=True)
+    codex = tmp_path / "rollout-parent.jsonl"
+    codex_child = tmp_path / "rollout-child.jsonl"
+
+    def claude_line(output_tokens):
+        return json.dumps({
+            "timestamp": 100,
+            "type": "assistant",
+            "message": {"id": "provider-message-1", "model": "claude-opus-4-8", "usage": {"output_tokens": output_tokens}, "content": []},
+        }) + "\n"
+
+    def codex_lines(thread_id, parent_thread_id, output_tokens):
+        meta = {"id": thread_id}
+        if parent_thread_id:
+            meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+        return "\n".join(json.dumps(row) for row in [
+            {"type": "session_meta", "payload": meta},
+            {"timestamp": 100, "type": "turn_context", "payload": {"model": "gpt-5.6"}},
+            {"timestamp": 101, "payload": {"info": {"total_token_usage": {"output_tokens": output_tokens}}}},
+        ]) + "\n"
+
+    claude.write_text(claude_line(11), encoding="utf-8")
+    claude_child.write_text(claude_line(13), encoding="utf-8")
+    codex.write_text(codex_lines("root", "", 17), encoding="utf-8")
+    codex_child.write_text(codex_lines("child", "root", 19), encoding="utf-8")
+    monkeypatch.setattr(session_files, "codex_transcript_family_paths", lambda _path: [codex, codex_child])
+
+    first = session_files.transcript_usage_atoms(claude, "claude") + session_files.transcript_usage_atoms(codex, "codex")
+    second = session_files.transcript_usage_atoms(claude, "claude") + session_files.transcript_usage_atoms(codex, "codex")
+
+    assert [(atom.event_id, atom.direction, atom.cache_role, atom.quantity) for atom in first] == [
+        (atom.event_id, atom.direction, atom.cache_role, atom.quantity) for atom in second
+    ]
+    identities = [(atom.event_id, atom.direction, atom.modality, atom.cache_role, atom.unit) for atom in first]
+    assert len(identities) == len(set(identities))
+    assert sum(atom.quantity for atom in first if atom.direction == "output") == 60.0
+
+
+def test_codex_child_outside_recent_candidate_window_is_documented_under_count(tmp_path):
+    parent = tmp_path / "rollout-parent.jsonl"
+    child = tmp_path / "rollout-child.jsonl"
+
+    def rollout(thread_id, parent_thread_id, output_tokens):
+        meta = {"id": thread_id}
+        if parent_thread_id:
+            meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+        return "\n".join(json.dumps(row) for row in [
+            {"type": "session_meta", "payload": meta},
+            {"timestamp": 1, "type": "turn_context", "payload": {"model": "gpt-5.6"}},
+            {"timestamp": 2, "payload": {"info": {"total_token_usage": {"output_tokens": output_tokens}}}},
+        ]) + "\n"
+
+    parent.write_text(rollout("parent", "", 5), encoding="utf-8")
+    child.write_text(rollout("child", "parent", 7), encoding="utf-8")
+
+    family = session_files.codex_transcript_family_paths(parent, candidates=[parent])
+    atoms = session_files.transcript_usage_atoms(parent, "codex", family_paths=family)
+
+    assert family == [parent.resolve()]
+    assert sum(atom.quantity for atom in atoms if atom.direction == "output") == 5.0
 
 
 def test_normalized_usage_atoms_keep_parent_child_grandchild_model_efforts_separate(tmp_path, monkeypatch):

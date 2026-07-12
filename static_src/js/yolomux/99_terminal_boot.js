@@ -20,7 +20,9 @@ function paneFrameControlsHtml(session, options = {}) {
   }));
   const includeActions = controlOptions.actions ?? isTmuxSession(session);
   const includeDetails = controlOptions.details === true;
-  const includeMinimize = controlOptions.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
+  const includeMinimize = controlOptions.minimize !== false
+    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session))
+    && !minimizeBlockedByPinned(session, options.slot || slotForItem(session));
   const includeExpand = controlOptions.expand !== false;
   const includePopout = controlOptions.popout === true;
   if (includeActions) {
@@ -144,6 +146,8 @@ const tmuxStatusModes = new Map();
 const terminalMobileAccessoryStates = new Map();
 const terminalMobileAccessoryKeyPresses = new Map();
 const terminalMobileAccessorySuppressedClicks = new Map();
+const terminalMobileAccessoryPaneObservers = new Map();
+const terminalMobileAccessoryModifierTapTimes = new Map();
 let terminalMobileAccessoryDismissalInstalled = false;
 let terminalMobileAccessoryResizeInstalled = false;
 // Clipboard reads must start while a touch still has browser user activation.  The shared
@@ -190,6 +194,8 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
   {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
   {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'shift', label: 'Shift', ariaLabel: 'Shift', modifier: 'shift'},
+  {action: 'cmd', label: 'Cmd', ariaLabel: 'Command / Meta', modifier: 'cmd'},
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
@@ -218,8 +224,10 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'tab', 'tmux-prefix', 'more']);
-const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'interrupt']);
+const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
+const terminalMobileAccessoryModifierDoubleTapMs = 450;
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'more']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'alt', 'cmd', 'interrupt']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -229,7 +237,23 @@ function terminalMobileAccessoryState(session, options = {}) {
   if (!key) return null;
   let state = terminalMobileAccessoryStates.get(key) || null;
   if (!state && options.create === true) {
-    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, launcherPress: null, suppressLauncherClick: false};
+    state = {
+      ctrl: false,
+      alt: false,
+      shift: false,
+      cmd: false,
+      ctrlLocked: false,
+      altLocked: false,
+      shiftLocked: false,
+      cmdLocked: false,
+      more: false,
+      open: false,
+      x: null,
+      y: null,
+      palettePress: null,
+      launcherPress: null,
+      suppressLauncherClick: false,
+    };
     terminalMobileAccessoryStates.set(key, state);
   }
   return state;
@@ -255,13 +279,14 @@ function terminalMobileAccessoryData(session, action) {
 
 function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
   const active = definition.modifier ? state?.[definition.modifier] === true : false;
+  const locked = definition.modifier ? state?.[terminalMobileAccessoryModifierLockedKey(definition.modifier)] === true : false;
   // Copy reads local terminal selection only, so it stays available to read-only share viewers;
   // every other palette key can change the terminal and keeps the existing write gate.
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const label = definition.labelKey ? t(definition.labelKey) : definition.label;
   const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
-  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
+  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
 function terminalMobileAccessoryDefinition(action) {
@@ -292,8 +317,111 @@ function terminalMobileAccessoryClamp(value, min, max) {
   return Math.max(min, Math.min(Math.max(min, max), value));
 }
 
+function terminalMobileAccessoryClampStateToPane(state, launcher, pane) {
+  if (!state || !launcher || !pane || (!Number.isFinite(state.x) && !Number.isFinite(state.y))) return false;
+  const paneRect = pane.getBoundingClientRect?.();
+  const paneWidth = Math.max(0, Number(paneRect?.width) || pane.clientWidth || 0);
+  const paneHeight = Math.max(0, Number(paneRect?.height) || pane.clientHeight || 0);
+  const launcherRect = launcher.getBoundingClientRect?.();
+  const launcherWidth = Math.max(0, Number(launcherRect?.width) || launcher.offsetWidth || 0);
+  const launcherHeight = Math.max(0, Number(launcherRect?.height) || launcher.offsetHeight || 0);
+  // Hidden/transitioning Dockview panes can briefly report zero size. Preserve the last good
+  // offset instead of collapsing a deliberately moved launcher to 0,0 during that transient.
+  if (paneWidth <= 0 || paneHeight <= 0 || launcherWidth <= 0 || launcherHeight <= 0) return false;
+  let changed = false;
+  if (Number.isFinite(state.x)) {
+    const x = terminalMobileAccessoryClamp(state.x, 0, paneWidth - launcherWidth);
+    if (x !== state.x) {
+      state.x = x;
+      changed = true;
+    }
+  }
+  if (Number.isFinite(state.y)) {
+    const y = terminalMobileAccessoryClamp(state.y, 0, paneHeight - launcherHeight);
+    if (y !== state.y) {
+      state.y = y;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function terminalMobileAccessoryObservePane(session, pane) {
+  const key = String(session || '');
+  if (!key) return;
+  const existing = terminalMobileAccessoryPaneObservers.get(key);
+  if (existing?.pane === pane) return;
+  existing?.observer?.disconnect?.();
+  terminalMobileAccessoryPaneObservers.delete(key);
+  if (!pane || typeof ResizeObserver !== 'function') return;
+  const observer = new ResizeObserver(() => {
+    if (!terminalMobileAccessoryState(key)) return;
+    syncTerminalMobileAccessoryState(key);
+  });
+  observer.observe(pane);
+  terminalMobileAccessoryPaneObservers.set(key, {pane, observer});
+}
+
 function terminalMobileAccessoryMoved(state) {
   return Number.isFinite(state?.x) || Number.isFinite(state?.y);
+}
+
+function terminalMobileAccessoryModifierLockedKey(modifier) {
+  return `${modifier}Locked`;
+}
+
+function terminalMobileAccessoryModifierTapKey(session, modifier) {
+  return `${String(session || '')}:${modifier}`;
+}
+
+function terminalMobileAccessoryModifierActive(state) {
+  return terminalMobileAccessoryModifierActions.some(modifier => state?.[modifier] === true);
+}
+
+function terminalMobileAccessoryClearModifiers(state, options = {}) {
+  if (!state) return false;
+  const includeLocked = options.includeLocked === true;
+  const session = String(options.session || '');
+  let changed = false;
+  for (const modifier of terminalMobileAccessoryModifierActions) {
+    const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+    if ((includeLocked || state[lockedKey] !== true) && state[modifier] === true) {
+      state[modifier] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+    if (includeLocked && state[lockedKey] === true) {
+      state[lockedKey] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function toggleTerminalMobileAccessoryModifier(session, modifier) {
+  const key = String(session || '');
+  const state = terminalMobileAccessoryState(key, {create: true});
+  if (!state || !terminalMobileAccessoryModifierActions.includes(modifier)) return false;
+  const tapKey = terminalMobileAccessoryModifierTapKey(key, modifier);
+  const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+  const now = Date.now();
+  const lastTap = Number(terminalMobileAccessoryModifierTapTimes.get(tapKey)) || 0;
+  if (state[lockedKey] === true) {
+    state[modifier] = false;
+    state[lockedKey] = false;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else if (state[modifier] === true && now - lastTap <= terminalMobileAccessoryModifierDoubleTapMs) {
+    state[modifier] = true;
+    state[lockedKey] = true;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else {
+    state[modifier] = !state[modifier];
+    if (state[modifier] === true) terminalMobileAccessoryModifierTapTimes.set(tapKey, now);
+    else terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  }
+  syncTerminalMobileAccessoryState(key);
+  return state[modifier] === true;
 }
 
 function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, barSize) {
@@ -390,11 +518,16 @@ function syncTerminalMobileAccessoryState(session) {
   const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
   const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
   if (!state || !bar) return false;
-  for (const modifier of ['ctrl', 'alt']) {
+  const pane = launcher?.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
+  terminalMobileAccessoryObservePane(session, pane);
+  if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
+  for (const modifier of terminalMobileAccessoryModifierActions) {
     const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
     if (!button) continue;
     const active = state[modifier] === true;
+    const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
     button.classList.toggle(CLS.active, active);
+    button.classList.toggle('locked', locked);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
   const more = bar.querySelector('.mobile-terminal-keyrow--more');
@@ -417,7 +550,6 @@ function syncTerminalMobileAccessoryState(session) {
   const positionedInline = Number.isFinite(state.x);
   const positionedBlock = Number.isFinite(state.y);
   if (state.open === true && launcher) {
-    const pane = launcher.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
     const paneRect = pane?.getBoundingClientRect?.();
     const launcherRect = launcher.getBoundingClientRect();
     if (paneRect) {
@@ -445,7 +577,8 @@ function syncTerminalMobileAccessoryState(session) {
 
 function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  if (!state || !['ctrl', 'alt', 'more', 'open'].includes(key)) return false;
+  if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
+  if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
   if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
   state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
@@ -457,8 +590,7 @@ function dismissTerminalMobileAccessory(session) {
   if (!state || state.open !== true) return false;
   state.open = false;
   state.more = false;
-  state.ctrl = false;
-  state.alt = false;
+  terminalMobileAccessoryClearModifiers(state, {includeLocked: true, session});
   state.launcherPress = null;
   syncTerminalMobileAccessoryState(session);
   return true;
@@ -489,13 +621,7 @@ function installTerminalMobileAccessoryResizeSync() {
   if (terminalMobileAccessoryResizeInstalled) return;
   terminalMobileAccessoryResizeInstalled = true;
   window.addEventListener('resize', () => {
-    for (const [session, state] of terminalMobileAccessoryStates) {
-      if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
-      const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
-      const pane = launcher?.closest?.('.tab-pane');
-      if (!launcher || !pane) continue;
-      state.x = terminalMobileAccessoryClamp(state.x, 0, pane.clientWidth - launcher.offsetWidth);
-      state.y = terminalMobileAccessoryClamp(state.y, 0, pane.clientHeight - launcher.offsetHeight);
+    for (const session of terminalMobileAccessoryStates.keys()) {
       syncTerminalMobileAccessoryState(session);
     }
   }, {passive: true});
@@ -560,6 +686,10 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session, {create: true});
   const pane = button?.closest?.('.tab-pane');
   if (!state || event.button > 0 || !button || !pane) return false;
+  // A real drag commonly produces no synthetic click. In that case the previous drag's click
+  // suppression must not eat this new intentional tap; suppression is only for the immediate
+  // click following the drag release that set it.
+  state.suppressLauncherClick = false;
   dismissTerminalMobileAccessories(session);
   const paneRect = pane.getBoundingClientRect();
   const launcherRect = button.getBoundingClientRect();
@@ -632,24 +762,119 @@ function consumeTerminalMobileAccessoryLauncherClick(session) {
   return true;
 }
 
+function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const pane = bar?.closest?.('.tab-pane');
+  if (!state || event.button > 0 || !bar || !pane || state.open !== true) return false;
+  if (event.target?.closest?.('[data-terminal-mobile-key]')) return false;
+  const paneRect = pane.getBoundingClientRect();
+  const launcher = pane.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+  if (!launcher) return false;
+  const launcherRect = launcher?.getBoundingClientRect?.();
+  const startX = Number.isFinite(state.x) ? state.x : (Number(launcherRect?.left) || 0) - paneRect.left;
+  const startY = Number.isFinite(state.y) ? state.y : (Number(launcherRect?.top) || 0) - paneRect.top;
+  const press = {
+    pointerId: event.pointerId,
+    dragging: false,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX,
+    startY,
+    paneWidth: pane.clientWidth,
+    paneHeight: pane.clientHeight,
+    launcherWidth: launcher?.offsetWidth || 0,
+    launcherHeight: launcher?.offsetHeight || 0,
+  };
+  state.palettePress = press;
+  bar.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function moveTerminalMobileAccessoryPalettePress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  if (!press.dragging && Math.hypot(dx, dy) < terminalMobileAccessoryDragThresholdPx) return false;
+  press.dragging = true;
+  const position = terminalMobileAccessoryLauncherDragPosition(press, event);
+  state.x = position.x;
+  state.y = position.y;
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryPalettePress(session, event, bar) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  state.palettePress = null;
+  bar?.releasePointerCapture?.(event.pointerId);
+  if (!press.dragging) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+const terminalMobileAccessoryShiftMap = Object.freeze({
+  '`': '~',
+  '1': '!',
+  '2': '@',
+  '3': '#',
+  '4': '$',
+  '5': '%',
+  '6': '^',
+  '7': '&',
+  '8': '*',
+  '9': '(',
+  '0': ')',
+  '-': '_',
+  '=': '+',
+  '[': '{',
+  ']': '}',
+  '\\': '|',
+  ';': ':',
+  "'": '"',
+  ',': '<',
+  '.': '>',
+  '/': '?',
+});
+
+function terminalMobileAccessoryShiftText(text) {
+  if (text === '\t') return '\x1b[Z';
+  if (text.length !== 1) return text;
+  if (text >= 'a' && text <= 'z') return text.toUpperCase();
+  return terminalMobileAccessoryShiftMap[text] || text;
+}
+
+function terminalMobileAccessoryControlText(text) {
+  if (text.length !== 1) return text;
+  const code = text.charCodeAt(0);
+  if (code === 32) return '\x00';
+  if (code === 63) return '\x7f';
+  if (code >= 64 && code <= 95) return String.fromCharCode(code & 0x1f);
+  if (code >= 97 && code <= 122) return String.fromCharCode(code - 96);
+  return text;
+}
+
 function terminalDataWithMobileAccessoryModifiers(session, data) {
   const state = terminalMobileAccessoryState(session);
   const text = String(data || '');
-  if (!state || (!state.ctrl && !state.alt) || !text) return text;
+  if (!state || !text || !terminalMobileAccessoryModifierActive(state)) return text;
   const ctrl = state.ctrl === true;
-  const alt = state.alt === true;
-  state.ctrl = false;
-  state.alt = false;
+  const shift = state.shift === true;
+  const meta = state.alt === true || state.cmd === true;
+  terminalMobileAccessoryClearModifiers(state, {session});
   syncTerminalMobileAccessoryState(session);
   let value = text;
-  if (ctrl && text.length === 1) {
-    const code = text.charCodeAt(0);
-    if (code === 32) value = '\x00';
-    else if (code === 63) value = '\x7f';
-    else if (code >= 64 && code <= 95) value = String.fromCharCode(code & 0x1f);
-    else if (code >= 97 && code <= 122) value = String.fromCharCode(code - 96);
-  }
-  return alt ? `\x1b${value}` : value;
+  if (shift) value = terminalMobileAccessoryShiftText(value);
+  if (ctrl) value = terminalMobileAccessoryControlText(value);
+  return meta ? `\x1b${value}` : value;
 }
 
 async function pasteTerminalMobileAccessoryClipboard(session) {
@@ -725,14 +950,14 @@ function sendTerminalMobileAccessoryInput(session, action) {
     statusErr(terminalNotConnectedHtml(session));
     return false;
   }
-  if (action === 'ctrl' || action === 'alt' || action === 'more' || action === 'open') {
+  if (terminalMobileAccessoryModifierActions.includes(action) || action === 'more' || action === 'open') {
     toggleTerminalMobileAccessoryState(session, action);
     return true;
   }
   const data = terminalMobileAccessoryData(session, action);
   if (!data) return false;
   noteTerminalExplicitInput(session);
-  const sent = handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+  const sent = handleTerminalData(session, data, {mobileAccessory: true});
   if (!sent) statusErr(terminalNotConnectedHtml(session));
   return sent;
 }
@@ -3325,6 +3550,18 @@ function bindPanelControls(panel, session) {
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
   });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
+    beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-keybar]', (event, bar) => {
+    moveTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
     // Do not blur xterm/close the software keyboard before the click sends its byte.
     if (beginTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, button.dataset.terminalMobileKey, event, button)) return;
@@ -3729,7 +3966,6 @@ async function uploadFiles(session, fileList, options = {}) {
     }
     refreshTerminalAfterUpload(session);
     refreshOpenEventLogs();
-    refreshTranscripts({force: true});
   } catch (error) {
     showFileTransferError(error, {session, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }

@@ -39,6 +39,27 @@ def test_catalog_requires_exact_alias_and_effective_date(tmp_path):
     assert catalog.resolve_rate(provider="openai", model="gpt-4.1", direction="input", timestamp="2024-12-31T00:00:00Z") is None
 
 
+def test_catalog_estimates_unknown_model_rate_band_from_comparable_active_rates(tmp_path):
+    catalog = PricingCatalog(tmp_path)
+    catalog.set_override({
+        "schema_version": 1,
+        "catalog_revision": 3,
+        "models": [
+            {"provider": "openai", "model": "cheap-output", "aliases": ["cheap-output"], "rates": [{"direction": "output", "modality": "synthetic", "cache_role": "none", "unit": "widgets", "scale": 1_000_000, "usd": "1.25", "effective_from": "2026-01-01T00:00:00Z", "profile": "default", "service_tier": "default"}], "source": {"url": "https://platform.openai.com/docs/pricing", "kind": "override"}},
+            {"provider": "openai", "model": "expensive-output", "aliases": ["expensive-output"], "rates": [{"direction": "output", "modality": "synthetic", "cache_role": "none", "unit": "widgets", "scale": 1_000_000, "usd": "9.50", "effective_from": "2026-01-01T00:00:00Z", "profile": "default", "service_tier": "default"}], "source": {"url": "https://platform.openai.com/docs/pricing", "kind": "override"}},
+        ],
+    })
+
+    band = catalog.estimate_rate_band(direction="output", modality="synthetic", cache_role="none", unit="widgets", profile="batch", service_tier="flex")
+
+    assert band is not None
+    assert str(band.minimum.usd) == "1.25"
+    assert band.minimum.model == "cheap-output"
+    assert str(band.maximum.usd) == "9.50"
+    assert band.maximum.model == "expensive-output"
+    assert catalog.estimate_rate_band(direction="input", modality="synthetic", cache_role="none", unit="widgets") is None
+
+
 def test_seed_validation_rejects_duplicate_alias_and_float_price():
     seed = load_packaged_seed()
     seed["models"].append({**seed["models"][0], "model": "other"})

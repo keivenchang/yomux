@@ -276,11 +276,24 @@ function canPaneExpand(item, slots = layoutSlots) {
   ));
 }
 
+function minimizeBlockedByPinned(item, sourceSlot = null, slots = layoutSlots) {
+  const slot = sourceSlot || slotForSession(item) || slotForItem(item, slots);
+  if (!slot) return false;
+  if (narrowPaneFrameActionTargetsTab(item, slots) || narrowSingleColumnMode()) {
+    return tabIsPinned(item);
+  }
+  if (slotIsSidePane(slot, slots)) {
+    return paneTabs(slot, slots).some(tabIsPinned);
+  }
+  const sourceTabs = paneTabsForGenericActions(slot, slots);
+  return sourceTabs.length > 0 && !sourceTabs.some(tab => !tabIsPinned(tab));
+}
+
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
   if (narrowPaneFrameActionTargetsTab(item)) {
-    if (tabIsPinned(item)) {
+    if (minimizeBlockedByPinned(item, sourceSlot)) {
       showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
       return;
     }
@@ -288,12 +301,12 @@ function minimizePaneFromLayout(item) {
     return;
   }
   if (narrowSingleColumnMode()) {
-    if (tabIsPinned(item)) showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
+    if (minimizeBlockedByPinned(item, sourceSlot)) showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
     return;
   }
   if (slotIsSidePane(sourceSlot)) {
     const pinnedSideTabs = paneTabs(sourceSlot).filter(tabIsPinned);
-    if (pinnedSideTabs.length) {
+    if (minimizeBlockedByPinned(item, sourceSlot)) {
       showLayoutStatus(pinnedMinimizeBlockedStatus(pinnedSideTabs), 'danger');
       return;
     }
@@ -303,7 +316,7 @@ function minimizePaneFromLayout(item) {
   const sourceTabs = paneTabsForGenericActions(sourceSlot);
   const pinnedSourceTabs = sourceTabs.filter(tabIsPinned);
   const minimizedTabs = sourceTabs.filter(tab => !tabIsPinned(tab));
-  if (!minimizedTabs.length) {
+  if (minimizeBlockedByPinned(item, sourceSlot)) {
     showLayoutStatus(pinnedMinimizeBlockedStatus(sourceTabs), 'danger');
     return;
   }

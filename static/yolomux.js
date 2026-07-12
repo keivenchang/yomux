@@ -9735,14 +9735,33 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
+  const roleExplainers = [
+    {abbr: 'IDX', role: t('backgroundOwner.index'), description: t('backgroundOwner.desc.index'), summary: indexSummary},
+    {abbr: 'STATS', role: t('tab.debug.short'), description: t('backgroundOwner.desc.stats'), summary: statsSummary},
+    {abbr: 'SESS', role: t('backgroundOwner.sessionFiles'), description: t('backgroundOwner.desc.sessionFiles'), summary: sessionSummary},
+  ];
+  const roleDefinitionLines = roleExplainers.map(item => t('backgroundOwner.summaryRole', {
+    abbr: item.abbr,
+    role: item.role,
+    description: item.description,
+  }));
+  const roleStateLines = roleExplainers.map(item => {
+    const state = item.summary?.mode;
+    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
+    return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
+  });
   const lines = [
     t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
+    ...roleDefinitionLines,
+    t('backgroundOwner.desc.leaderFollower'),
     indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
     statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
     sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
+    ...roleStateLines,
     indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
     statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
     sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
+    t('backgroundOwner.desc.takeOver'),
     indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');
@@ -14865,7 +14884,7 @@ async function openFileExplorerAt(path, options = {}) {
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
-    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0);
+    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder'});
   }
   if (options.refreshPanels !== false) {
     await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false});
@@ -15759,6 +15778,18 @@ function firstChildPathUnderRoot(root, path) {
   return parts.length ? childPath(root, parts[0]) : '';
 }
 
+function ancestorPathsUnderRoot(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const normalizedPath = normalizeDirectoryPath(path || '');
+  if (!normalizedRoot || !normalizedPath || normalizedPath === normalizedRoot || !pathIsInsideDirectory(normalizedPath, normalizedRoot)) return [];
+  const parts = childPathParts(normalizedRoot, normalizedPath);
+  const result = [];
+  for (let index = 1; index <= parts.length; index += 1) {
+    result.push(childPath(normalizedRoot, parts.slice(0, index).join('/')));
+  }
+  return result;
+}
+
 function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = []) {
   const normalizedRoot = normalizeDirectoryPath(root || '');
   if (!normalizedRoot) return [];
@@ -15768,11 +15799,9 @@ function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [
   const normalizedAffectedDirs = Array.from(new Set(affectedDirs
     .map(path => normalizeDirectoryPath(path))
     .filter(Boolean)));
-  const repoTargets = normalizedRepoRoots.filter(path => path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const affectedTargets = normalizedAffectedDirs
-    .map(path => firstChildPathUnderRoot(normalizedRoot, path))
-    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const candidates = repoTargets.length ? repoTargets : affectedTargets;
+  const repoTargets = normalizedRepoRoots.flatMap(path => ancestorPathsUnderRoot(normalizedRoot, path));
+  const affectedTargets = normalizedAffectedDirs.flatMap(path => ancestorPathsUnderRoot(normalizedRoot, path));
+  const candidates = [...repoTargets, ...affectedTargets];
   return Array.from(new Set(candidates
     .map(path => normalizeDirectoryPath(path))
     .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
@@ -15793,12 +15822,24 @@ function fileExplorerSyncPlan(preferredItem = null) {
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
   if (!affectedDirs.length && focusedGitRoot && (!focusedDir || pathIsInsideDirectory(focusedDir, focusedGitRoot))) affectedDirs.push(focusedGitRoot);
   if (!affectedDirs.length && focusedDir) affectedDirs.push(focusedDir);
+  if (
+    focusedDir
+    && (!focusedGitRoot || pathIsInsideDirectory(focusedDir, focusedGitRoot))
+    && !affectedDirs.includes(focusedDir)
+  ) {
+    affectedDirs.push(focusedDir);
+  }
   const repoRoots = payloadUsable ? sessionFilesRepoRoots(payload) : [];
   if (focusedGitRoot && !repoRoots.includes(focusedGitRoot)) repoRoots.push(focusedGitRoot);
   let root = commonAncestorPath(affectedDirs);
   if (!root) root = normalizeDirectoryPath(homePath || '/');
   if (root && pathIsShallowerThanHome(root)) {
     root = focusedRepoRootForSync(focusedDir, repoRoots) || normalizeDirectoryPath(homePath || '/');
+  }
+  const normalizedHome = normalizeDirectoryPath(homePath || '');
+  const rootBeforeHomeLift = normalizeDirectoryPath(root || '');
+  if (normalizedHome && rootBeforeHomeLift && rootBeforeHomeLift !== normalizedHome && pathIsInsideDirectory(rootBeforeHomeLift, normalizedHome)) {
+    root = normalizedHome;
   }
   const normalizedRoot = normalizeDirectoryPath(root || '');
   const expandPaths = fileExplorerSyncExpansionTargets(normalizedRoot, affectedDirs, repoRoots);
@@ -15814,6 +15855,11 @@ function fileExplorerSyncPlanForFile(path) {
   let root = repo && pathIsInsideDirectory(target, repo) ? repo : '';
   if (!root && currentRoot && pathIsInsideDirectory(target, currentRoot) && target !== currentRoot) root = currentRoot;
   if (!root) root = targetDir;
+  const normalizedHome = normalizeDirectoryPath(homePath || '');
+  const rootBeforeHomeLift = normalizeDirectoryPath(root || '');
+  if (normalizedHome && rootBeforeHomeLift && rootBeforeHomeLift !== normalizedHome && pathIsInsideDirectory(rootBeforeHomeLift, normalizedHome)) {
+    root = normalizedHome;
+  }
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
   const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
   return {
@@ -15911,12 +15957,18 @@ function fileExplorerSyncExpansionPaths(plan) {
 function fileExplorerSyncExplicitExpansionTargets(plan, root = plan?.root || currentFileExplorerRoot()) {
   const normalizedRoot = normalizeDirectoryPath(root || '');
   if (!normalizedRoot) return [];
+  const expansionPaths = fileExplorerSyncExpansionPaths(plan);
   return Array.from(new Set([
-    ...(plan?.expandPaths || []),
+    ...expansionPaths,
     ...(plan?.affectedDirs || []),
   ]
     .map(path => normalizeDirectoryPath(path))
-    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
+    .filter(path => (
+      path
+      && path !== normalizedRoot
+      && pathIsInsideDirectory(path, normalizedRoot)
+      && !fileExplorerSyncPathSuppressed(path)
+    ))))
     .sort((left, right) => (
       childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
       || left.localeCompare(right)
@@ -15960,7 +16012,15 @@ function forgetFileExplorerSyncManualCollapse(path) {
 }
 
 function emptyFileExplorerSessionHighlightSets() {
-  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs: new Set()};
+  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs: new Set(), syncTargetDirs: new Set(), syncTargetTitle: ''};
+}
+
+function fileExplorerSyncTargetDirs(plan) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const dirs = Array.from(new Set((plan?.affectedDirs || [])
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && root && path !== root && pathIsInsideDirectory(path, root))));
+  return dirs.filter(path => !dirs.some(other => other !== path && pathIsInsideDirectory(other, path)));
 }
 
 function fileExplorerSessionHighlightSets(preferredItem = null) {
@@ -15977,8 +16037,17 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
     return emptyFileExplorerSessionHighlightSets();
   }
   const repoRoots = new Set(sessionFilesRepoRoots(payload));
-  const expandedDirs = new Set(fileExplorerSyncHighlightedRepoRoots(fileExplorerSyncPlan(targetSession), repoRoots));
-  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs};
+  const plan = fileExplorerSyncPlan(targetSession);
+  const expandedDirs = new Set(fileExplorerSyncHighlightedRepoRoots(plan, repoRoots));
+  const syncTargetDirs = new Set(fileExplorerSyncTargetDirs(plan));
+  const sessionLabel = targetSession || plan.session || '';
+  return {
+    repoRoots: new Set(),
+    touchedDirs: new Set(),
+    expandedDirs,
+    syncTargetDirs,
+    syncTargetTitle: t('finder.syncTarget.title', {session: sessionLabel}),
+  };
 }
 
 function fileExplorerSessionHighlightClassForPath(path, kind = 'dir', options = {}) {
@@ -15994,8 +16063,13 @@ function fileExplorerSessionHighlightClassForPath(path, kind = 'dir', options = 
 
 function applyFileExplorerSessionHighlightRow(row, sets = fileExplorerSessionHighlightSets()) {
   if (!row) return;
-  const highlightClass = fileExplorerSessionHighlightClassForPath(row.dataset?.path || '', row.dataset?.kind || '', {sessionHighlightSets: sets});
+  const path = normalizeDirectoryPath(row.dataset?.path || '');
+  const kind = row.dataset?.kind || '';
+  const highlightClass = fileExplorerSessionHighlightClassForPath(path, kind, {sessionHighlightSets: sets});
   applySessionHighlightRowClass(row, highlightClass);
+  const isSyncTarget = kind === 'dir' && Boolean(path && sets.syncTargetDirs?.has(path));
+  row.classList.toggle('file-tree-row--sync-target', isSyncTarget);
+  updateFileTreeSyncTargetMarker(row, isSyncTarget, sets.syncTargetTitle);
 }
 
 function updateFileExplorerSessionHighlightRows(preferredItem = null) {
@@ -16014,8 +16088,9 @@ function fileExplorerPathInputs() {
 
 function setFileExplorerPathElementValue(node, path) {
   if (!node) return;
-  if ('value' in node) node.value = path;
-  else node.textContent = path;
+  const display = typeof compactHomePath === 'function' ? (compactHomePath(path) || path) : path;
+  if ('value' in node) node.value = display;
+  else node.textContent = display;
 }
 
 function setFileExplorerPathError(node, message = '') {
@@ -16411,7 +16486,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       const generation = ++fileExplorerSyncState.generation;
       for (const path of expandPaths) {
         if (generation !== fileExplorerSyncState.generation) return changed;
-        changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true}) || changed;
+        changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true, user: options.force === true}) || changed;
         if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
       }
     }
@@ -16565,17 +16640,17 @@ function createFileTreeChildContainer(fullPath) {
   return children;
 }
 
-async function ensureFileTreeRootRendered(container, root) {
+async function ensureFileTreeRootRendered(container, root, options = {}) {
   if (!container) return false;
   const firstRow = container.querySelector?.('.file-tree-row[data-path]');
   if (firstRow) {
     if (pathIsInsideDirectory(firstRow.dataset.path, root) && childPathParts(root, firstRow.dataset.path).length === 1) return true;
     container.replaceChildren();
   }
-  const entries = await fetchDirectory(root);
+  const entries = await fetchDirectory(root, {user: options.user === true});
   if (!entries) return false;
   container.replaceChildren();
-  renderTreeChildren(container, root, entries, 0);
+  renderTreeChildren(container, root, entries, 0, {view: 'finder'});
   return true;
 }
 
@@ -16616,7 +16691,7 @@ function scrollFileTreeRowIntoView(container, row) {
 async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncState.generation, options = {}) {
   const parts = childPathParts(root, path);
   if (!parts.length) return false;
-  const rendered = await ensureFileTreeRootRendered(container, root);
+  const rendered = await ensureFileTreeRootRendered(container, root, options);
   if (!rendered) return false;
   if (generation !== fileExplorerSyncState.generation) return false;
   let scope = container;
@@ -16636,7 +16711,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
       if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
         return false;
       }
-      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true});
+      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true, user: options.user === true});
       if (generation !== fileExplorerSyncState.generation) return false;
       if (fullPath !== path) {
         if (!childScope) return false;
@@ -16980,6 +17055,29 @@ const GIT_STATUS_ROW_CLASSES = Object.freeze(['git-modified', 'git-untracked', '
 // two places (applyFileExplorerSessionHighlightRow + updateFileTreeRow).
 const SESSION_HIGHLIGHT_ROW_CLASSES = Object.freeze(['file-tree-row--sync-expanded', 'file-tree-row--session-repo', 'file-tree-row--session-touched']);
 
+function updateFileTreeSyncTargetMarker(row, active, title = '') {
+  if (!row) return;
+  const enabled = active === true;
+  let marker = row.querySelector(':scope > .file-tree-sync-target');
+  if (!enabled) {
+    marker?.remove();
+    return;
+  }
+  if (!marker) {
+    marker = document.createElement('span');
+    marker.className = 'file-tree-sync-target';
+  }
+  const anchor = row.querySelector(':scope > .file-tree-agent') || row.querySelector(':scope > .file-tree-name');
+  const before = anchor?.nextElementSibling || null;
+  if (marker.parentElement !== row || marker.previousElementSibling !== anchor) {
+    row.insertBefore(marker, before);
+  }
+  marker.hidden = false;
+  if (marker.textContent !== '★') marker.textContent = '★';
+  marker.setAttribute('aria-label', title);
+  marker.setAttribute('title', title);
+}
+
 function applyGitStatusRowClass(row, gitClass) {
   for (const className of GIT_STATUS_ROW_CLASSES) {
     row.classList.toggle(className, className === gitClass);
@@ -17120,6 +17218,8 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     row.appendChild(date);
   }
   // Keep DOM order: icon → name → agent → diff → dir-count → status → date.
+  // updateFileTreeSyncTargetMarker inserts a star only for starred sync rows, so ordinary rows
+  // keep the established Finder/Differ column ownership with no hidden spacer.
   if (name.nextElementSibling !== agent) row.insertBefore(agent, name.nextElementSibling);
   if (agent.nextElementSibling !== diff) row.insertBefore(diff, agent.nextElementSibling);
   if (diff.nextElementSibling !== dirCount) row.insertBefore(dirCount, diff.nextElementSibling);
@@ -17483,6 +17583,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   applyFileTreeRowDataset(row, rowState);
   applyFileTreeRowDerivedState(row, rowState.derivedState);
+  applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
   applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
   bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);
@@ -21100,7 +21201,6 @@ async function expandSyncFileExplorerAffectedDirectories() {
   if (!root) return false;
   resetFileExplorerSyncManualCollapsesIfNeeded(plan);
   const paths = fileExplorerSyncExplicitExpansionTargets(plan, root);
-  for (const path of paths) forgetFileExplorerSyncManualCollapse(path);
   resetFileExplorerAppliedSyncPlan();
   if (root !== currentFileExplorerRoot()) {
     const opened = await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});
@@ -26153,7 +26253,7 @@ function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
 async function expandDirectoryRow(row, fullPath, options = {}) {
   fileExplorerPendingExpansions.add(fullPath);
   syncDirectoryRowExpansionVisual(row, true, true);
-  const entries = await fetchDirectory(fullPath);
+  const entries = await fetchDirectory(fullPath, {user: options.user === true});
   fileExplorerPendingExpansions.delete(fullPath);
   if (!entries) {
     if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
@@ -28269,11 +28369,24 @@ function canPaneExpand(item, slots = layoutSlots) {
   ));
 }
 
+function minimizeBlockedByPinned(item, sourceSlot = null, slots = layoutSlots) {
+  const slot = sourceSlot || slotForSession(item) || slotForItem(item, slots);
+  if (!slot) return false;
+  if (narrowPaneFrameActionTargetsTab(item, slots) || narrowSingleColumnMode()) {
+    return tabIsPinned(item);
+  }
+  if (slotIsSidePane(slot, slots)) {
+    return paneTabs(slot, slots).some(tabIsPinned);
+  }
+  const sourceTabs = paneTabsForGenericActions(slot, slots);
+  return sourceTabs.length > 0 && !sourceTabs.some(tab => !tabIsPinned(tab));
+}
+
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
   if (narrowPaneFrameActionTargetsTab(item)) {
-    if (tabIsPinned(item)) {
+    if (minimizeBlockedByPinned(item, sourceSlot)) {
       showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
       return;
     }
@@ -28281,12 +28394,12 @@ function minimizePaneFromLayout(item) {
     return;
   }
   if (narrowSingleColumnMode()) {
-    if (tabIsPinned(item)) showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
+    if (minimizeBlockedByPinned(item, sourceSlot)) showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
     return;
   }
   if (slotIsSidePane(sourceSlot)) {
     const pinnedSideTabs = paneTabs(sourceSlot).filter(tabIsPinned);
-    if (pinnedSideTabs.length) {
+    if (minimizeBlockedByPinned(item, sourceSlot)) {
       showLayoutStatus(pinnedMinimizeBlockedStatus(pinnedSideTabs), 'danger');
       return;
     }
@@ -28296,7 +28409,7 @@ function minimizePaneFromLayout(item) {
   const sourceTabs = paneTabsForGenericActions(sourceSlot);
   const pinnedSourceTabs = sourceTabs.filter(tabIsPinned);
   const minimizedTabs = sourceTabs.filter(tab => !tabIsPinned(tab));
-  if (!minimizedTabs.length) {
+  if (minimizeBlockedByPinned(item, sourceSlot)) {
     showLayoutStatus(pinnedMinimizeBlockedStatus(sourceTabs), 'danger');
     return;
   }
@@ -41237,6 +41350,8 @@ const jsDebugGraphGeometry = (() => {
 const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
 const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
 const jsDebugHistoryOlderOverlayDelayMs = 120;
+const jsDebugHistoryRetryInitialDelayMs = 10_000;
+const jsDebugHistoryRetryMaxDelayMs = 5 * 60_000;
 const jsDebugHistoryReadiness = {
   phase: 'idle',
   requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
@@ -41253,6 +41368,7 @@ const jsDebugHistoryReadiness = {
   error: '',
   generation: 0,
   loadingStartedAtMs: 0,
+  nextAutoRetryAtMs: 0,
   overlayVisible: false,
   overlayTimer: null,
 };
@@ -41364,27 +41480,59 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   clientRequests: {
     attribute: 'displayed-client-request-sum',
     labelKey: 'debug.graph.sumDisplayedClientRequests',
+    descKey: 'debug.graph.sumDisplayedClientRequests.desc',
     value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['apiCount', 'sseCount']),
     format: debugGraphTokenNumberText,
   },
   bandwidth: {
     attribute: 'displayed-bandwidth-sum',
     labelKey: 'debug.graph.sumDisplayed',
+    descKey: 'debug.graph.sumDisplayed.desc',
     value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['bandwidthBytes']),
     format: value => debugGraphValueText(value, 'bytes'),
   },
   agentTokens: {
     attribute: 'displayed-token-sum',
     labelKey: 'debug.graph.sumDisplayed',
+    descKey: 'debug.graph.sumDisplayed.desc',
     value: debugGraphAgentTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
   modelTokens: {
     attribute: 'displayed-token-sum',
     labelKey: 'debug.graph.sumDisplayed',
+    descKey: 'debug.graph.sumDisplayed.desc',
     value: debugGraphModelTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
+});
+const jsDebugGraphDescriptionKeyByLabelKey = Object.freeze({
+  'debug.graph.metric.api': 'debug.graph.metric.api.desc',
+  'debug.graph.metric.sse': 'debug.graph.metric.sse.desc',
+  'debug.graph.metric.bandwidth': 'debug.graph.metric.bandwidth.desc',
+  'debug.graph.meta.removal': 'debug.graph.meta.removal.desc',
+  'debug.graph.meta.rss': 'debug.graph.meta.rss.desc',
+  'debug.graph.meta.serverSequence': 'debug.graph.meta.serverSequence.desc',
+  'debug.graph.meta.totalTraffic': 'debug.graph.meta.totalTraffic.desc',
+  'debug.graph.meta.uptime': 'debug.graph.meta.uptime.desc',
+  'debug.graph.status.attention': 'debug.graph.status.attention.desc',
+  'debug.graph.status.transition': 'debug.graph.status.transition.desc',
+  'debug.graph.series.allAgentsTotal': 'debug.graph.series.allAgentsTotal.desc',
+  'debug.graph.series.allClientsApiSseTotal': 'debug.graph.series.allClientsApiSseTotal.desc',
+  'debug.graph.series.defaultProcessCpu': 'debug.graph.series.defaultProcessCpu.desc',
+  'debug.graph.series.otherClientsAverage': 'debug.graph.series.otherClientsAverage.desc',
+  'debug.graph.series.processCpu': 'debug.graph.series.processCpu.desc',
+  'debug.graph.series.systemCpu': 'debug.graph.series.systemCpu.desc',
+  'debug.graph.series.systemMemory': 'debug.graph.series.systemMemory.desc',
+  'debug.graph.series.thisClient': 'debug.graph.series.thisClient.desc',
+  'debug.graph.series.tokensPerAgent': 'debug.graph.series.tokensPerAgent.desc',
+  'debug.graph.sumDisplayed': 'debug.graph.sumDisplayed.desc',
+  'debug.graph.sumDisplayedClientRequests': 'debug.graph.sumDisplayedClientRequests.desc',
+  'debug.modelTokens.allBillable': 'debug.modelTokens.allBillable.desc',
+  'debug.modelTokens.cacheRead': 'debug.modelTokens.cacheRead.desc',
+  'debug.modelTokens.cacheWrite': 'debug.modelTokens.cacheWrite.desc',
+  'state.idle': 'debug.graph.status.idle.desc',
+  'state.working': 'debug.graph.status.working.desc',
 });
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
@@ -41465,16 +41613,16 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'memory', labelKey: 'debug.graph.chart.memory', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10},
-  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
-  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
-  {key: 'latency', labelKey: 'common.clientLatency', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
+  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
+  {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
 const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
   ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title', toggleLabelEn: 'Cost'})]
@@ -41485,6 +41633,21 @@ function debugGraphLocalizedLabel(item = {}) {
   const params = {...(item.labelParams || {})};
   if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
   return t(item.labelKey, params);
+}
+
+function debugGraphLocalizedDescription(item = {}) {
+  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
+  if (!descKey) return '';
+  const params = {...(item.descParams || item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(descKey, params);
+}
+
+function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
+  if (!descKey) return '';
+  const text = desc || t(descKey, params);
+  if (!text || text === descKey) return '';
+  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
 }
 
 function normalizedJsDebugSubTab(value) {
@@ -41607,9 +41770,20 @@ function jsDebugHistoryReadinessSnapshot() {
     attemptCount: state.attemptCount,
     error: state.error,
     generation: state.generation,
+    nextAutoRetryAtMs: state.nextAutoRetryAtMs,
     overlayVisible: state.overlayVisible,
     busy: jsDebugHistoryReadinessBusy(state),
   };
+}
+
+function jsDebugHistoryRetryDelayMs(attemptCount = jsDebugHistoryReadiness.attemptCount) {
+  const attempts = Math.max(1, Number(attemptCount) || 1);
+  const multiplier = 2 ** Math.min(8, attempts - 1);
+  return Math.min(jsDebugHistoryRetryMaxDelayMs, jsDebugHistoryRetryInitialDelayMs * multiplier);
+}
+
+function jsDebugHistoryAutoRetryDue(state = jsDebugHistoryReadiness, nowMs = performanceNow()) {
+  return state.phase !== 'error' || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
 }
 
 function clearJsDebugHistoryOverlayTimer() {
@@ -41645,7 +41819,7 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
   const wasBusy = jsDebugHistoryReadinessBusy(state);
   const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
   clearJsDebugHistoryOverlayTimer();
-  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs']) {
+  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs', 'nextAutoRetryAtMs']) {
     if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
   }
   state.phase = nextPhase;
@@ -41683,6 +41857,7 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
     error: '',
     generation,
     loadingStartedAtMs: performanceNow(),
+    nextAutoRetryAtMs: 0,
   });
 }
 
@@ -41841,6 +42016,7 @@ function resetJsDebugHistoryReadiness() {
     error: '',
     generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
     loadingStartedAtMs: 0,
+    nextAutoRetryAtMs: 0,
   });
 }
 
@@ -42385,17 +42561,20 @@ function debugGraphMergeAgentTokenRates(target, source) {
 function debugGraphMergeCostSummary(target, source) {
   if (!source?.costSummary) return;
   const current = target.costSummary || {
-    totalMicroUsd: 0, knownMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0,
-    components: [], models: [], sources: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
+    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0,
+    components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
   };
   current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd);
   current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd);
+  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd);
+  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd);
   current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount);
   current.complete = current.complete && source.costSummary.complete === true;
   current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount);
   current.components.push(...debugGraphCostRows(source.costSummary.components));
   current.models.push(...debugGraphCostRows(source.costSummary.models));
   current.sources.push(...debugGraphCostRows(source.costSummary.sources));
+  current.tmuxWindows.push(...debugGraphCostRows(source.costSummary.tmuxWindows));
   current.catalogRevision = source.costSummary.catalogRevision || current.catalogRevision;
   current.activeCatalogRevision = source.costSummary.activeCatalogRevision || current.activeCatalogRevision;
   current.freshness = source.costSummary.freshness || current.freshness;
@@ -42718,12 +42897,15 @@ function debugGraphApplyServerCostSummary(bucket, source) {
   bucket.costSummary = {
     totalMicroUsd: debugGraphCostInteger(source.total_micro_usd),
     knownMicroUsd: debugGraphCostInteger(source.known_micro_usd),
+    lowerMicroUsd: debugGraphCostInteger(source.lower_micro_usd ?? source.known_micro_usd),
+    upperMicroUsd: debugGraphCostInteger(source.upper_micro_usd ?? source.total_micro_usd ?? source.known_micro_usd),
     pricedCount: debugGraphCostInteger(source.priced_count),
     complete: source.complete === true,
     unpricedCount: debugGraphCostInteger(source.unpriced_count),
     components: debugGraphCostRows(source.components),
     models: debugGraphCostRows(source.models),
     sources: debugGraphCostRows(source.sources),
+    tmuxWindows: debugGraphCostRows(source.tmux_windows),
     catalogRevision: String(source.catalog_revision || '').slice(0, 160),
     activeCatalogRevision: String(source.active_catalog_revision || '').slice(0, 160),
     freshness: String(source.freshness || '').slice(0, 80),
@@ -43146,6 +43328,7 @@ function debugGraphDisplayedSummary(group, buckets) {
   const value = Math.max(0, Number(spec.value(buckets)) || 0);
   return {
     attribute: spec.attribute,
+    descKey: spec.descKey,
     text: t(spec.labelKey, {count: spec.format(value)}),
     value,
   };
@@ -43371,11 +43554,19 @@ function debugGraphTotalMegabytesText(bytes) {
   return value.toFixed(2);
 }
 
-function debugRemovalLatencyMetaText() {
+function debugGraphMetaItem(labelKey, params = {}) {
+  return {text: t(labelKey, params), labelKey, descKey: jsDebugGraphDescriptionKeyByLabelKey[labelKey]};
+}
+
+function debugGraphPlainMetaItem(text, descKey = '') {
+  return {text: String(text || ''), descKey};
+}
+
+function debugRemovalLatencyMetaItem() {
   if (typeof terminalRemovalLatencySummary !== 'function') return '';
   const summary = terminalRemovalLatencySummary();
   if (!summary?.count) return '';
-  return t('debug.graph.meta.removal', {
+  return debugGraphMetaItem('debug.graph.meta.removal', {
     last: debugGraphTerseTimeText(summary.last?.durationMs),
     average: debugGraphTerseTimeText(summary.averageMs),
     count: summary.count,
@@ -43422,18 +43613,18 @@ function debugClientPerfHtml() {
 
 function debugGraphMetaItems() {
   const items = [];
-  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(t('debug.graph.meta.uptime', {uptime: debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}));
-  if (Number.isFinite(jsDebugStatsServerPid)) items.push(`PID=${Math.floor(jsDebugStatsServerPid)}`);
+  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(debugGraphMetaItem('debug.graph.meta.uptime', {uptime: debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}));
+  if (Number.isFinite(jsDebugStatsServerPid)) items.push(debugGraphPlainMetaItem(`PID=${Math.floor(jsDebugStatsServerPid)}`));
   const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
-  if (rss) items.push(t('debug.graph.meta.rss', {rss}));
-  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(t('debug.graph.meta.serverSequence', {sequence: Math.floor(jsDebugStatsServerSequence)}));
-  const removalLatency = debugRemovalLatencyMetaText();
+  if (rss) items.push(debugGraphMetaItem('debug.graph.meta.rss', {rss}));
+  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(debugGraphMetaItem('debug.graph.meta.serverSequence', {sequence: Math.floor(jsDebugStatsServerSequence)}));
+  const removalLatency = debugRemovalLatencyMetaItem();
   if (removalLatency) items.push(removalLatency);
   if (items.length) {
     const counts = debugEventCounts();
     const uploadedMb = debugGraphTotalMegabytesText(counts.apiRequestBytes);
     const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
-    items.push(t('debug.graph.meta.totalTraffic', {uploaded: uploadedMb, downloaded: downloadedMb}));
+    items.push(debugGraphMetaItem('debug.graph.meta.totalTraffic', {uploaded: uploadedMb, downloaded: downloadedMb}));
   }
   return items;
 }
@@ -43447,7 +43638,7 @@ function debugGraphMetaHtml() {
   const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadiness.phase === 'loading-initial'
     && jsDebugHistoryReadiness.overlayVisible === true;
   const metaHtml = items.length
-    ? esc(items.join(' | '))
+    ? items.map(item => `<span class="js-debug-graph-meta-item"${debugGraphExplainAttrs(item.text, item.descKey, {attribute: 'data-js-debug-meta-desc'})}>${esc(item.text)}</span>`).join('<span aria-hidden="true"> | </span>')
     : (initialHistoryOverlayOwnsLoading ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
 }
@@ -43506,6 +43697,8 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
     .map(([key, item], index) => ({
       key: `${prefix}${key}`,
       label: item.label,
+      descKey: dimension === 'agent' ? 'debug.graph.series.agentToken.desc' : 'debug.graph.series.modelToken.desc',
+      descParams: dimension === 'agent' ? {agent: item.label} : {model: item.label},
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
       agentTokenSeries: dimension === 'agent',
@@ -43556,6 +43749,11 @@ function debugGraphStablePaletteIndex(identity, count) {
 function debugGraphModelTokenDimensionLabel(dimension = jsDebugGraphModelTokenDimension) {
   const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
   return item ? debugGraphCostText(item.labelKey, item.fallback) : debugGraphCostText('debug.cost.output', 'Output');
+}
+
+function debugGraphModelTokenDimensionDescriptionKey(dimension = jsDebugGraphModelTokenDimension) {
+  const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
+  return item ? jsDebugGraphDescriptionKeyByLabelKey[item.labelKey] : '';
 }
 
 function debugGraphModelTokenComponentMatches(component, dimension = jsDebugGraphModelTokenDimension) {
@@ -43631,6 +43829,8 @@ function debugGraphModelTokenSeriesDefs(buckets) {
     .map((item, index) => ({
       key: `${jsDebugGraphModelTokenSeriesPrefix}${item.key}`,
       label: item.label,
+      descKey: 'debug.graph.series.modelToken.desc',
+      descParams: {model: item.label},
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
       agentTokenKey: item.key,
@@ -43759,6 +43959,8 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
     .map(([deviceId, label], index) => ({
       key: `gpu:${metric}:${deviceId}`,
       label,
+      descKey: 'debug.graph.series.gpuDevice.desc',
+      descParams: {device: label, metric: metric === 'gpuMemory' ? t('debug.graph.chart.gpuMemory') : t('debug.graph.chart.gpuUtil')},
       unit: metric === 'gpuMemory' ? 'bytes' : 'percent',
       hostMetric: metric,
       gpuDeviceId: deviceId,
@@ -44288,7 +44490,10 @@ function debugGraphInteractionOverlayHtml() {
 
 function debugGraphLegendHtml(seriesItems) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
-    ${seriesItems.map(series => `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span>${esc(series.label)}</span></div>`).join('')}
+    ${seriesItems.map(series => {
+      const descKey = series.descKey || jsDebugGraphDescriptionKeyByLabelKey[series.labelKey] || jsDebugGraphDescriptionKeyByLabelKey[series.metricLabelKey];
+      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span${debugGraphExplainAttrs(series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
+    }).join('')}
   </div>`;
 }
 
@@ -44535,6 +44740,7 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   const groupLabel = debugGraphChartLabel(group, buckets);
+  const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
@@ -44558,17 +44764,20 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const displayedSummary = debugGraphDisplayedSummary(group, buckets);
   const displayedSummaryHtml = displayedSummary === null
     ? ''
-    : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
+    : `<span class="js-debug-chart-summary"${debugGraphExplainAttrs(displayedSummary.text, displayedSummary.descKey, {attribute: 'data-js-debug-summary-desc'})} data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
   const modelDimensionControl = group.key === 'modelTokens'
-    ? `<label class="js-debug-resolution-label js-debug-model-token-dimension" data-js-debug-model-token-dimension>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}: <select data-js-debug-model-token-dimension-select aria-label="${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}">${jsDebugGraphModelTokenDimensions.map(item => `<option value="${esc(item.key)}"${item.key === jsDebugGraphModelTokenDimension ? ' selected' : ''}>${esc(debugGraphModelTokenDimensionLabel(item.key))}</option>`).join('')}</select></label>`
+    ? `<label class="js-debug-resolution-label js-debug-model-token-dimension" data-js-debug-model-token-dimension>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}: <select data-js-debug-model-token-dimension-select aria-label="${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}">${jsDebugGraphModelTokenDimensions.map(item => {
+        const label = debugGraphModelTokenDimensionLabel(item.key);
+        return `<option value="${esc(item.key)}"${item.key === jsDebugGraphModelTokenDimension ? ' selected' : ''}${debugGraphExplainAttrs(label, debugGraphModelTokenDimensionDescriptionKey(item.key), {attribute: 'data-js-debug-model-token-dimension-desc'})}>${esc(label)}</option>`;
+      }).join('')}</select></label>`
     : '';
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${tokenAxis ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
-        <span class="js-debug-chart-title">${esc(groupLabel)}</span>
+        <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
         ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
@@ -44667,6 +44876,13 @@ function debugGraphCostUsdText(microUsd) {
   return `$${usd.toFixed(6)}`;
 }
 
+function debugGraphCostRangeUsdText(summary) {
+  const lower = debugGraphCostInteger(summary?.lowerMicroUsd ?? summary?.knownMicroUsd);
+  const upper = Math.max(lower, debugGraphCostInteger(summary?.upperMicroUsd ?? summary?.totalMicroUsd ?? summary?.knownMicroUsd));
+  if (lower === upper) return debugGraphCostUsdText(lower);
+  return `${debugGraphCostUsdText(lower)} – ${debugGraphCostUsdText(upper)}`;
+}
+
 function debugGraphCostKind(item) {
   return String(item?.key || item?.kind || item?.direction || item?.label || '').toLowerCase();
 }
@@ -44709,12 +44925,11 @@ function debugGraphCostTokenTotals(summary) {
 
 function debugGraphCostAggregateRows(rows, keyFields) {
   const grouped = new Map();
-  const subtotalFields = ['input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd'];
+  const subtotalFields = ['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd'];
   const tokenFields = ['quantity', 'token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens'];
   for (const row of rows || []) {
     const key = keyFields.map(field => String(row?.[field] || '')).join('\u0000') || 'unknown';
-    const current = grouped.get(key) || {...row, micro_usd: 0, ...Object.fromEntries([...subtotalFields, ...tokenFields].map(field => [field, 0]))};
-    current.micro_usd += debugGraphCostMicroUsd(row);
+    const current = grouped.get(key) || {...row, ...Object.fromEntries([...subtotalFields, ...tokenFields].map(field => [field, 0]))};
     for (const field of subtotalFields) current[field] += debugGraphCostInteger(row?.[field]);
     for (const field of tokenFields) current[field] += Math.max(0, Number(row?.[field]) || 0);
     grouped.set(key, current);
@@ -44726,19 +44941,22 @@ function debugGraphCostAggregateRows(rows, keyFields) {
 function debugGraphCostSummaryForBuckets(buckets) {
   const summaries = (buckets || []).map(bucket => bucket?.costSummary).filter(Boolean);
   const result = {
-    totalMicroUsd: 0, knownMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
-    unpricedCount: 0, components: [], models: [], sources: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
+    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
+    unpricedCount: 0, components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
     backfill: {...jsDebugUsageAtomBackfill},
   };
   for (const summary of summaries) {
     result.totalMicroUsd += debugGraphCostInteger(summary.totalMicroUsd);
     result.knownMicroUsd += debugGraphCostInteger(summary.knownMicroUsd);
+    result.lowerMicroUsd += debugGraphCostInteger(summary.lowerMicroUsd ?? summary.knownMicroUsd);
+    result.upperMicroUsd += debugGraphCostInteger(summary.upperMicroUsd ?? summary.totalMicroUsd ?? summary.knownMicroUsd);
     result.pricedCount += debugGraphCostInteger(summary.pricedCount);
     result.complete = result.complete && summary.complete === true;
     result.unpricedCount += debugGraphCostInteger(summary.unpricedCount);
     result.components.push(...debugGraphCostRows(summary.components));
     result.models.push(...debugGraphCostRows(summary.models));
     result.sources.push(...debugGraphCostRows(summary.sources));
+    result.tmuxWindows.push(...debugGraphCostRows(summary.tmuxWindows));
     result.catalogRevision = summary.catalogRevision || result.catalogRevision;
     result.activeCatalogRevision = summary.activeCatalogRevision || result.activeCatalogRevision;
     result.freshness = summary.freshness || result.freshness;
@@ -44748,7 +44966,8 @@ function debugGraphCostSummaryForBuckets(buckets) {
   // misleadingly collapsed into one synthetic rate row.
   result.components = debugGraphCostAggregateRows(result.components, ['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
   result.models = debugGraphCostAggregateRows(result.models, ['provider', 'model', 'effort']);
-  result.sources = debugGraphCostAggregateRows(result.sources, ['root_agent', 'agent', 'source', 'tool', 'model']);
+  result.sources = debugGraphCostAggregateRows(result.sources, ['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
+  result.tmuxWindows = debugGraphCostAggregateRows(result.tmuxWindows, ['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind']);
   if (result.backfill.state !== 'complete') result.complete = false;
   return result;
 }
@@ -44766,6 +44985,17 @@ function debugGraphCostModelLabel(row) {
   return effort ? `${label} · ${effort}` : label;
 }
 
+function debugGraphCostUsageTokensText(tokens) {
+  const value = Math.max(0, Number(tokens) || 0);
+  return value > 0 ? debugGraphTokensText(value) : '0';
+}
+
+function debugGraphCostUsageUsdText(microUsd, tokens = 1) {
+  if (Math.max(0, Number(tokens) || 0) <= 0) return '$0';
+  const value = debugGraphCostInteger(microUsd);
+  return value > 0 ? debugGraphCostUsdText(value) : '$0';
+}
+
 function debugGraphCostBreakdownItems(row) {
   return [
     ['input', debugGraphCostText('debug.cost.input', 'Input')],
@@ -44780,7 +45010,7 @@ function debugGraphCostBreakdownItems(row) {
   }));
 }
 
-function debugGraphCostPricingLinksHtml(components, modelRow = null) {
+function debugGraphCostPricingSourceEntries(components, modelRow = null) {
   const provider = String(modelRow?.provider || '').trim();
   const model = String(modelRow?.model || '').trim();
   const links = new Map();
@@ -44793,30 +45023,46 @@ function debugGraphCostPricingLinksHtml(components, modelRow = null) {
       || debugGraphCostText('debug.cost.source', 'Pricing source');
     links.set(url, sourceLabel);
   }
-  if (!links.size) return '';
-  return `<span class="js-debug-cost-pricing-links">${[...links].map(([url, label]) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`).join(' · ')}</span>`;
+  return [...links].map(([url, label]) => ({url, label}));
+}
+
+function debugGraphCostPricingLinksHtml(components, modelRow = null) {
+  const links = debugGraphCostPricingSourceEntries(components, modelRow);
+  if (!links.length) return '';
+  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`).join(' · ')}</span>`;
+}
+
+function debugGraphCostAllPricingSourcesHtml(components) {
+  const links = debugGraphCostPricingSourceEntries(components);
+  if (!links.length) return '';
+  return `<section class="js-debug-cost-details-section js-debug-cost-pricing-sources">
+    <h2>${esc(debugGraphCostText('debug.cost.pricingSources', 'Pricing sources'))}</h2>
+    <ul class="js-debug-cost-report-list">${links.map(({url, label}) => `<li><strong>${esc(label)}:</strong> <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></li>`).join('')}</ul>
+  </section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
   if (!rows.length) return '';
   const maxTokens = Math.max(1, ...rows.map(row => Math.max(0, Number(row?.token_quantity) || 0)));
+  const usageKeys = ['input', 'cache', 'output', 'other'];
   const usageLabels = {
     input: debugGraphCostText('debug.cost.input', 'Input'),
     cache: debugGraphCostText('debug.cost.cached', 'Cached'),
     output: debugGraphCostText('debug.cost.output', 'Output'),
     other: debugGraphCostText('debug.cost.other', 'Other'),
   };
-  const legend = Object.entries(usageLabels).map(([key, label]) => `<span><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(label)}</span>`).join('');
   const report = options.report === true;
   const heading = esc(debugGraphCostText('debug.cost.modelUsages', 'Model Usages'));
-  return `<section class="js-debug-cost-model-usages${report ? ' js-debug-cost-details-section' : ''}">${report ? `<h2>${heading}</h2>` : `<h4>${heading}</h4>`}<div class="js-debug-cost-usage-legend" aria-label="${esc(debugGraphCostText('debug.summary', 'Legend'))}">${legend}</div><div class="js-debug-cost-usage-chart">${rows.map(row => {
+  const header = `<div class="js-debug-cost-usage-header" aria-hidden="true"><span class="js-debug-cost-usage-head-cell js-debug-cost-usage-head-cell--model">${esc(debugGraphCostText('debug.cost.model', 'Model'))}</span><span class="js-debug-cost-usage-head-cell js-debug-cost-usage-head-cell--bar"></span>${usageKeys.map(key => `<span class="js-debug-cost-usage-head-cell js-debug-cost-usage-head-cell--${esc(key)}"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</span>`).join('')}<span class="js-debug-cost-usage-head-cell js-debug-cost-usage-head-cell--total">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></div>`;
+  return `<section class="js-debug-cost-model-usages${report ? ' js-debug-cost-details-section' : ''}">${report ? `<h2>${heading}</h2>` : `<h4>${heading}</h4>`}<div class="js-debug-cost-usage-chart">${header}${rows.map(row => {
     const breakdown = debugGraphCostBreakdownItems(row);
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
     const barShare = Math.max(0, Math.min(100, (totalTokens / maxTokens) * 100));
     const segmentTotal = breakdown.reduce((total, item) => total + item.tokens, 0) || totalTokens || 1;
     const pricingLinks = debugGraphCostPricingLinksHtml(components, row);
-    const accessible = `${debugGraphCostModelLabel(row)}: ${debugGraphTokensText(totalTokens)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphTokensText(item.tokens)}`).join('; ')}`;
-    return `<article class="js-debug-cost-usage-row"><div class="js-debug-cost-usage-heading"><span><strong>${esc(debugGraphCostModelLabel(row))}</strong>${pricingLinks}</span><span>${esc(`${debugGraphTokensText(totalTokens)} · ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}</span></div><div class="js-debug-cost-usage-track" role="img" aria-label="${esc(accessible)}"><div class="js-debug-cost-usage-fill" style="--js-debug-cost-model-share:${barShare.toFixed(4)}%">${breakdown.filter(item => item.tokens > 0).map(item => `<span class="js-debug-cost-usage-segment js-debug-cost-usage-segment--${esc(item.key)}" style="--js-debug-cost-class-share:${((item.tokens / segmentTotal) * 100).toFixed(4)}%" title="${esc(`${usageLabels[item.key]}: ${debugGraphTokensText(item.tokens)} · ${debugGraphCostUsdText(item.microUsd)}`)}"></span>`).join('')}</div></div><ul class="js-debug-cost-usage-values">${breakdown.map(item => `<li><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(item.key)}" aria-hidden="true"></i><span>${esc(usageLabels[item.key])}</span><strong>${esc(debugGraphTokensText(item.tokens))}</strong><small>${esc(debugGraphCostUsdText(item.microUsd))}</small></li>`).join('')}</ul></article>`;
+    const accessible = `${debugGraphCostModelLabel(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostUsageUsdText(debugGraphCostMicroUsd(row), totalTokens)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostUsageUsdText(item.microUsd, item.tokens)}`).join('; ')}`;
+    const cells = breakdown.map(item => `<span class="js-debug-cost-usage-metric js-debug-cost-usage-metric--${esc(item.key)}"><strong>${esc(debugGraphCostUsageTokensText(item.tokens))}</strong><small>${esc(debugGraphCostUsageUsdText(item.microUsd, item.tokens))}</small></span>`).join('');
+    return `<article class="js-debug-cost-usage-row" aria-label="${esc(accessible)}"><div class="js-debug-cost-usage-model"><strong>${esc(debugGraphCostModelLabel(row))}</strong>${pricingLinks}</div><div class="js-debug-cost-usage-track" role="img" aria-label="${esc(accessible)}"><div class="js-debug-cost-usage-fill" style="--js-debug-cost-model-share:${barShare.toFixed(4)}%">${breakdown.filter(item => item.tokens > 0).map(item => `<span class="js-debug-cost-usage-segment js-debug-cost-usage-segment--${esc(item.key)}" style="--js-debug-cost-class-share:${((item.tokens / segmentTotal) * 100).toFixed(4)}%" title="${esc(`${usageLabels[item.key]}: ${debugGraphCostUsageTokensText(item.tokens)} · ${debugGraphCostUsageUsdText(item.microUsd, item.tokens)}`)}"></span>`).join('')}</div></div>${cells}<span class="js-debug-cost-usage-metric js-debug-cost-usage-metric--total"><strong>${esc(debugGraphCostUsageTokensText(totalTokens))}</strong><small>${esc(debugGraphCostUsageUsdText(debugGraphCostMicroUsd(row), totalTokens))}</small></span></article>`;
   }).join('')}</div></section>`;
 }
 
@@ -44868,6 +45114,13 @@ function debugGraphCostSourceLabel(row) {
   return [source, agent && agent !== root ? agent : '', tool].filter(Boolean).join(' · ') || root || debugGraphCostText('debug.cost.unknown', 'Unknown');
 }
 
+function debugGraphCostRowRangeUsdText(row) {
+  const lower = debugGraphCostInteger(row?.lower_micro_usd ?? row?.micro_usd);
+  const upper = Math.max(lower, debugGraphCostInteger(row?.upper_micro_usd ?? row?.micro_usd));
+  if (lower === upper) return debugGraphCostUsdText(lower);
+  return `${debugGraphCostUsdText(lower)} – ${debugGraphCostUsdText(upper)}`;
+}
+
 function debugGraphCostSubtotalText(row) {
   const parts = [
     ['input_micro_usd', debugGraphCostText('debug.cost.input', 'Input')],
@@ -44875,7 +45128,52 @@ function debugGraphCostSubtotalText(row) {
     ['output_micro_usd', debugGraphCostText('debug.cost.output', 'Output')],
     ['other_micro_usd', debugGraphCostText('debug.cost.other', 'Other')],
   ];
-  return `${debugGraphTokensText(row?.token_quantity)} · ${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`;
+  return `${debugGraphTokensText(row?.token_quantity)} · ${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostRowRangeUsdText(row)}`;
+}
+
+function debugGraphCostTmuxLabel(row) {
+  const explicit = String(row?.tmux_label || '').trim();
+  if (explicit) return explicit;
+  const session = String(row?.tmux_session || '').trim();
+  const windowLabel = String(row?.tmux_window_label || row?.tmux_window || '').trim();
+  const kind = String(row?.agent_kind || '').trim();
+  return [session, windowLabel || kind].filter(Boolean).join(':') || debugGraphCostSourceLabel(row);
+}
+
+function debugGraphCostTmuxBreakdownRows(rows) {
+  const grouped = new Map();
+  for (const row of rows || []) {
+    const key = String(row?.tmux_key || row?.root_thread_id || row?.source || debugGraphCostTmuxLabel(row)).trim() || 'unknown';
+    const current = grouped.get(key) || {
+      ...row,
+      token_quantity: 0,
+      micro_usd: 0,
+      lower_micro_usd: 0,
+      upper_micro_usd: 0,
+      input_micro_usd: 0,
+      cache_micro_usd: 0,
+      output_micro_usd: 0,
+      other_micro_usd: 0,
+    };
+    current.token_quantity += Math.max(0, Number(row?.token_quantity) || 0);
+    for (const field of ['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
+      current[field] += debugGraphCostInteger(row?.[field]);
+    }
+    grouped.set(key, current);
+  }
+  return [...grouped.values()].sort((left, right) => debugGraphCostInteger(right?.upper_micro_usd ?? right?.micro_usd) - debugGraphCostInteger(left?.upper_micro_usd ?? left?.micro_usd)
+    || debugGraphCostTmuxLabel(left).localeCompare(debugGraphCostTmuxLabel(right)));
+}
+
+function debugGraphCostTmuxBreakdownHtml(summary) {
+  const directRows = debugGraphCostRows(summary?.tmuxWindows);
+  const rows = directRows.length ? directRows : debugGraphCostTmuxBreakdownRows(summary.sources);
+  if (!rows.length) return '';
+  const heading = debugGraphCostText('debug.cost.byTmux', 'Cost by tmux window');
+  return `<section class="js-debug-cost-details-section js-debug-cost-tmux-breakdown">
+    <h2>${esc(heading)}</h2>
+    <ul class="js-debug-cost-source-tree" role="tree" aria-label="${esc(heading)}">${rows.map(row => `<li role="treeitem" aria-level="1" tabindex="0"><span class="js-debug-cost-source-label">${esc(debugGraphCostTmuxLabel(row))}</span><span class="js-debug-cost-source-subtotals">${esc(debugGraphCostSubtotalText(row))}</span></li>`).join('')}</ul>
+  </section>`;
 }
 
 function debugGraphCostSourceTreeHtml(rows) {
@@ -44911,9 +45209,10 @@ function debugGraphCostBackfillText(summary) {
 }
 
 function debugGraphCostDetailsModalHtml(summary, domain) {
-  const hasPricedUsage = summary.pricedCount > 0;
-  const exact = hasPricedUsage && summary.complete === true && summary.unpricedCount === 0;
-  const total = hasPricedUsage ? debugGraphCostUsdText(exact ? summary.totalMicroUsd : summary.knownMicroUsd) : '—';
+  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0;
+  const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
+  const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
+  const total = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
   const tokens = debugGraphCostTokenTotals(summary);
   const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
   return `<article class="js-debug-cost-modal-dialog js-debug-cost-report" role="dialog" aria-modal="true" aria-label="${esc(title)}">
@@ -44923,42 +45222,50 @@ function debugGraphCostDetailsModalHtml(summary, domain) {
     </div>
     <div class="js-debug-cost-report-body">
       <p class="meta-muted">${esc(debugGraphCostRangeText(domain))}</p>
-      <p>${esc(!hasPricedUsage ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage') : (exact ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total}) : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total})))}</p>
+      <p>${esc(!hasEstimatedUsage ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage') : (exact ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total}) : hasFiniteRange ? debugGraphCostText('debug.cost.range', `Estimated API list-price range ${total}`, {amount: total}) : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total})))}</p>
       <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.total', 'Summary'))}</h2>
         <ul class="js-debug-cost-report-list"><li><strong>${esc(debugGraphCostText('debug.cost.total', 'Estimated total'))}:</strong> ${esc(total)}</li><li><strong>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}:</strong> ${esc(debugGraphTokensText(tokens.total))}<ul><li>${esc(`${debugGraphCostText('debug.cost.input', 'Input')}: ${debugGraphTokensText(tokens.input)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.cache', 'Cache')}: ${debugGraphTokensText(tokens.cache)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.output', 'Output')}: ${debugGraphTokensText(tokens.output)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.other', 'Other')}: ${debugGraphTokensText(tokens.other)}`)}</li></ul></li></ul>
       </section>
       <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.catalogRevision', 'Pricing catalog'))}</h2>${debugGraphCostCatalogDetailsHtml(summary)}</section>
+      ${debugGraphCostTmuxBreakdownHtml(summary)}
       ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true})}
       ${debugGraphCostComponentDetailsHtml(summary.components)}
       ${debugGraphCostSourceTreeHtml(summary.sources)}
+      ${debugGraphCostAllPricingSourcesHtml(summary.components)}
     </div>
   </article>`;
 }
 
 function debugGraphCostSummaryHtml(buckets, domain) {
   const summary = debugGraphCostSummaryForBuckets(buckets);
-  const hasPricedUsage = summary.pricedCount > 0;
-  const exact = hasPricedUsage && summary.complete === true && summary.unpricedCount === 0;
-  const estimated = hasPricedUsage ? debugGraphCostUsdText(exact ? summary.totalMicroUsd : summary.knownMicroUsd) : '—';
+  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0;
+  const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
+  const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
+  const estimated = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
   const compact = debugGraphCostCompactTotals(summary);
   const tokens = debugGraphCostTokenTotals(summary);
-  const heading = hasPricedUsage ? `${exact ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';
-  const accessible = !hasPricedUsage
+  const heading = hasEstimatedUsage ? `${exact || hasFiniteRange ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';
+  const accessible = !hasEstimatedUsage
     ? 'No displayed usage has a selected price'
     : exact
     ? `Estimated API list-price total ${estimated} across displayed usage; open calculation and pricing sources`
-    : `Known estimated lower bound ${estimated}; some displayed usage is not estimated`;
+    : `Estimated API list-price range ${estimated}; unknown or incomplete displayed usage widens the range`;
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refreshHtml = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh aria-label="${esc(refreshLabel)}" title="${esc(jsDebugPricingRefreshState.error || refreshLabel)}"${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
   const refreshStatus = jsDebugPricingRefreshState.error || (jsDebugPricingRefreshState.inFlight ? (jsDebugPricingRefreshState.status || `${refreshLabel}…`) : '');
   const backfillStatus = debugGraphCostBackfillText(summary);
   const moreInfo = debugGraphCostText('debug.cost.moreInfo', 'More Info');
+  const compactRows = [
+    ['Input', compact.input === null ? null : debugGraphCostUsdText(compact.input), tokens.input],
+    ['Cache', compact.cache === null ? null : debugGraphCostUsdText(compact.cache), tokens.cache],
+    ['Output', compact.output === null ? null : debugGraphCostUsdText(compact.output), tokens.output],
+    ['Total', hasEstimatedUsage ? estimated : null, tokens.total],
+  ];
   return `<section class="js-debug-chart js-debug-cost-summary" data-js-debug-summary-group="costSummary">
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}</span>
         <span class="js-debug-chart-summary js-debug-cost-estimate">(${esc(heading)})</span>
-        <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-expanded="false" aria-haspopup="dialog" aria-label="${esc(accessible)}">${esc(moreInfo)}</button><template data-js-debug-cost-modal-template>${debugGraphCostDetailsModalHtml(summary, domain)}</template></span>
         ${refreshHtml}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="costSummary" aria-label="${esc(t('common.close'))} ${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}" title="${esc(t('common.close'))}">×</button>
       </div>
@@ -44967,8 +45274,9 @@ function debugGraphCostSummaryHtml(buckets, domain) {
       ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
     </div>
     <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
-      ${[['Input', compact.input, tokens.input], ['Cache', compact.cache, tokens.cache], ['Output', compact.output, tokens.output], ['Total', hasPricedUsage ? (exact ? summary.totalMicroUsd : summary.knownMicroUsd) : null, tokens.total]].map(([label, value, tokenCount]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : debugGraphCostUsdText(value))}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
+      ${compactRows.map(([label, value, tokenCount]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
     </dl>
+    <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-expanded="false" aria-haspopup="dialog" aria-label="${esc(accessible)}">${esc(moreInfo)}</button><template data-js-debug-cost-modal-template>${debugGraphCostDetailsModalHtml(summary, domain)}</template></span>
   </section>`;
 }
 
@@ -45166,6 +45474,7 @@ async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, re
     requestedRangeSeconds,
     requestedStartSeconds,
     error: '',
+    nextAutoRetryAtMs: 0,
   });
   return true;
 }
@@ -45185,6 +45494,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   jsDebugStatsPollState.pending = false;
   jsDebugStatsPollState.inFlight = true;
   let readinessRequest = null;
+  let historyRequestSuppressed = false;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
@@ -45198,34 +45508,39 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
     if (needsHistoryCoverage) {
       const state = jsDebugHistoryReadiness;
-      const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
-        && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
-        && Number(state.targetStartSeconds) === Number(targetStart)
-        && Number(state.targetEndSeconds) === Number(targetEnd)
-        && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
-      if (!currentRequestMatches) {
-        const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
-        beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
-          targetStartSeconds: targetStart,
-          targetEndSeconds: targetEnd,
-          requestedEndSeconds: requestWindow.endSeconds,
-          requestedResolutionSeconds: coverageResolution,
-          retry: state.phase === 'error',
-        });
+      if (state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) {
+        historyRequestSuppressed = true;
+      } else {
+        const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
+          && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+          && Number(state.targetStartSeconds) === Number(targetStart)
+          && Number(state.targetEndSeconds) === Number(targetEnd)
+          && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
+        if (!currentRequestMatches) {
+          const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
+          beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
+            targetStartSeconds: targetStart,
+            targetEndSeconds: targetEnd,
+            requestedEndSeconds: requestWindow.endSeconds,
+            requestedResolutionSeconds: coverageResolution,
+            retry: state.phase === 'error',
+          });
+        }
+        readinessRequest = jsDebugHistoryReadinessSnapshot();
+        await nextAnimationFrame();
+        if (!jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
       }
-      readinessRequest = jsDebugHistoryReadinessSnapshot();
-      await nextAnimationFrame();
-      if (!jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     }
     const historyEnd = readinessRequest
       ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
       : 0;
-    const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : targetStart;
+    const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : (historyRequestSuppressed ? 0 : targetStart);
     const tokenHistory = tokenResolution
       ? `&token_since=${encodeURIComponent(String(readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0)))}&token_resolution=${encodeURIComponent(String(tokenResolution))}&token_history_start=${encodeURIComponent(String(targetStart))}&token_history_end=0`
       : '';
+    const historyMode = historyRequestSuppressed ? '&history=0' : '';
     const requestSince = readinessRequest ? 0 : (jsDebugStatsServerSequence || 0);
-    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${tokenHistory}`, {cache: 'no-store'});
+    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${historyMode}${tokenHistory}`, {cache: 'no-store'});
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
     if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
@@ -45251,7 +45566,10 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     }
   } catch (error) {
     if (readinessRequest && jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) {
-      setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error)});
+      setJsDebugHistoryReadiness('error', {
+        error: jsDebugErrorText(error),
+        nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryDelayMs(readinessRequest.attemptCount),
+      });
     }
   } finally {
     jsDebugStatsPollState.inFlight = false;
@@ -45479,11 +45797,187 @@ function debugSystemCardHtml(title, body, options = {}) {
 function debugSystemServiceState(service = {}) {
   const pid = Number(service.pid || 0);
   if (pid <= 0) {
-    if (Number(service.restart_backoff_seconds || 0) > 0) return {label: 'Issue', tone: 'bad'};
-    return {label: 'Idle', tone: 'muted'};
+    if (Number(service.restart_backoff_seconds || 0) > 0) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
+    return {label: t('state.idle'), tone: 'muted'};
   }
-  if (service.healthy === false) return {label: 'Issue', tone: 'bad'};
-  return {label: 'Running', tone: 'good'};
+  if (service.healthy === false) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
+  return {label: t('debug.system.localServices.state.running'), tone: 'good'};
+}
+
+const DEBUG_SYSTEM_SERVICE_FRESH_MS = 60_000;
+const debugSystemLocalServicesState = {records: new Map(), signature: ''};
+const debugSystemLocalServiceFields = Object.freeze([
+  {key: 'status', labelKey: 'debug.system.localServices.field.status'},
+  {key: 'pid', labelKey: 'debug.system.localServices.field.pid'},
+  {key: 'started', labelKey: 'debug.system.localServices.field.started'},
+  {key: 'lastRan', labelKey: 'debug.system.localServices.field.lastRan'},
+  {key: 'uptime', labelKey: 'debug.system.localServices.field.uptime'},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu'},
+  {key: 'memory', labelKey: 'debug.system.localServices.field.memory'},
+  {key: 'clients', labelKey: 'debug.system.localServices.field.clients'},
+  {key: 'activeTask', labelKey: 'debug.system.localServices.field.activeTask'},
+  {key: 'lastFailure', labelKey: 'debug.system.localServices.field.lastFailure'},
+  {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
+]);
+
+function debugSystemServiceName(service = {}) {
+  return String(service.service || t('debug.system.localServices.serviceFallback')).trim() || t('debug.system.localServices.serviceFallback');
+}
+
+function debugSystemPrevText(value) {
+  const text = String(value == null || value === '' ? t('common.notAvailable') : value);
+  const prefix = t('debug.system.localServices.prevPrefix');
+  return text.startsWith(`${prefix} `) ? text : t('debug.system.localServices.prevValue', {value: text});
+}
+
+function debugSystemStripPrevText(value) {
+  const prefix = t('debug.system.localServices.prevPrefix').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(value || '').replace(new RegExp(`^${prefix}\\s*`), '');
+}
+
+function debugSystemQueueText(service = {}) {
+  const queues = service.queues && typeof service.queues === 'object' ? service.queues : {};
+  return Object.entries(queues).map(([key, count]) => `${key} ${count}`).join('\n');
+}
+
+function debugSystemLocalServiceRecord(name) {
+  let record = debugSystemLocalServicesState.records.get(name);
+  if (!record) {
+    record = {name, fields: new Map(), startedAt: 0, exitedAt: 0, lastPid: 0, running: false};
+    debugSystemLocalServicesState.records.set(name, record);
+  }
+  return record;
+}
+
+function debugSystemLocalServiceUpdateLifecycle(record, service = {}, nowSeconds) {
+  const pid = Number(service.pid || 0);
+  const running = pid > 0;
+  const serverStartedAt = Number(service.started_at || 0);
+  const uptimeSeconds = Number(service.uptime_seconds);
+  if (running) {
+    record.lastPid = pid;
+    record.exitedAt = 0;
+    record.startedAt = serverStartedAt > 0
+      ? serverStartedAt
+      : (Number.isFinite(uptimeSeconds) ? Math.max(0, nowSeconds - uptimeSeconds) : (record.running ? record.startedAt : nowSeconds));
+  } else if (record.running) {
+    record.exitedAt = nowSeconds;
+  }
+  record.running = running;
+}
+
+function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSeconds) {
+  const state = debugSystemServiceState(service);
+  const pid = Number(service.pid || 0);
+  const running = pid > 0;
+  const resources = service.resources && typeof service.resources === 'object' ? service.resources : {};
+  const previous = record.fields.get(fieldKey);
+  const previousDisplay = debugSystemStripPrevText(previous?.display || '');
+  const previousAvailable = previousDisplay && previousDisplay !== '—' && previousDisplay !== t('common.notAvailable');
+  const previousValue = () => previousAvailable ? {display: debugSystemPrevText(previousDisplay), identity: `prev:${previous?.identity || previousDisplay}`, previous: true} : null;
+  const valueOrPrevious = value => {
+    if (running) return value;
+    if (value.display && value.display !== '—' && value.display !== t('common.notAvailable')) return {display: debugSystemPrevText(value.display), identity: `prev:${value.identity}`, previous: true};
+    return previousValue() || value;
+  };
+  if (fieldKey === 'status') return {display: state.label, identity: state.label, tone: state.tone};
+  if (fieldKey === 'pid') {
+    if (running) return {display: String(pid), identity: String(pid)};
+    return record.lastPid > 0 ? {display: debugSystemPrevText(record.lastPid), identity: `prev:${record.lastPid}`, previous: true} : {display: '—', identity: 'empty'};
+  }
+  if (fieldKey === 'started') {
+    return record.startedAt > 0
+      ? {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `started:${record.startedAt}`, dynamic: true}
+      : {display: '—', identity: 'empty'};
+  }
+  if (fieldKey === 'lastRan') {
+    if (running && record.startedAt > 0) return {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `running:${record.startedAt}`, dynamic: true};
+    if (record.exitedAt > 0) return {display: t('debug.system.localServices.exitedAgo', {time: relativeTimeFormat(Math.max(0, nowSeconds - record.exitedAt))}), identity: `exited:${record.exitedAt}`, dynamic: true, previous: true};
+    return {display: '—', identity: 'empty'};
+  }
+  if (fieldKey === 'uptime') return valueOrPrevious({display: service.uptime_seconds == null ? '—' : debugGraphUptimeText(service.uptime_seconds), identity: String(service.uptime_seconds ?? '')});
+  if (fieldKey === 'cpu') return valueOrPrevious({display: resources.cpu_percent == null ? '—' : `${debugSystemNumber(resources.cpu_percent, 1)}%`, identity: String(resources.cpu_percent ?? '')});
+  if (fieldKey === 'memory') return valueOrPrevious({display: resources.rss_bytes == null ? '—' : debugGraphTerseBytesText(resources.rss_bytes), identity: String(resources.rss_bytes ?? '')});
+  if (fieldKey === 'clients') return valueOrPrevious({display: service.clients == null ? '—' : debugSystemNumber(service.clients), identity: String(service.clients ?? '')});
+  if (fieldKey === 'activeTask') return valueOrPrevious({display: service.active_task || '—', identity: String(service.active_task || '')});
+  if (fieldKey === 'lastFailure') return valueOrPrevious({display: service.last_failure || '—', identity: String(service.last_failure || '')});
+  if (fieldKey === 'queues') {
+    const queueText = debugSystemQueueText(service);
+    return valueOrPrevious({display: queueText || '—', identity: queueText});
+  }
+  return {display: '—', identity: 'empty'};
+}
+
+function debugSystemLocalServicesCardHtml() {
+  return `<section class="js-debug-system-card js-debug-system-card--wide" data-js-debug-local-services-card>
+    <h3>${esc(t('debug.system.localServices.title'))}</h3><div data-js-debug-local-services></div>
+  </section>`;
+}
+
+function debugSystemLocalServicesTableHtml(serviceNames = []) {
+  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table">
+    <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
+    <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}">—</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemLocalServiceCellMap(root) {
+  const cells = new Map();
+  root.querySelectorAll?.('[data-js-debug-service-cell]').forEach(cell => {
+    cells.set(`${cell.dataset.service || ''}\x1f${cell.dataset.field || ''}`, cell);
+  });
+  return cells;
+}
+
+function ensureDebugSystemLocalServicesTable(root, serviceNames) {
+  if (!root) return;
+  const signature = serviceNames.join('\x1f');
+  const table = root.querySelector('.js-debug-system-local-services-table');
+  if (table && root.dataset.signature === signature) return;
+  root.innerHTML = serviceNames.length ? debugSystemLocalServicesTableHtml(serviceNames) : `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  root.dataset.signature = signature;
+}
+
+function updateDebugSystemLocalServiceCell(cell, record, fieldKey, value, nowMs) {
+  const field = record.fields.get(fieldKey) || {display: '', identity: '', lastChangedAt: nowMs};
+  if (field.identity !== value.identity) field.lastChangedAt = nowMs;
+  field.display = value.display;
+  field.identity = value.identity;
+  record.fields.set(fieldKey, field);
+  if (cell.textContent !== value.display) cell.textContent = value.display;
+  cell.classList.toggle('js-debug-system-service-cell--prev', value.previous === true);
+  cell.classList.toggle('js-debug-system-service-cell--fresh', value.previous !== true && nowMs - field.lastChangedAt <= DEBUG_SYSTEM_SERVICE_FRESH_MS);
+  cell.classList.toggle('js-debug-system-service-cell--stale', value.previous === true || nowMs - field.lastChangedAt > DEBUG_SYSTEM_SERVICE_FRESH_MS);
+}
+
+function updateDebugSystemLocalServicesCard(card, payload = {}) {
+  const root = card?.querySelector?.('[data-js-debug-local-services]');
+  if (!root) return;
+  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
+  const incomingNames = services.map(debugSystemServiceName);
+  const retainedNames = [...debugSystemLocalServicesState.records.keys()].filter(name => !incomingNames.includes(name));
+  const serviceNames = [...incomingNames, ...retainedNames];
+  ensureDebugSystemLocalServicesTable(root, serviceNames);
+  const cells = debugSystemLocalServiceCellMap(root);
+  const nowMs = Date.now();
+  const nowSeconds = nowMs / 1000;
+  const servicesByName = new Map(services.map(service => [debugSystemServiceName(service), service]));
+  for (const name of serviceNames) {
+    const service = servicesByName.get(name) || {service: name, pid: 0};
+    const record = debugSystemLocalServiceRecord(name);
+    debugSystemLocalServiceUpdateLifecycle(record, service, nowSeconds);
+    const state = debugSystemServiceState(service);
+    const headState = root.querySelector(`[data-js-debug-service-state="${cssEscape(name)}"]`);
+    if (headState) {
+      headState.textContent = state.label;
+      headState.className = `js-debug-system-state js-debug-system-state--${state.tone}`;
+    }
+    for (const field of debugSystemLocalServiceFields) {
+      const cell = cells.get(`${name}\x1f${field.key}`);
+      if (!cell) continue;
+      updateDebugSystemLocalServiceCell(cell, record, field.key, debugSystemLocalServiceFieldValue(service, record, field.key, nowSeconds), nowMs);
+    }
+  }
 }
 
 function debugSystemRolesHtml(roles = {}) {
@@ -45497,30 +45991,6 @@ function debugSystemRolesHtml(roles = {}) {
       <td>${esc(debugSystemNumber(role?.follower_stale_reads))}</td>
     </tr>`).join('')}</tbody>
   </table></div>`;
-}
-
-function debugSystemServicesHtml(payload = {}) {
-  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
-  if (!services.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
-  return `<div class="js-debug-system-services">${services.map(service => {
-    const state = debugSystemServiceState(service);
-    const resources = service.resources && typeof service.resources === 'object' ? service.resources : {};
-    const queues = service.queues && typeof service.queues === 'object' ? service.queues : {};
-    const queueText = Object.entries(queues).map(([key, count]) => `${key} ${count}`).join(' · ');
-    return `<article class="js-debug-system-service">
-      <header><strong>${esc(service.service || 'service')}</strong><span class="js-debug-system-state js-debug-system-state--${state.tone}">${esc(state.label)}</span></header>
-      ${debugSystemRowsHtml([
-        ['PID', Number(service.pid || 0) || '—'],
-        ['Uptime', service.uptime_seconds == null ? '—' : debugGraphUptimeText(service.uptime_seconds)],
-        ['CPU', resources.cpu_percent == null ? '—' : `${debugSystemNumber(resources.cpu_percent, 1)}%`],
-        ['Memory', resources.rss_bytes == null ? '—' : debugGraphTerseBytesText(resources.rss_bytes)],
-        ['Clients', service.clients == null ? '—' : debugSystemNumber(service.clients)],
-        ['Queues', queueText || '—'],
-        ['Active task', service.active_task || '—'],
-        ['Last failure', service.last_failure || '—'],
-      ])}
-    </article>`;
-  }).join('')}</div>`;
 }
 
 function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
@@ -45585,7 +46055,7 @@ function debugSystemInnerHtml() {
       ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
     ])),
     debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
-    debugSystemCardHtml('Local services', debugSystemServicesHtml(payload), {wide: true}),
+    debugSystemLocalServicesCardHtml(),
     debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),
     debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(payload.top_background_work, 'worker'), {wide: true}),
   ];
@@ -45599,7 +46069,15 @@ function refreshDebugSystemViews() {
   for (const view of document.querySelectorAll('[data-js-debug-system]')) {
     const scrollTop = view.scrollTop;
     const scrollLeft = view.scrollLeft;
+    const oldLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
     view.innerHTML = debugSystemInnerHtml();
+    const newLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
+    let localServicesCard = newLocalServicesCard;
+    if (oldLocalServicesCard && newLocalServicesCard && jsDebugSystemState.payload) {
+      newLocalServicesCard.replaceWith(oldLocalServicesCard);
+      localServicesCard = oldLocalServicesCard;
+    }
+    if (jsDebugSystemState.payload) updateDebugSystemLocalServicesCard(localServicesCard, jsDebugSystemState.payload);
     restoreElementScrollPosition(view, scrollTop, scrollLeft);
     view.setAttribute('aria-busy', jsDebugSystemState.inFlight ? 'true' : 'false');
   }
@@ -45847,6 +46325,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionSeconds(requestedStartSeconds, requestedResolutionSeconds);
   if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds)) return false;
   const state = jsDebugHistoryReadiness;
+  if (!retry && state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
     && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
@@ -47435,7 +47914,7 @@ function sessionFileMissingTimeText() {
 }
 
 function sessionFileDisplayTimeText(mtime, options = {}) {
-  const mode = fileExplorerTreeDateModeForView(options.view || 'differ');
+  const mode = fileExplorerTreeDateModeForView(options.view || (options.differMode ? 'differ' : 'finder'));
   if (mode === 'none') return '';
   const text = mode === 'date' ? sessionFileTimeText(mtime)
     : mode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
@@ -60961,7 +61440,9 @@ function paneFrameControlsHtml(session, options = {}) {
   }));
   const includeActions = controlOptions.actions ?? isTmuxSession(session);
   const includeDetails = controlOptions.details === true;
-  const includeMinimize = controlOptions.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
+  const includeMinimize = controlOptions.minimize !== false
+    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session))
+    && !minimizeBlockedByPinned(session, options.slot || slotForItem(session));
   const includeExpand = controlOptions.expand !== false;
   const includePopout = controlOptions.popout === true;
   if (includeActions) {
@@ -61085,6 +61566,8 @@ const tmuxStatusModes = new Map();
 const terminalMobileAccessoryStates = new Map();
 const terminalMobileAccessoryKeyPresses = new Map();
 const terminalMobileAccessorySuppressedClicks = new Map();
+const terminalMobileAccessoryPaneObservers = new Map();
+const terminalMobileAccessoryModifierTapTimes = new Map();
 let terminalMobileAccessoryDismissalInstalled = false;
 let terminalMobileAccessoryResizeInstalled = false;
 // Clipboard reads must start while a touch still has browser user activation.  The shared
@@ -61131,6 +61614,8 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
   {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
   {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'shift', label: 'Shift', ariaLabel: 'Shift', modifier: 'shift'},
+  {action: 'cmd', label: 'Cmd', ariaLabel: 'Command / Meta', modifier: 'cmd'},
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
@@ -61159,8 +61644,10 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'tab', 'tmux-prefix', 'more']);
-const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'interrupt']);
+const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
+const terminalMobileAccessoryModifierDoubleTapMs = 450;
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'more']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'alt', 'cmd', 'interrupt']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -61170,7 +61657,23 @@ function terminalMobileAccessoryState(session, options = {}) {
   if (!key) return null;
   let state = terminalMobileAccessoryStates.get(key) || null;
   if (!state && options.create === true) {
-    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, launcherPress: null, suppressLauncherClick: false};
+    state = {
+      ctrl: false,
+      alt: false,
+      shift: false,
+      cmd: false,
+      ctrlLocked: false,
+      altLocked: false,
+      shiftLocked: false,
+      cmdLocked: false,
+      more: false,
+      open: false,
+      x: null,
+      y: null,
+      palettePress: null,
+      launcherPress: null,
+      suppressLauncherClick: false,
+    };
     terminalMobileAccessoryStates.set(key, state);
   }
   return state;
@@ -61196,13 +61699,14 @@ function terminalMobileAccessoryData(session, action) {
 
 function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
   const active = definition.modifier ? state?.[definition.modifier] === true : false;
+  const locked = definition.modifier ? state?.[terminalMobileAccessoryModifierLockedKey(definition.modifier)] === true : false;
   // Copy reads local terminal selection only, so it stays available to read-only share viewers;
   // every other palette key can change the terminal and keeps the existing write gate.
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const label = definition.labelKey ? t(definition.labelKey) : definition.label;
   const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
-  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
+  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
 function terminalMobileAccessoryDefinition(action) {
@@ -61233,8 +61737,111 @@ function terminalMobileAccessoryClamp(value, min, max) {
   return Math.max(min, Math.min(Math.max(min, max), value));
 }
 
+function terminalMobileAccessoryClampStateToPane(state, launcher, pane) {
+  if (!state || !launcher || !pane || (!Number.isFinite(state.x) && !Number.isFinite(state.y))) return false;
+  const paneRect = pane.getBoundingClientRect?.();
+  const paneWidth = Math.max(0, Number(paneRect?.width) || pane.clientWidth || 0);
+  const paneHeight = Math.max(0, Number(paneRect?.height) || pane.clientHeight || 0);
+  const launcherRect = launcher.getBoundingClientRect?.();
+  const launcherWidth = Math.max(0, Number(launcherRect?.width) || launcher.offsetWidth || 0);
+  const launcherHeight = Math.max(0, Number(launcherRect?.height) || launcher.offsetHeight || 0);
+  // Hidden/transitioning Dockview panes can briefly report zero size. Preserve the last good
+  // offset instead of collapsing a deliberately moved launcher to 0,0 during that transient.
+  if (paneWidth <= 0 || paneHeight <= 0 || launcherWidth <= 0 || launcherHeight <= 0) return false;
+  let changed = false;
+  if (Number.isFinite(state.x)) {
+    const x = terminalMobileAccessoryClamp(state.x, 0, paneWidth - launcherWidth);
+    if (x !== state.x) {
+      state.x = x;
+      changed = true;
+    }
+  }
+  if (Number.isFinite(state.y)) {
+    const y = terminalMobileAccessoryClamp(state.y, 0, paneHeight - launcherHeight);
+    if (y !== state.y) {
+      state.y = y;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function terminalMobileAccessoryObservePane(session, pane) {
+  const key = String(session || '');
+  if (!key) return;
+  const existing = terminalMobileAccessoryPaneObservers.get(key);
+  if (existing?.pane === pane) return;
+  existing?.observer?.disconnect?.();
+  terminalMobileAccessoryPaneObservers.delete(key);
+  if (!pane || typeof ResizeObserver !== 'function') return;
+  const observer = new ResizeObserver(() => {
+    if (!terminalMobileAccessoryState(key)) return;
+    syncTerminalMobileAccessoryState(key);
+  });
+  observer.observe(pane);
+  terminalMobileAccessoryPaneObservers.set(key, {pane, observer});
+}
+
 function terminalMobileAccessoryMoved(state) {
   return Number.isFinite(state?.x) || Number.isFinite(state?.y);
+}
+
+function terminalMobileAccessoryModifierLockedKey(modifier) {
+  return `${modifier}Locked`;
+}
+
+function terminalMobileAccessoryModifierTapKey(session, modifier) {
+  return `${String(session || '')}:${modifier}`;
+}
+
+function terminalMobileAccessoryModifierActive(state) {
+  return terminalMobileAccessoryModifierActions.some(modifier => state?.[modifier] === true);
+}
+
+function terminalMobileAccessoryClearModifiers(state, options = {}) {
+  if (!state) return false;
+  const includeLocked = options.includeLocked === true;
+  const session = String(options.session || '');
+  let changed = false;
+  for (const modifier of terminalMobileAccessoryModifierActions) {
+    const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+    if ((includeLocked || state[lockedKey] !== true) && state[modifier] === true) {
+      state[modifier] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+    if (includeLocked && state[lockedKey] === true) {
+      state[lockedKey] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function toggleTerminalMobileAccessoryModifier(session, modifier) {
+  const key = String(session || '');
+  const state = terminalMobileAccessoryState(key, {create: true});
+  if (!state || !terminalMobileAccessoryModifierActions.includes(modifier)) return false;
+  const tapKey = terminalMobileAccessoryModifierTapKey(key, modifier);
+  const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+  const now = Date.now();
+  const lastTap = Number(terminalMobileAccessoryModifierTapTimes.get(tapKey)) || 0;
+  if (state[lockedKey] === true) {
+    state[modifier] = false;
+    state[lockedKey] = false;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else if (state[modifier] === true && now - lastTap <= terminalMobileAccessoryModifierDoubleTapMs) {
+    state[modifier] = true;
+    state[lockedKey] = true;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else {
+    state[modifier] = !state[modifier];
+    if (state[modifier] === true) terminalMobileAccessoryModifierTapTimes.set(tapKey, now);
+    else terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  }
+  syncTerminalMobileAccessoryState(key);
+  return state[modifier] === true;
 }
 
 function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, barSize) {
@@ -61331,11 +61938,16 @@ function syncTerminalMobileAccessoryState(session) {
   const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
   const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
   if (!state || !bar) return false;
-  for (const modifier of ['ctrl', 'alt']) {
+  const pane = launcher?.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
+  terminalMobileAccessoryObservePane(session, pane);
+  if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
+  for (const modifier of terminalMobileAccessoryModifierActions) {
     const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
     if (!button) continue;
     const active = state[modifier] === true;
+    const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
     button.classList.toggle(CLS.active, active);
+    button.classList.toggle('locked', locked);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
   const more = bar.querySelector('.mobile-terminal-keyrow--more');
@@ -61358,7 +61970,6 @@ function syncTerminalMobileAccessoryState(session) {
   const positionedInline = Number.isFinite(state.x);
   const positionedBlock = Number.isFinite(state.y);
   if (state.open === true && launcher) {
-    const pane = launcher.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
     const paneRect = pane?.getBoundingClientRect?.();
     const launcherRect = launcher.getBoundingClientRect();
     if (paneRect) {
@@ -61386,7 +61997,8 @@ function syncTerminalMobileAccessoryState(session) {
 
 function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  if (!state || !['ctrl', 'alt', 'more', 'open'].includes(key)) return false;
+  if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
+  if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
   if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
   state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
@@ -61398,8 +62010,7 @@ function dismissTerminalMobileAccessory(session) {
   if (!state || state.open !== true) return false;
   state.open = false;
   state.more = false;
-  state.ctrl = false;
-  state.alt = false;
+  terminalMobileAccessoryClearModifiers(state, {includeLocked: true, session});
   state.launcherPress = null;
   syncTerminalMobileAccessoryState(session);
   return true;
@@ -61430,13 +62041,7 @@ function installTerminalMobileAccessoryResizeSync() {
   if (terminalMobileAccessoryResizeInstalled) return;
   terminalMobileAccessoryResizeInstalled = true;
   window.addEventListener('resize', () => {
-    for (const [session, state] of terminalMobileAccessoryStates) {
-      if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
-      const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
-      const pane = launcher?.closest?.('.tab-pane');
-      if (!launcher || !pane) continue;
-      state.x = terminalMobileAccessoryClamp(state.x, 0, pane.clientWidth - launcher.offsetWidth);
-      state.y = terminalMobileAccessoryClamp(state.y, 0, pane.clientHeight - launcher.offsetHeight);
+    for (const session of terminalMobileAccessoryStates.keys()) {
       syncTerminalMobileAccessoryState(session);
     }
   }, {passive: true});
@@ -61501,6 +62106,10 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session, {create: true});
   const pane = button?.closest?.('.tab-pane');
   if (!state || event.button > 0 || !button || !pane) return false;
+  // A real drag commonly produces no synthetic click. In that case the previous drag's click
+  // suppression must not eat this new intentional tap; suppression is only for the immediate
+  // click following the drag release that set it.
+  state.suppressLauncherClick = false;
   dismissTerminalMobileAccessories(session);
   const paneRect = pane.getBoundingClientRect();
   const launcherRect = button.getBoundingClientRect();
@@ -61573,24 +62182,119 @@ function consumeTerminalMobileAccessoryLauncherClick(session) {
   return true;
 }
 
+function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
+  const state = terminalMobileAccessoryState(session, {create: true});
+  const pane = bar?.closest?.('.tab-pane');
+  if (!state || event.button > 0 || !bar || !pane || state.open !== true) return false;
+  if (event.target?.closest?.('[data-terminal-mobile-key]')) return false;
+  const paneRect = pane.getBoundingClientRect();
+  const launcher = pane.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+  if (!launcher) return false;
+  const launcherRect = launcher?.getBoundingClientRect?.();
+  const startX = Number.isFinite(state.x) ? state.x : (Number(launcherRect?.left) || 0) - paneRect.left;
+  const startY = Number.isFinite(state.y) ? state.y : (Number(launcherRect?.top) || 0) - paneRect.top;
+  const press = {
+    pointerId: event.pointerId,
+    dragging: false,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX,
+    startY,
+    paneWidth: pane.clientWidth,
+    paneHeight: pane.clientHeight,
+    launcherWidth: launcher?.offsetWidth || 0,
+    launcherHeight: launcher?.offsetHeight || 0,
+  };
+  state.palettePress = press;
+  bar.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function moveTerminalMobileAccessoryPalettePress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  if (!press.dragging && Math.hypot(dx, dy) < terminalMobileAccessoryDragThresholdPx) return false;
+  press.dragging = true;
+  const position = terminalMobileAccessoryLauncherDragPosition(press, event);
+  state.x = position.x;
+  state.y = position.y;
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryPalettePress(session, event, bar) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  state.palettePress = null;
+  bar?.releasePointerCapture?.(event.pointerId);
+  if (!press.dragging) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+const terminalMobileAccessoryShiftMap = Object.freeze({
+  '`': '~',
+  '1': '!',
+  '2': '@',
+  '3': '#',
+  '4': '$',
+  '5': '%',
+  '6': '^',
+  '7': '&',
+  '8': '*',
+  '9': '(',
+  '0': ')',
+  '-': '_',
+  '=': '+',
+  '[': '{',
+  ']': '}',
+  '\\': '|',
+  ';': ':',
+  "'": '"',
+  ',': '<',
+  '.': '>',
+  '/': '?',
+});
+
+function terminalMobileAccessoryShiftText(text) {
+  if (text === '\t') return '\x1b[Z';
+  if (text.length !== 1) return text;
+  if (text >= 'a' && text <= 'z') return text.toUpperCase();
+  return terminalMobileAccessoryShiftMap[text] || text;
+}
+
+function terminalMobileAccessoryControlText(text) {
+  if (text.length !== 1) return text;
+  const code = text.charCodeAt(0);
+  if (code === 32) return '\x00';
+  if (code === 63) return '\x7f';
+  if (code >= 64 && code <= 95) return String.fromCharCode(code & 0x1f);
+  if (code >= 97 && code <= 122) return String.fromCharCode(code - 96);
+  return text;
+}
+
 function terminalDataWithMobileAccessoryModifiers(session, data) {
   const state = terminalMobileAccessoryState(session);
   const text = String(data || '');
-  if (!state || (!state.ctrl && !state.alt) || !text) return text;
+  if (!state || !text || !terminalMobileAccessoryModifierActive(state)) return text;
   const ctrl = state.ctrl === true;
-  const alt = state.alt === true;
-  state.ctrl = false;
-  state.alt = false;
+  const shift = state.shift === true;
+  const meta = state.alt === true || state.cmd === true;
+  terminalMobileAccessoryClearModifiers(state, {session});
   syncTerminalMobileAccessoryState(session);
   let value = text;
-  if (ctrl && text.length === 1) {
-    const code = text.charCodeAt(0);
-    if (code === 32) value = '\x00';
-    else if (code === 63) value = '\x7f';
-    else if (code >= 64 && code <= 95) value = String.fromCharCode(code & 0x1f);
-    else if (code >= 97 && code <= 122) value = String.fromCharCode(code - 96);
-  }
-  return alt ? `\x1b${value}` : value;
+  if (shift) value = terminalMobileAccessoryShiftText(value);
+  if (ctrl) value = terminalMobileAccessoryControlText(value);
+  return meta ? `\x1b${value}` : value;
 }
 
 async function pasteTerminalMobileAccessoryClipboard(session) {
@@ -61666,14 +62370,14 @@ function sendTerminalMobileAccessoryInput(session, action) {
     statusErr(terminalNotConnectedHtml(session));
     return false;
   }
-  if (action === 'ctrl' || action === 'alt' || action === 'more' || action === 'open') {
+  if (terminalMobileAccessoryModifierActions.includes(action) || action === 'more' || action === 'open') {
     toggleTerminalMobileAccessoryState(session, action);
     return true;
   }
   const data = terminalMobileAccessoryData(session, action);
   if (!data) return false;
   noteTerminalExplicitInput(session);
-  const sent = handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+  const sent = handleTerminalData(session, data, {mobileAccessory: true});
   if (!sent) statusErr(terminalNotConnectedHtml(session));
   return sent;
 }
@@ -64266,6 +64970,18 @@ function bindPanelControls(panel, session) {
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
   });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
+    beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-keybar]', (event, bar) => {
+    moveTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
     // Do not blur xterm/close the software keyboard before the click sends its byte.
     if (beginTerminalMobileAccessoryKeyPress(button.dataset.terminalMobileSession || session, button.dataset.terminalMobileKey, event, button)) return;
@@ -64670,7 +65386,6 @@ async function uploadFiles(session, fileList, options = {}) {
     }
     refreshTerminalAfterUpload(session);
     refreshOpenEventLogs();
-    refreshTranscripts({force: true});
   } catch (error) {
     showFileTransferError(error, {session, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
