@@ -2313,7 +2313,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
           details?.click();
           await window.__yolomuxTestWaitFor(
             () => details?.getAttribute('aria-expanded') === 'true',
-            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary details popover'},
+            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary details modal'},
           );
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const overlay = document.querySelector('[data-js-debug-cost-modal]');
@@ -2370,6 +2370,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
           popoverState.xClosed = details?.getAttribute('aria-expanded') === 'false' && document.activeElement === details;
           const compact = initial.card?.querySelector('.js-debug-cost-compact');
           const compactStyle = compact ? getComputedStyle(compact) : null;
+          const detailsStyle = details ? getComputedStyle(details) : null;
           // A 21rem graph column represents the narrow Side Pane/card width. The
           // card must reflow rather than overflow its display box.
           const grid = initial.graph?.querySelector('[data-js-debug-chart-grid]');
@@ -2415,6 +2416,11 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
               hasChart: Boolean(initial.card?.querySelector('.js-debug-line-chart, [data-js-debug-axis], [data-js-debug-bar-series]')),
               hasDirectLink: Boolean(initial.card?.querySelector(':scope > a, .js-debug-cost-compact a')),
               moreInfo: initial.card?.querySelector('[data-js-debug-cost-details]')?.textContent || '',
+              moreInfoTag: initial.card?.querySelector('[data-js-debug-cost-details]')?.tagName || '',
+              moreInfoClasses: initial.card?.querySelector('[data-js-debug-cost-details]')?.className || '',
+              moreInfoBorder: detailsStyle?.borderTopWidth || '',
+              moreInfoPadding: detailsStyle?.paddingInlineStart || '',
+              moreInfoBackground: detailsStyle?.backgroundColor || '',
             },
                 narrow: {
                   columns: narrowCompact ? getComputedStyle(narrowCompact).gridTemplateColumns : '',
@@ -2441,6 +2447,9 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["compact"]["totalCount"] == 4, metrics
     assert metrics["compact"]["hasChart"] is False, metrics
     assert metrics["compact"]["hasDirectLink"] is False and metrics["compact"]["moreInfo"] == "More Info", metrics
+    assert metrics["compact"]["moreInfoTag"] == "BUTTON" and "control-active-hover" in metrics["compact"]["moreInfoClasses"], metrics
+    assert metrics["compact"]["moreInfoBorder"] != "0px" and metrics["compact"]["moreInfoPadding"] != "0px", metrics
+    assert metrics["compact"]["moreInfoBackground"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
     # The condensed card stays one simple vertical accounting list.
     narrow_cells = metrics["narrow"]["cells"]
     assert len(narrow_cells) == 4 and len({cell["left"] for cell in narrow_cells}) == 1, metrics

@@ -622,11 +622,13 @@
   gap: var(--space-4);
 }
 .js-debug-cost-details {
-  border: 0;
-  padding: 0;
-  color: var(--text);
-  background: transparent;
-  font: inherit;
+  min-height: var(--compact-control-height);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-5);
+  color: var(--active-control-bg);
+  background: var(--active-control-soft-bg);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
   cursor: pointer;
 }
 .js-debug-cost-details:focus-visible {

@@ -44737,7 +44737,7 @@ function debugGraphCostSummaryHtml(buckets, domain) {
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title">${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}</span>
         <span class="js-debug-chart-summary js-debug-cost-estimate">(${esc(heading)})</span>
-        <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details" data-js-debug-cost-details aria-expanded="false" aria-haspopup="dialog" aria-label="${esc(accessible)}">${esc(moreInfo)}</button><template data-js-debug-cost-modal-template>${debugGraphCostDetailsModalHtml(summary, domain)}</template></span>
+        <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-expanded="false" aria-haspopup="dialog" aria-label="${esc(accessible)}">${esc(moreInfo)}</button><template data-js-debug-cost-modal-template>${debugGraphCostDetailsModalHtml(summary, domain)}</template></span>
         ${refreshHtml}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="costSummary" aria-label="${esc(t('common.close'))} ${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}" title="${esc(t('common.close'))}">×</button>
       </div>
@@ -45524,7 +45524,7 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
     graph.className = debugGraphClassName(nowMs);
     graph.innerHTML = debugGraphInnerHtml(nowMs);
     restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
-    bindDebugCostSummaryPopovers(graph);
+    bindDebugCostSummaryModalButtons(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
@@ -45576,7 +45576,7 @@ function openDebugCostSummaryModal(anchor) {
   overlay.querySelector('[data-js-debug-cost-modal-close]')?.focus?.({preventScroll: true});
 }
 
-function bindDebugCostSummaryPopovers(graph) {
+function bindDebugCostSummaryModalButtons(graph) {
   if (!graph) return;
   graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
     if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
@@ -45983,7 +45983,7 @@ function handleDebugGraphControlEvent(event, panel) {
 function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
-  bindDebugCostSummaryPopovers(panel.querySelector('[data-js-debug-graph]'));
+  bindDebugCostSummaryModalButtons(panel.querySelector('[data-js-debug-graph]'));
   syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
   panel.addEventListener('pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
