@@ -7493,6 +7493,141 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["pgUp"]["top"] < metrics["right"]["top"] < metrics["pgDown"]["top"], metrics
 
 
+def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+    )
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1&layout=slot1&tabs=slot1:1",
+            sessions=["1"],
+            terminal_css=".terminal { width: 640px; height: 420px; }",
+            grid_width=760,
+            grid_height=560,
+        )
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return typeof terminalMobileAccessoryState === 'function' && document.querySelector('[data-terminal-mobile-toggle=\"1\"]') !== null"
+            )
+        )
+        metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const launcher = document.querySelector('[data-terminal-mobile-toggle="1"]');
+            const bar = document.querySelector('[data-terminal-mobile-keybar="1"]');
+            const pane = launcher?.closest('.tab-pane');
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height};
+            };
+            const stateSnapshot = () => ({...terminalMobileAccessoryState('1')});
+            const tap = node => {
+              const rect = node.getBoundingClientRect();
+              const x = rect.left + rect.width / 2;
+              const y = rect.top + rect.height / 2;
+              const init = {bubbles: true, cancelable: true, pointerId: 71, pointerType: 'touch', button: 0, buttons: 1, clientX: x, clientY: y, isPrimary: true};
+              node.dispatchEvent(new PointerEvent('pointerdown', init));
+              node.dispatchEvent(new PointerEvent('pointerup', {...init, buttons: 0}));
+              node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
+            };
+            const dragLauncherTo = (x, y) => {
+              const rect = launcher.getBoundingClientRect();
+              const startX = rect.left + rect.width / 2;
+              const startY = rect.top + rect.height / 2;
+              const pointerId = 72;
+              const base = {bubbles: true, cancelable: true, pointerId, pointerType: 'touch', button: 0, buttons: 1, isPrimary: true};
+              launcher.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
+              launcher.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
+              launcher.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
+              launcher.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
+            };
+            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            (async () => {
+              const coarse = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+              launcher.setPointerCapture = () => {};
+              launcher.releasePointerCapture = () => {};
+              const initial = {launcher: box(launcher), barHidden: bar.hidden, state: stateSnapshot()};
+              tap(launcher);
+              await settle();
+              const opened = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                label: launcher.getAttribute('aria-label'),
+                expanded: launcher.getAttribute('aria-expanded'),
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              const paneRect = pane.getBoundingClientRect();
+              dragLauncherTo(paneRect.left + 18, paneRect.top + 18);
+              await settle();
+              const dragged = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              tap(launcher);
+              await settle();
+              const closed = {
+                launcher: box(launcher),
+                text: launcher.textContent,
+                label: launcher.getAttribute('aria-label'),
+                expanded: launcher.getAttribute('aria-expanded'),
+                hidden: bar.hidden,
+                state: stateSnapshot(),
+              };
+              tap(launcher);
+              await settle();
+              const reopened = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              done({coarse, pane: box(pane), initial, opened, dragged, closed, reopened, errors: window.__bootErrors || []});
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+    assert metrics.get("error") is None, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["coarse"] is True, metrics
+    assert metrics["initial"]["barHidden"] is True and metrics["initial"]["state"]["x"] is None, metrics
+    assert metrics["opened"]["text"] == "×" and metrics["opened"]["expanded"] == "true", metrics
+    assert metrics["opened"]["hidden"] is False and metrics["opened"]["placement"] == "above", metrics
+    assert 0 <= metrics["opened"]["launcher"]["top"] - metrics["opened"]["bar"]["bottom"] <= 16, metrics
+    assert metrics["dragged"]["hidden"] is False and metrics["dragged"]["text"] == "×", metrics
+    assert metrics["dragged"]["placement"] == "below", metrics
+    assert metrics["dragged"]["state"]["x"] <= 5 and metrics["dragged"]["state"]["y"] <= 5, metrics
+    assert metrics["dragged"]["bar"]["top"] >= metrics["dragged"]["launcher"]["bottom"], metrics
+    assert metrics["dragged"]["bar"]["left"] >= metrics["pane"]["left"] - 0.5 and metrics["dragged"]["bar"]["right"] <= metrics["pane"]["right"] + 0.5, metrics
+    assert metrics["closed"]["hidden"] is True and metrics["closed"]["text"] == "⌨" and metrics["closed"]["expanded"] == "false", metrics
+    assert metrics["closed"]["state"]["x"] == metrics["dragged"]["state"]["x"], metrics
+    assert metrics["closed"]["state"]["y"] == metrics["dragged"]["state"]["y"], metrics
+    assert metrics["reopened"]["hidden"] is False and metrics["reopened"]["text"] == "×", metrics
+    assert metrics["reopened"]["placement"] == "below", metrics
+    assert metrics["reopened"]["state"]["x"] == metrics["dragged"]["state"]["x"], metrics
+    assert metrics["reopened"]["state"]["y"] == metrics["dragged"]["state"]["y"], metrics
+
+
 def test_phone_single_pane_uses_one_pixel_active_ring_without_changing_tablets(browser, tmp_path):
     page = tmp_path / "phone-single-pane-ring.html"
     load_static_html_fixture(

@@ -60988,11 +60988,24 @@ function terminalMobileAccessoryDefinition(action) {
   return [...terminalMobileAccessoryKeyDefs, ...terminalMobileAccessoryMoreKeyDefs].find(item => item.action === action) || null;
 }
 
-function terminalMobileAccessoryPositionStyle(state) {
+function terminalMobileAccessoryLauncherPosition(state) {
   const x = Number.isFinite(state?.x) ? Math.max(0, Math.round(state.x)) : null;
   const y = Number.isFinite(state?.y) ? Math.max(0, Math.round(state.y)) : null;
-  if (x === null && y === null) return '';
-  return ` style="${x === null ? '' : `inset-inline-start:${x}px;inset-inline-end:auto;`}${y === null ? '' : `inset-block-start:${y}px;inset-block-end:auto;transform:none;`}"`;
+  return {
+    positionedInline: x !== null,
+    positionedBlock: y !== null,
+    insetInlineStart: x === null ? '' : `${x}px`,
+    insetInlineEnd: x === null ? '' : 'auto',
+    insetBlockStart: y === null ? '' : `${y}px`,
+    insetBlockEnd: y === null ? '' : 'auto',
+    transform: y === null ? '' : 'none',
+  };
+}
+
+function terminalMobileAccessoryPositionStyle(state) {
+  const position = terminalMobileAccessoryLauncherPosition(state);
+  if (!position.positionedInline && !position.positionedBlock) return '';
+  return ` style="${position.positionedInline ? `inset-inline-start:${position.insetInlineStart};inset-inline-end:${position.insetInlineEnd};` : ''}${position.positionedBlock ? `inset-block-start:${position.insetBlockStart};inset-block-end:${position.insetBlockEnd};transform:${position.transform};` : ''}"`;
 }
 
 function terminalMobileAccessoryClamp(value, min, max) {
@@ -61114,13 +61127,12 @@ function syncTerminalMobileAccessoryState(session) {
     launcher.setAttribute('aria-label', open ? t('shortcuts.close') : t('common.keyboardShortcuts'));
     launcher.textContent = open ? '×' : '⌨';
     launcher.classList.toggle('mobile-terminal-key-launcher--open', open);
-    const launcherInline = Number.isFinite(state.x);
-    const launcherBlock = Number.isFinite(state.y);
-    launcher.style.insetInlineStart = launcherInline ? `${Math.max(0, Math.round(state.x))}px` : '';
-    launcher.style.insetInlineEnd = launcherInline ? 'auto' : '';
-    launcher.style.insetBlockStart = launcherBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
-    launcher.style.insetBlockEnd = launcherBlock ? 'auto' : '';
-    launcher.style.transform = launcherBlock ? 'none' : '';
+    const position = terminalMobileAccessoryLauncherPosition(state);
+    launcher.style.insetInlineStart = position.insetInlineStart;
+    launcher.style.insetInlineEnd = position.insetInlineEnd;
+    launcher.style.insetBlockStart = position.insetBlockStart;
+    launcher.style.insetBlockEnd = position.insetBlockEnd;
+    launcher.style.transform = position.transform;
   }
   const positionedInline = Number.isFinite(state.x);
   const positionedBlock = Number.isFinite(state.y);
