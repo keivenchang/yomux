@@ -3751,6 +3751,7 @@ function cycleSessionRepoDisplay(session, info, direction) {
 function resetLayoutStatusSurface() {
   statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
   statusEl.removeAttribute('data-layout-status-kind');
+  delete statusEl.dataset.layoutStatusKind;
 }
 
 function statusErr(html) {
@@ -8342,6 +8343,13 @@ function setTabPinned(item, pinned) {
     next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);
   }
   applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
+  const slot = slotForItem(resolved, layoutSlots);
+  const pinnedInSlot = slot ? paneTabs(slot, layoutSlots).filter(tabIsPinned) : [];
+  if (pinned && pinnedInSlot.length >= maxTabsPerPane() && typeof showLayoutStatus === 'function') {
+    showLayoutStatus(pinnedPaneAtCapStatus(pinnedInSlot, maxTabsPerPane()), 'advisory');
+    return true;
+  }
+  if (typeof resetLayoutStatusSurface === 'function') resetLayoutStatusSurface();
   statusEl.textContent = pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)});
   return true;
 }
@@ -28163,7 +28171,11 @@ function paneCapacityCheckForInsert(slot, incomingTabs = [], keepItem = null, sl
   if (overflow <= 0) return {ok: true, cap, overflow: 0, evicted: [], finalTabs: tabs, reason: ''};
   const evictable = tabs.filter(item => tabIsEvictableForCap(item, keep));
   if (!evictable.length) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
-  const byLeastRecent = [...evictable].sort((a, b) => (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0));
+  const originalIndex = new Map(tabs.map((item, index) => [item, index]));
+  const byLeastRecent = [...evictable].sort((a, b) => {
+    const delta = (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0);
+    return delta || ((originalIndex.get(a) || 0) - (originalIndex.get(b) || 0));
+  });
   const evicted = byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
   if (evicted.length < overflow) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
   return {ok: true, cap, overflow, evicted, finalTabs: tabs.filter(item => !evicted.includes(item)), reason: ''};
@@ -28176,14 +28188,38 @@ function tabsToEvictForCap(tabs, keepItem) {
 }
 
 function paneCapacityRefusalStatus(item, capacity, targetSlot = '') {
+  return paneCapacityRefusalStatusForItems([item], capacity, targetSlot);
+}
+
+function layoutItemLabels(items = []) {
+  return (Array.isArray(items) ? items : [items]).filter(isLayoutItem).map(itemLabel).join(', ');
+}
+
+function paneCapacityRefusalStatusForItems(items, capacity, targetSlot = '') {
   const statusKey = capacity?.reason === 'all-pinned'
     ? 'layout.status.paneFullPinned'
     : 'layout.status.nothingEvictable';
   return t(statusKey, {
-    item: itemLabel(item),
+    item: layoutItemLabels(items) || targetSlot || t('layout.zone.middle'),
     pane: targetSlot || t('layout.zone.middle'),
     limit: capacity?.cap || maxTabsPerPane(),
   });
+}
+
+function pinnedMinimizeBlockedStatus(items) {
+  return t('layout.status.pinnedMinimizeBlocked', {items: layoutItemLabels(items) || t('tab.pinned')});
+}
+
+function pinnedPaneAtCapStatus(items, cap = maxTabsPerPane()) {
+  return t('layout.status.pinnedPaneAtCap', {items: layoutItemLabels(items) || t('tab.pinned'), limit: cap});
+}
+
+function pinnedTabsInSlot(slot, slots = layoutSlots) {
+  return paneTabs(slot, slots).filter(tabIsPinned);
+}
+
+function unpinnedTabsInSlot(slot, slots = layoutSlots) {
+  return paneTabs(slot, slots).filter(item => !tabIsPinned(item));
 }
 
 function dropIntentCapacityCheckForSession(session, intent, sourceSlot = null) {
@@ -28229,7 +28265,7 @@ function canPaneExpand(item, slots = layoutSlots) {
   return layoutSlotKeys(slots).some(slot => (
     slot !== targetSlot
     && !slotIsSidePane(slot, slots)
-    && paneTabsForGenericActions(slot, slots).length > 0
+    && unpinnedTabsInSlot(slot, slots).length > 0
   ));
 }
 
@@ -28237,28 +28273,63 @@ function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
   if (narrowPaneFrameActionTargetsTab(item)) {
+    if (tabIsPinned(item)) {
+      showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
+      return;
+    }
     removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
     return;
   }
-  if (narrowSingleColumnMode()) return;
+  if (narrowSingleColumnMode()) {
+    if (tabIsPinned(item)) showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
+    return;
+  }
   if (slotIsSidePane(sourceSlot)) {
+    const pinnedSideTabs = paneTabs(sourceSlot).filter(tabIsPinned);
+    if (pinnedSideTabs.length) {
+      showLayoutStatus(pinnedMinimizeBlockedStatus(pinnedSideTabs), 'danger');
+      return;
+    }
     removePaneFromLayout(item);
     return;
   }
-  const minimizedTabs = paneTabsForGenericActions(sourceSlot);
+  const sourceTabs = paneTabsForGenericActions(sourceSlot);
+  const pinnedSourceTabs = sourceTabs.filter(tabIsPinned);
+  const minimizedTabs = sourceTabs.filter(tab => !tabIsPinned(tab));
+  if (!minimizedTabs.length) {
+    showLayoutStatus(pinnedMinimizeBlockedStatus(sourceTabs), 'danger');
+    return;
+  }
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
   if (!targetSlot || !minimizedTabs.length) {
+    if (pinnedSourceTabs.length) {
+      showLayoutStatus(pinnedMinimizeBlockedStatus(pinnedSourceTabs), 'danger');
+      return;
+    }
     removePaneFromLayout(item);
     return;
   }
   const targetActive = activeItemForSide(targetSlot);
-  const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  const targetTabs = appendUniqueItems(paneTabsForGenericActions(targetSlot, next), minimizedTabs);
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, targetTabs, targetActive, next);
+  const next = pinnedSourceTabs.length
+    ? cloneLayoutSlots(layoutSlots)
+    : layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
+  if (pinnedSourceTabs.length) {
+    next[sourceSlot] = paneStateWithTabsForSlot(sourceSlot, pinnedSourceTabs, activeItemForSide(sourceSlot), next);
+  }
+  const capacity = paneCapacityCheckForInsert(targetSlot, minimizedTabs, null, next, {keepItems: minimizedTabs});
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(minimizedTabs, capacity, targetSlot), 'danger');
+    return;
+  }
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive, next);
+  const messages = [t('layout.status.minimized', {items: minimizedTabs.map(itemLabel).join(', ')})];
+  if (capacity.evicted.length) {
+    messages.push(t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}));
+  }
   applyLayoutSlots(next, {
-    focusSession: targetActive || targetTabs[0],
+    focusSession: targetActive || capacity.finalTabs[0] || pinnedSourceTabs[0],
     prune: false,
-    message: t('layout.status.minimized', {items: minimizedTabs.map(itemLabel).join(', ')}),
+    message: messages.filter(Boolean).join('; '),
   });
 }
 
@@ -28267,18 +28338,39 @@ function expandPaneFromLayout(item) {
   if (!targetSlot || !canPaneExpand(item)) return;
   const active = activeItemForSide(targetSlot);
   if (!active) return;
-  const targetTabs = appendUniqueItems([], paneTabsForGenericActions(targetSlot));
+  const incomingTabs = [];
   for (const slot of layoutSlotKeys()) {
     if (slot === targetSlot) continue;
-    appendUniqueItems(targetTabs, paneTabsForGenericActions(slot));
+    appendUniqueItems(incomingTabs, unpinnedTabsInSlot(slot));
   }
-  const content = emptyLayoutSlots();
-  content[targetSlot] = paneStateWithTabs(targetTabs, active, paneRoleDefinition(paneRoleGeneric));
-  content[layoutTreeKey] = leafNode(targetSlot);
-  const next = layoutWithPreservedSidePanes(content);
+  if (!incomingTabs.length) return;
+  const capacity = paneCapacityCheckForInsert(targetSlot, incomingTabs, active, layoutSlots);
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(incomingTabs, capacity, targetSlot), 'danger');
+    return;
+  }
+  if (!incomingTabs.some(tab => capacity.finalTabs.includes(tab))) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(incomingTabs, {
+      ...capacity,
+      ok: false,
+      reason: 'nothing-evictable',
+    }, targetSlot), 'danger');
+    return;
+  }
+  const next = cloneLayoutSlots(layoutSlots);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, active, next);
+  for (const slot of layoutSlotKeys(next)) {
+    if (slot === targetSlot || slotIsSidePane(slot, next)) continue;
+    const pinnedTabs = pinnedTabsInSlot(slot, next);
+    next[slot] = pinnedTabs.length
+      ? paneStateWithTabsForSlot(slot, pinnedTabs, pinnedTabs[0], next)
+      : emptyPaneState(paneRoleForSlot(slot, next));
+  }
   applyLayoutSlots(next, {
     focusSession: active,
     prune: false,
+    preserveMissingSidePane: sidePaneSlots(next).length > 0,
+    preservePlaceholderSlots: true,
     message: t('layout.status.expanded', {item: itemLabel(active)}),
   });
 }

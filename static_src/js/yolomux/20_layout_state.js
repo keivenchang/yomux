@@ -1546,6 +1546,13 @@ function setTabPinned(item, pinned) {
     next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);
   }
   applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
+  const slot = slotForItem(resolved, layoutSlots);
+  const pinnedInSlot = slot ? paneTabs(slot, layoutSlots).filter(tabIsPinned) : [];
+  if (pinned && pinnedInSlot.length >= maxTabsPerPane() && typeof showLayoutStatus === 'function') {
+    showLayoutStatus(pinnedPaneAtCapStatus(pinnedInSlot, maxTabsPerPane()), 'advisory');
+    return true;
+  }
+  if (typeof resetLayoutStatusSurface === 'function') resetLayoutStatusSurface();
   statusEl.textContent = pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)});
   return true;
 }

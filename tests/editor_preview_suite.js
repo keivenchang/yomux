@@ -730,6 +730,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }, 'minus removes only the selected tab and keeps the remaining single-column view visible');
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['1', '2']},
+    });
+    api.setPinnedTabsForTest(['1']);
+    api.minimizePaneFromLayout('1');
+    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['1', '2']},
+    }, 'one-column minimize refuses a selected pinned tab instead of hiding it');
+    assert.equal(api.statusKindForTest(), 'danger', 'one-column pinned minimize reports a visible danger status');
+    api.setPinnedTabsForTest([]);
+    api.setLayoutSlotsForTest({
+      __tree: {slot: 'left'},
       left: {active: '1', tabs: [api.finderItemId, '1', '2']},
     });
     api.closePaneFrameItem('1');

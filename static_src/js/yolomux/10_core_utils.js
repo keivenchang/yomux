@@ -1572,6 +1572,7 @@ function cycleSessionRepoDisplay(session, info, direction) {
 function resetLayoutStatusSurface() {
   statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
   statusEl.removeAttribute('data-layout-status-kind');
+  delete statusEl.dataset.layoutStatusKind;
 }
 
 function statusErr(html) {

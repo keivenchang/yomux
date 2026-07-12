@@ -4670,6 +4670,69 @@ def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_status(browse
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
+def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3,4&layout=row@50(left,right)&tabs=left:1,2,3;right:4",
+        sessions=["1", "2", "3", "4"],
+    )
+    wait_for_dockview(browser, min_tabs=4)
+    wait_for_dockview_tab_geometry(browser, min_tabs=4)
+    mixed = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        setTabPinned('1', true);
+        minimizePaneFromLayout('3');
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          done({
+            left: paneTabs('left'),
+            right: paneTabs('right'),
+            status: document.getElementById('status').textContent,
+            kind: document.getElementById('status').dataset.layoutStatusKind || '',
+          });
+        }));
+        """
+    )
+    assert mixed["left"] == ["1"], mixed
+    assert mixed["right"] == ["4", "2", "3"], mixed
+    assert mixed["kind"] == "", mixed
+    assert "minimized" in mixed["status"], mixed
+
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2,3&layout=row@50(left,right)&tabs=left:1,2;right:3",
+        sessions=["1", "2", "3"],
+    )
+    wait_for_dockview(browser, min_tabs=3)
+    wait_for_dockview_tab_geometry(browser, min_tabs=3)
+    refused = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        setTabPinned('1', true);
+        setTabPinned('2', true);
+        const before = JSON.stringify({left: paneTabs('left'), right: paneTabs('right')});
+        minimizePaneFromLayout('1');
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const status = document.getElementById('status');
+          done({
+            before,
+            after: JSON.stringify({left: paneTabs('left'), right: paneTabs('right')}),
+            text: status.textContent,
+            classes: Array.from(status.classList),
+            kind: status.dataset.layoutStatusKind || '',
+          });
+        }));
+        """
+    )
+    assert refused["before"] == refused["after"], refused
+    assert refused["kind"] == "danger", refused
+    assert "cannot be minimized" in refused["text"], refused
+    assert "layout-status-visible" in refused["classes"], refused
+    assert "layout-status-danger" in refused["classes"], refused
+
+
 def test_dockview_first_pinned_tab_drags_after_second_pinned_tab(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
     wait_for_dockview(browser, min_tabs=3)

@@ -1555,3 +1555,9 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 - YO!agent now routes persisted messages, streaming messages, and the synthetic current-activity/Recent-agents snapshot through one timestamp-ordered timeline. A newer answer can no longer render above an older activity snapshot merely because the snapshot was appended as special chrome after the transcript.
 - The regression reproduces an older persisted answer, a 7:02:38 PM activity snapshot, and a 7:11:52 PM answer, then proves the visible order is chronological with the newest answer last.
+
+## 2026-07-12 Pinned tabs and pane-cap completion
+
+- Completed and removed `DOIT.pinned-tab-limits.md`. Pinned tabs now stay resident in their pane: minimize refuses all-pinned and one-column pinned cases with the danger status, Generic minimize moves only unpinned tabs, Vertical Side Pane minimize refuses pinned dual-role residents, and Expand gathers only unpinned tabs while preserving panes that still hold pinned tabs.
+- Minimize and Expand now use the shared per-pane capacity owner. Minimize into a capped target evicts only target-side eligible LRU tabs and keeps every just-minimized tab; if the target is all-pinned or otherwise unevictable, the whole minimize is refused with no partial layout change. LRU ties now evict deterministically in pane order, and the kept/incoming active tab is never evicted even when it has the oldest timestamp.
+- Pinning a pane up to `appearance.max_tabs_per_pane` shows an advisory status; unpinning clears the advisory. Lowering the cap below existing pinned tabs faithfully preserves restored/share/URL layouts without load-time error spam, then refuses future incoming tabs unless eligible unpinned overflow can be shrunk. README and `docs/specs/GUI.md` document the behavior and test owners.
