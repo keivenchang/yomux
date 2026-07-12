@@ -9033,10 +9033,13 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   box-shadow: var(--shadow-elevated);
   font: 700 var(--ui-font-size)/1 var(--ui-font);
-  touch-action: manipulation;
+  touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+}
+.mobile-terminal-key-launcher--open {
+  font-size: 20px;
 }
 /* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
    not a permanent row, so an idle terminal keeps its full visible height. */
@@ -9052,7 +9055,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   gap: var(--space-4);
   width: min(18rem, calc(100vw - var(--space-12)));
   max-height: calc(100% - var(--space-12));
-  padding: calc(var(--space-5) + 22px) var(--space-5) var(--space-5);
+  padding: var(--space-5);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
@@ -9064,46 +9067,11 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .mobile-terminal-keybar[hidden] {
   display: none;
 }
-.mobile-terminal-key-close {
-  position: absolute;
-  inset-block-start: var(--space-3);
-  inset-inline-end: var(--space-3);
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-control);
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: transparent;
-  font: 700 20px/1 var(--ui-font);
-  touch-action: manipulation;
-}
-.mobile-terminal-key-close:hover,
-.mobile-terminal-key-close:focus-visible {
-  background: color-mix(in srgb, var(--text) 12%, transparent);
-}
-.mobile-terminal-key-drag {
-  width: 36px;
-  min-height: 36px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  background: transparent;
-  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
-  cursor: grab;
-  touch-action: none;
-}
-.mobile-terminal-key-drag:active {
-  cursor: grabbing;
-}
 .mobile-terminal-key-side {
   grid-column: 1;
   grid-row: 1 / span 2;
   display: grid;
-  grid-template-rows: repeat(3, 36px);
+  grid-template-rows: repeat(2, 36px);
   align-content: start;
   gap: var(--space-3);
 }

@@ -1517,6 +1517,8 @@ globalThis.__layoutTestApi = {
   handleTerminalDataForTest: handleTerminalData,
   terminalMobileAccessoryHtmlForTest: terminalMobileAccessoryHtml,
   terminalMobileAccessoryDataForTest: terminalMobileAccessoryData,
+  terminalMobileAccessoryPalettePlacementForTest: terminalMobileAccessoryPalettePlacement,
+  terminalMobileAccessoryLauncherDragPositionForTest: terminalMobileAccessoryLauncherDragPosition,
   terminalMobileAccessoryStateForTest(session) {
     const state = terminalMobileAccessoryState(session);
     return state ? {...state} : null;
@@ -1524,6 +1526,7 @@ globalThis.__layoutTestApi = {
   toggleTerminalMobileAccessoryStateForTest: toggleTerminalMobileAccessoryState,
   dismissTerminalMobileAccessoriesForTest: dismissTerminalMobileAccessories,
   beginTerminalMobileAccessoryLauncherPressForTest: beginTerminalMobileAccessoryLauncherPress,
+  moveTerminalMobileAccessoryLauncherPressForTest: moveTerminalMobileAccessoryLauncherPress,
   endTerminalMobileAccessoryLauncherPressForTest: endTerminalMobileAccessoryLauncherPress,
   consumeTerminalMobileAccessoryLauncherClickForTest: consumeTerminalMobileAccessoryLauncherClick,
   sendTerminalMobileAccessoryInputForTest: sendTerminalMobileAccessoryInput,

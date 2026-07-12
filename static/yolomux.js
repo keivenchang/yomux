@@ -60949,7 +60949,7 @@ function terminalMobileAccessoryState(session, options = {}) {
   if (!key) return null;
   let state = terminalMobileAccessoryStates.get(key) || null;
   if (!state && options.create === true) {
-    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false};
+    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, launcherPress: null, suppressLauncherClick: false};
     terminalMobileAccessoryStates.set(key, state);
   }
   return state;
@@ -60992,10 +60992,83 @@ function terminalMobileAccessoryPositionStyle(state) {
   const x = Number.isFinite(state?.x) ? Math.max(0, Math.round(state.x)) : null;
   const y = Number.isFinite(state?.y) ? Math.max(0, Math.round(state.y)) : null;
   if (x === null && y === null) return '';
-  // A moved absolute overlay must release its original end edges. Leaving `bottom` set alongside
-  // the drag-set `top` makes CSS stretch the palette to the terminal bottom, producing a giant
-  // empty box and preventing a useful upward move.
   return ` style="${x === null ? '' : `inset-inline-start:${x}px;inset-inline-end:auto;`}${y === null ? '' : `inset-block-start:${y}px;inset-block-end:auto;transform:none;`}"`;
+}
+
+function terminalMobileAccessoryClamp(value, min, max) {
+  return Math.max(min, Math.min(Math.max(min, max), value));
+}
+
+function terminalMobileAccessoryMoved(state) {
+  return Number.isFinite(state?.x) || Number.isFinite(state?.y);
+}
+
+function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, barSize) {
+  const gap = 8;
+  const paneLeft = Number.isFinite(paneRect?.left) ? paneRect.left : 0;
+  const paneTop = Number.isFinite(paneRect?.top) ? paneRect.top : 0;
+  const paneWidth = Math.max(0, Number(paneRect?.width) || 0);
+  const paneHeight = Math.max(0, Number(paneRect?.height) || 0);
+  const width = Math.min(Math.max(0, Number(barSize?.width) || 0), paneWidth);
+  const height = Math.min(Math.max(0, Number(barSize?.height) || 0), paneHeight);
+  const left = (Number.isFinite(launcherRect?.left) ? launcherRect.left : 0) - paneLeft;
+  const top = (Number.isFinite(launcherRect?.top) ? launcherRect.top : 0) - paneTop;
+  const launcherWidth = Math.max(0, Number(launcherRect?.width) || 0);
+  const launcherHeight = Math.max(0, Number(launcherRect?.height) || 0);
+  const right = left + launcherWidth;
+  const bottom = top + launcherHeight;
+  const above = top;
+  const below = paneHeight - bottom;
+  const leftRoom = left;
+  const rightRoom = paneWidth - right;
+  const moved = terminalMobileAccessoryMoved(state);
+  let side = 'above';
+  if (!moved && above >= height + gap) {
+    side = 'above';
+  } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
+    side = 'below';
+  } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
+    side = 'left';
+  } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
+    side = 'right';
+  } else if (below <= gap * 2 && above >= height + gap) {
+    side = 'above';
+  } else {
+    const candidates = [
+      {side: 'above', room: above, fits: above >= height + gap},
+      {side: 'below', room: below, fits: below >= height + gap},
+      {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
+      {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
+    ];
+    const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
+    side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+  }
+  let x = right - width;
+  let y = top - height - gap;
+  if (side === 'below') {
+    x = left;
+    y = bottom + gap;
+  } else if (side === 'left') {
+    x = left - width - gap;
+    y = top;
+  } else if (side === 'right') {
+    x = right + gap;
+    y = top;
+  }
+  return {
+    side,
+    x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
+    y: Math.round(terminalMobileAccessoryClamp(y, 0, paneHeight - height)),
+  };
+}
+
+function terminalMobileAccessoryLauncherDragPosition(press, event) {
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  return {
+    x: terminalMobileAccessoryClamp(press.startX + dx, 0, press.paneWidth - press.launcherWidth),
+    y: terminalMobileAccessoryClamp(press.startY + dy, 0, press.paneHeight - press.launcherHeight),
+  };
 }
 
 function terminalMobileAccessoryHtml(session) {
@@ -61007,11 +61080,10 @@ function terminalMobileAccessoryHtml(session) {
   // The overflow button remains the rightmost control in both palette states. Keeping the return
   // target in one physical corner avoids a touch user hunting for it after the content switches.
   const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
-  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
-    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
-      <button type="button" class="mobile-terminal-key-close" data-terminal-mobile-close="${esc(session)}" aria-label="${esc(t('shortcuts.close'))}">×</button>
+  const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
+  return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
+    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
       <div class="mobile-terminal-key-side">
-        <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
         ${sideKeys}
       </div>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
@@ -61036,14 +61108,43 @@ function syncTerminalMobileAccessoryState(session) {
   const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
   bar.hidden = state.open !== true;
   bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
-  if (launcher) launcher.setAttribute('aria-expanded', state.open === true ? 'true' : 'false');
+  if (launcher) {
+    const open = state.open === true;
+    launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
+    launcher.setAttribute('aria-label', open ? t('shortcuts.close') : t('common.keyboardShortcuts'));
+    launcher.textContent = open ? '×' : '⌨';
+    launcher.classList.toggle('mobile-terminal-key-launcher--open', open);
+    const launcherInline = Number.isFinite(state.x);
+    const launcherBlock = Number.isFinite(state.y);
+    launcher.style.insetInlineStart = launcherInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+    launcher.style.insetInlineEnd = launcherInline ? 'auto' : '';
+    launcher.style.insetBlockStart = launcherBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+    launcher.style.insetBlockEnd = launcherBlock ? 'auto' : '';
+    launcher.style.transform = launcherBlock ? 'none' : '';
+  }
   const positionedInline = Number.isFinite(state.x);
   const positionedBlock = Number.isFinite(state.y);
-  bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
-  bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
-  bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
-  bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
-  bar.style.transform = positionedBlock ? 'none' : '';
+  if (state.open === true && launcher) {
+    const pane = launcher.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
+    const paneRect = pane?.getBoundingClientRect?.();
+    const launcherRect = launcher.getBoundingClientRect();
+    if (paneRect) {
+      const placement = terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, {width: bar.offsetWidth, height: bar.offsetHeight});
+      bar.style.insetInlineStart = `${placement.x}px`;
+      bar.style.insetInlineEnd = 'auto';
+      bar.style.insetBlockStart = `${placement.y}px`;
+      bar.style.insetBlockEnd = 'auto';
+      bar.style.transform = 'none';
+      bar.dataset.terminalMobilePlacement = placement.side;
+    }
+  } else {
+    bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+    bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+    bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+    bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+    bar.style.transform = positionedBlock ? 'none' : '';
+    delete bar.dataset.terminalMobilePlacement;
+  }
   if (more) more.hidden = state.more !== true;
   for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
@@ -61066,7 +61167,7 @@ function dismissTerminalMobileAccessory(session) {
   state.more = false;
   state.ctrl = false;
   state.alt = false;
-  state.drag = null;
+  state.launcherPress = null;
   syncTerminalMobileAccessoryState(session);
   return true;
 }
@@ -61098,17 +61199,18 @@ function installTerminalMobileAccessoryResizeSync() {
   window.addEventListener('resize', () => {
     for (const [session, state] of terminalMobileAccessoryStates) {
       if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
-      const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
-      const pane = bar?.closest?.('.tab-pane');
-      if (!bar || !pane) continue;
-      state.x = Math.max(0, Math.min(pane.clientWidth - bar.offsetWidth, state.x));
-      state.y = Math.max(0, Math.min(pane.clientHeight - bar.offsetHeight, state.y));
+      const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+      const pane = launcher?.closest?.('.tab-pane');
+      if (!launcher || !pane) continue;
+      state.x = terminalMobileAccessoryClamp(state.x, 0, pane.clientWidth - launcher.offsetWidth);
+      state.y = terminalMobileAccessoryClamp(state.y, 0, pane.clientHeight - launcher.offsetHeight);
       syncTerminalMobileAccessoryState(session);
     }
   }, {passive: true});
 }
 
 const terminalMobileAccessoryLongPressMs = 450;
+const terminalMobileAccessoryDragThresholdPx = 6;
 const terminalMobileAccessoryRepeatDelayMs = mobileTerminalKeyRepeatDelayMs;
 const terminalMobileAccessoryRepeatIntervalMs = mobileTerminalKeyRepeatIntervalMs;
 
@@ -61162,12 +61264,31 @@ function consumeTerminalMobileAccessoryKeyClick(session, action) {
   return true;
 }
 
-function beginTerminalMobileAccessoryLauncherPress(session, event) {
+function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  if (!state || event.button > 0 || event.pointerType === 'mouse') return false;
+  const pane = button?.closest?.('.tab-pane');
+  if (!state || event.button > 0 || !button || !pane) return false;
   dismissTerminalMobileAccessories(session);
-  const press = {pointerId: event.pointerId, longPressed: false, timer: null};
+  const paneRect = pane.getBoundingClientRect();
+  const launcherRect = button.getBoundingClientRect();
+  const startX = Number.isFinite(state.x) ? state.x : launcherRect.left - paneRect.left;
+  const startY = Number.isFinite(state.y) ? state.y : launcherRect.top - paneRect.top;
+  const press = {
+    pointerId: event.pointerId,
+    longPressed: false,
+    dragging: false,
+    timer: null,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX,
+    startY,
+    paneWidth: pane.clientWidth,
+    paneHeight: pane.clientHeight,
+    launcherWidth: button.offsetWidth,
+    launcherHeight: button.offsetHeight,
+  };
   state.launcherPress = press;
+  button.setPointerCapture?.(event.pointerId);
   press.timer = window.setTimeout(() => {
     if (terminalMobileAccessoryState(session)?.launcherPress !== press) return;
     press.longPressed = true;
@@ -61178,13 +61299,34 @@ function beginTerminalMobileAccessoryLauncherPress(session, event) {
   return true;
 }
 
-function endTerminalMobileAccessoryLauncherPress(session, event) {
+function moveTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.launcherPress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  if (!press.dragging && Math.hypot(dx, dy) < terminalMobileAccessoryDragThresholdPx) return false;
+  if (!press.dragging) {
+    press.dragging = true;
+    window.clearTimeout(press.timer);
+  }
+  const position = terminalMobileAccessoryLauncherDragPosition(press, event);
+  state.x = position.x;
+  state.y = position.y;
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session);
   const press = state?.launcherPress;
   if (!state || !press || press.pointerId !== event.pointerId) return false;
   window.clearTimeout(press.timer);
   state.launcherPress = null;
-  if (!press.longPressed) return false;
+  button?.releasePointerCapture?.(event.pointerId);
+  if (!press.longPressed && !press.dragging) return false;
   state.suppressLauncherClick = true;
   event.preventDefault();
   event.stopPropagation();
@@ -61195,41 +61337,6 @@ function consumeTerminalMobileAccessoryLauncherClick(session) {
   const state = terminalMobileAccessoryState(session);
   if (!state?.suppressLauncherClick) return false;
   state.suppressLauncherClick = false;
-  return true;
-}
-
-function beginTerminalMobileAccessoryDrag(session, event, handle) {
-  const state = terminalMobileAccessoryState(session, {create: true});
-  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
-  if (!state || !bar || event.button > 0) return false;
-  const rect = bar.getBoundingClientRect();
-  state.drag = {pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top};
-  handle.setPointerCapture?.(event.pointerId);
-  event.preventDefault();
-  event.stopPropagation();
-  return true;
-}
-
-function moveTerminalMobileAccessoryDrag(session, event, handle) {
-  const state = terminalMobileAccessoryState(session);
-  const drag = state?.drag;
-  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
-  const pane = bar?.closest?.('.tab-pane');
-  if (!drag || drag.pointerId !== event.pointerId || !bar || !pane) return false;
-  const paneRect = pane.getBoundingClientRect();
-  state.x = Math.max(0, Math.min(paneRect.width - bar.offsetWidth, event.clientX - paneRect.left - drag.offsetX));
-  state.y = Math.max(0, Math.min(paneRect.height - bar.offsetHeight, event.clientY - paneRect.top - drag.offsetY));
-  syncTerminalMobileAccessoryState(session);
-  event.preventDefault();
-  return true;
-}
-
-function endTerminalMobileAccessoryDrag(session, event, handle) {
-  const state = terminalMobileAccessoryState(session);
-  if (!state?.drag || state.drag.pointerId !== event.pointerId) return false;
-  handle.releasePointerCapture?.(event.pointerId);
-  state.drag = null;
-  event.preventDefault();
   return true;
 }
 
@@ -63905,28 +64012,19 @@ function applyShareInfoState(info = {}) {
 
 function bindPanelControls(panel, session) {
   delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
-    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-toggle]', (event, button) => {
+    moveTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'pointerup', '[data-terminal-mobile-toggle]', (event, button) => {
-    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'pointercancel', '[data-terminal-mobile-toggle]', (event, button) => {
-    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'contextmenu', '[data-terminal-mobile-toggle]', event => {
     event.preventDefault();
-  });
-  delegate(panel, 'pointerdown', '[data-terminal-mobile-drag]', (event, handle) => {
-    beginTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointermove', '[data-terminal-mobile-drag]', (event, handle) => {
-    moveTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointerup', '[data-terminal-mobile-drag]', (event, handle) => {
-    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointercancel', '[data-terminal-mobile-drag]', (event, handle) => {
-    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
   });
   delegate(panel, 'click', '[data-terminal-mobile-toggle]', (event, button) => {
     event.preventDefault();
@@ -63934,11 +64032,6 @@ function bindPanelControls(panel, session) {
     const targetSession = button.dataset.terminalMobileToggle || session;
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
-  });
-  delegate(panel, 'click', '[data-terminal-mobile-close]', (event, button) => {
-    event.preventDefault();
-    event.stopPropagation();
-    dismissTerminalMobileAccessory(button.dataset.terminalMobileClose || session);
   });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
     // Do not blur xterm/close the software keyboard before the click sends its byte.
