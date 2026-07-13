@@ -1562,7 +1562,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/scheduleToastRemoval\(id, node, options\.countdownMs \|\| toastDurationMs\)/.test(source), '#85: toast removal uses options.countdownMs through the shared scheduler');
     assert.ok(/function confirmSessionGoneOrReconnect[\s\S]*?if \(item\.confirmingGone\) return;[\s\S]*?item\.confirmingGone = true/.test(source), '#86: reconnect confirmation has an in-flight guard');
     assert.ok(/function showFileTreeRepoPopover[\s\S]*?clampToViewport\(/.test(source), '#87: the repo popover is clamped to the viewport');
-    assert.ok(/function fileTreeRepoHoverController\(row, path\)[\s\S]*?createHoverPopover\([\s\S]*?onOpen: \(\) => \{ void showRepoRowHoverPopover\(row, path\); \}/.test(source), '#87: repo directory hover popovers use the shared delayed hover controller');
+    assert.ok(/function fileTreeRepoHoverController\(row, path\)[\s\S]*?createHoverPopover\([\s\S]*?canOpen: \(\) => row\.dataset\.isRepo === 'true' \|\| Boolean\(row\.dataset\.syncTargetTitle\)[\s\S]*?onOpen: \(\) => \{ if \(row\.dataset\.isRepo === 'true'\) void showRepoRowHoverPopover\(row, path\); \}/.test(source), '#87: repo and starred Finder rows use the shared delayed hover controller');
     assert.equal(source.includes('row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);'), false, '#87: repo directory hover must not open the popover immediately on mouseenter');
     assert.ok(/function fileEntryChanged[\s\S]*?state\.size == null \|\| entry\.size == null\) return true/.test(source), '#88: unknown-size equal-mtime entries are treated as changed');
     // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),

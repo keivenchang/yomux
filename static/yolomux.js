@@ -16163,6 +16163,8 @@ function applyFileExplorerSessionHighlightRow(row, sets = fileExplorerSessionHig
   applySessionHighlightRowClass(row, highlightClass);
   const isSyncTarget = kind === 'dir' && Boolean(path && sets.syncTargetDirs?.has(path));
   row.classList.toggle('file-tree-row--sync-target', isSyncTarget);
+  if (isSyncTarget) row.dataset.syncTargetTitle = sets.syncTargetTitle || '';
+  else delete row.dataset.syncTargetTitle;
   updateFileTreeSyncTargetMarker(row, isSyncTarget, sets.syncTargetTitle);
 }
 
@@ -16300,6 +16302,11 @@ function repoInfoPopoverHtml(repo) {
   return rows.join('');
 }
 
+function fileTreeSyncTargetPopoverHtml(row) {
+  const title = String(row?.dataset?.syncTargetTitle || '').trim();
+  return title ? `<div class="file-tree-repo-popover-title">★ ${esc(title)}</div>` : '';
+}
+
 function fileTreeRepoPopoverNode() {
   let node = document.getElementById('fileTreeRepoPopover');
   if (!node) {
@@ -16313,9 +16320,10 @@ function fileTreeRepoPopoverNode() {
 }
 
 function showFileTreeRepoPopover(row, repo) {
-  if (!repo?.root) return;
+  const content = repo?.root ? repoInfoPopoverHtml(repo) : fileTreeSyncTargetPopoverHtml(row);
+  if (!content) return;
   const node = fileTreeRepoPopoverNode();
-  node.innerHTML = repoInfoPopoverHtml(repo);
+  node.innerHTML = content;
   node.hidden = false;
   const popRect = node.getBoundingClientRect?.(), pos = clampToViewport(
     Math.round(Number(row.dataset.repoPopoverX || 0) + 14), Math.round(Number(row.dataset.repoPopoverY || 0) + 4),
@@ -16350,14 +16358,14 @@ function fileTreeRepoHoverController(row, path) {
     anchor: row,
     popover: fileTreeRepoPopoverNode,
     stateClass: null,
-    canOpen: () => row.dataset.isRepo === 'true',
+    canOpen: () => row.dataset.isRepo === 'true' || Boolean(row.dataset.syncTargetTitle),
     position: event => {
       updatePointer(event);
       const repo = fileExplorerRepoInfoCache.get(normalizeDirectoryPath(path));
-      if (repo) showFileTreeRepoPopover(row, repo);
+      showFileTreeRepoPopover(row, repo);
     },
     onPointerMove: updatePointer,
-    onOpen: () => { void showRepoRowHoverPopover(row, path); },
+    onOpen: () => { if (row.dataset.isRepo === 'true') void showRepoRowHoverPopover(row, path); },
     onClose: hideFileTreeRepoPopover,
   });
 }
@@ -17622,7 +17630,7 @@ function applyFileTreeRowDataset(row, state) {
 
 function bindFinderRowHandlers(row, state) {
   const {entry, fullPath, differMode} = state;
-  if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
+  if (!differMode && entry.kind === 'dir' && (entry.is_repo === true || Boolean(row.dataset.syncTargetTitle))) {
     row.removeAttribute('title');
     fileTreeRepoHoverController(row, fullPath);
   } else if (!differMode) {
