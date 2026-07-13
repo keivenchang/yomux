@@ -213,10 +213,6 @@ function paneCapacityRefusalStatusForItems(items, capacity, targetSlot = '') {
   });
 }
 
-function pinnedMinimizeBlockedStatus(items) {
-  return t('layout.status.pinnedMinimizeBlocked', {items: layoutItemLabels(items) || t('tab.pinned')});
-}
-
 function pinnedPaneAtCapStatus(items, cap = maxTabsPerPane()) {
   return t('layout.status.pinnedPaneAtCap', {items: layoutItemLabels(items) || t('tab.pinned'), limit: cap});
 }
@@ -276,78 +272,38 @@ function canPaneExpand(item, slots = layoutSlots) {
   ));
 }
 
-function minimizeBlockedByPinned(item, sourceSlot = null, slots = layoutSlots) {
-  const slot = sourceSlot || slotForSession(item) || slotForItem(item, slots);
-  if (!slot) return false;
-  if (narrowPaneFrameActionTargetsTab(item, slots) || narrowSingleColumnMode()) {
-    return tabIsPinned(item);
-  }
-  if (slotIsSidePane(slot, slots)) {
-    return paneTabs(slot, slots).some(tabIsPinned);
-  }
-  const sourceTabs = paneTabsForGenericActions(slot, slots);
-  return sourceTabs.length > 0 && !sourceTabs.some(tab => !tabIsPinned(tab));
-}
-
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
   if (narrowPaneFrameActionTargetsTab(item)) {
-    if (minimizeBlockedByPinned(item, sourceSlot)) {
-      showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
-      return;
-    }
     removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
     return;
   }
-  if (narrowSingleColumnMode()) {
-    if (minimizeBlockedByPinned(item, sourceSlot)) showLayoutStatus(pinnedMinimizeBlockedStatus(item), 'danger');
-    return;
-  }
+  if (narrowSingleColumnMode()) return;
   if (slotIsSidePane(sourceSlot)) {
-    const pinnedSideTabs = paneTabs(sourceSlot).filter(tabIsPinned);
-    if (minimizeBlockedByPinned(item, sourceSlot)) {
-      showLayoutStatus(pinnedMinimizeBlockedStatus(pinnedSideTabs), 'danger');
-      return;
-    }
     removePaneFromLayout(item);
     return;
   }
   const sourceTabs = paneTabsForGenericActions(sourceSlot);
-  const pinnedSourceTabs = sourceTabs.filter(tabIsPinned);
-  const minimizedTabs = sourceTabs.filter(tab => !tabIsPinned(tab));
-  if (minimizeBlockedByPinned(item, sourceSlot)) {
-    showLayoutStatus(pinnedMinimizeBlockedStatus(sourceTabs), 'danger');
-    return;
-  }
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
-  if (!targetSlot || !minimizedTabs.length) {
-    if (pinnedSourceTabs.length) {
-      showLayoutStatus(pinnedMinimizeBlockedStatus(pinnedSourceTabs), 'danger');
-      return;
-    }
+  if (!targetSlot || !sourceTabs.length) {
     removePaneFromLayout(item);
     return;
   }
   const targetActive = activeItemForSide(targetSlot);
-  const next = pinnedSourceTabs.length
-    ? cloneLayoutSlots(layoutSlots)
-    : layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  if (pinnedSourceTabs.length) {
-    next[sourceSlot] = paneStateWithTabsForSlot(sourceSlot, pinnedSourceTabs, activeItemForSide(sourceSlot), next);
-  }
-  const capacity = paneCapacityCheckForInsert(targetSlot, minimizedTabs, null, next, {keepItems: minimizedTabs});
+  const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
+  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems: sourceTabs});
   if (!capacity.ok) {
-    showLayoutStatus(paneCapacityRefusalStatusForItems(minimizedTabs, capacity, targetSlot), 'danger');
+    showLayoutStatus(paneCapacityRefusalStatusForItems(sourceTabs, capacity, targetSlot), 'danger');
     return;
   }
   next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive, next);
-  const messages = [t('layout.status.minimized', {items: minimizedTabs.map(itemLabel).join(', ')})];
+  const messages = [t('layout.status.minimized', {items: sourceTabs.map(itemLabel).join(', ')})];
   if (capacity.evicted.length) {
     messages.push(t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}));
   }
   applyLayoutSlots(next, {
-    focusSession: targetActive || capacity.finalTabs[0] || pinnedSourceTabs[0],
+    focusSession: targetActive || capacity.finalTabs[0],
     prune: false,
     message: messages.filter(Boolean).join('; '),
   });

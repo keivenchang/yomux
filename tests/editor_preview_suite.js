@@ -733,17 +733,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       left: {active: '1', tabs: ['1', '2']},
     });
     api.setPinnedTabsForTest(['1']);
-    assert.equal(api.minimizeBlockedByPinned('1'), true, 'one-column active pinned tab shares the minimize-block predicate');
-    assert.equal(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), false, 'one-column active pinned tab hides the dead minimize affordance');
+    assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'one-column active pinned tab keeps the normal pane-frame minimize affordance');
     api.minimizePaneFromLayout('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '1', tabs: ['1', '2']},
-    }, 'one-column minimize refuses a selected pinned tab instead of hiding it');
-    assert.equal(api.statusKindForTest(), 'danger', 'one-column pinned minimize reports a visible danger status');
+      left: {active: '2', tabs: ['2']},
+    }, 'one-column minimize removes the selected pinned tab exactly like an unpinned tab');
+    assert.notEqual(api.statusKindForTest(), 'danger', 'one-column pinned minimize has no pin-specific danger status');
     api.setPinnedTabsForTest([]);
-    assert.equal(api.minimizeBlockedByPinned('1'), false, 'one-column unpinned active tab can still be minimized');
-    assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'one-column unpinned active tab shows minimize again');
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
       left: {active: '1', tabs: [api.finderItemId, '1', '2']},

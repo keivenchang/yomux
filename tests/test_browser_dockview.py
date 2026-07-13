@@ -4670,7 +4670,7 @@ def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_status(browse
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
-def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser, tmp_path):
+def test_dockview_minimize_moves_pinned_tabs_with_their_pane(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -4704,8 +4704,8 @@ def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser,
         """
     )
     assert mixed["beforeMinimizeButtons"] == 1, mixed
-    assert mixed["left"] == ["1"], mixed
-    assert mixed["right"] == ["4", "2", "3"], mixed
+    assert mixed["left"] == [], mixed
+    assert mixed["right"] == ["1", "4", "2", "3"], mixed
     assert mixed["kind"] == "", mixed
     assert "minimized" in mixed["status"], mixed
 
@@ -4717,7 +4717,7 @@ def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser,
     )
     wait_for_dockview(browser, min_tabs=3)
     wait_for_dockview_tab_geometry(browser, min_tabs=3)
-    refused = browser.execute_async_script(
+    all_pinned = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         setTabPinned('1', true);
@@ -4747,15 +4747,14 @@ def test_dockview_minimize_preserves_pinned_tabs_and_refuses_all_pinned(browser,
         }));
         """
     )
-    assert refused["beforeMinimizeButtons"] == 0, refused
-    assert refused["before"] == refused["after"], refused
-    assert refused["kind"] == "danger", refused
-    assert "cannot be minimized" in refused["text"], refused
-    assert "layout-status-visible" in refused["classes"], refused
-    assert "layout-status-danger" in refused["classes"], refused
+    assert all_pinned["beforeMinimizeButtons"] == 1, all_pinned
+    assert all_pinned["before"] != all_pinned["after"], all_pinned
+    assert all_pinned["kind"] != "danger", all_pinned
+    assert "minimized" in all_pinned["text"], all_pinned
+    assert "layout-status-danger" not in all_pinned["classes"], all_pinned
 
 
-def test_dockview_narrow_pinned_active_tab_hides_minimize_affordance(browser, tmp_path):
+def test_dockview_narrow_pinned_active_tab_keeps_minimize_affordance(browser, tmp_path):
     try:
         load_dockview_runtime_boot_fixture(
             browser,
@@ -4794,15 +4793,10 @@ def test_dockview_narrow_pinned_active_tab_hides_minimize_affordance(browser, tm
                 singleColumn: narrowSingleColumnMode(),
                 minimizeButtons: activeMinimizeCount(),
               };
-              selectSession('2', {userInitiated: true});
-              requestAnimationFrame(() => requestAnimationFrame(() => {
-                done({
-                  pinnedActive,
-                  unpinnedActive: {
-                    active: activeItemForSide('left'),
-                    minimizeButtons: activeMinimizeCount(),
-                  },
-                  errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
+                  requestAnimationFrame(() => requestAnimationFrame(() => {
+                    done({
+                      pinnedActive,
+                      errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
                 });
               }));
             }));
@@ -4810,8 +4804,7 @@ def test_dockview_narrow_pinned_active_tab_hides_minimize_affordance(browser, tm
         )
         assert metrics["errors"] == [], metrics
         assert metrics["pinnedActive"]["singleColumn"] is True, metrics
-        assert metrics["pinnedActive"]["active"] == "1" and metrics["pinnedActive"]["minimizeButtons"] == 0, metrics
-        assert metrics["unpinnedActive"]["active"] == "2" and metrics["unpinnedActive"]["minimizeButtons"] == 1, metrics
+        assert metrics["pinnedActive"]["active"] == "1" and metrics["pinnedActive"]["minimizeButtons"] == 1, metrics
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
@@ -7897,9 +7890,9 @@ def test_dockview_side_pane_single_yoinfo_keeps_intrinsic_tab_and_minimize_only_
 
     browser.execute_script("setTabPinned(infoItemId, true)")
     pinned = WebDriverWait(browser, 5).until(
-        lambda driver: (state if (state := metrics(driver))["item"] == "__info__" and state["visibleActionButtons"] == 0 else False)
+        lambda driver: (state if (state := metrics(driver))["item"] == "__info__" and state["visibleActionButtons"] == 1 else False)
     )
-    assert pinned["actionButtons"] == [] and pinned["visibleActionButtons"] == 0, pinned
+    assert len(pinned["actionButtons"]) == 1 and pinned["actionButtons"][0]["minimize"] == "__info__", pinned
 
     browser.execute_script("setTabPinned(infoItemId, false)")
     unpinned = WebDriverWait(browser, 5).until(

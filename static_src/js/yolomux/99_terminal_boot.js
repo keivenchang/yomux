@@ -21,8 +21,7 @@ function paneFrameControlsHtml(session, options = {}) {
   const includeActions = controlOptions.actions ?? isTmuxSession(session);
   const includeDetails = controlOptions.details === true;
   const includeMinimize = controlOptions.minimize !== false
-    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session))
-    && !minimizeBlockedByPinned(session, options.slot || slotForItem(session));
+    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = controlOptions.expand !== false;
   const includePopout = controlOptions.popout === true;
   if (includeActions) {

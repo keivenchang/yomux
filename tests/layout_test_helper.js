@@ -932,7 +932,6 @@ globalThis.__layoutTestApi = {
   createAppMenuCommand,
   backgroundTabItems,
   canPaneExpand,
-  minimizeBlockedByPinned,
   codeMirrorHtmlSemanticEmphasisExtension,
   codeMirrorApiIsUsable,
   codeMirrorLanguageExtension,
