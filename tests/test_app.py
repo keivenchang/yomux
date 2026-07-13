@@ -41,6 +41,7 @@ class StatsRoleOwner:
         self.owner = owner
         self.port = port
         self.follower_stale_reads = []
+        self.refresh_requests = []
 
     def can_run(self, role):
         return self.owner and role == app_module.BACKGROUND_ROLE_STATS_SAMPLER
@@ -50,6 +51,10 @@ class StatsRoleOwner:
 
     def record_follower_stale_read(self, role):
         self.follower_stale_reads.append(role)
+
+    def request_owner_refresh(self, role, payload):
+        self.refresh_requests.append((role, payload))
+        return {"ok": True, "accepted": True, "role": role, "local_owner": self.owner, "fallback": False}
 
 
 def test_record_owned_direct_image_usage_preserves_structured_image_token_classes():
@@ -1084,6 +1089,10 @@ def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch,
         follower.control_server.stop()
 
     token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
+    assert follower.background_owner.refresh_requests == [(
+        app_module.BACKGROUND_ROLE_STATS_SAMPLER,
+        {"family": "agent_tokens", "reason": "stats-token-consumer", "cache_key": "agent-tokens"},
+    )]
     assert sum(item["tokens"] for item in token_records) >= 250.0
     assert sum(record["agent_token_samples"] for record in history["records"]) >= 1
 
@@ -2498,6 +2507,63 @@ def test_stats_metric_families_have_independent_named_cadences():
         assert specs["agent_tokens"][1]() == 10.0
     finally:
         webapp.control_server.stop()
+
+
+def test_token_consumer_wakes_only_idle_token_family_while_cpu_keeps_ticking(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.background_owner = StatsRoleOwner(owner=True, port=8881)
+    token_attempts = []
+    cpu_attempts = []
+    first_token = threading.Event()
+    second_token = threading.Event()
+    second_token_release = threading.Event()
+    consumer = {"until": 0.0}
+
+    class StatsClientStub:
+        def runtime_status(self):
+            return {"agent_token_consumer_until": consumer["until"], "sampler_families": {}}
+
+        def set_token_consumer_until(self, until):
+            consumer["until"] = until
+            return {"ok": True}
+
+        def update_sampler_family(self, _family, _status):
+            return {"ok": True}
+
+    def token_collector():
+        token_attempts.append(time.monotonic())
+        (first_token if len(token_attempts) == 1 else second_token).set()
+        if len(token_attempts) == 2:
+            assert second_token_release.wait(1.0) is True
+
+    monkeypatch.setattr(webapp, "stats_client", StatsClientStub())
+    monkeypatch.setattr(webapp, "stats_metric_family_specs", lambda: {
+        "cpu": (lambda: cpu_attempts.append(time.monotonic()), lambda: 0.1),
+        "agent_tokens": (token_collector, webapp.stats_agent_token_scheduler_seconds),
+    })
+    try:
+        assert webapp.start_stats_metric_scheduler() is True
+        assert first_token.wait(1.0) is True
+        time.sleep(0.2)
+        assert len(token_attempts) == 1  # worker is holding its 60-second idle deadline
+        cpu_before_demand = len(cpu_attempts)
+
+        webapp.stats_sample_context(token_consumer=True)
+
+        assert second_token.wait(1.0) is True
+        cpu_during_token = len(cpu_attempts)
+        webapp.stats_sample_context(token_consumer=True)  # running scan already satisfies this wake
+        second_token_release.set()
+        time.sleep(0.2)
+    finally:
+        second_token_release.set()
+        webapp.stop_stats_metric_scheduler()
+        webapp.control_server.stop()
+
+    assert token_attempts[1] - token_attempts[0] < 1.0
+    assert len(token_attempts) == 2
+    assert len(cpu_attempts) > cpu_before_demand
+    assert len(cpu_attempts) > cpu_during_token
 
 
 def test_agent_status_scheduler_persists_an_observed_empty_roster(monkeypatch):

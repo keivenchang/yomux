@@ -274,6 +274,9 @@ def test_statsd_tracks_independent_sampler_family_diagnostics_deterministically(
     status = service.common_status()
     assert status["sampler_families"] == {"cpu": cpu, "gpu": gpu}
     assert status["last_failure"] == "cpu: cpu delayed"
+    assert status["sampler_last_cycle_seconds"] == 0.4
+    assert status["sampler_late_cycles"] == 1
+    assert status["sampler_missed_cycles"] == 1
     service.store.close()
 
 

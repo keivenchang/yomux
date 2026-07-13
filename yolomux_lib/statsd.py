@@ -3027,6 +3027,12 @@ class PersistentStatsService:
             attempts = [float(item.get("last_attempt_at") or 0.0) for item in self.sampler_families.values()]
             self.last_sampler_success_at = max(successes, default=0.0)
             self.last_sampler_attempt_at = max(attempts, default=0.0)
+            self.sampler_last_cycle_seconds = max(
+                (float(item.get("last_runtime_seconds") or 0.0) for item in self.sampler_families.values()),
+                default=0.0,
+            )
+            self.sampler_late_cycles = sum(int(item.get("late_cycles") or 0) for item in self.sampler_families.values())
+            self.sampler_missed_cycles = sum(int(item.get("missed_cycles") or 0) for item in self.sampler_families.values())
             failures = [
                 f"{name}: {item.get('last_failure')}"
                 for name, item in sorted(self.sampler_families.items())

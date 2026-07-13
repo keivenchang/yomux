@@ -2437,6 +2437,8 @@ class TmuxWebtermApp:
             service.scheduler_threads = {}
             for family, (collector, cadence) in self.stats_metric_family_specs().items():
                 service.scheduler_family_locks.setdefault(family, threading.Lock())
+                wake_event = service.scheduler_wake_events.setdefault(family, threading.Event())
+                wake_event.clear()
                 worker = threading.Thread(
                     target=self.stats_metric_family_loop,
                     args=(family, collector, cadence, generation, service.scheduler_stop_event),
@@ -2452,7 +2454,23 @@ class TmuxWebtermApp:
         with service.scheduler_lock:
             service.scheduler_generation += 1
             service.scheduler_stop_event.set()
+            for wake_event in service.scheduler_wake_events.values():
+                wake_event.set()
             service.scheduler_threads = {}
+
+    def wake_stats_metric_family(self, family: str) -> bool:
+        """Wake one metric deadline without disturbing any other family."""
+
+        with self.stats_history_service.scheduler_lock:
+            wake_event = self.stats_history_service.scheduler_wake_events.get(family)
+            worker = self.stats_history_service.scheduler_threads.get(family)
+            if wake_event is None or worker is None or not worker.is_alive():
+                return False
+            status = self.stats_history_service.scheduler_diagnostics.get(family, {})
+            if status.get("running") is True:
+                return True
+            wake_event.set()
+            return True
 
     def stats_metric_family_status(self, family: str, **updates: Any) -> dict[str, Any]:
         service = self.stats_history_service
@@ -2473,10 +2491,16 @@ class TmuxWebtermApp:
         stop_event: threading.Event,
     ) -> None:
         next_deadline = time.monotonic()
+        wake_event = self.stats_history_service.scheduler_wake_events[family]
         while not stop_event.is_set() and generation == self.stats_history_service.scheduler_generation:
             wait_seconds = max(0.0, next_deadline - time.monotonic())
-            if stop_event.wait(wait_seconds):
+            woke = wake_event.wait(wait_seconds)
+            if woke:
+                wake_event.clear()
+            if stop_event.is_set() or generation != self.stats_history_service.scheduler_generation:
                 break
+            if woke:
+                next_deadline = time.monotonic()
             interval = max(0.1, float(cadence()))
             attempt_at = time.time()
             started = time.monotonic()
@@ -2524,11 +2548,12 @@ class TmuxWebtermApp:
                 self.stats_client.update_sampler_family(family, status)
             except (OSError, RuntimeError, ValueError):
                 logger.exception("stats %s diagnostics update failed", family)
-            next_deadline += interval
+            schedule_interval = max(0.1, float(cadence()))
+            next_deadline += schedule_interval
             now = time.monotonic()
             if now >= next_deadline:
-                skipped = int((now - next_deadline) // interval) + 1
-                next_deadline += skipped * interval
+                skipped = int((now - next_deadline) // schedule_interval) + 1
+                next_deadline += skipped * schedule_interval
                 with self.stats_history_service.scheduler_lock:
                     previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
                 self.stats_metric_family_status(
@@ -2771,6 +2796,13 @@ class TmuxWebtermApp:
             with self.stats_history_service.agent_token_lock:
                 self.stats_history_service.agent_token_consumer_until = max(self.stats_history_service.agent_token_consumer_until, consumer_until)
             self.stats_client.set_token_consumer_until(consumer_until)
+            if self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
+                self.wake_stats_metric_family("agent_tokens")
+            else:
+                self.request_background_refresh(
+                    BACKGROUND_ROLE_STATS_SAMPLER,
+                    {"family": "agent_tokens", "reason": "stats-token-consumer", "cache_key": "agent-tokens"},
+                )
         endpoint_profile["stats_token_consumer_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         phase_started = time.perf_counter()
         sample = self.latest_stats_sample()
@@ -3143,6 +3175,8 @@ class TmuxWebtermApp:
             details={"accepted": bool(result.get("accepted")), "fallback": bool(result.get("fallback")), "coalesced": bool(result.get("coalesced"))},
         )
         if result.get("local_owner"):
+            if role == BACKGROUND_ROLE_STATS_SAMPLER and request_payload.get("family") == "agent_tokens":
+                result["refreshing"] = self.wake_stats_metric_family("agent_tokens")
             if not result.get("coalesced"):
                 self.log_sampled_background_refresh_event(
                     "background_refresh_started",

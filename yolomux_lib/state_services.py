@@ -120,6 +120,7 @@ class StatsHistoryService:
     scheduler_stop_event: threading.Event = field(default_factory=threading.Event)
     scheduler_threads: dict[str, threading.Thread] = field(default_factory=dict)
     scheduler_family_locks: dict[str, threading.Lock] = field(default_factory=dict)
+    scheduler_wake_events: dict[str, threading.Event] = field(default_factory=dict)
     scheduler_generation: int = 0
     scheduler_diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
 
