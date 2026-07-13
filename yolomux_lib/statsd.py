@@ -12,8 +12,10 @@ import copy
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import sqlite3
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -82,6 +84,94 @@ STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
 STATS_COST_SUMMARY_MAX_BYTES = stats_store.STATS_COST_SUMMARY_MAX_BYTES
 STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
+
+
+def _scan_agent_token_rows_in_worker(
+    rows: list[dict[str, Any]],
+    sample_time: float,
+    previous_state: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse transcript files without touching statsd's SQLite connection.
+
+    This deliberately lives at module scope so the recovery worker can use a
+    spawned process.  A thread only makes the SQLite owner asynchronous; a
+    CPU-heavy JSONL parse still holds the same process GIL and delays the
+    one-second sampler and RPC listener.
+    """
+
+    measurements: list[dict[str, Any]] = []
+    atom_records: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        transcript = str(row.get("transcript") or "").strip()
+        kind = str(row.get("kind") or "").strip().lower()
+        if not transcript:
+            continue
+        transcript_path = Path(transcript)
+        generated_tokens = session_files.transcript_generated_tokens(transcript_path, kind)
+        if generated_tokens is None:
+            continue
+        key = str(row.get("key") or "").strip()
+        if not key:
+            continue
+        measurements.append({
+            "key": key,
+            "label": str(row.get("label") or key),
+            "tokens": generated_tokens,
+            "source": "transcript",
+            "identity": session_files.transcript_usage_identity(transcript_path, kind),
+            "models": session_files.transcript_generated_tokens_by_model(transcript_path, kind),
+        })
+        # The old counter projection is deliberately retained above.  The
+        # component stream is separate and idempotent by event identity, so it
+        # cannot inflate the Output chart when both are present.
+        previous_time = float(previous_state.get(key, {}).get("time") or sample_time)
+        tmux_fields = _tmux_usage_fields_from_row(row, key=key, label=str(row.get("label") or key), kind=kind)
+        for atom in session_files.transcript_usage_atoms(transcript_path, kind):
+            if previous_time < atom.timestamp <= sample_time:
+                # Dataclasses are useful inside the parser but the result file
+                # is a wire format. Convert before crossing the process
+                # boundary so an otherwise valid scan cannot wedge statsd.
+                normalized = normalized_usage_atom(atom)
+                if normalized is not None:
+                    normalized.update(tmux_fields)
+                    atom_records.append({"time": atom.timestamp, "usage_atoms": [normalized]})
+    return measurements, atom_records
+
+
+def _run_agent_token_scan_process(
+    rows: list[dict[str, Any]],
+    sample_time: float,
+    previous_state: dict[str, dict[str, Any]],
+    seen_keys: set[str],
+    scan_id: str,
+    result_path_text: str,
+) -> None:
+    """Filesystem-only child entry point; it never opens the stats SQLite DB."""
+
+    result_path = Path(result_path_text)
+    try:
+        measurements, atom_records = _scan_agent_token_rows_in_worker(rows, sample_time, previous_state)
+        result: dict[str, Any] = {
+            "measurements": measurements,
+            "atom_records": atom_records,
+            "seen_keys": sorted(seen_keys),
+            "sample_time": sample_time,
+            "previous_state": previous_state,
+            "scan_id": scan_id,
+        }
+    except BaseException as exc:  # always leave a terminal result for the owner
+        result = {"error": str(exc), "scan_id": scan_id}
+    temporary = result_path.with_suffix(result_path.suffix + ".tmp")
+    try:
+        temporary.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(temporary, result_path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def stats_history_client_id(value: Any = "") -> str:
@@ -452,10 +542,17 @@ class PersistentStatsService:
         self.last_sampler_failure = ""
         self.last_sampler_attempt_at = 0.0
         self.sampler_failure_count = 0
+        self.sampler_missed_cycles = 0
+        self.sampler_late_cycles = 0
+        self.sampler_last_cycle_seconds = 0.0
         self.sampler_thread: threading.Thread | None = None
         self.sampler_wake_event = threading.Event()
         self.agent_token_scan_lock = threading.Lock()
-        self.agent_token_scan_worker: threading.Thread | None = None
+        # JSONL parsing can be CPU-bound for minutes. It must not share the
+        # daemon GIL with the sampler/control listener; the process returns a
+        # compact, local result file for this SQLite owner to persist.
+        self.agent_token_scan_worker: multiprocessing.Process | None = None
+        self.agent_token_scan_result_path: Path | None = None
         self.agent_token_scan_result: dict[str, Any] | None = None
         self.agent_token_scan_sequence = 0
         self.agent_token_scan_id = ""
@@ -543,8 +640,38 @@ class PersistentStatsService:
         multiplier = 2 ** min(6, self.sampler_failure_count - 1)
         return min(STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS, STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS * multiplier)
 
+    def _next_sampler_deadline(self, previous_deadline: float, now: float, *, cycle_failed: bool) -> float:
+        """Advance the sampler clock without coupling a success to its work time."""
+
+        if cycle_failed:
+            # Failure retries deliberately retain exponential backoff; do not
+            # immediately spin against an unavailable elected owner.
+            return now + self._sampler_delay_seconds()
+        next_deadline = previous_deadline + STATSD_SAMPLE_INTERVAL_SECONDS
+        if now >= next_deadline:
+            # A late healthy cycle is never overlapped. Skip deadlines already
+            # in the past and expose that bounded degradation rather than
+            # manufacturing catch-up samples.
+            skipped = int((now - next_deadline) // STATSD_SAMPLE_INTERVAL_SECONDS) + 1
+            self.sampler_late_cycles += 1
+            self.sampler_missed_cycles += skipped
+            next_deadline += skipped * STATSD_SAMPLE_INTERVAL_SECONDS
+        return next_deadline
+
     def _sampler_loop(self) -> None:
+        next_deadline = monotonic_clock()
         while not self.stop_event.is_set():
+            wait_seconds = max(0.0, next_deadline - monotonic_clock())
+            if wait_seconds and self.sampler_wake_event.wait(wait_seconds):
+                self.sampler_wake_event.clear()
+                # Owner/consumer state changed. Sampling immediately is both
+                # useful and safe: this loop is the sole owner RPC caller.
+                next_deadline = monotonic_clock()
+            else:
+                self.sampler_wake_event.clear()
+            if self.stop_event.is_set():
+                break
+            cycle_started = monotonic_clock()
             cycle_failed = False
             try:
                 owner = self._sampler_owner_for_cycle()
@@ -572,8 +699,10 @@ class PersistentStatsService:
                 self.last_sampler_failure = redact_local_service_text(exc)
                 cycle_failed = True
             self.sampler_failure_count = self.sampler_failure_count + 1 if cycle_failed else 0
-            self.sampler_wake_event.wait(self._sampler_delay_seconds())
-            self.sampler_wake_event.clear()
+            self.sampler_last_cycle_seconds = max(0.0, monotonic_clock() - cycle_started)
+            next_deadline = self._next_sampler_deadline(
+                next_deadline, monotonic_clock(), cycle_failed=cycle_failed
+            )
 
     @staticmethod
     def _legacy_client_bucket(snapshot: Any) -> dict[str, Any] | None:
@@ -1178,49 +1307,9 @@ class PersistentStatsService:
         sample_time: float,
         previous_state: dict[str, dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Parse transcript files without touching the statsd SQLite connection."""
+        """Compatibility helper for synchronous callers and direct tests."""
 
-        measurements: list[dict[str, Any]] = []
-        atom_records: list[dict[str, Any]] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            transcript = str(row.get("transcript") or "").strip()
-            kind = str(row.get("kind") or "").strip().lower()
-            if not transcript:
-                continue
-            transcript_path = Path(transcript)
-            generated_tokens = session_files.transcript_generated_tokens(transcript_path, kind)
-            if generated_tokens is None:
-                continue
-            key = str(row.get("key") or "").strip()
-            if not key:
-                continue
-            measurements.append({
-                "key": key,
-                "label": str(row.get("label") or key),
-                "tokens": generated_tokens,
-                "source": "transcript",
-                "identity": session_files.transcript_usage_identity(transcript_path, kind),
-                "models": session_files.transcript_generated_tokens_by_model(transcript_path, kind),
-            })
-            # The old counter projection is deliberately retained above.  The
-            # component stream is separate and idempotent by event identity,
-            # so it cannot inflate the Output chart when both are present.
-            previous_time = float(previous_state.get(key, {}).get("time") or sample_time)
-            tmux_fields = _tmux_usage_fields_from_row(row, key=key, label=str(row.get("label") or key), kind=kind)
-            for atom in session_files.transcript_usage_atoms(transcript_path, kind):
-                if previous_time < atom.timestamp <= sample_time:
-                    # This response crosses the statsd Unix-RPC boundary.
-                    # Dataclasses are useful inside the parser but are not a
-                    # wire format; convert here so a successful baseline
-                    # cannot kill the shared daemon while serializing its
-                    # claimed records.
-                    normalized = normalized_usage_atom(atom)
-                    if normalized is not None:
-                        normalized.update(tmux_fields)
-                        atom_records.append({"time": atom.timestamp, "usage_atoms": [normalized]})
-        return measurements, atom_records
+        return _scan_agent_token_rows_in_worker(rows, sample_time, previous_state)
 
     def _persist_agent_token_scan(
         self,
@@ -1267,10 +1356,28 @@ class PersistentStatsService:
 
         with self.agent_token_scan_lock:
             result = self.agent_token_scan_result
+            worker = self.agent_token_scan_worker
+            result_path = self.agent_token_scan_result_path
+            if result is None and worker is not None and not worker.is_alive():
+                worker.join(timeout=0)
+                self.agent_token_scan_worker = None
+                self.agent_token_scan_result_path = None
+                try:
+                    result = json.loads(result_path.read_text(encoding="utf-8")) if result_path is not None else None
+                except (OSError, TypeError, ValueError) as exc:
+                    result = {"error": f"agent token scan worker exited without a readable result: {exc}", "scan_id": self.agent_token_scan_id}
+                finally:
+                    if result_path is not None:
+                        try:
+                            result_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                self.agent_token_scan_result = result
             if result is None:
                 return False
             self.agent_token_scan_result = None
             self.agent_token_scan_worker = None
+            self.agent_token_scan_result_path = None
             scan_id = str(result.get("scan_id") or self.agent_token_scan_id)
         error = result.get("error")
         if error:
@@ -1310,36 +1417,35 @@ class PersistentStatsService:
             self.agent_token_scan_sequence += 1
             scan_id = f"scan-{self.agent_token_scan_sequence}"
             self.agent_token_scan_id = scan_id
-            worker: threading.Thread
-
-            def run() -> None:
-                try:
-                    measurements, atom_records = self._scan_agent_token_rows(rows, sample_time, previous_state)
-                    result: dict[str, Any] = {
-                        "measurements": measurements,
-                        "atom_records": atom_records,
-                        "seen_keys": seen_keys,
-                        "sample_time": sample_time,
-                        "previous_state": previous_state,
-                        "scan_id": scan_id,
-                    }
-                except Exception as exc:
-                    # A worker boundary must always publish a terminal result;
-                    # otherwise one unexpected parser exception wedges the
-                    # single-flight slot and idle shutdown forever.
-                    result = {"error": str(exc), "scan_id": scan_id}
-                with self.agent_token_scan_lock:
-                    if self.agent_token_scan_worker is worker:
-                        self.agent_token_scan_result = result
-
-            worker = threading.Thread(target=run, name="statsd-agent-token-scan", daemon=True)
+            descriptor, result_path_text = tempfile.mkstemp(
+                prefix="statsd-agent-token-scan-", suffix=".json", dir=self.socket_path.parent
+            )
+            os.close(descriptor)
+            result_path = Path(result_path_text)
+            # The child atomically replaces this path only once its complete
+            # result is ready. Remove the empty reservation first so a failed
+            # child is distinguishable from a valid empty scan.
+            result_path.unlink(missing_ok=True)
+            context = multiprocessing.get_context("spawn")
+            worker = context.Process(
+                target=_run_agent_token_scan_process,
+                args=(rows, sample_time, previous_state, seen_keys, scan_id, str(result_path)),
+                name="statsd-agent-token-scan",
+                daemon=True,
+            )
             self.agent_token_scan_worker = worker
+            self.agent_token_scan_result_path = result_path
         try:
             worker.start()
         except RuntimeError:
             with self.agent_token_scan_lock:
                 if self.agent_token_scan_worker is worker:
                     self.agent_token_scan_worker = None
+                    self.agent_token_scan_result_path = None
+            try:
+                result_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise
         return {"ok": True, "accepted": True, "busy": False, "scan_id": scan_id, "records": [], "state": previous_state}
 
@@ -2272,6 +2378,9 @@ class PersistentStatsService:
             "last_failure": last_failure,
             "last_sampler_success_at": self.last_sampler_success_at,
             "last_sampler_attempt_at": self.last_sampler_attempt_at,
+            "sampler_missed_cycles": self.sampler_missed_cycles,
+            "sampler_late_cycles": self.sampler_late_cycles,
+            "sampler_last_cycle_seconds": self.sampler_last_cycle_seconds,
             "sampler_alive": bool(self.sampler_thread and self.sampler_thread.is_alive()),
             "restart_backoff_seconds": 0.0,
             "generation": generation,
@@ -2543,9 +2652,18 @@ class PersistentStatsService:
             self.sampler_thread.join(timeout=1.0)
         with self.agent_token_scan_lock:
             scan_worker = self.agent_token_scan_worker
+            scan_result_path = self.agent_token_scan_result_path
         if scan_worker is not None and scan_worker.is_alive():
             scan_worker.join(timeout=1.0)
+        if scan_worker is not None and scan_worker.is_alive():
+            scan_worker.terminate()
+            scan_worker.join(timeout=1.0)
         self._drain_agent_token_scan_result()
+        if scan_result_path is not None:
+            try:
+                scan_result_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         self.store.close()
 
 

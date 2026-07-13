@@ -1123,33 +1123,26 @@ def test_statsd_history_listener_stays_responsive_while_sampler_owner_is_slow(mo
 def test_statsd_history_listener_stays_responsive_while_agent_token_scan_is_slow(monkeypatch, tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     service.store.upsert_bucket(_bucket(sequence=1))
-    entered = threading.Event()
-    release = threading.Event()
-    persisted: list[tuple[list[dict], list[dict]]] = []
-
-    def slow_scan(_rows, _sample_time, _previous_state):
-        entered.set()
-        release.wait(1.0)
-        return ([{"key": "s|0|codex", "tokens": 12}], [])
-
-    def record_persist(measurements, atom_records, _seen_keys, _sample_time, _previous_state):
-        persisted.append((measurements, atom_records))
-        return {"ok": True, "records": []}
-
-    monkeypatch.setattr(service, "_scan_agent_token_rows", slow_scan)
-    monkeypatch.setattr(service, "_persist_agent_token_scan", record_persist)
+    # A FIFO holds the real transcript reader in the child process. This is a
+    # deterministic recovery stall without a test-only production hook.
+    transcript = tmp_path / "slow.jsonl"
+    os.mkfifo(transcript)
 
     started = time.perf_counter()
     accepted, _binary = service.handle_with_binary({
         "action": "claim_agent_token_deltas_from_rows",
-        "rows": [{"key": "s|0|codex", "transcript": "/tmp/slow.jsonl", "kind": "codex"}],
+        "rows": [{"key": "s|0|codex", "transcript": str(transcript), "kind": "codex"}],
         "seen_keys": ["s|0|codex"],
         "sample_time": 1002,
     })
     accept_elapsed = time.perf_counter() - started
     assert accepted["accepted"] is True
     assert accept_elapsed < 0.1
-    assert entered.wait(1.0) is True
+    assert service.agent_token_scan_worker is not None
+    deadline = time.monotonic() + 2.0
+    while not service.agent_token_scan_worker.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.agent_token_scan_worker.is_alive() is True
     assert service.common_status()["active_task"] == "agent-token-scan"
 
     busy, _binary = service.handle_with_binary({
@@ -1167,29 +1160,26 @@ def test_statsd_history_listener_stays_responsive_while_agent_token_scan_is_slow
     assert history["records"]
     assert history_elapsed < 0.1
 
-    release.set()
-    assert service.agent_token_scan_worker is not None
-    service.agent_token_scan_worker.join(timeout=1.0)
-    assert service._drain_agent_token_scan_result() is True
-    assert persisted == [([{"key": "s|0|codex", "tokens": 12}], [])]
-    assert service.common_status()["active_task"] == ""
-    service.store.close()
+    # Shutdown cancels a process-bound parse without waiting for it to unblock
+    # and leaves the single-flight slot/temporary result cleaned up.
+    service._shutdown()
+    assert service.agent_token_scan_worker is None or not service.agent_token_scan_worker.is_alive()
 
 
-def test_statsd_agent_token_scan_exception_releases_single_flight_slot(monkeypatch, tmp_path):
+def test_statsd_agent_token_scan_exception_releases_single_flight_slot(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    monkeypatch.setattr(service, "_scan_agent_token_rows", lambda *_args: (_ for _ in ()).throw(AssertionError("broken parser")))
-
-    first = service.start_agent_token_scan_from_rows([], set(), 1000)
-    assert service.agent_token_scan_worker is not None
-    service.agent_token_scan_worker.join(timeout=1.0)
+    # A child parser failure reaches the SQLite owner as a terminal result;
+    # draining it must release the single-flight slot for the next scan.
+    first = {"scan_id": "scan-1"}
+    service.agent_token_scan_id = first["scan_id"]
+    service.agent_token_scan_sequence = 1
+    service.agent_token_scan_result = {"error": "broken parser", "scan_id": first["scan_id"]}
     assert service._drain_agent_token_scan_result() is True
     completed = service.finish_agent_token_scan(first["scan_id"])
     assert completed["done"] is True
     assert completed["ok"] is False
     assert "broken parser" in completed["error"]
 
-    monkeypatch.setattr(service, "_scan_agent_token_rows", lambda *_args: ([], []))
     second = service.start_agent_token_scan_from_rows([], set(), 1001)
     assert second["accepted"] is True
     assert second["scan_id"] != first["scan_id"]
@@ -1276,6 +1266,30 @@ def test_statsd_sampler_failure_delay_backs_off(tmp_path):
     assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS * 2
     service.sampler_failure_count = 99
     assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS
+    service.store.close()
+
+
+def test_statsd_sampler_deadline_math_does_not_add_successful_rpc_duration(tmp_path):
+    """A 200ms owner RPC still leaves the following fixed 1s deadline at 1.0."""
+
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+
+    assert service._next_sampler_deadline(0.0, 0.2, cycle_failed=False) == 1.0
+    assert service._next_sampler_deadline(1.0, 1.2, cycle_failed=False) == 2.0
+    assert service.sampler_missed_cycles == 0
+    assert service.sampler_late_cycles == 0
+    service.store.close()
+
+
+def test_statsd_sampler_deadline_math_skips_overdue_cycles_and_retains_failure_backoff(tmp_path):
+    """A slow cycle is observable degradation, never a catch-up burst."""
+
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    assert service._next_sampler_deadline(0.0, 2.2, cycle_failed=False) == 3.0
+    assert service.sampler_late_cycles == 1
+    assert service.sampler_missed_cycles == 2
+    service.sampler_failure_count = 2
+    assert service._next_sampler_deadline(3.0, 3.2, cycle_failed=True) == 13.2
     service.store.close()
 
 
