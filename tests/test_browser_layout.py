@@ -1049,6 +1049,61 @@ def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(bro
     assert metrics["zeroStyle"] == "100.000%", metrics
 
 
+def test_debug_graph_raw_rollup_overlap_uses_finest_values_at_one_uniform_resolution(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof debugGraphDisplayBuckets === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.floor(Date.now() / 10_000) * 10_000;
+        const start = now - 20_000;
+        setDebugGraphRange(60, {render: false});
+        debugGraphApplyServerHistory({sequence: 1, records: [
+          {start: start / 1000, duration: 10, api_count: 100, latency_total_ms: 1000, latency_count: 10},
+          ...Array.from({length: 3}, (_unused, index) => ({
+            start: (start + (index * 1000)) / 1000,
+            duration: 1,
+            api_count: 1,
+            latency_total_ms: 10,
+            latency_count: 1,
+          })),
+          ...Array.from({length: 2}, (_unused, index) => ({
+            start: (now - 5000 + (index * 1000)) / 1000,
+            duration: 1,
+            api_count: 1,
+            latency_total_ms: 10,
+            latency_count: 1,
+          })),
+        ]});
+        renderDebugPanels({force: true});
+        const buckets = debugGraphDisplayBuckets(now);
+        return {
+          bucketDurations: buckets.map(bucket => bucket.durationMs),
+          apiCounts: buckets.map(bucket => bucket.apiCount),
+          latencyTotalMs: buckets[0]?.latencyTotalMs,
+          latencyCount: buckets[0]?.latencyCount,
+          controlResolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+        };
+        """
+    )
+    assert metrics == {
+        "bucketDurations": [10_000, 10_000],
+        "apiCounts": [73, 2],
+        "latencyTotalMs": 730,
+        "latencyCount": 10,
+        "controlResolution": 10,
+    }, metrics
+
+
 def test_yostats_chart_title_descriptions_cover_theme_and_pane_role(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
     WebDriverWait(browser, 5).until(

@@ -4357,6 +4357,45 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(html.includes('uptime 1s') && html.includes('PID=9876') && html.includes('server seq 20'), 'graph renders restarted process metadata with retained sequence');
   });
 
+  test('YO!stats chooses one finest source per instant and one display width across raw/rollup overlap', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 10_000) * 10_000;
+    const start = now - 20_000;
+    api.setDebugGraphRangeForTest(60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 1,
+      records: [
+        // The retained rollup reports ten requests for each of its ten seconds.
+        {start: start / 1000, duration: 10, api_count: 100, latency_total_ms: 1000, latency_count: 10},
+        // Three later-arriving raw instants supersede that rollup for only those
+        // instants; the other seven seconds still use its proportional history.
+        ...Array.from({length: 3}, (_unused, index) => ({
+          start: (start + (index * 1000)) / 1000,
+          duration: 1,
+          api_count: 1,
+          latency_total_ms: 10,
+          latency_count: 1,
+        })),
+        // The recent tail is non-overlapping, so this range also straddles
+        // the raw/rollup tier boundary rather than testing only one cell.
+        ...Array.from({length: 2}, (_unused, index) => ({
+          start: (now - 5000 + (index * 1000)) / 1000,
+          duration: 1,
+          api_count: 1,
+          latency_total_ms: 10,
+          latency_count: 1,
+        })),
+      ],
+    });
+    const buckets = api.debugGraphDisplayBucketsForTest(now);
+    assert.deepStrictEqual(Array.from(buckets, bucket => bucket.durationMs), [10_000, 10_000], 'a tier-straddling raw/rollup range produces one uniform bar width');
+    assert.equal(buckets[0].apiCount, 73, 'fine raw values replace their three instants; the rollup supplies only its remaining seven');
+    assert.equal(buckets[0].latencyTotalMs, 730, 'additive values are never double-counted while filling an uncovered rollup interval');
+    assert.equal(buckets[0].latencyCount, 10, 'rate denominators retain exactly one source per instant');
+    assert.equal(buckets[1].apiCount, 2, 'a non-overlapping raw tail remains present beside the compact historical bucket');
+    assert.deepStrictEqual([...api.debugGraphBucketSummaryForTest(now).displayBucketSeconds], [10], 'the display summary documents a single resolution for the selected set');
+  });
+
   test('YO!stats API graph event records update, expire, and clear as one lifecycle', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     api.clearJsDebugEventsForTest();
@@ -4455,17 +4494,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     api.setDebugGraphRangeForTest(60, {render: false});
     let summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 1, 'a one-minute graph always selects one-second resolution even when a stale coarse source record is present');
-    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="1"'), 'the read-only control reports one second for the one-minute graph');
+    assert.equal(summary.resolutionSeconds, 10, 'a one-minute graph uses the coarsest present retained source so its bars remain uniform');
+    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="10"'), 'the read-only control reports the one uniform source-safe resolution');
     api.setDebugGraphRangeForTest(5 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 5, 'a five-minute graph aggregates irregular client events into five-second display buckets');
+    assert.equal(summary.resolutionSeconds, 10, 'a five-minute graph does not choose a width finer than an available retained source');
     api.setDebugGraphRangeForTest(15 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 10, 'a fifteen-minute graph stays within the shared display point budget');
     api.setDebugGraphResolutionOverrideForTest(1);
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 1, 'a user may override AUTO with a finer retained resolution');
+    assert.equal(summary.resolutionSeconds, 10, 'a manual override cannot make mixed retained sources render at incompatible widths');
     api.setDebugGraphResolutionOverrideForTest(0);
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 10, 'reset restores the automatic display resolution');
