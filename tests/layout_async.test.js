@@ -3666,6 +3666,7 @@ async function runLayoutAsyncSuite() {
         send(frame) { frames.push(JSON.parse(frame)); },
       });
       assert.equal(api.terminalMobileAccessoryDataForTest('1', 'escape'), '\x1b', 'mobile accessory maps Esc to the terminal escape byte');
+      assert.equal(api.terminalMobileAccessoryDataForTest('1', 'backspace'), '\x7f', 'mobile accessory maps its visible Backspace key to the terminal DEL byte');
       assert.equal(api.terminalMobileAccessoryDataForTest('1', 'arrow-up'), '\x1b[A', 'mobile accessory uses the normal cursor sequence outside application-cursor mode');
       assert.equal(api.terminalMobileAccessoryRepeatsForTest('arrow-up'), true, 'holding an arrow is repeatable like a hardware cursor key');
       assert.equal(api.terminalMobileAccessoryRepeatsForTest('tmux-scroll-down'), true, 'holding PgDown repeats tmux scrolling without closing the palette');
@@ -3675,10 +3676,11 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher toggles the existing palette closed');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'interrupt'), true, 'mobile Ctrl-C sends through the shared terminal transport');
-      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}], 'mobile Ctrl-C preserves the terminal interrupt byte');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'backspace'), true, 'visible mobile Backspace sends through the shared terminal transport');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}], 'mobile Ctrl-C and Backspace preserve their terminal control bytes');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
       assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
-      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
       assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: false, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
       assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
@@ -3702,7 +3704,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
       const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
-      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"/.test(keyboardHtml), 'the touch palette exposes Esc/Ctrl/Shift/Alt/Cmd/Ctrl-C in the left column before the slim Tab/Ctrl-B top row');
+      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"/.test(keyboardHtml), 'the touch palette keeps Ctrl-C above bottom Alt/Cmd and exposes Backspace beside Tab/Ctrl-B');
       assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 

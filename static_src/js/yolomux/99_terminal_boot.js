@@ -225,8 +225,10 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
 ]);
 const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'more']);
-const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'alt', 'cmd', 'interrupt']);
+// Keep one visible definition for every first-page key. The primary row stays compact while
+// Backspace uses its existing terminal-byte definition; the utility column ends in Alt/Cmd.
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);

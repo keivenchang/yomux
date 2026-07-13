@@ -7943,8 +7943,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <div id="terminal" class="terminal"><div class="xterm"></div></div>
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
-            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button></div>
-            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
+            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button><button id="smart-key-backspace" class="mobile-terminal-key">⌫</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
             <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
             <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
           </div>
@@ -8009,9 +8009,9 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["hasClose"] is False and metrics["hasDrag"] is False, metrics
     assert metrics["key"]["height"] >= 36, metrics
     assert metrics["overflowX"] == "visible", metrics
-    assert metrics["primaryColumns"].startswith("repeat(2,") or len(metrics["primaryColumns"].split()) == 2, metrics
-    assert metrics["primaryLabels"] == ["Tab", "^B"], metrics
-    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "Alt", "Cmd", "^C"], metrics
+    assert metrics["primaryColumns"].startswith("repeat(3,") or len(metrics["primaryColumns"].split()) == 3, metrics
+    assert metrics["primaryLabels"] == ["Tab", "^B", "⌫"], metrics
+    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "^C", "Alt", "Cmd"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
     assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
     assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
@@ -8035,6 +8035,19 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["copy"]["top"] < metrics["left"]["top"] < metrics["paste"]["top"], metrics
     assert metrics["pgUp"]["left"] > metrics["up"]["left"] and metrics["pgDown"]["left"] > metrics["down"]["left"], metrics
     assert metrics["pgUp"]["top"] < metrics["right"]["top"] < metrics["pgDown"]["top"], metrics
+    light_metrics = browser.execute_script(
+        """
+        document.body.classList.add('theme-light');
+        const box = node => { const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height}; };
+        const side = document.getElementById('smart-key-side');
+        const primary = document.getElementById('smart-key-row');
+        const backspace = document.getElementById('smart-key-backspace');
+        return {bar: box(document.getElementById('smart-keys')), side: box(side), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent)};
+        """
+    )
+    assert light_metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "^C", "Alt", "Cmd"], light_metrics
+    assert light_metrics["backspace"]["left"] >= light_metrics["primary"]["left"] and light_metrics["backspace"]["right"] <= light_metrics["primary"]["right"], light_metrics
+    assert light_metrics["bar"]["height"] < metrics["pane"]["height"] and light_metrics["side"]["bottom"] <= light_metrics["bar"]["bottom"], light_metrics
 
 
 def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_path):
