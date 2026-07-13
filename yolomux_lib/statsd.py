@@ -3576,6 +3576,24 @@ class StatsReaderClient(LocalServiceClient):
         )
 
 
+def remove_legacy_zero_byte_service_database(service_dir: Path, configured_database: Path) -> bool:
+    """Remove only the obsolete empty DB accidentally created beside sockets."""
+    legacy = Path(service_dir) / STATSD_DATABASE_NAME
+    configured = Path(configured_database)
+    if legacy.absolute() == configured.absolute() or legacy.is_symlink():
+        return False
+    try:
+        stat = legacy.stat()
+        if not legacy.is_file() or stat.st_size != 0:
+            return False
+        legacy.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
 class StatsClient(LocalServiceClient):
     """Thin cross-port client for the ``statsd`` durable owner."""
 
@@ -3585,6 +3603,7 @@ class StatsClient(LocalServiceClient):
     ):
         self.database_path = Path(database_path or default_database_path())
         writer_socket = Path(socket_path or default_socket_path())
+        remove_legacy_zero_byte_service_database(writer_socket.parent, self.database_path)
         super().__init__(
             "statsd",
             "yolomux_lib.statsd",

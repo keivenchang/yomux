@@ -1682,10 +1682,13 @@ def indexed_repo_summaries(
     indexed_dirs: list[str] | None = None,
     cache: MetadataCache | None = None,
     allow_network: bool = False,
+    *,
+    repo_roots: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     metadata_cache = cache or MetadataCache()
     summaries: list[dict[str, Any]] = []
-    for root in indexed_repo_roots(indexed_dirs):
+    roots = indexed_repo_roots(indexed_dirs) if repo_roots is None else list(repo_roots)
+    for root in roots:
         summary = repo_summary(root, branch_limit=None)
         if not summary:
             continue

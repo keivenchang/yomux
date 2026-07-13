@@ -6271,6 +6271,43 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(html.includes('data-js-debug-history-retry'), 'malformed history still exposes the manual Retry action');
   });
 
+  await testAsync('YO!stats treats an explicit history backfill response as pending and recovers', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    let requests = 0;
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest((url) => {
+      requests += 1;
+      if (requests === 1) return Promise.resolve(jsonResponse({history: {
+        coverage: {pending: true, reason: 'Backfill in progress', retry_after_seconds: 5},
+      }}));
+      return Promise.resolve(jsonResponse({history: {
+        sequence: 2,
+        records: [],
+        coverage: statsHistoryCoverageForRequest(url, {covered_start: 0, covered_end: 0}),
+      }}));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'retrying', 'an explicit pending envelope remains busy rather than becoming malformed');
+    assert.match(api.debugPanelHtmlForTest(), /Backfill in progress/, 'the overlay explains the backend convergence state');
+    api.setJsDebugHistoryReadinessForTest('retrying', {nextAutoRetryAtMs: 0});
+    await api.pollJsDebugStatsSampleForTest();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'the next due poll accepts durable coverage and exits retrying');
+    assert.equal(requests, 2, 'pending causes one bounded retry, not a request loop');
+  });
+
+  await testAsync('YO!stats defers chart and cost refresh work for the full pane drag', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
+    await flushAsyncWork();
+    api.setDragSessionForTest('debug');
+    api.scheduleJsDebugPanelRefreshForTest({force: true});
+    assert.equal(api.jsDebugRenderDragDeferredForTest(), true, 'the shared debug/cost scheduler records one deferred refresh during drag');
+    api.endSessionDrag({});
+    assert.equal(api.jsDebugRenderDragDeferredForTest(), false, 'drag end flushes the deferred refresh exactly once through the scheduler');
+  });
+
   await testAsync('YO!stats history errors back off automatic polls but manual Retry remains immediate', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];

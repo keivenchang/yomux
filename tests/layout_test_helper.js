@@ -2182,6 +2182,8 @@ globalThis.__layoutTestApi = {
   ensureFileTabStateForItem,
   setDragSessionForTest(session) { dragState.item = session; },
   dragStateForTest() { return {...dragState}; },
+  scheduleJsDebugPanelRefreshForTest: scheduleJsDebugPanelRefresh,
+  jsDebugRenderDragDeferredForTest() { return jsDebugRenderDragDeferred; },
   pendingTabStripRenderForTest() { return pendingTabStripRender; },
   renderSessionButtonsForTest: renderSessionButtons,
   sessionButtonsForTest() { return sessionButtons; },

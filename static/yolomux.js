@@ -1089,6 +1089,7 @@ let jsDebugEvents = [];
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
 let jsDebugRenderForce = false;
+let jsDebugRenderDragDeferred = false;
 const clientPerfCounterLimit = 80;
 const clientPerfLongTaskSampleLimit = 40;
 const clientPerfCounters = new Map();
@@ -2777,19 +2778,35 @@ function clearJsDebugEvents() {
     jsDebugRenderTimer = null;
   }
   jsDebugRenderForce = false;
+  jsDebugRenderDragDeferred = false;
   if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
 }
 
 function scheduleJsDebugPanelRefresh(options = {}) {
   if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
   if (options.force === true) jsDebugRenderForce = true;
+  if (dragState.item != null) {
+    jsDebugRenderDragDeferred = true;
+    return;
+  }
   if (jsDebugRenderTimer) return;
   jsDebugRenderTimer = setTimeout(() => {
     jsDebugRenderTimer = null;
+    if (dragState.item != null) {
+      jsDebugRenderDragDeferred = true;
+      return;
+    }
     const force = jsDebugRenderForce;
     jsDebugRenderForce = false;
     refreshDebugPanelsFromEvents({force});
   }, jsDebugRenderDebounceMs);
+}
+
+function flushDeferredJsDebugPanelRefresh() {
+  if (!jsDebugRenderDragDeferred) return false;
+  jsDebugRenderDragDeferred = false;
+  scheduleJsDebugPanelRefresh({force: jsDebugRenderForce});
+  return true;
 }
 
 function installJsDebugEventCapture() {
@@ -28332,6 +28349,7 @@ function endSessionDrag(event) {
   // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
+  flushDeferredJsDebugPanelRefresh();
   // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
   dragTimingReport();
@@ -41983,7 +42001,7 @@ function jsDebugHistoryRetryDelayMs(attemptCount = jsDebugHistoryReadiness.attem
 }
 
 function jsDebugHistoryAutoRetryDue(state = jsDebugHistoryReadiness, nowMs = performanceNow()) {
-  return state.phase !== 'error' || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
+  return !['error', 'retrying'].includes(state.phase) || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
 }
 
 function clearJsDebugHistoryOverlayTimer() {
@@ -42127,6 +42145,16 @@ function normalizedJsDebugHistoryCoverage(history = {}) {
   if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = 1;
   if (!Number.isFinite(coverage.sourceResolutionSeconds) || coverage.sourceResolutionSeconds <= 0) coverage.sourceResolutionSeconds = 0;
   return coverage;
+}
+
+function normalizedJsDebugHistoryPending(history = {}) {
+  const coverage = history?.coverage;
+  if (!coverage || typeof coverage !== 'object' || coverage.pending !== true) return null;
+  const retrySeconds = Number(coverage.retry_after_seconds ?? coverage.retry_after_s ?? 1);
+  return {
+    retryAfterMs: Math.max(1000, Math.min(60_000, Number.isFinite(retrySeconds) ? retrySeconds * 1000 : 1000)),
+    reason: String(coverage.reason || 'Backfill in progress'),
+  };
 }
 
 function jsDebugHistoryIntervalSummary(intervals) {
@@ -44155,7 +44183,7 @@ function debugGraphHistoryOverlayText(state = jsDebugHistoryReadiness) {
   const range = jsDebugGraphRangeLabel(state.requestedRangeSeconds);
   if (state.phase === 'loading-initial') return t('debug.graph.history.loadingInitial');
   if (state.phase === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
-  if (state.phase === 'retrying') return t('debug.graph.history.retrying', {range});
+  if (state.phase === 'retrying') return state.error || t('debug.graph.history.retrying', {range});
   if (state.phase === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
   return '';
 }
@@ -46460,7 +46488,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
     if (needsHistoryCoverage) {
       const state = jsDebugHistoryReadiness;
-      if (state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) {
+      if (['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) {
         historyRequestSuppressed = true;
       } else {
         const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
@@ -46468,14 +46496,14 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
           && Number(state.targetStartSeconds) === Number(targetStart)
           && Number(state.targetEndSeconds) === Number(targetEnd)
           && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
-        if (!currentRequestMatches) {
+        if (!currentRequestMatches || state.phase === 'retrying') {
           const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
           beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
             targetStartSeconds: targetStart,
             targetEndSeconds: targetEnd,
             requestedEndSeconds: requestWindow.endSeconds,
             requestedResolutionSeconds: coverageResolution,
-            retry: state.phase === 'error',
+            retry: ['error', 'retrying'].includes(state.phase),
           });
         }
         readinessRequest = jsDebugHistoryReadinessSnapshot();
@@ -46497,6 +46525,15 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
     });
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
+    const pendingCoverage = normalizedJsDebugHistoryPending(payload?.history);
+    if (readinessRequest && pendingCoverage) {
+      recordJsDebugStatsDiagnostic('info', `history backfill pending: ${pendingCoverage.reason}`);
+      setJsDebugHistoryReadiness('retrying', {
+        error: pendingCoverage.reason,
+        nextAutoRetryAtMs: performanceNow() + pendingCoverage.retryAfterMs,
+      });
+      return;
+    }
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
     if (readinessRequest && !coverage) {
       recordJsDebugStatsDiagnostic('error', 'coverage rejected: response omitted or malformed the required interval list');
@@ -47372,6 +47409,11 @@ function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
 }
 
 function renderYoCostPanels({force = false} = {}) {
+  if (dragState.item != null) {
+    jsDebugRenderForce ||= force;
+    jsDebugRenderDragDeferred = true;
+    return false;
+  }
   const nowMs = Date.now();
   const visible = typeof document !== 'undefined'
     && document.visibilityState !== 'hidden'
@@ -47446,6 +47488,11 @@ function renderDebugPanels(options = {}) {
 }
 
 function refreshDebugPanelsFromEvents(options = {}) {
+  if (dragState.item != null) {
+    jsDebugRenderForce ||= options.force === true;
+    jsDebugRenderDragDeferred = true;
+    return;
+  }
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
@@ -47722,7 +47769,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionSeconds(requestedStartSeconds, requestedResolutionSeconds);
   if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds)) return false;
   const state = jsDebugHistoryReadiness;
-  if (!retry && state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) return false;
+  if (!retry && ['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
     && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)

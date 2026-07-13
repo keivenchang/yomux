@@ -135,6 +135,7 @@ from .metadata import focus_root_for_session
 from .metadata import github_checks_unknown
 from .metadata import git_inventory
 from .metadata import indexed_repo_summaries
+from .metadata import INDEXED_REPO_ROOTS_CACHE_SECONDS
 from .metadata import metadata_build_cache
 from .metadata import project_inventory
 from .metadata import pull_request_number_from_subject
@@ -10241,7 +10242,11 @@ class TmuxWebtermApp:
                 name: session_to_json(info, self.metadata_cache, allow_network=False, include_metadata=not lightweight)
                 for name, info in sessions.items()
             }
-            indexed_repos = [] if lightweight else indexed_repo_summaries(cache=self.metadata_cache, allow_network=False)
+            indexed_repos = [] if lightweight else indexed_repo_summaries(
+                cache=self.metadata_cache,
+                allow_network=False,
+                repo_roots=self.indexed_repo_roots_snapshot(),
+            )
         agent_payload = {"agentAuth": {}, "availableAgents": available_agent_commands()} if lightweight else self.agent_auth_payload()
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -10263,6 +10268,88 @@ class TmuxWebtermApp:
             self.apply_metadata_badge_pulses(session_payloads)
             self.warm_metadata_cache_async(sessions)
         return payload
+
+    def indexed_repo_roots_snapshot(self) -> list[str]:
+        """Return the last jobd discovery immediately and advance it asynchronously."""
+        raw_dirs = self.settings_payload().get("settings", {}).get("file_explorer", {}).get("indexed_dirs", [])
+        indexed_dirs = tuple(str(item).strip() for item in raw_dirs if isinstance(item, str) and str(item).strip()) if isinstance(raw_dirs, list) else ()
+        service = self.activity_transcript_service
+        now = time.monotonic()
+        with service.indexed_repo_lock:
+            record = service.indexed_repo_record
+            if record.indexed_dirs != indexed_dirs:
+                record.indexed_dirs = indexed_dirs
+                record.roots = []
+                record.refreshed_at = 0.0
+                record.retry_at = 0.0
+            roots = list(record.roots)
+            should_start = (
+                record.worker is None
+                and now >= record.retry_at
+                and (record.refreshed_at <= 0.0 or now - record.refreshed_at >= INDEXED_REPO_ROOTS_CACHE_SECONDS)
+            )
+            if should_start:
+                worker = threading.Thread(
+                    target=self.refresh_indexed_repo_roots_worker,
+                    args=(indexed_dirs,),
+                    name="yolomux-indexed-repos",
+                    daemon=True,
+                )
+                record.worker = worker
+                worker.start()
+        return roots
+
+    def refresh_indexed_repo_roots_worker(self, indexed_dirs: tuple[str, ...]) -> None:
+        """Submit and observe one discovery job without blocking metadata requests."""
+        service = self.activity_transcript_service
+        worker = threading.current_thread()
+        succeeded = False
+        try:
+            signature = "\0".join(indexed_dirs).encode("utf-8")
+            generation = max(1, int(time.time() // INDEXED_REPO_ROOTS_CACHE_SECONDS))
+            response = self.job_client.submit(
+                "indexed_repo_roots",
+                {"indexed_dirs": list(indexed_dirs)},
+                priority="maintenance",
+                generation=generation,
+                coalesce_key=f"indexed-repos:{hashlib.sha256(signature).hexdigest()[:24]}:{generation}",
+                deadline_ms=120_000,
+            )
+            job = response.get("job") if isinstance(response.get("job"), dict) else {}
+            job_id = job.get("job_id") if response.get("ok") and isinstance(job.get("job_id"), str) else ""
+            if not job_id:
+                return
+            with service.indexed_repo_lock:
+                if service.indexed_repo_record.indexed_dirs != indexed_dirs:
+                    return
+                service.indexed_repo_record.job_id = job_id
+            while True:
+                with service.indexed_repo_lock:
+                    if service.indexed_repo_record.indexed_dirs != indexed_dirs:
+                        return
+                response = self.job_client.result(job_id)
+                job = response.get("job") if isinstance(response.get("job"), dict) else {}
+                status = str(job.get("status") or "")
+                if status == "completed" and isinstance(job.get("result"), dict):
+                    roots = job["result"].get("roots")
+                    safe_roots = [str(item) for item in roots if isinstance(item, str)] if isinstance(roots, list) else []
+                    with service.indexed_repo_lock:
+                        if service.indexed_repo_record.indexed_dirs == indexed_dirs:
+                            service.indexed_repo_record.roots = safe_roots
+                            service.indexed_repo_record.refreshed_at = time.monotonic()
+                            succeeded = True
+                    return
+                if status in {"failed", "cancelled", "superseded", "timed_out"} or not response.get("ok"):
+                    return
+                time.sleep(0.1)
+        finally:
+            with service.indexed_repo_lock:
+                record = service.indexed_repo_record
+                if record.worker is worker:
+                    record.worker = None
+                    record.job_id = ""
+                    if not succeeded:
+                        record.retry_at = time.monotonic() + 5.0
 
     def build_transcripts_payload(self, lightweight: bool = False) -> dict[str, Any]:
         return self.build_session_metadata_payload(lightweight=lightweight)

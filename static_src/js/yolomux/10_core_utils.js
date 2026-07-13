@@ -578,19 +578,35 @@ function clearJsDebugEvents() {
     jsDebugRenderTimer = null;
   }
   jsDebugRenderForce = false;
+  jsDebugRenderDragDeferred = false;
   if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
 }
 
 function scheduleJsDebugPanelRefresh(options = {}) {
   if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
   if (options.force === true) jsDebugRenderForce = true;
+  if (dragState.item != null) {
+    jsDebugRenderDragDeferred = true;
+    return;
+  }
   if (jsDebugRenderTimer) return;
   jsDebugRenderTimer = setTimeout(() => {
     jsDebugRenderTimer = null;
+    if (dragState.item != null) {
+      jsDebugRenderDragDeferred = true;
+      return;
+    }
     const force = jsDebugRenderForce;
     jsDebugRenderForce = false;
     refreshDebugPanelsFromEvents({force});
   }, jsDebugRenderDebounceMs);
+}
+
+function flushDeferredJsDebugPanelRefresh() {
+  if (!jsDebugRenderDragDeferred) return false;
+  jsDebugRenderDragDeferred = false;
+  scheduleJsDebugPanelRefresh({force: jsDebugRenderForce});
+  return true;
 }
 
 function installJsDebugEventCapture() {

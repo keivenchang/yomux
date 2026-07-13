@@ -1088,6 +1088,7 @@ let jsDebugEvents = [];
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
 let jsDebugRenderForce = false;
+let jsDebugRenderDragDeferred = false;
 const clientPerfCounterLimit = 80;
 const clientPerfLongTaskSampleLimit = 40;
 const clientPerfCounters = new Map();

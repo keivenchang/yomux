@@ -228,7 +228,7 @@ flowchart TB
 | Elected server → `statsd` | Independently scheduled YO!stats CPU/status/GPU/memory/token partial records and bounded maintenance | Local Unix RPC; the elected server collects each family asynchronously and `statsd` is the sole SQLite WAL writer for `STATE_DIR/stats-history.sqlite3` |
 | Server → `stats-reader` | Retained-history queries, aggregation, and pre-encoded responses | Local Unix RPC to an independent SQLite `mode=ro`/`query_only` WAL reader, so a long range query cannot occupy the writer listener or suppress a CPU deadline |
 | Server ↔ `indexd` | Quick Open enqueue/search/unindex and index diagnostics | Local Unix RPC; `indexd` writes `STATE_DIR/search_index/<digest>.sqlite3` row deltas, servers read committed snapshots |
-| Server ↔ `jobd` | Stateless bounded CPU tasks such as `transcript_view` | Local Unix RPC to the broker; broker supervises 1-2 spawned executors and bounded queues |
+| Server ↔ `jobd` | Stateless bounded CPU tasks such as `transcript_view` and indexed-repository discovery | Local Unix RPC to the broker; broker supervises 1-2 spawned executors and bounded queues. The web process consumes the last completed repository snapshot and never recursively walks configured index roots. |
 | Server ↔ `approvald` | YO auto-approval start/status/stop/pending-prompt checks | Local Unix RPC; `approvald` owns target locks and target-keyed `AutoApproveWorker` threads |
 | Server ↔ durable caches | Activity, session-file, watch-root, chat, and ownership state | Atomic JSON/files, SQLite stores, and `flock` locks under the state directory |
 | Native watcher ↔ OS | Filesystem changes for watched client roots | `watchfiles` backend; macOS/Linux validated, bounded polling fallback otherwise |

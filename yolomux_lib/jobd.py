@@ -77,6 +77,28 @@ def _text_facts(payload: bytes) -> bytes:
     return json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _indexed_repo_roots(payload: bytes) -> bytes:
+    """Discover configured repositories in a worker process, never in HTTP."""
+    value = json.loads(payload.decode("utf-8"))
+    raw_dirs = value.get("indexed_dirs") if isinstance(value, dict) else None
+    if not isinstance(raw_dirs, list) or len(raw_dirs) > 64:
+        raise ValueError("indexed_dirs must be a bounded list")
+    indexed_dirs: list[str] = []
+    for item in raw_dirs:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        path = Path(item).expanduser()
+        if not path.is_absolute() or ".." in path.parts:
+            raise ValueError("indexed directory must be absolute and normalized")
+        indexed_dirs.append(str(path))
+    # Import locally so ordinary jobd startup does not initialize metadata/git
+    # helpers until this maintenance task actually runs.
+    from .metadata import _discover_indexed_repo_roots
+
+    result = {"roots": _discover_indexed_repo_roots(indexed_dirs)}
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def _normalized_transcript_path(path_text: str) -> Path:
     path = Path(path_text).expanduser()
     if not path.is_absolute():
@@ -145,6 +167,7 @@ def _transcript_view(payload: bytes) -> bytes:
 
 
 REGISTERED_TASKS = {
+    "indexed_repo_roots": _indexed_repo_roots,
     "json_compact": _json_compact,
     "text_facts": _text_facts,
     "transcript_view": _transcript_view,

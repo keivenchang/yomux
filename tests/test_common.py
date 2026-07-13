@@ -93,6 +93,7 @@ def test_main_process_cpu_work_has_named_allowlist():
     }
     assert thread_owners == {
         "chat_yoagent",
+        "indexed_repo_roots_snapshot",
         "start_auto_approve_cache_refresh",
         "start_client_directory_poll",
         "start_client_event_watcher",

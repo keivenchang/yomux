@@ -5336,7 +5336,7 @@ def test_transcripts_payload_exposes_server_version(monkeypatch):
 def test_transcripts_payload_includes_indexed_repos_only_on_full_metadata(monkeypatch):
     indexed = [{"root": "/repo", "other_branches": {"branches": [{"name": "feature"}]}}]
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    monkeypatch.setattr(app_module, "indexed_repo_summaries", lambda cache=None, allow_network=False: indexed)
+    monkeypatch.setattr(app_module, "indexed_repo_summaries", lambda cache=None, allow_network=False, repo_roots=None: indexed)
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
@@ -13293,3 +13293,36 @@ def test_version_change_level_classifies_semver_bumps():
     assert app_module.common.version_change_level("0.3.25", "1.0.0") == "major"
     assert app_module.common.version_change_level("0.3.25", "0.3.25") == "none"
     assert app_module.common.version_change_level("0.3.25", "not-a-version") == "none"
+
+
+def test_indexed_repo_discovery_is_submitted_to_jobd_and_consumed_as_a_snapshot(tmp_path):
+    class FakeJobClient:
+        def __init__(self):
+            self.submissions = []
+            self.release_result = threading.Event()
+
+        def submit(self, task, payload, **options):
+            self.submissions.append((task, payload, options))
+            return {"ok": True, "job": {"job_id": "repo-job", "status": "queued"}}
+
+        def result(self, job_id):
+            assert job_id == "repo-job"
+            assert self.release_result.wait(timeout=2.0)
+            return {"ok": True, "job": {"status": "completed", "result": {"roots": [str(tmp_path / "repo")]}}}
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.activity_transcript_service = app_module.ActivityTranscriptService()
+    webapp.job_client = FakeJobClient()
+    webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": [str(tmp_path)]}}}
+
+    assert webapp.indexed_repo_roots_snapshot() == []
+    worker = webapp.activity_transcript_service.indexed_repo_record.worker
+    assert worker is not None
+    assert worker.is_alive() is True
+    webapp.job_client.release_result.set()
+    worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+    assert webapp.job_client.submissions[0][0] == "indexed_repo_roots"
+    assert webapp.job_client.submissions[0][2]["priority"] == "maintenance"
+    assert webapp.indexed_repo_roots_snapshot() == [str(tmp_path / "repo")]
+    assert len(webapp.job_client.submissions) == 1

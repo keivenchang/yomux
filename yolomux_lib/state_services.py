@@ -181,6 +181,18 @@ class SessionFilesService:
 
 
 @dataclass
+class IndexedRepoDiscoveryRecord:
+    """Last completed jobd repository discovery plus one in-flight job."""
+
+    indexed_dirs: tuple[str, ...] = ()
+    roots: list[str] = field(default_factory=list)
+    job_id: str = ""
+    worker: threading.Thread | None = None
+    refreshed_at: float = 0.0
+    retry_at: float = 0.0
+
+
+@dataclass
 class ActivityTranscriptService:
     """Own payload caches for activity, transcript, tail, and context-item views."""
 
@@ -200,6 +212,8 @@ class ActivityTranscriptService:
     # large JSONL belongs in jobd, never in the HTTP process cache.
     transcript_job_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
     transcript_job_records: dict[tuple[Any, ...], str] = field(default_factory=dict)
+    indexed_repo_lock: threading.RLock = field(default_factory=threading.RLock)
+    indexed_repo_record: IndexedRepoDiscoveryRecord = field(default_factory=IndexedRepoDiscoveryRecord)
 
 
 @dataclass

@@ -22,6 +22,22 @@ def _statsd_history_latency_budget_seconds(span_seconds: int, *, cpu_count: int 
     return baseline * max(1.0, min(1.25, 32 / cores))
 
 
+def test_stats_client_removes_only_legacy_zero_byte_service_database(tmp_path):
+    services = tmp_path / "services"
+    services.mkdir()
+    legacy = services / statsd.STATSD_DATABASE_NAME
+    configured = tmp_path / statsd.STATSD_DATABASE_NAME
+    legacy.touch()
+
+    assert statsd.remove_legacy_zero_byte_service_database(services, configured) is True
+    assert legacy.exists() is False
+
+    legacy.write_bytes(b"not-empty")
+    assert statsd.remove_legacy_zero_byte_service_database(services, configured) is False
+    assert legacy.read_bytes() == b"not-empty"
+    assert statsd.remove_legacy_zero_byte_service_database(tmp_path, configured) is False
+
+
 class _FakePricingCatalog:
     def __init__(self):
         self.calls = []

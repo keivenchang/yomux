@@ -3316,6 +3316,18 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
 
     def handle_error(self, request: socket.socket, client_address: tuple[str, int]) -> None:
         error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            host = client_address[0] if client_address else "unknown"
+            error_name = type(error).__name__
+            sys.stderr.write(f"{host} - - client disconnected: {error_name}\n")
+            self.app.record_performance_sample(
+                "http-endpoint",
+                "expected-disconnect",
+                trigger=error_name,
+                count=1,
+                details={"client": host},
+            )
+            return
         if isinstance(error, ssl.SSLError):
             host = client_address[0] if client_address else "unknown"
             reason = getattr(error, "reason", None) or str(error)

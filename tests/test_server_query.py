@@ -42,6 +42,45 @@ def server_ws_json(frame: bytes) -> dict:
     return json.loads(frame[offset:offset + payload_length].decode("utf-8"))
 
 
+def test_expected_client_disconnect_is_counted_without_traceback(monkeypatch):
+    recorded = []
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: recorded.append((args, kwargs)))
+    stderr = io.StringIO()
+    monkeypatch.setattr(server_module.sys, "stderr", stderr)
+
+    try:
+        raise BrokenPipeError(errno.EPIPE, "fixture disconnected")
+    except BrokenPipeError:
+        server.handle_error(None, ("127.0.0.1", 4321))
+
+    assert stderr.getvalue() == "127.0.0.1 - - client disconnected: BrokenPipeError\n"
+    assert "Traceback" not in stderr.getvalue()
+    assert recorded == [(('http-endpoint', 'expected-disconnect'), {
+        'trigger': 'BrokenPipeError',
+        'count': 1,
+        'details': {'client': '127.0.0.1'},
+    })]
+
+
+def test_unexpected_server_error_keeps_the_standard_traceback_path(monkeypatch):
+    delegated = []
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    monkeypatch.setattr(
+        server_module.ThreadingHTTPServer,
+        "handle_error",
+        lambda self, request, address: delegated.append((request, address)),
+    )
+
+    request = object()
+    try:
+        raise RuntimeError("real handler bug")
+    except RuntimeError:
+        server.handle_error(request, ("127.0.0.1", 4321))
+
+    assert delegated == [(request, ("127.0.0.1", 4321))]
+
+
 def init_share_replay_state(server):
     server.share_replay_lock = server_module.threading.Lock()
     server.share_replay_records = {}
