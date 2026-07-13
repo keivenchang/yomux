@@ -8172,11 +8172,12 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <div id="terminal" class="terminal"><div class="xterm"></div></div>
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
+            <div id="smart-key-grabber" class="mobile-terminal-key-grabber" aria-hidden="true"></div>
             <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button></div>
             <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button><button id="smart-key-backspace" class="mobile-terminal-key">⌫</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
-            <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
-            <div id="smart-key-bottom" class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom"><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
-            <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">⌘C</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
+            <div id="smart-key-bottom" class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom"><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
+            <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
           </div>
       </div>
     """, extra_css="""
@@ -8192,6 +8193,14 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const bar = document.getElementById('smart-keys');
         const row = document.getElementById('smart-key-row');
         const key = row.querySelector('.mobile-terminal-key');
+        const paint = (property, token) => {
+          const probe = document.createElement('i');
+          probe.style[property] = `var(${token})`;
+          document.body.append(probe);
+          const value = getComputedStyle(probe)[property];
+          probe.remove();
+          return value;
+        };
         const hidden = bar.hidden;
         bar.hidden = false;
         const initial = {bar: box(bar), launcher: box(document.getElementById('smart-key-launcher'))};
@@ -8205,16 +8214,20 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const moreRow = document.getElementById('smart-key-more-row');
         const side = document.getElementById('smart-key-side');
         const sideButtons = [...side.querySelectorAll('.mobile-terminal-key')];
-        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), grabber: box(document.getElementById('smart-key-grabber')), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
-        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), interrupt: box(document.getElementById('smart-key-interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display};
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display};
         return {
           pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
           paneDisplay: getComputedStyle(pane).display,
           overflowX: getComputedStyle(row).overflowX,
           activeBackground: getComputedStyle(document.getElementById('smart-key-ctrl')).backgroundColor,
           launcherUserSelect: getComputedStyle(document.getElementById('smart-key-launcher')).userSelect,
+          launcherColor: getComputedStyle(document.getElementById('smart-key-launcher')).color,
+          launcherBackground: getComputedStyle(document.getElementById('smart-key-launcher')).backgroundColor,
+          inactiveTabColor: paint('color', '--pane-tab-text'),
+          inactiveTabBackground: paint('backgroundColor', '--panel2'),
           barUserSelect: getComputedStyle(bar).userSelect,
           interruptColor: getComputedStyle(document.getElementById('smart-key-interrupt')).color,
           primaryColumns: getComputedStyle(row).gridTemplateColumns,
@@ -8223,7 +8236,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           shell: normal.shell,
           movedInsetEnd: bar.style.insetBlockEnd,
           initiallyHidden: hidden,
-              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, bottom: normal.bottom, bottomLabels: normal.bottomLabels, bottomKeys: normal.bottomKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, grabber: normal.grabber, bottom: normal.bottom, bottomLabels: normal.bottomLabels, bottomKeys: normal.bottomKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
           hasClose: Boolean(document.querySelector('.mobile-terminal-key-close, [data-terminal-mobile-close]')),
           hasDrag: Boolean(document.querySelector('.mobile-terminal-key-drag, [data-terminal-mobile-drag]')),
@@ -8243,7 +8256,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["primaryColumns"].startswith("repeat(3,") or len(metrics["primaryColumns"].split()) == 3, metrics
     assert metrics["primaryLabels"] == ["Tab", "^B", "⌫"], metrics
     assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], metrics
-    assert metrics["bottomLabels"] == ["Alt", "Cmd"], metrics
+    assert metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], metrics
+    assert metrics["copy"]["width"] == metrics["paste"]["width"] and metrics["copy"]["height"] == metrics["paste"]["height"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
     assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
     assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
@@ -8257,13 +8271,18 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
     assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
+    assert metrics["launcherColor"] == metrics["inactiveTabColor"] and metrics["launcherBackground"] == metrics["inactiveTabBackground"], metrics
     assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(2)), metrics
     assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["sideKeys"]), metrics
     assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["bottomKeys"]), metrics
     assert all(key["right"] <= metrics["dpad"]["left"] for key in metrics["sideKeys"]), metrics
-    assert metrics["bottom"]["left"] <= metrics["side"]["left"] and metrics["bottom"]["right"] >= metrics["dpad"]["right"], metrics
+    assert metrics["bottom"]["left"] == metrics["side"]["left"], metrics
+    assert metrics["bottomKeys"][0]["left"] == metrics["sideKeys"][-1]["left"] and metrics["bottomKeys"][0]["right"] == metrics["sideKeys"][-1]["right"], metrics
+    assert abs(metrics["sideKeys"][-1]["bottom"] - metrics["bottomKeys"][0]["top"]) <= 5, metrics
+    assert all(key["width"] == metrics["sideKeys"][0]["width"] for key in metrics["bottomKeys"]), metrics
     assert metrics["bottom"]["top"] >= metrics["dpad"]["bottom"], metrics
-    assert metrics["overflow"]["interrupt"]["top"] >= metrics["overflow"]["row"]["top"] and metrics["overflow"]["interrupt"]["bottom"] <= metrics["overflow"]["row"]["bottom"], metrics
+    assert metrics["overflow"]["hasInterrupt"] is False, metrics
+    assert metrics["grabber"]["width"] > 0 and metrics["grabber"]["top"] >= metrics["bar"]["top"] and metrics["grabber"]["bottom"] <= metrics["key"]["top"], metrics
     assert metrics["up"]["top"] < metrics["left"]["top"] and metrics["up"]["top"] < metrics["right"]["top"], metrics
     assert metrics["left"]["left"] < metrics["up"]["left"] < metrics["right"]["left"], metrics
     assert metrics["down"]["top"] > metrics["left"]["top"] and metrics["down"]["top"] > metrics["right"]["top"], metrics
@@ -8279,11 +8298,21 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const primary = document.getElementById('smart-key-row');
         const backspace = document.getElementById('smart-key-backspace');
         const bottom = document.getElementById('smart-key-bottom');
-        return {bar: box(document.getElementById('smart-keys')), side: box(side), bottom: box(bottom), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent), bottomLabels: [...bottom.querySelectorAll('button')].map(node => node.textContent)};
+        const launcher = document.getElementById('smart-key-launcher');
+        const paint = (property, token) => {
+          const probe = document.createElement('i');
+          probe.style[property] = `var(${token})`;
+          document.body.append(probe);
+          const value = getComputedStyle(probe)[property];
+          probe.remove();
+          return value;
+        };
+        return {bar: box(document.getElementById('smart-keys')), side: box(side), bottom: box(bottom), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent), bottomLabels: [...bottom.querySelectorAll('button')].map(node => node.textContent), launcherColor: getComputedStyle(launcher).color, launcherBackground: getComputedStyle(launcher).backgroundColor, inactiveTabColor: paint('color', '--pane-tab-text'), inactiveTabBackground: paint('backgroundColor', '--panel2')};
         """
     )
     assert light_metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], light_metrics
-    assert light_metrics["bottomLabels"] == ["Alt", "Cmd"], light_metrics
+    assert light_metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], light_metrics
+    assert light_metrics["launcherColor"] == light_metrics["inactiveTabColor"] and light_metrics["launcherBackground"] == light_metrics["inactiveTabBackground"], light_metrics
     assert light_metrics["backspace"]["left"] >= light_metrics["primary"]["left"] and light_metrics["backspace"]["right"] <= light_metrics["primary"]["right"], light_metrics
     assert light_metrics["bar"]["height"] < metrics["pane"]["height"] and light_metrics["side"]["bottom"] <= light_metrics["bar"]["bottom"] and light_metrics["bottom"]["bottom"] <= light_metrics["bar"]["bottom"], light_metrics
 
@@ -8319,6 +8348,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
             const done = arguments[arguments.length - 1];
             const launcher = document.querySelector('[data-terminal-mobile-toggle="1"]');
             const bar = document.querySelector('[data-terminal-mobile-keybar="1"]');
+            const grabber = bar?.querySelector('.mobile-terminal-key-grabber');
             const pane = launcher?.closest('.tab-pane');
             const box = node => {
               const rect = node.getBoundingClientRect();
@@ -8345,15 +8375,15 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
               launcher.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
               if (emitClick) launcher.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
             };
-            const dragPaletteTo = (x, y) => {
-              const rect = bar.getBoundingClientRect();
+            const dragPaletteTo = (x, y, source = bar) => {
+              const rect = source.getBoundingClientRect();
               const startX = rect.left + Math.min(12, Math.max(4, rect.width / 4));
               const startY = rect.top + Math.min(12, Math.max(4, rect.height / 4));
               const pointerId = 73;
               const base = {bubbles: true, cancelable: true, pointerId, pointerType: 'touch', button: 0, buttons: 1, isPrimary: true};
-              bar.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
-              bar.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
-              bar.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
+              source.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
+              source.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
+              source.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
             };
             const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             (async () => {
@@ -8441,7 +8471,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
                 readyState: WebSocket.OPEN,
                 send(frame) { frames.push(JSON.parse(frame)); },
               };
-              dragPaletteTo(resized.pane.left + 24, resized.pane.bottom - 24);
+              dragPaletteTo(resized.pane.left + 24, resized.pane.bottom - 24, grabber);
               await settle();
               const paletteDragged = {
                 bar: box(bar),
@@ -8458,7 +8488,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
               ];
               const paletteEdgeDrags = [];
               for (const [name, x, y] of edgeTargets) {
-                dragPaletteTo(x, y);
+                dragPaletteTo(x, y, grabber);
                 await settle();
                 paletteEdgeDrags.push({
                   name,
@@ -8491,7 +8521,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
               tap(bar.querySelector('[data-terminal-mobile-key="tab"]'));
               await settle();
               const afterKeyTapState = stateSnapshot();
-              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
+              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, grabber: grabber ? box(grabber) : null, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
             })().catch(error => done({error: String(error?.stack || error)}));
             """
         )
@@ -8505,6 +8535,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     assert metrics["initial"]["barHidden"] is True and metrics["initial"]["state"]["x"] is None, metrics
     assert metrics["opened"]["text"] == "×" and metrics["opened"]["expanded"] == "true", metrics
     assert metrics["opened"]["hidden"] is False and metrics["opened"]["placement"] == "above", metrics
+    assert metrics["grabber"] is not None and metrics["grabber"]["width"] > 0, metrics
     assert 0 <= metrics["opened"]["launcher"]["top"] - metrics["opened"]["bar"]["bottom"] <= 16, metrics
     assert metrics["dragged"]["hidden"] is False and metrics["dragged"]["text"] == "×", metrics
     assert metrics["dragged"]["placement"] == "below", metrics

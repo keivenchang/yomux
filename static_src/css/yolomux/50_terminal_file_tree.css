@@ -38,10 +38,10 @@
   width: 40px;
   height: 40px;
   padding: 0;
-  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border: 1px solid var(--pane-inactive-tab-border);
   border-radius: var(--radius-control);
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  color: var(--pane-tab-text);
+  background: var(--panel2);
   box-shadow: var(--shadow-elevated);
   font: 700 var(--ui-font-size)/1 var(--ui-font);
   touch-action: none;
@@ -66,7 +66,7 @@
   gap: var(--space-4);
   width: min(18rem, calc(100vw - var(--space-12)));
   max-height: calc(100% - var(--space-4));
-  padding: var(--space-2);
+  padding: calc(var(--space-2) + var(--space-4)) var(--space-2) var(--space-2);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
@@ -79,12 +79,23 @@
 .mobile-terminal-keybar[hidden] {
   display: none;
 }
+.mobile-terminal-key-grabber {
+  position: absolute;
+  inset-inline: 50% auto;
+  inset-block-start: var(--space-2);
+  width: 24px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--pane-tab-text) 55%, transparent);
+  cursor: grab;
+}
 .mobile-terminal-key-side {
   grid-column: 1;
-  grid-row: 1 / span 2;
+  grid-row: 2;
   display: grid;
   grid-template-rows: repeat(3, 36px);
-  align-self: start;
+  align-self: end;
   align-content: start;
   gap: var(--space-1);
 }
@@ -111,8 +122,13 @@
   grid-column: 1 / -1;
   grid-row: 3;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, 36px);
+  justify-content: start;
   overflow: visible;
+}
+.mobile-terminal-keyrow-bottom .mobile-terminal-key {
+  min-width: 36px;
+  padding-inline: 0;
 }
 .mobile-terminal-keyrow-shell {
   grid-column: 2;

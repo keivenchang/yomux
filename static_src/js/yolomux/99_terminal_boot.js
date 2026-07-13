@@ -198,7 +198,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
-  {action: 'copy', labelKey: 'common.copy', ariaLabelKey: 'common.copy'},
+  {action: 'copy', label: '⌘C', ariaLabelKey: 'common.copy', ariaLabelSuffix: 'Cmd-C'},
   {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
   {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
   {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
@@ -223,16 +223,16 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-// Overflow reuses the shared definitions above (and the one direct interrupt definition) instead
-// of creating parallel key definitions that could drift from their terminal-byte behavior.
-const terminalMobileAccessoryMoreActions = Object.freeze(['command-p', 'home', 'end', 'delete', 'shift-tab', 'interrupt', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r']);
+// Overflow refers to shared definitions instead of creating parallel key definitions that could
+// drift from their terminal-byte behavior.
+const terminalMobileAccessoryMoreActions = Object.freeze(['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r']);
 const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
 const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
 const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift']);
-const terminalMobileAccessoryBottomActions = Object.freeze(['alt', 'cmd']);
+const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -290,7 +290,7 @@ function terminalMobileAccessoryButtonHtml(session, definition, state, extraClas
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const label = definition.labelKey ? t(definition.labelKey) : definition.label;
-  const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
+  const ariaLabel = `${definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel}${definition.ariaLabelSuffix ? ` (${definition.ariaLabelSuffix})` : ''}`;
   return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
@@ -510,6 +510,7 @@ function terminalMobileAccessoryHtml(session) {
   const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
   return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
+      <div class="mobile-terminal-key-grabber" aria-hidden="true"></div>
       <div class="mobile-terminal-key-side">
         ${sideKeys}
       </div>
