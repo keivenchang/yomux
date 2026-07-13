@@ -422,25 +422,29 @@ class PricingCatalog:
                 return None
             return ResolvedRate(provider, str(row["model"]), model, direction, modality, cache_role, unit, int(row["scale"]), Decimal(str(row["usd"])), str(row["effective_from"]), str(row["source_kind"]), str(row["source_url"]), int(row["revision"]))
 
-    def estimate_rate_band(self, *, direction: str, modality: str = "text", cache_role: str = "none", unit: str = "tokens", profile: str = "default", service_tier: str = "default", timestamp: str = "9999-12-31T23:59:59Z") -> EstimatedRateBand | None:
+    def estimate_rate_band(self, *, provider: str = "unknown", direction: str, modality: str = "text", cache_role: str = "none", unit: str = "tokens", profile: str = "default", service_tier: str = "default", timestamp: str = "9999-12-31T23:59:59Z") -> EstimatedRateBand | None:
         """Return a defensible low/high comparable rate band for unknown models.
 
         This intentionally does not guess a model identity. It compares active
-        catalog rows with the same billable dimension tuple and picks the
+        catalog rows from the known provider with the same billable dimension tuple and picks the
         cheapest and most expensive current rates in that class. If no exact
         profile/service-tier match exists, it falls back to the same
         direction/modality/cache-role/unit class across profiles and tiers.
+        Provider-unknown telemetry may compare across providers; a known
+        provider never inherits another provider's unrelated ceiling.
         """
         self.open()
+        normalized_provider = str(provider or "unknown").strip().lower() or "unknown"
+        provider_clause = " AND provider = ?" if normalized_provider != "unknown" else ""
         with self._transaction() as connection:
             rows = connection.execute(
-                "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1 AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
-                (direction, modality, cache_role, unit, profile, service_tier, timestamp),
+                "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1" + provider_clause + " AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
+                (direction, modality, cache_role, unit, profile, service_tier, timestamp, *([normalized_provider] if provider_clause else [])),
             ).fetchall()
             if not rows:
                 rows = connection.execute(
-                    "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND effective_from <= ? AND active = 1 AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
-                    (direction, modality, cache_role, unit, timestamp),
+                    "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND effective_from <= ? AND active = 1" + provider_clause + " AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
+                    (direction, modality, cache_role, unit, timestamp, *([normalized_provider] if provider_clause else [])),
                 ).fetchall()
             rates = [
                 ResolvedRate(

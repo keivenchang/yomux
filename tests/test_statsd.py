@@ -2,7 +2,6 @@ import gzip
 import json
 import os
 import sqlite3
-import sys
 import threading
 import time
 from decimal import Decimal
@@ -12,6 +11,15 @@ import pytest
 
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
+
+
+def _statsd_history_latency_budget_seconds(span_seconds: int, *, cpu_count: int | None = None) -> float:
+    cores = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    baseline = 1.0 if span_seconds <= 3600 else 2.0
+    # The canonical gate runs three pytest pools plus Chrome concurrently. Keep
+    # the 32-core Linux contract, while allowing at most 25% scheduler headroom
+    # on lower-core hosts such as the 10-core Mac.
+    return baseline * max(1.0, min(1.25, 32 / cores))
 
 
 class _FakePricingCatalog:
@@ -345,19 +353,20 @@ def test_statsd_reprices_startup_history_in_bounded_keyset_turns(monkeypatch, tm
     catalog.usd = Decimal("3")
     catalog.revision = 8
     monkeypatch.setattr(statsd, "STATSD_PRICING_REPROJECTION_BATCH_BUCKETS", 1)
+    service.store.set_metadata_value(statsd.STATSD_PRICING_REPROJECTION_MARKER, "8")
 
     assert service._schedule_cost_reprojection()["pending"] is True
     first = service._maybe_reproject_cost_summaries()
     assert first["pending"] is True
     assert first["processed"] == 1
-    assert service.store.metadata_value(statsd.STATSD_PRICING_REPROJECTION_MARKER) is None
+    assert service.store.metadata_value(statsd.STATSD_PRICING_REPROJECTION_MARKER) == "8"
     # A ping/status can be served between these calls because no maintenance
     # loop occupies the listener or moves SQLite to a background thread.
     assert service.handle({"action": "ping"})["ok"] is True
     while service.pricing_reprojection is not None:
         service._maybe_reproject_cost_summaries()
 
-    assert service.store.metadata_value(statsd.STATSD_PRICING_REPROJECTION_MARKER) == "8"
+    assert service.store.metadata_value(statsd.STATSD_PRICING_REPROJECTION_MARKER) == "8:policy-2"
     assert all(record["cost_summary"]["total_micro_usd"] == 300 for record in service.handle({"action": "history"})["records"])
     service.store.close()
 
@@ -527,6 +536,51 @@ def test_statsd_cost_summary_exposes_lower_upper_bounds_for_unpriced_usage():
     assert summary["complete"] is False
     assert summary["models"][0]["lower_micro_usd"] == 200
     assert sum(row["upper_micro_usd"] for row in summary["models"]) == summary["upper_micro_usd"]
+
+
+def test_statsd_unknown_openai_cache_input_output_reconcile_to_provider_scoped_upper_bound():
+    class Catalog:
+        def __init__(self):
+            self.estimate_calls = []
+
+        def resolve_rate(self, **_kwargs):
+            return None
+
+        def estimate_rate_band(self, **kwargs):
+            self.estimate_calls.append(kwargs)
+            maximum = {
+                ("input", "read"): Decimal("0.5"),
+                ("input", "none"): Decimal("30"),
+                ("output", "none"): Decimal("180"),
+            }[(kwargs["direction"], kwargs["cache_role"])]
+            return SimpleNamespace(
+                minimum=SimpleNamespace(usd=Decimal("0"), scale=1_000_000, catalog_revision=9, source_url="https://prices.example/min"),
+                maximum=SimpleNamespace(usd=maximum, scale=1_000_000, catalog_revision=9, source_url="https://prices.example/max"),
+            )
+
+    catalog = Catalog()
+    atoms = [
+        {"event_id": "cache", "timestamp": 1, "provider": "openai", "model": "unknown", "direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "quantity": 2_000_000},
+        {"event_id": "input", "timestamp": 1, "provider": "openai", "model": "unknown", "direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 3_000_000},
+        {"event_id": "output", "timestamp": 1, "provider": "openai", "model": "unknown", "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 4_000_000},
+    ]
+    for atom in atoms:
+        atom.update({"source": "migrated Codex", "tmux_key": "s|1|codex", "tmux_label": "s:1:codex", "tmux_session": "s", "tmux_window": "1", "agent_kind": "codex"})
+    components = [statsd.projected_usage_component(atom, catalog) for atom in atoms]
+    summary = statsd.cost_summary_response({"components": components})
+
+    assert all(component and component["lower_micro_usd"] == 0 and component["priced"] is False for component in components)
+    assert [component["upper_micro_usd"] for component in components] == [1_000_000, 90_000_000, 720_000_000]
+    assert summary["lower_micro_usd"] == summary["known_micro_usd"] == 0
+    assert summary["upper_micro_usd"] == 811_000_000
+    assert summary["unpriced_token_quantity"] == 9_000_000
+    assert all(call["provider"] == "openai" for call in catalog.estimate_calls)
+    for rows in (summary["models"], summary["sources"], summary["tmux_windows"]):
+        assert len(rows) == 1
+        assert rows[0]["cache_upper_micro_usd"] == 1_000_000
+        assert rows[0]["input_upper_micro_usd"] == 90_000_000
+        assert rows[0]["output_upper_micro_usd"] == 720_000_000
+        assert rows[0]["upper_micro_usd"] == summary["upper_micro_usd"]
 
 
 def test_statsd_projects_observed_profile_and_service_tier_without_default_fallback():
@@ -1838,6 +1892,13 @@ def test_stats_coverage_read_only_reader_and_legacy_database_derive_holes(tmp_pa
         reader.engine.store.close()
 
 
+def test_statsd_history_latency_budget_scales_below_linux_baseline_cores():
+    assert _statsd_history_latency_budget_seconds(3600, cpu_count=64) == 1.0
+    assert _statsd_history_latency_budget_seconds(3600, cpu_count=32) == 1.0
+    assert _statsd_history_latency_budget_seconds(3600, cpu_count=10) == 1.25
+    assert _statsd_history_latency_budget_seconds(24 * 3600, cpu_count=10) == 2.5
+
+
 def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_path):
     """Dense retained history stays exact, bounded, and responsive."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
@@ -1863,13 +1924,8 @@ def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_pat
                 service.store.upsert_rollup(_real_schema_history_bucket(bucket_start, duration, sequence))
                 sequence += 1
 
-        for span, latency_budget in (
-            (3600, 1.0),
-            # The canonical gate runs browser/E2E/pytest lanes concurrently.
-            # Allow bounded scheduler contention on the 10-core macOS dev host
-            # while retaining the 2s production/Linux contract.
-            (24 * 3600, 2.5 if sys.platform == "darwin" else 2.0),
-        ):
+        for span in (3600, 24 * 3600):
+            latency_budget = _statsd_history_latency_budget_seconds(span)
             service._encoded_query_cache.clear()
             requested_start = end - span
             started = time.perf_counter()

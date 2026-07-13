@@ -1104,6 +1104,275 @@ def test_debug_graph_raw_rollup_overlap_uses_finest_values_at_one_uniform_resolu
     }, metrics
 
 
+def test_debug_graph_thirty_minute_resolution_ignores_covered_coarse_boundary(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof debugGraphDisplayBuckets === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.floor(Date.now() / 10_000) * 10_000;
+        const domainStart = now - (30 * 60 * 1000);
+        const coarseStart = Math.floor(domainStart / 600_000) * 600_000;
+        setDebugGraphRange(30 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: 1, records: [{
+          start: coarseStart / 1000, duration: 600, sequence: 1, api_count: 600,
+        }]});
+        debugGraphApplyServerHistory({
+          sequence: 182,
+          records: Array.from({length: 181}, (_item, index) => ({
+            start: (domainStart / 1000) + (index * 10),
+            duration: 10,
+            sequence: index + 2,
+            api_count: 10,
+          })),
+        });
+        renderDebugPanels({force: true});
+        const select = document.querySelector('[data-js-debug-resolution-override]');
+        return {
+          resolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+          bucketDurations: [...new Set(debugGraphDisplayBuckets(now).map(bucket => bucket.durationMs))],
+          options: [...(select?.options || [])].map(option => Number(option.value)),
+          selected: select?.value,
+        };
+        """
+    )
+    assert metrics == {
+        "resolution": 30,
+        "bucketDurations": [30_000],
+        "options": [0, 10, 30, 60, 120],
+        "selected": "0",
+    }, metrics
+
+
+def test_debug_graph_live_tail_refresh_stays_ready_without_older_overlay(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof applyJsDebugHistoryCoverage === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalFetch = window.fetch;
+          try {
+            stopJsDebugStatsPolling();
+            clearJsDebugGraphData();
+            resetJsDebugHistoryReadiness();
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            const targetStart = nowSeconds - (30 * 60);
+            setDebugGraphRange(30 * 60, {render: false});
+            applyJsDebugHistoryCoverage({
+              mode: 'older', requestedStart: targetStart, requestedEnd: nowSeconds - 5,
+              coveredStart: targetStart, coveredEnd: nowSeconds - 5,
+              resolutionSeconds: 1, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+            });
+            setJsDebugHistoryReadiness('ready');
+            debugGraphApplyServerHistory({sequence: 55, records: [{start: nowSeconds - 5, duration: 1, sequence: 55, api_count: 1}]});
+            renderDebugPanels({force: true});
+            const requests = [];
+            let release;
+            window.fetch = input => {
+              requests.push(String(input));
+              return new Promise(resolve => {
+                release = () => resolve(new Response(JSON.stringify({history: {sequence: 56, records: []}}), {
+                  status: 200,
+                  headers: {'Content-Type': 'application/json'},
+                }));
+              });
+            };
+            const polling = pollJsDebugStatsSample();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const during = {
+              phase: graph?.dataset.jsDebugHistoryState,
+              busy: graph?.getAttribute('aria-busy'),
+              overlayHidden: graph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+              text: graph?.textContent || '',
+            };
+            release();
+            await polling;
+            return {
+              requestCount: requests.length,
+              since: new URL(requests[0], location.href).searchParams.get('since'),
+              during,
+              finalPhase: jsDebugHistoryReadinessSnapshot().phase,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] == 1, metrics
+    assert metrics["since"] == "55", metrics
+    assert metrics["during"]["phase"] == "ready", metrics
+    assert metrics["during"]["busy"] == "false", metrics
+    assert metrics["during"]["overlayHidden"] is True, metrics
+    assert "Loading older data" not in metrics["during"]["text"], metrics
+    assert metrics["finalPhase"] == "ready", metrics
+
+
+def test_debug_graph_layout_reconciliation_polls_only_on_stats_activation(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyLayoutSlots === 'function'
+              && typeof emptyLayoutSlots === 'function'
+              && typeof paneStateWithTabs === 'function'
+              && typeof syncJsDebugStatsPolling === 'function';
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalFetch = window.fetch;
+          try {
+            stopJsDebugStatsPolling();
+            resetJsDebugHistoryReadiness();
+            const regular = emptyLayoutSlots();
+            regular[layoutTreeKey] = leafNode('main');
+            regular.main = paneStateWithTabs(['1'], '1');
+            applyLayoutSlots(regular, {focusSession: '1', forceFull: true});
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const sampleRequests = [];
+            window.fetch = input => {
+              const requestUrl = String(input);
+              if (!requestUrl.includes('/api/stats-sample?')) {
+                return Promise.resolve(new Response(JSON.stringify({ok: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              }
+              sampleRequests.push(requestUrl);
+              const parsed = new URL(requestUrl, location.href);
+              const start = Number(parsed.searchParams.get('history_start'));
+              const end = Math.max(start + 1, Math.floor(Date.now() / 1000));
+              return Promise.resolve(new Response(JSON.stringify({
+                pid: 123,
+                uptime_seconds: 10,
+                history: {
+                  sequence: 1,
+                  records: [],
+                  coverage: {
+                    mode: 'live', requested_start: start, requested_end: 0,
+                    covered_start: start, covered_end: end, resolution_seconds: 1,
+                    complete: true, has_more_older: false, next_older_end: 0,
+                    intervals: [{start, end, resolution_seconds: 1}], store_intervals: {}, epochs: [],
+                  },
+                },
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            };
+
+            applyLayoutSlots(regular, {focusSession: '1', forceFull: true});
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const afterRegularReconcile = sampleRequests.length;
+            const stats = emptyLayoutSlots();
+            stats[layoutTreeKey] = leafNode('stats');
+            stats.stats = paneStateWithTabs([debugPaneItemId], debugPaneItemId);
+            applyLayoutSlots(stats, {focusSession: debugPaneItemId, forceFull: true});
+            for (let index = 0; index < 4; index += 1) await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterActivation = sampleRequests.length;
+            applyLayoutSlots(stats, {focusSession: debugPaneItemId, forceFull: true});
+            for (let index = 0; index < 4; index += 1) await new Promise(resolve => requestAnimationFrame(resolve));
+            return {
+              afterRegularReconcile,
+              afterActivation,
+              afterStatsReconcile: sampleRequests.length,
+              pending: jsDebugStatsPollState.pending,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["afterRegularReconcile"] == 0, metrics
+    assert metrics["afterActivation"] == 1, metrics
+    assert metrics["afterStatsReconcile"] == 1, metrics
+    assert metrics["pending"] is False, metrics
+
+
+def test_debug_graph_24_hour_cost_range_reconciles_three_unknown_classes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphCostSummaryForBuckets === 'function'
+              && typeof debugGraphCostReportHtml === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.floor(Date.now() / 600_000) * 600_000;
+        setDebugGraphRange(24 * 60 * 60, {render: false});
+        debugGraphApplyServerHistory({
+          sequence: 2,
+          usage_atom_backfill: {state: 'complete', sources: 2, missing: 0},
+          records: [
+            {start: (now - (20 * 60 * 60 * 1000)) / 1000, duration: 600, sequence: 1, cost_summary: {
+              total_micro_usd: 100000, known_micro_usd: 100000, lower_micro_usd: 100000, upper_micro_usd: 600000,
+              priced_count: 1, unpriced_count: 1, unpriced_token_quantity: 1000, complete: false,
+              components: [{provider: 'openai', model: 'unknown', direction: 'input', cache_role: 'read', unit: 'tokens', priced: false, token_quantity: 1000, unpriced_count: 1, unpriced_token_quantity: 1000, upper_micro_usd: 500000}],
+            }},
+            {start: (now - (60 * 60 * 1000)) / 1000, duration: 600, sequence: 2, cost_summary: {
+              total_micro_usd: 200000, known_micro_usd: 200000, lower_micro_usd: 200000, upper_micro_usd: 1700000,
+              priced_count: 1, unpriced_count: 2, unpriced_token_quantity: 2000, complete: false,
+              components: [
+                {provider: 'openai', model: 'unknown', direction: 'input', cache_role: 'none', unit: 'tokens', priced: false, token_quantity: 1200, unpriced_count: 1, unpriced_token_quantity: 1200, upper_micro_usd: 600000},
+                {provider: 'openai', model: 'unknown', direction: 'output', cache_role: 'none', unit: 'tokens', priced: false, token_quantity: 800, unpriced_count: 1, unpriced_token_quantity: 800, upper_micro_usd: 900000},
+              ],
+            }},
+          ],
+        });
+        setDebugGraphChartVisible('modelTokens', true);
+        setDebugGraphChartVisible('costSummary', true);
+        renderDebugPanels({force: true});
+        const summary = debugGraphCostSummaryForBuckets(debugGraphAgentTokenDisplayBuckets(now));
+        const report = debugGraphCostReportHtml(summary, {startMs: now - (24 * 60 * 60 * 1000), endMs: now});
+        const card = document.querySelector('[data-js-debug-summary-group="costSummary"]');
+        return {
+          lower: summary.lowerMicroUsd,
+          upper: summary.upperMicroUsd,
+          spread: summary.upperMicroUsd - summary.lowerMicroUsd,
+          tokens: summary.unpricedTokenQuantity,
+          cardText: card?.textContent || '',
+          hasCache: report.includes('openai · unknown (cache)'),
+          hasInput: report.includes('openai · unknown (input)'),
+          hasOutput: report.includes('openai · unknown (output)'),
+        };
+        """
+    )
+    assert metrics["lower"] == 300_000, metrics
+    assert metrics["upper"] == 2_300_000, metrics
+    assert metrics["spread"] == 2_000_000, metrics
+    assert metrics["tokens"] == 3_000, metrics
+    assert "$0.3000 – $2.30" in metrics["cardText"], metrics
+    assert metrics["hasCache"] and metrics["hasInput"] and metrics["hasOutput"], metrics
+
+
 def test_yostats_chart_title_descriptions_cover_theme_and_pane_role(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
     WebDriverWait(browser, 5).until(
@@ -11619,6 +11888,98 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["panelVisible"]
     assert metrics["notifyActive"] is True
     assert metrics["terminalText"] == "fake terminal"
+
+
+def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_or_fails(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=slot1&tabs=slot1:1",
+        sessions=["1", "2"],
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof selectSession === 'function' && typeof tmuxWindow === 'function' && document.querySelector('#panel-1 .terminal .xterm')"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalEnsureSession = ensureSession;
+          const originalApiFetchJson = apiFetchJson;
+          const originalFetch = window.fetch;
+          try {
+            let resolveEnsure;
+            ensureSession = () => new Promise(resolve => { resolveEnsure = resolve; });
+            transcriptMetadataState.loaded = false;
+            if (transcriptMetadataState.payload?.sessions) delete transcriptMetadataState.payload.sessions['2'];
+            const tabStarted = performance.now();
+            void selectSession('2', {userInitiated: true});
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const tabState = document.querySelector('#term-2 [data-terminal-connection-state]');
+            const tabAck = {
+              elapsedMs: performance.now() - tabStarted,
+              visible: activeSessions.includes('2') && document.querySelector('#panel-2')?.isConnected === true,
+              state: tabState?.dataset.terminalConnectionState || '',
+            };
+            resolveEnsure(false);
+            await window.__yolomuxTestWaitFor(
+              () => document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]'),
+              {timeoutMs: 2000, intervalMs: 20, description: 'cold tmux unavailable state'}
+            );
+            const unavailable = document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]');
+            const failedTab = {
+              stillVisible: activeSessions.includes('2'),
+              retry: Boolean(unavailable?.querySelector('[data-terminal-connection-retry]')),
+            };
+
+            activatePaneTab(slotForItem('1'), '1', {userInitiated: true});
+            let rejectWindow;
+            apiFetchJson = (url, options) => String(url).startsWith('/api/tmux-window?')
+              ? new Promise((_resolve, reject) => { rejectWindow = reject; })
+              : originalApiFetchJson(url, options);
+            const windowStarted = performance.now();
+            tmuxWindow('1', {windowIndex: 2}, 'window 2');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const switching = document.querySelector('#term-1 [data-terminal-connection-state="switching"]');
+            const windowAck = {
+              elapsedMs: performance.now() - windowStarted,
+              state: switching?.dataset.terminalConnectionState || '',
+              dimmed: document.querySelector('#term-1')?.classList.contains('terminal-connection-pending') || false,
+            };
+            rejectWindow(new Error('switch failed'));
+            await window.__yolomuxTestWaitFor(
+              () => !document.querySelector('#term-1 [data-terminal-connection-state="switching"]'),
+              {timeoutMs: 2000, intervalMs: 20, description: 'failed tmux switch rollback'}
+            );
+            window.fetch = () => Promise.reject(new TypeError('server unavailable'));
+            await Promise.allSettled([apiFetch('/api/test-a'), apiFetch('/api/test-b'), apiFetch('/api/test-c')]);
+            const degraded = document.querySelector('[data-backend-health="unresponsive"]');
+            window.fetch = () => Promise.resolve(new Response('{}', {status: 200, headers: {'Content-Type': 'application/json'}}));
+            await apiFetch('/api/test-recovery');
+            return {
+              tabAck, failedTab, windowAck, windowCleared: !terminalConnectionStateNode('1'),
+              backendHealth: {shown: Boolean(degraded), cleared: !document.querySelector('[data-backend-health]')},
+            };
+          } finally {
+            ensureSession = originalEnsureSession;
+            apiFetchJson = originalApiFetchJson;
+            window.fetch = originalFetch;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["tabAck"]["elapsedMs"] <= 50, metrics
+    assert metrics["tabAck"]["visible"] is True, metrics
+    assert metrics["tabAck"]["state"] == "connecting", metrics
+    assert metrics["failedTab"] == {"stillVisible": True, "retry": True}, metrics
+    assert metrics["windowAck"]["elapsedMs"] <= 50, metrics
+    assert metrics["windowAck"]["state"] == "switching", metrics
+    assert metrics["windowAck"]["dimmed"] is True, metrics
+    assert metrics["windowCleared"] is True, metrics
+    assert metrics["backendHealth"] == {"shown": True, "cleared": True}, metrics
 
 
 def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp_path):

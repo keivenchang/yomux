@@ -780,7 +780,22 @@ function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
 
 function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return true;
-  return !jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds);
+  if (jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds)) return false;
+  const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
+    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(resolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
+    .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
+  let cursor = startSeconds;
+  for (const interval of intervals) {
+    const intervalStart = Number(interval.startSeconds);
+    const intervalEnd = Number(interval.endSeconds);
+    if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
+    if (intervalStart > cursor) return true;
+    cursor = Math.max(cursor, intervalEnd);
+  }
+  // A continuously covered prefix is enough for an ordinary incremental poll:
+  // its sequence cursor supplies the newly elapsed live tail. Older-prefix,
+  // interior-gap, and finer-resolution requests still require a full snapshot.
+  return cursor <= startSeconds;
 }
 
 function jsDebugRequestedHistoryResolutionSeconds() {
@@ -2120,7 +2135,7 @@ function debugGraphMinimumDisplayResolutionMs(domain, nowMs = Date.now()) {
   const domainStartMs = Number(domain?.startMs);
   return Math.max(
     Number.isFinite(domainStartMs) ? debugGraphBucketDurationForTime(domainStartMs, nowMs) : jsDebugGraphRawBucketMs,
-    ...debugGraphSourceBuckets(domain).map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs)),
+    ...debugGraphContributingSourceSlices(domain).map(slice => slice.sourceDurationMs),
   );
 }
 
@@ -2149,16 +2164,6 @@ function debugGraphSourceBuckets(domain) {
     .sort((left, right) => left.startMs - right.startMs);
 }
 
-function debugGraphCoveredDuration(intervals, startMs, endMs) {
-  let covered = 0;
-  for (const interval of intervals) {
-    if (interval.endMs <= startMs) continue;
-    if (interval.startMs >= endMs) break;
-    covered += Math.max(0, Math.min(endMs, interval.endMs) - Math.max(startMs, interval.startMs));
-  }
-  return Math.min(Math.max(0, endMs - startMs), covered);
-}
-
 function debugGraphAddCoveredInterval(intervals, startMs, endMs) {
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
   let index = 0;
@@ -2173,26 +2178,65 @@ function debugGraphAddCoveredInterval(intervals, startMs, endMs) {
   intervals.splice(index, 0, {startMs: mergedStart, endMs: mergedEnd});
 }
 
-function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
-  compactJsDebugGraphBuckets(nowMs);
-  const domain = debugGraphDomain(nowMs, rangeSeconds);
-  const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
-  const buckets = new Map();
+function debugGraphUncoveredIntervals(intervals, startMs, endMs) {
+  const uncovered = [];
+  let cursor = startMs;
+  for (const interval of intervals) {
+    if (interval.endMs <= cursor) continue;
+    if (interval.startMs >= endMs) break;
+    if (interval.startMs > cursor) uncovered.push({startMs: cursor, endMs: Math.min(endMs, interval.startMs)});
+    cursor = Math.max(cursor, interval.endMs);
+    if (cursor >= endMs) break;
+  }
+  if (cursor < endMs) uncovered.push({startMs: cursor, endMs});
+  return uncovered;
+}
+
+function debugGraphContributingSourceSlices(domain) {
+  const domainStartMs = Number(domain?.startMs);
+  const domainEndMs = Number(domain?.endMs);
+  if (!Number.isFinite(domainStartMs) || !Number.isFinite(domainEndMs) || domainEndMs <= domainStartMs) return [];
   const coveredIntervals = [];
+  const slices = [];
   const sources = debugGraphSourceBuckets(domain).sort((left, right) => (
     (Number(left.durationMs) - Number(right.durationMs))
     || (Number(left.startMs) - Number(right.startMs))
   ));
   for (const bucket of sources) {
-    const startMs = Number(bucket.startMs);
-    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
-    const endMs = startMs + durationMs;
-    const uncoveredMs = durationMs - debugGraphCoveredDuration(coveredIntervals, startMs, endMs);
-    if (uncoveredMs > 0) debugGraphAggregateBucket(buckets, bucket, scaleMs, uncoveredMs / durationMs);
-    // Once a finer source has claimed an instant, a coarser history response
-    // may only fill the remaining interval. This prevents raw/live + rollup
-    // overlap from double-counting values in the same rendered bar.
-    debugGraphAddCoveredInterval(coveredIntervals, startMs, endMs);
+    const sourceStartMs = Number(bucket.startMs);
+    const sourceDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+    const visibleStartMs = Math.max(domainStartMs, sourceStartMs);
+    // Keep the current/right-edge bucket whole: its sample is attached to the
+    // bucket start even while the interval is still in progress. Only the old
+    // left edge has an out-of-view prefix that can contaminate a narrower range.
+    const visibleEndMs = sourceStartMs + sourceDurationMs;
+    if (visibleEndMs <= visibleStartMs) continue;
+    for (const interval of debugGraphUncoveredIntervals(coveredIntervals, visibleStartMs, visibleEndMs)) {
+      slices.push({
+        bucket,
+        startMs: interval.startMs,
+        endMs: interval.endMs,
+        sourceDurationMs,
+        multiplier: (interval.endMs - interval.startMs) / sourceDurationMs,
+      });
+    }
+    // Coverage is clipped to the selected domain. A coarse bucket retained for a wider
+    // range must not claim an out-of-view prefix and poison a fully fine-covered view.
+    debugGraphAddCoveredInterval(coveredIntervals, visibleStartMs, visibleEndMs);
+  }
+  return slices;
+}
+
+function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
+  compactJsDebugGraphBuckets(nowMs);
+  const domain = debugGraphDomain(nowMs, rangeSeconds);
+  const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
+  const buckets = new Map();
+  for (const slice of debugGraphContributingSourceSlices(domain)) {
+    // Once a finer source has claimed an instant, a coarser history response may
+    // only fill the remaining visible interval. Place that proportional slice in
+    // its visible cell while retaining the complete source bucket for wider views.
+    debugGraphAggregateBucket(buckets, {...slice.bucket, startMs: slice.startMs}, scaleMs, slice.multiplier);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
@@ -4798,6 +4842,10 @@ function jsDebugStatsPanelVisible() {
     && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
 }
 
+function jsDebugStatsLayoutItemsVisible(items) {
+  return Array.isArray(items) && (items.includes(debugPaneItemId) || items.includes(yocostItemId));
+}
+
 function jsDebugStatsTokenConsumerEnabled() {
   return jsDebugStatsPanelVisible();
 }
@@ -4817,7 +4865,15 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
   }
   stopJsDebugStatsPolling();
   if (pollNow) void pollJsDebugStatsSample({forceGraphRefresh});
-  resetRuntimeInterval('debug-stats', pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
+  resetRuntimeInterval('debug-stats', pollJsDebugStatsOnInterval, jsDebugStatsPollIntervalMs());
+}
+
+function pollJsDebugStatsOnInterval() {
+  // Passive cadence ticks never need to queue behind an explicit range,
+  // activation, or initial request. The next full interval is soon enough and
+  // avoids a slow request degenerating into an immediate back-to-back fetch.
+  if (jsDebugStatsPollState.inFlight) return;
+  return pollJsDebugStatsSample();
 }
 
 function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
@@ -5127,9 +5183,9 @@ async function clearJsDebugServerHistory() {
   }
 }
 
-function startJsDebugStatsPolling() {
+function startJsDebugStatsPolling({pollNow = true} = {}) {
   startJsDebugClientHealthPolling();
-  syncJsDebugStatsPolling({pollNow: true});
+  syncJsDebugStatsPolling({pollNow});
 }
 
 const jsDebugClientHealthPollState = {inFlight: false};
@@ -5175,6 +5231,13 @@ function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {
 async function primeJsDebugStatsBeforeLongLivedStreams() {
   if (!jsDebugStatsPanelVisible() || jsDebugStatsPollState.firstSampleReceived) return false;
   await pollJsDebugStatsSample();
+  return jsDebugStatsPollState.firstSampleReceived;
+}
+
+async function initializeJsDebugStatsBeforeStreams() {
+  startJsDebugClientHealthPolling();
+  await primeJsDebugStatsBeforeLongLivedStreams();
+  syncJsDebugStatsPolling({pollNow: false});
   return jsDebugStatsPollState.firstSampleReceived;
 }
 
@@ -5787,7 +5850,6 @@ function bindYoCostPanel(panel) {
     if (handleYoCostTableSort(event, panel)) return;
     openYoCostTranscriptPreview(event);
   });
-  syncJsDebugStatsPolling({pollNow: !jsDebugStatsPollState.firstSampleReceived});
 }
 
 function createYoCostPanel() {

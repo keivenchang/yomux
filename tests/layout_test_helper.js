@@ -1279,6 +1279,7 @@ globalThis.__layoutTestApi = {
   debugSystemStatsSamplerCardHtmlForTest: debugSystemStatsSamplerCardHtml,
   debugSystemCpuBudgetCardHtmlForTest: debugSystemCpuBudgetCardHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
+  jsDebugStatsLayoutItemsVisibleForTest: jsDebugStatsLayoutItemsVisible,
   jsDebugStatsPollingStateForTest() {
     return {
       firstSampleReceived: jsDebugStatsPollState.firstSampleReceived,
@@ -1299,6 +1300,8 @@ globalThis.__layoutTestApi = {
   debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
   resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
   retryJsDebugHistoryForTest: retryJsDebugHistory,
+  initializeJsDebugStatsBeforeStreamsForTest: initializeJsDebugStatsBeforeStreams,
+  pollJsDebugStatsOnIntervalForTest: pollJsDebugStatsOnInterval,
   startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
   syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
   stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,

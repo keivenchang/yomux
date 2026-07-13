@@ -2197,6 +2197,39 @@ function rerenderDateTimeFormatSurfaces() {
   if (typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs();
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
 }
+const backendHealthState = {consecutiveFailures: 0};
+const backendHealthFailureThreshold = 3;
+
+function syncBackendHealthIndicator() {
+  if (!topbar) return;
+  let indicator = topbar.querySelector('[data-backend-health]');
+  const host = topbar.querySelector('.topbar-right-tools') || topbar;
+  const degraded = backendHealthState.consecutiveFailures >= backendHealthFailureThreshold;
+  if (!degraded) {
+    indicator?.remove();
+    return;
+  }
+  if (!indicator) {
+    indicator = document.createElement('span');
+    indicator.className = 'backend-health-indicator';
+    indicator.dataset.backendHealth = 'unresponsive';
+    indicator.setAttribute('role', 'status');
+    host.prepend(indicator);
+  }
+  indicator.textContent = `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`;
+}
+
+function noteBackendHealthFailure() {
+  backendHealthState.consecutiveFailures += 1;
+  syncBackendHealthIndicator();
+}
+
+function noteBackendHealthSuccess() {
+  if (!backendHealthState.consecutiveFailures) return;
+  backendHealthState.consecutiveFailures = 0;
+  syncBackendHealthIndicator();
+}
+
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
@@ -2217,9 +2250,11 @@ async function apiFetch(url, options = {}) {
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
+    noteBackendHealthFailure();
     if (apiDebugEnabled) recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
+  noteBackendHealthSuccess();
   if (apiDebugEnabled) {
     const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
     recordApiDebugResponseBytes(event, response);
@@ -2264,6 +2299,10 @@ async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
   let response;
   try {
     response = await fetch(url, requestOptions);
+    noteBackendHealthSuccess();
+  } catch (error) {
+    noteBackendHealthFailure();
+    throw error;
   } finally {
     if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.fetchMs = performanceNow() - fetchStartedAt;
   }
@@ -2774,7 +2813,6 @@ function installJsDebugEventCapture() {
 function enableDebugMode() {
   debugModeEnabled = true;
   installJsDebugEventCapture();
-  if (typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
   scheduleJsDebugPanelRefresh();
 }
 
@@ -12761,7 +12799,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
   updatePanelInactiveOverlays();
-  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: true});
+  const statsActivated = typeof jsDebugStatsLayoutItemsVisible === 'function'
+    && !jsDebugStatsLayoutItemsVisible(previousActive)
+    && jsDebugStatsLayoutItemsVisible(activeSessions);
+  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
@@ -28760,10 +28801,6 @@ function slotForTabActivation(item) {
 
 async function activateTabInExistingPane(item, options = {}) {
   if (!isLayoutItem(item)) return;
-  if (isTmuxSession(item)) {
-    const ensured = await ensureSession(item);
-    if (!ensured) return;
-  }
   const targetSlot = options.preferFocused === true
     ? (fileEditorActivationSlot() || slotForTabActivation(item))
     : slotForTabActivation(item);
@@ -28922,10 +28959,6 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
     await splitSessionAtSlot(session, targetSlot, zone, null, pct);
     return;
   }
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return;
-  }
   const next = layoutWithoutItem(session);
   if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(targetSlot);
   if (!next[targetSlot]) next[targetSlot] = emptyPlaceholderPaneState();
@@ -28942,26 +28975,15 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
   applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
-// C12 F1: is this session's terminal already attached (socket open/connecting)? A live pane does not need
-// the blocking /api/ensure-session round-trip (two tmux subprocesses) on a move — it is already running.
-function sessionTerminalIsLive(session) {
-  const readyState = terminals.get(session)?.socket?.readyState;
-  return readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING;
-}
-
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0, options = {}) {
   if (!isLayoutItem(session) || !targetSlot) return false;
   const actualSourceSlot = sourceSlot || slotForItem(session);
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, targetSlot, layoutSlots, {
     allowRequiredInGeneric: sidePaneConstrainedMode(),
   })) return false;
-  // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
-  // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
-  // still reconciles/recovers if the session turns out to be gone (its socket would no longer be live).
-  if (isTmuxSession(session) && !sessionTerminalIsLive(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return;
-  }
+  // Placement is always visual-first. applyLayoutSlots -> ensureTerminalRunning owns the
+  // asynchronous readiness check and renders the shared connecting/unavailable state while it
+  // reconciles. Never put /api/ensure-session back in this user-action critical path.
   const next = layoutWithoutItem(session, {
     // Directional Move deliberately leaves the source as an explicit drop target when its
     // final tab leaves. Ordinary tab drag/move continues to compact that now-empty slot.
@@ -29075,19 +29097,11 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
   const targetRole = paneRoleForSlot(targetSlot);
   if ((targetRole.kind === paneRoleSide && !['top', 'bottom'].includes(zone))
     || !paneRoleAllowsItemTransfer(item, actualSourceSlot, targetSlot, layoutSlots)) return false;
-  // Read this before ensureSession(). A tmux readiness round trip can let Dockview reconcile an
-  // empty source while it is pending; the directional action still owes the user the explicit peer
-  // they chose when the gesture began.
   const preserveRemovedSlot = options.preserveSourcePlaceholder === true
     && sourceSlot === targetSlot
     && paneTabs(sourceSlot).length === 1;
-  if (isTmuxSession(item)) {
-    const ensured = await ensureSession(item);
-    if (!ensured) return;
-  }
-  // ensureSession() may let Dockview adopt the same visible group under a new slot id while the
-  // readiness request is in flight. Keep a self-split attached to that live source leaf instead of
-  // replacing the stale pre-await slot name (which leaves the new pane outside the layout tree).
+  // Layout placement is synchronous, so the source cannot drift during a readiness round trip;
+  // applyLayoutSlots delegates any cold terminal reconciliation to ensureTerminalRunning.
   const liveSourceSlot = slotForItem(item) || actualSourceSlot;
   const liveTargetSlot = targetSlot === actualSourceSlot ? liveSourceSlot : targetSlot;
   // Dockview can retain an unrendered empty group from an earlier arrangement. Directional Move
@@ -29385,10 +29399,6 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
     }
   }
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {targetRole})) return false;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return false;
-  }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   if (!root) {
@@ -29413,10 +29423,6 @@ async function splitSessionAtGutter(session, splitPath, zone, sourceSlot = null,
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {
     targetRole: paneRoleDefinition(paneRoleGeneric),
   })) return false;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return false;
-  }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   const target = layoutNodeAtPath(splitPath, root);
@@ -31486,6 +31492,7 @@ function scheduleTerminalReconnect(session, item) {
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
   statusErr(localizedHtml('terminal.connection.reconnectingStatus', {session: sessionLabel(session), seconds}));
   showTerminalConnectionToast(session, t('terminal.connection.reconnectingToast', {seconds}), delay);
+  showTerminalConnectionState(session, 'reconnecting', t('terminal.connection.reconnectingToast', {seconds}));
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
     item.reconnectTimer = null;
@@ -42270,7 +42277,22 @@ function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
 
 function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return true;
-  return !jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds);
+  if (jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds)) return false;
+  const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
+    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(resolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
+    .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
+  let cursor = startSeconds;
+  for (const interval of intervals) {
+    const intervalStart = Number(interval.startSeconds);
+    const intervalEnd = Number(interval.endSeconds);
+    if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
+    if (intervalStart > cursor) return true;
+    cursor = Math.max(cursor, intervalEnd);
+  }
+  // A continuously covered prefix is enough for an ordinary incremental poll:
+  // its sequence cursor supplies the newly elapsed live tail. Older-prefix,
+  // interior-gap, and finer-resolution requests still require a full snapshot.
+  return cursor <= startSeconds;
 }
 
 function jsDebugRequestedHistoryResolutionSeconds() {
@@ -43610,7 +43632,7 @@ function debugGraphMinimumDisplayResolutionMs(domain, nowMs = Date.now()) {
   const domainStartMs = Number(domain?.startMs);
   return Math.max(
     Number.isFinite(domainStartMs) ? debugGraphBucketDurationForTime(domainStartMs, nowMs) : jsDebugGraphRawBucketMs,
-    ...debugGraphSourceBuckets(domain).map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs)),
+    ...debugGraphContributingSourceSlices(domain).map(slice => slice.sourceDurationMs),
   );
 }
 
@@ -43639,16 +43661,6 @@ function debugGraphSourceBuckets(domain) {
     .sort((left, right) => left.startMs - right.startMs);
 }
 
-function debugGraphCoveredDuration(intervals, startMs, endMs) {
-  let covered = 0;
-  for (const interval of intervals) {
-    if (interval.endMs <= startMs) continue;
-    if (interval.startMs >= endMs) break;
-    covered += Math.max(0, Math.min(endMs, interval.endMs) - Math.max(startMs, interval.startMs));
-  }
-  return Math.min(Math.max(0, endMs - startMs), covered);
-}
-
 function debugGraphAddCoveredInterval(intervals, startMs, endMs) {
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
   let index = 0;
@@ -43663,26 +43675,65 @@ function debugGraphAddCoveredInterval(intervals, startMs, endMs) {
   intervals.splice(index, 0, {startMs: mergedStart, endMs: mergedEnd});
 }
 
-function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
-  compactJsDebugGraphBuckets(nowMs);
-  const domain = debugGraphDomain(nowMs, rangeSeconds);
-  const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
-  const buckets = new Map();
+function debugGraphUncoveredIntervals(intervals, startMs, endMs) {
+  const uncovered = [];
+  let cursor = startMs;
+  for (const interval of intervals) {
+    if (interval.endMs <= cursor) continue;
+    if (interval.startMs >= endMs) break;
+    if (interval.startMs > cursor) uncovered.push({startMs: cursor, endMs: Math.min(endMs, interval.startMs)});
+    cursor = Math.max(cursor, interval.endMs);
+    if (cursor >= endMs) break;
+  }
+  if (cursor < endMs) uncovered.push({startMs: cursor, endMs});
+  return uncovered;
+}
+
+function debugGraphContributingSourceSlices(domain) {
+  const domainStartMs = Number(domain?.startMs);
+  const domainEndMs = Number(domain?.endMs);
+  if (!Number.isFinite(domainStartMs) || !Number.isFinite(domainEndMs) || domainEndMs <= domainStartMs) return [];
   const coveredIntervals = [];
+  const slices = [];
   const sources = debugGraphSourceBuckets(domain).sort((left, right) => (
     (Number(left.durationMs) - Number(right.durationMs))
     || (Number(left.startMs) - Number(right.startMs))
   ));
   for (const bucket of sources) {
-    const startMs = Number(bucket.startMs);
-    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
-    const endMs = startMs + durationMs;
-    const uncoveredMs = durationMs - debugGraphCoveredDuration(coveredIntervals, startMs, endMs);
-    if (uncoveredMs > 0) debugGraphAggregateBucket(buckets, bucket, scaleMs, uncoveredMs / durationMs);
-    // Once a finer source has claimed an instant, a coarser history response
-    // may only fill the remaining interval. This prevents raw/live + rollup
-    // overlap from double-counting values in the same rendered bar.
-    debugGraphAddCoveredInterval(coveredIntervals, startMs, endMs);
+    const sourceStartMs = Number(bucket.startMs);
+    const sourceDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+    const visibleStartMs = Math.max(domainStartMs, sourceStartMs);
+    // Keep the current/right-edge bucket whole: its sample is attached to the
+    // bucket start even while the interval is still in progress. Only the old
+    // left edge has an out-of-view prefix that can contaminate a narrower range.
+    const visibleEndMs = sourceStartMs + sourceDurationMs;
+    if (visibleEndMs <= visibleStartMs) continue;
+    for (const interval of debugGraphUncoveredIntervals(coveredIntervals, visibleStartMs, visibleEndMs)) {
+      slices.push({
+        bucket,
+        startMs: interval.startMs,
+        endMs: interval.endMs,
+        sourceDurationMs,
+        multiplier: (interval.endMs - interval.startMs) / sourceDurationMs,
+      });
+    }
+    // Coverage is clipped to the selected domain. A coarse bucket retained for a wider
+    // range must not claim an out-of-view prefix and poison a fully fine-covered view.
+    debugGraphAddCoveredInterval(coveredIntervals, visibleStartMs, visibleEndMs);
+  }
+  return slices;
+}
+
+function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
+  compactJsDebugGraphBuckets(nowMs);
+  const domain = debugGraphDomain(nowMs, rangeSeconds);
+  const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
+  const buckets = new Map();
+  for (const slice of debugGraphContributingSourceSlices(domain)) {
+    // Once a finer source has claimed an instant, a coarser history response may
+    // only fill the remaining visible interval. Place that proportional slice in
+    // its visible cell while retaining the complete source bucket for wider views.
+    debugGraphAggregateBucket(buckets, {...slice.bucket, startMs: slice.startMs}, scaleMs, slice.multiplier);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
@@ -46288,6 +46339,10 @@ function jsDebugStatsPanelVisible() {
     && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
 }
 
+function jsDebugStatsLayoutItemsVisible(items) {
+  return Array.isArray(items) && (items.includes(debugPaneItemId) || items.includes(yocostItemId));
+}
+
 function jsDebugStatsTokenConsumerEnabled() {
   return jsDebugStatsPanelVisible();
 }
@@ -46307,7 +46362,15 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
   }
   stopJsDebugStatsPolling();
   if (pollNow) void pollJsDebugStatsSample({forceGraphRefresh});
-  resetRuntimeInterval('debug-stats', pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
+  resetRuntimeInterval('debug-stats', pollJsDebugStatsOnInterval, jsDebugStatsPollIntervalMs());
+}
+
+function pollJsDebugStatsOnInterval() {
+  // Passive cadence ticks never need to queue behind an explicit range,
+  // activation, or initial request. The next full interval is soon enough and
+  // avoids a slow request degenerating into an immediate back-to-back fetch.
+  if (jsDebugStatsPollState.inFlight) return;
+  return pollJsDebugStatsSample();
 }
 
 function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
@@ -46617,9 +46680,9 @@ async function clearJsDebugServerHistory() {
   }
 }
 
-function startJsDebugStatsPolling() {
+function startJsDebugStatsPolling({pollNow = true} = {}) {
   startJsDebugClientHealthPolling();
-  syncJsDebugStatsPolling({pollNow: true});
+  syncJsDebugStatsPolling({pollNow});
 }
 
 const jsDebugClientHealthPollState = {inFlight: false};
@@ -46665,6 +46728,13 @@ function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {
 async function primeJsDebugStatsBeforeLongLivedStreams() {
   if (!jsDebugStatsPanelVisible() || jsDebugStatsPollState.firstSampleReceived) return false;
   await pollJsDebugStatsSample();
+  return jsDebugStatsPollState.firstSampleReceived;
+}
+
+async function initializeJsDebugStatsBeforeStreams() {
+  startJsDebugClientHealthPolling();
+  await primeJsDebugStatsBeforeLongLivedStreams();
+  syncJsDebugStatsPolling({pollNow: false});
   return jsDebugStatsPollState.firstSampleReceived;
 }
 
@@ -47277,7 +47347,6 @@ function bindYoCostPanel(panel) {
     if (handleYoCostTableSort(event, panel)) return;
     openYoCostTranscriptPreview(event);
   });
-  syncJsDebugStatsPolling({pollNow: !jsDebugStatsPollState.firstSampleReceived});
 }
 
 function createYoCostPanel() {
@@ -66542,6 +66611,13 @@ function bindPanelControls(panel, session) {
     }
     handleWindowStepButtonClick(event);
   });
+  delegate(panel, 'click', '[data-terminal-connection-retry]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalConnectionRetry || session;
+    showTerminalConnectionState(targetSession, 'connecting', t('tmuxWall.status.connecting'));
+    void ensureTerminalRunning(targetSession);
+  });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
@@ -67333,6 +67409,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
     const readback = refreshTmuxWindowActiveFromSignals(session, {...options, acceptUnchanged});
     return Promise.resolve(readback).then(confirmed => {
       if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return;
+      if (confirmed) clearTerminalConnectionState(session, {sequence: options.sequence});
       if (!confirmed && attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
       }
@@ -67344,6 +67421,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
       } else {
         const info = transcriptMetadataState.payload.sessions?.[session];
         reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
+        clearTerminalConnectionState(session, {sequence: options.sequence});
       }
     });
   };
@@ -67360,6 +67438,8 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
+  const targetLabel = directIndex !== null ? t('terminal.window.title', {name: directIndex}) : shortcut.label;
+  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${targetLabel}`, {sequence});
   updateTerminalTmuxInputState(session, {repeatUntilMs: shortcut.repeatable ? Date.now() + terminalTmuxWindowRepeatMs : 0});
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
@@ -67677,6 +67757,7 @@ function tmuxWindow(session, key, label) {
   if (directIndex !== null) {
     const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
+    showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${t('terminal.window.title', {name: directIndex})}`, {sequence});
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
     focusAfterAcknowledgedSwitch();
@@ -67687,6 +67768,7 @@ function tmuxWindow(session, key, label) {
       })
       .catch(error => {
         if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
+        clearTerminalConnectionState(session, {sequence});
         if (previousInfo) {
           setTranscriptMetadataPayload({
             ...transcriptMetadataState.payload,
@@ -67708,12 +67790,49 @@ function tmuxWindow(session, key, label) {
   }
   const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = setTmuxWindowActiveIndexPending(session);
+  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${label}`, {sequence});
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusAfterAcknowledgedSwitch();
   scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
+}
+
+function terminalConnectionStateNode(session) {
+  return document.getElementById(terminalDomId(session))?.querySelector?.('[data-terminal-connection-state]') || null;
+}
+
+function terminalConnectionStateHtml(session, state, text, options = {}) {
+  const retry = options.retry === true
+    ? `<button type="button" data-terminal-connection-retry="${esc(session)}">${esc(t('common.retry'))}</button>`
+    : '';
+  const sequence = options.sequence === undefined ? '' : ` data-terminal-connection-sequence="${esc(String(options.sequence))}"`;
+  return `<div class="terminal-connection-state terminal-connection-state--${esc(state)}" data-terminal-connection-state="${esc(state)}"${sequence} role="status"><span>${esc(text)}</span>${retry}</div>`;
+}
+
+function showTerminalConnectionState(session, state, text, options = {}) {
+  const container = document.getElementById(terminalDomId(session));
+  if (!container) return null;
+  let node = terminalConnectionStateNode(session);
+  const replacement = document.createElement('div');
+  replacement.innerHTML = terminalConnectionStateHtml(session, state, text, options);
+  const next = replacement.firstElementChild;
+  if (!next) return null;
+  if (node) node.replaceWith(next);
+  else container.appendChild(next);
+  container.classList.add('terminal-connection-pending');
+  return next;
+}
+
+function clearTerminalConnectionState(session, options = {}) {
+  const node = terminalConnectionStateNode(session);
+  if (!node) return false;
+  if (options.sequence !== undefined && String(node.dataset.terminalConnectionSequence || '') !== String(options.sequence)) return false;
+  const container = node.parentElement;
+  node.remove();
+  container?.classList.remove('terminal-connection-pending');
+  return true;
 }
 
 async function ensureTerminalRunning(session) {
@@ -67731,12 +67850,23 @@ async function ensureTerminalRunning(session) {
       return;
     }
     const knownFromTranscriptPayload = Boolean(transcriptMetadataState.loaded && transcriptMetadataState.payload.sessions?.[session]);
+    if (!knownFromTranscriptPayload) showTerminalConnectionState(session, 'connecting', t('tmuxWall.status.connecting'));
     const ensured = knownFromTranscriptPayload || await ensureSession(session);
     if (!ensured) {
-      const container = document.getElementById(terminalDomId(session));
-      if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
+      const message = t('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)});
+      showTerminalConnectionState(session, 'unavailable', message, {retry: true});
+      if (document?.defaultView && attentionAlerts) {
+        emitNotification('terminalConnection', {
+          session,
+          title: sessionLabel(session),
+          body: message,
+          className: 'danger-alert toast',
+          coalesceKey: `terminal-unavailable:${session}`,
+        });
+      }
       return;
     }
+    clearTerminalConnectionState(session);
     startTerminal(session);
   })();
   terminalStartupPromises.set(key, promise);
@@ -67759,6 +67889,7 @@ function connectTerminalSocket(session, item) {
     item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
     dismissTerminalConnectionToasts(session);
+    clearTerminalConnectionState(session);
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
@@ -67789,6 +67920,7 @@ function connectTerminalSocket(session, item) {
       clientPerfEnd(writePerf, {bytes: dataBytes});
       const firstOutput = item.terminalOutputSeen !== true;
       item.terminalOutputSeen = true;
+      clearTerminalConnectionState(session);
       item.fileUnderlineController?.schedule?.({reason: 'output'});
       if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
       scheduleTerminalAttentionHighlight(session);
@@ -69321,9 +69453,8 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  if (!shareViewMode && typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
-  if (!shareViewMode && typeof primeJsDebugStatsBeforeLongLivedStreams === 'function') {
-    await primeJsDebugStatsBeforeLongLivedStreams();
+  if (!shareViewMode && typeof initializeJsDebugStatsBeforeStreams === 'function') {
+    await initializeJsDebugStatsBeforeStreams();
   }
   if (!shareViewMode) installClientEventStream();
   if (!shareViewMode) {

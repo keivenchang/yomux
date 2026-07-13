@@ -94,6 +94,7 @@
   --paint-overlay-slate-16: rgb(var(--overlay-slate-rgb) / 0.16);
   --paint-overlay-slate-18: rgb(var(--overlay-slate-rgb) / 0.18);
   --paint-shadow-35: rgb(var(--shadow-rgb) / 0.35);
+  --paint-shadow-38: rgb(var(--shadow-rgb) / 0.38);
   --paint-shadow-42: rgb(var(--shadow-rgb) / 0.42);
   --paint-shadow-45: rgb(var(--shadow-rgb) / 0.45);
   --paint-shadow-50: rgb(var(--shadow-rgb) / 0.50);

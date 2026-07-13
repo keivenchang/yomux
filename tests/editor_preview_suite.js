@@ -4141,10 +4141,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal((debugPaneSource.match(/scheduleJsDebugPanelRefresh\(\{force: firstSampleApplied \|\| forceGraphRefresh\}\);/g) || []).length, 2, 'YO!stats forces first samples and widened-history responses through the shared refresh path');
     assert.ok(/if \(event\.type === 'pointerdown'\)[\s\S]*jsDebugGraphRangeSliderDragging = true;[\s\S]*return true;[\s\S]*if \(event\.type === 'change'\)[\s\S]*jsDebugGraphRangeSliderDragging = false;[\s\S]*setDebugGraphRangeFromSlider/.test(debugPaneSource), 'YO!stats range dragging preserves the native input and commits only on change');
     assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)[\s\S]*itemIsActivePaneTab\(yocostItemId\)/.test(debugPaneSource), 'YO!stats polling is shared by the visible YO!stats and YO!cost tabs');
-    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*syncJsDebugStatsPolling\(\{pollNow: true\}\)/.test(debugPaneSource), 'every Chrome-style pane-tab activation re-arms or stops the shared YO!stats sampler');
+    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*statsActivated = typeof jsDebugStatsLayoutItemsVisible[\s\S]*!jsDebugStatsLayoutItemsVisible\(previousActive\)[\s\S]*jsDebugStatsLayoutItemsVisible\(activeSessions\)[\s\S]*syncJsDebugStatsPolling\(\{pollNow: statsActivated\}\)/.test(debugPaneSource), 'layout changes poll YO!stats only on a hidden-to-visible activation, never on a pure visible layout reconciliation');
+    assert.ok(!/function enableDebugMode\(\) \{[\s\S]*?startJsDebugStatsPolling\(\)[\s\S]*?\}/.test(debugPaneSource), 'enabling debug rendering does not own stats polling; boot and hidden-to-visible layout activation do');
+    assert.equal(api.jsDebugStatsLayoutItemsVisibleForTest(['1', '2']), false, 'ordinary active layout items do not activate YO!stats polling');
+    assert.equal(api.jsDebugStatsLayoutItemsVisibleForTest(['1', '__debug__']), true, 'the YO!stats virtual item activates shared stats polling');
+    assert.equal(api.jsDebugStatsLayoutItemsVisibleForTest(['__yocost__']), true, 'the YO!cost virtual item activates the same shared stats polling');
     assert.ok(/function syncJsDebugStatsPolling\(\{pollNow = true, forceGraphRefresh = false\} = \{\}\)[\s\S]*armJsDebugStatsPolling\(\{pollNow, forceGraphRefresh\}\)/.test(debugPaneSource), 'YO!stats uses one polling synchronizer for layout and browser visibility changes');
     assert.ok(/document\.addEventListener\('visibilitychange'[\s\S]*forceGraphRefresh: visible/.test(debugPaneSource), 'YO!stats forces a catch-up graph redraw when Chrome makes the page visible again');
-    assert.ok(/await Promise\.all\(activeSessions\.filter\(isTmuxSession\)[\s\S]*await primeJsDebugStatsBeforeLongLivedStreams\(\)[\s\S]*installClientEventStream\(\)/.test(debugPaneSource), 'YO!stats primes its first sample before the global long-lived SSE streams can consume the remaining HTTP\/1.1 connection slots');
+    assert.ok(/await Promise\.all\(activeSessions\.filter\(isTmuxSession\)[\s\S]*await initializeJsDebugStatsBeforeStreams\(\)[\s\S]*installClientEventStream\(\)/.test(debugPaneSource), 'YO!stats performs one coordinated initial sample before the global long-lived SSE streams can consume the remaining HTTP\/1.1 connection slots');
     assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
     assert.ok(/\.pane-drag-image-frame,\s*\.preferences-panel,\s*\.js-debug-panel,[\s\S]*?\.panel,[\s\S]*?\.summary\s*\{[^}]*grid-template-rows:\s*var\(--three-row-panel-layout\)/.test(debugPaneCss), 'Debug and Preferences panels consume the shared three-row panel grid');
     assert.ok(debugPaneCss.includes('.js-debug-subtabs') && debugPaneCss.includes('.js-debug-chart-grid') && debugPaneCss.includes('.js-debug-y-axis') && debugPaneCss.includes('.js-debug-line--cpu') && debugPaneCss.includes('.js-debug-line--systemCpu') && debugPaneCss.includes('.js-debug-bar--workingAgents') && debugPaneCss.includes('.js-debug-bar--agentToken') && debugPaneCss.includes('.js-debug-legend'), 'YO!stats ships sub-tab, split chart, Y-axis, line/bar graph styling, and legends');
@@ -4553,6 +4557,37 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setDebugGraphRangeForTest(16 * 60 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 600, 'a sixteen-hour range reports the ten-minute retained resolution');
+  });
+
+  test('YO!stats ignores a fully covered coarse boundary bucket when choosing 30-minute resolution', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 10_000) * 10_000;
+    const domainStart = now - (30 * 60 * 1000);
+    const coarseStart = Math.floor(domainStart / 600_000) * 600_000;
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(30 * 60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({sequence: 1, records: [{
+      start: coarseStart / 1000,
+      duration: 600,
+      sequence: 1,
+      api_count: 600,
+    }]});
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 182,
+      records: Array.from({length: 181}, (_item, index) => ({
+        start: (domainStart / 1000) + (index * 10),
+        duration: 10,
+        sequence: index + 2,
+        api_count: 10,
+      })),
+    });
+
+    const summary = api.debugGraphBucketSummaryForTest(now);
+    assert.equal(summary.resolutionSeconds, 30, 'fine coverage across the visible domain restores the automatic thirty-second display scale');
+    assert.deepStrictEqual([...summary.displayBucketSeconds], [30], 'the preserved out-of-view portion of the coarse boundary bucket cannot force visible bars to ten minutes');
+    const controls = api.debugGraphInnerHtmlForTest(now).match(/data-js-debug-resolution-override[\s\S]*?<\/select>/)?.[0] || '';
+    for (const value of [10, 30, 60, 120]) assert.ok(controls.includes(`value="${value}"`), `the 30-minute resolution selector offers ${value}s`);
+    assert.ok(controls.includes('<option value="0" selected>AUTO</option>'), 'the 30-minute selector remains on AUTO while offering manual resolutions');
   });
 
   test('YO!stats aggregates irregular client events but preserves real communication gaps', () => {
@@ -5487,15 +5522,19 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const unpricedReportHtml = api.debugGraphCostReportHtmlForTest({
       knownMicroUsd: 200000,
       lowerMicroUsd: 200000,
-      upperMicroUsd: 950000,
+      upperMicroUsd: 1400000,
       pricedCount: 1,
       complete: false,
-      unpricedCount: 1,
-      unpricedTokenQuantity: 50,
-      components: [{provider: 'openai', model: 'unknown-model', direction: 'input', unit: 'tokens', priced: false, unpriced_count: 1, unpriced_token_quantity: 50, token_quantity: 50, upper_micro_usd: 750000}],
+      unpricedCount: 3,
+      unpricedTokenQuantity: 90,
+      components: [
+        {provider: 'openai', model: 'unknown-model', direction: 'input', cache_role: 'read', unit: 'tokens', priced: false, unpriced_count: 1, unpriced_token_quantity: 20, token_quantity: 20, upper_micro_usd: 100000},
+        {provider: 'openai', model: 'unknown-model', direction: 'input', cache_role: 'none', unit: 'tokens', priced: false, unpriced_count: 1, unpriced_token_quantity: 30, token_quantity: 30, upper_micro_usd: 300000},
+        {provider: 'openai', model: 'unknown-model', direction: 'output', cache_role: 'none', unit: 'tokens', priced: false, unpriced_count: 1, unpriced_token_quantity: 40, token_quantity: 40, upper_micro_usd: 800000},
+      ],
       models: [], sources: [], tmuxWindows: [],
     }, {startMs: now - 60000, endMs: now});
-    assert.ok(unpricedReportHtml.includes('data-js-debug-cost-table="unpriced"') && unpricedReportHtml.includes('Known priced total') && unpricedReportHtml.includes('$0.20') && unpricedReportHtml.includes('Unpriced tokens') && unpricedReportHtml.includes('50 tokens') && unpricedReportHtml.includes('Worst-case additional estimate') && unpricedReportHtml.includes('$0.75') && unpricedReportHtml.includes('openai · unknown-model (input)'), 'unpriced usage keeps known cost, token volume, worst-case increment, and affected model/class explicit instead of widening the headline opaquely');
+    assert.ok(unpricedReportHtml.includes('data-js-debug-cost-table="unpriced"') && unpricedReportHtml.includes('Known priced total') && unpricedReportHtml.includes('$0.20') && unpricedReportHtml.includes('Unpriced tokens') && unpricedReportHtml.includes('90 tokens') && unpricedReportHtml.includes('Worst-case additional estimate') && unpricedReportHtml.includes('$1.20') && unpricedReportHtml.includes('openai · unknown-model (cache)') && unpricedReportHtml.includes('openai · unknown-model (input)') && unpricedReportHtml.includes('openai · unknown-model (output)'), 'unpriced usage keeps known cost, three-class token volume, reconciled worst-case increment, and every affected model/class explicit instead of widening the headline opaquely');
     const modelIndex = html.indexOf('data-js-debug-chart="modelTokens"');
     const costIndex = html.indexOf('data-js-debug-summary-group="costSummary"');
     assert.ok(modelIndex >= 0 && costIndex > modelIndex, 'Cost summary is immediately ordered after Model tokens/min in the graph stack');
@@ -5557,6 +5596,47 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok((reportHtml.match(/data-js-debug-cost-table=/g) || []).length >= 5, 'the Cost report renders every section in a shared table shell without former list/tree caps');
 
     assert.ok(costSource.includes("debugGraphCostRangeUsdText(summary)") && costSource.includes("debug.cost.range") && costSource.includes("'est. —, Σ displayed'"), 'an interval with no priceable component is distinctly unestimated while incomplete priced ranges render as low-high estimates');
+  });
+
+  test('YO!stats 24-hour displayed cost range reconciles unknown components exactly once', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 600_000) * 600_000;
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(24 * 60 * 60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 2,
+      usage_atom_backfill: {state: 'complete', sources: 2, missing: 0},
+      records: [
+        {
+          start: (now - (20 * 60 * 60 * 1000)) / 1000, duration: 600, sequence: 1,
+          cost_summary: {
+            total_micro_usd: 100000, known_micro_usd: 100000, lower_micro_usd: 100000, upper_micro_usd: 600000,
+            priced_count: 1, unpriced_count: 1, unpriced_token_quantity: 1000, complete: false,
+            components: [{provider: 'openai', model: 'unknown', direction: 'input', cache_role: 'read', unit: 'tokens', priced: false, token_quantity: 1000, unpriced_count: 1, unpriced_token_quantity: 1000, lower_micro_usd: 0, upper_micro_usd: 500000}],
+          },
+        },
+        {
+          start: (now - (60 * 60 * 1000)) / 1000, duration: 600, sequence: 2,
+          cost_summary: {
+            total_micro_usd: 200000, known_micro_usd: 200000, lower_micro_usd: 200000, upper_micro_usd: 1700000,
+            priced_count: 1, unpriced_count: 2, unpriced_token_quantity: 2000, complete: false,
+            components: [
+              {provider: 'openai', model: 'unknown', direction: 'input', cache_role: 'none', unit: 'tokens', priced: false, token_quantity: 1200, unpriced_count: 1, unpriced_token_quantity: 1200, lower_micro_usd: 0, upper_micro_usd: 600000},
+              {provider: 'openai', model: 'unknown', direction: 'output', cache_role: 'none', unit: 'tokens', priced: false, token_quantity: 800, unpriced_count: 1, unpriced_token_quantity: 800, lower_micro_usd: 0, upper_micro_usd: 900000},
+            ],
+          },
+        },
+      ],
+    });
+
+    const summary = canonical(api.debugGraphCostSummaryForTest(api.debugGraphAgentTokenDisplayBucketsForTest(now)));
+    assert.equal(summary.knownMicroUsd, 300000, 'the 24-hour lower edge sums known cost from each displayed bucket once');
+    assert.equal(summary.lowerMicroUsd, 300000, 'the displayed lower edge stays equal to exact known cost');
+    assert.equal(summary.upperMicroUsd, 2300000, 'the displayed upper edge adds cache, input, and output uncertainty once');
+    assert.equal(summary.upperMicroUsd - summary.lowerMicroUsd, 2000000, 'the headline spread equals the three unknown-component increments');
+    assert.equal(summary.unpricedTokenQuantity, 3000, 'the 24-hour summary retains every unknown token across persistence tiers');
+    const report = api.debugGraphCostReportHtmlForTest(summary, {startMs: now - (24 * 60 * 60 * 1000), endMs: now});
+    assert.ok(report.includes('$0.3000') && report.includes('$2.30') && report.includes('openai · unknown (cache)') && report.includes('openai · unknown (input)') && report.includes('openai · unknown (output)'), 'YO!cost explains both range endpoints and all three contributors for the displayed 24-hour buckets');
   });
 
   test('YO!stats Cost summary renders a single exact total when lower and upper match', () => {
@@ -5885,7 +5965,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     const bootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     assert.equal(debugSource.trimEnd().endsWith('startJsDebugStatsPolling();'), false, 'loading the debug partial has no recurring top-level side effect');
-    assert.ok(/if \(!shareViewMode && typeof startJsDebugStatsPolling === 'function'\) startJsDebugStatsPolling\(\);/.test(bootSource), 'normal application boot starts background client health collection independent of pane visibility');
+    assert.ok(/if \(!shareViewMode && typeof initializeJsDebugStatsBeforeStreams === 'function'\)[\s\S]*await initializeJsDebugStatsBeforeStreams\(\)/.test(bootSource), 'normal application boot uses the single stats initializer for health collection, initial sample, and interval arming');
     const api = loadYolomux('', ['1']);
     const requests = [];
     await flushAsyncWork();
@@ -5905,6 +5985,76 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(body.records.some(record => record.heartbeat_count === 1 && record.latency_count === 1 && record.bandwidth_bytes > 0), 'health polling records latency, transfer bytes, and an explicit heartbeat');
     assert.equal(body.records.reduce((total, record) => total + Number(record.api_count || 0) + Number(record.sse_count || 0), 0), 0, 'health polling does not inflate API or SSE activity counters');
     assert.equal(api.jsDebugEventsForTest().length, 0, 'the quiet health request is not reported as a normal API event');
+  });
+
+  await testAsync('YO!stats boot and passive cold cadence never queue duplicate history requests', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const sampleRequests = [];
+    let releaseSample;
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest((url) => {
+      const requestUrl = String(url);
+      if (requestUrl.startsWith('/api/ping?')) return Promise.resolve(jsonResponse({ok: true, time: 1}));
+      if (!requestUrl.startsWith('/api/stats-sample?')) return Promise.resolve(jsonResponse({ok: true}));
+      sampleRequests.push(requestUrl);
+      return new Promise(resolve => { releaseSample = resolve; });
+    });
+
+    const initializing = api.initializeJsDebugStatsBeforeStreamsForTest();
+    await flushAsyncWork();
+    assert.equal(sampleRequests.length, 1, 'boot starts exactly one initial history request');
+    assert.equal(api.jsDebugStatsPollingStateForTest().pending, false, 'the initializer does not queue a second request behind its own prime');
+    api.pollJsDebugStatsOnIntervalForTest();
+    assert.equal(api.jsDebugStatsPollingStateForTest().pending, false, 'a passive 2.001-second cold tick is dropped while the explicit initial request is in flight');
+
+    releaseSample(jsonResponse({
+      pid: 123,
+      uptime_seconds: 10,
+      history: {sequence: 1, records: [], coverage: statsHistoryCoverageForRequest(sampleRequests[0])},
+    }));
+    await initializing;
+    for (let index = 0; index < 3; index += 1) await flushAsyncWork();
+    assert.equal(sampleRequests.length, 1, 'accepting the initial response does not launch a queued duplicate');
+    assert.equal(api.jsDebugStatsPollingStateForTest().firstSampleReceived, true, 'the one initial response establishes steady-state polling');
+    assert.equal(api.runtimeIntervalActiveForTest('debug-stats'), true, 'the initializer leaves the shared recurring sampler armed');
+    api.stopJsDebugStatsPollingForTest();
+  });
+
+  await testAsync('YO!stats moving live tail stays ready and uses the incremental cursor', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const targetStart = nowSeconds - (30 * 60);
+    const requests = [];
+    let releasePoll;
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.setDebugGraphRangeForTest(30 * 60, {render: false});
+    api.resetJsDebugHistoryReadinessForTest();
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'older', requestedStart: targetStart, requestedEnd: nowSeconds - 5,
+      coveredStart: targetStart, coveredEnd: nowSeconds - 5,
+      resolutionSeconds: 1, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    api.setJsDebugHistoryReadinessForTest('ready');
+    api.debugGraphApplyServerHistoryForTest({sequence: 55, records: [{start: nowSeconds - 5, duration: 1, sequence: 55, api_count: 1}]});
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      return new Promise(resolve => { releasePoll = resolve; });
+    });
+
+    const polling = api.pollJsDebugStatsSampleForTest();
+    await flushAsyncWork();
+    const request = new URL(requests[0], 'http://localhost');
+    assert.equal(request.searchParams.get('since'), '55', 'a right-edge-only gap uses the incremental sequence instead of resetting to zero');
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'a moving live tail never re-enters loading-older');
+    assert.equal(api.debugPanelHtmlForTest().includes('Loading older data'), false, 'the quiet live-tail request does not cover the graph with an older-data message');
+
+    releasePoll(jsonResponse({history: {sequence: 56, records: []}}));
+    await polling;
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'the incremental tail response preserves ready state');
+    api.stopJsDebugStatsPollingForTest();
   });
 
   test('YO!stats history readiness owns empty success, interval resolution, and retained loading UI', () => {
@@ -6170,6 +6320,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   await testAsync('YO!stats follows has-more coverage until the requested history window is complete', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
+    let releaseFinalPage;
     await flushAsyncWork();
     api.stopJsDebugStatsPollingForTest();
     api.resetJsDebugHistoryReadinessForTest();
@@ -6190,20 +6341,27 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
           }),
         }}));
       }
-      return Promise.resolve(jsonResponse({history: {
-        sequence: 2,
-        records: [],
-        coverage: statsHistoryCoverageForRequest(requestUrl),
-      }}));
+      return new Promise(resolve => {
+        releaseFinalPage = () => resolve(jsonResponse({history: {
+          sequence: 2,
+          records: [],
+          coverage: statsHistoryCoverageForRequest(requestUrl),
+        }}));
+      });
     });
 
     await api.pollJsDebugStatsSampleForTest();
-    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    for (let index = 0; index < 3; index += 1) await flushAsyncWork();
     assert.equal(requests.length, 2, 'has_more_older schedules the next bounded page without user input');
     const firstUrl = new URL(requests[0], 'http://localhost');
     const secondUrl = new URL(requests[1], 'http://localhost');
     assert.equal(firstUrl.searchParams.get('history_end'), '0', 'the first page uses the live-history sentinel');
     assert.equal(secondUrl.searchParams.get('history_end'), String(Number(firstUrl.searchParams.get('history_start')) + 300), 'the continuation stops at the backend next-older cursor');
+    const paginatingReadiness = api.jsDebugHistoryReadinessForTest();
+    assert.equal(paginatingReadiness.phase, 'loading-initial', 'pagination stays in its original busy phase between pages instead of flashing ready then loading again');
+    assert.equal(paginatingReadiness.overlayVisible, true, 'pagination retains one continuous loading surface while the final page is pending');
+    releaseFinalPage();
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
     const finalReadiness = api.jsDebugHistoryReadinessForTest();
     assert.equal(finalReadiness.phase, 'ready', 'readiness clears only after the final page paints');
     assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(Number(firstUrl.searchParams.get('history_start')), finalReadiness.targetEndSeconds, 1), false, 'the older page joins the retained live suffix instead of replacing it');

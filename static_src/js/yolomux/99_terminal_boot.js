@@ -3636,6 +3636,13 @@ function bindPanelControls(panel, session) {
     }
     handleWindowStepButtonClick(event);
   });
+  delegate(panel, 'click', '[data-terminal-connection-retry]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalConnectionRetry || session;
+    showTerminalConnectionState(targetSession, 'connecting', t('tmuxWall.status.connecting'));
+    void ensureTerminalRunning(targetSession);
+  });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
@@ -4427,6 +4434,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
     const readback = refreshTmuxWindowActiveFromSignals(session, {...options, acceptUnchanged});
     return Promise.resolve(readback).then(confirmed => {
       if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return;
+      if (confirmed) clearTerminalConnectionState(session, {sequence: options.sequence});
       if (!confirmed && attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
       }
@@ -4438,6 +4446,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
       } else {
         const info = transcriptMetadataState.payload.sessions?.[session];
         reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
+        clearTerminalConnectionState(session, {sequence: options.sequence});
       }
     });
   };
@@ -4454,6 +4463,8 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
+  const targetLabel = directIndex !== null ? t('terminal.window.title', {name: directIndex}) : shortcut.label;
+  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${targetLabel}`, {sequence});
   updateTerminalTmuxInputState(session, {repeatUntilMs: shortcut.repeatable ? Date.now() + terminalTmuxWindowRepeatMs : 0});
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
@@ -4771,6 +4782,7 @@ function tmuxWindow(session, key, label) {
   if (directIndex !== null) {
     const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
+    showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${t('terminal.window.title', {name: directIndex})}`, {sequence});
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
     focusAfterAcknowledgedSwitch();
@@ -4781,6 +4793,7 @@ function tmuxWindow(session, key, label) {
       })
       .catch(error => {
         if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
+        clearTerminalConnectionState(session, {sequence});
         if (previousInfo) {
           setTranscriptMetadataPayload({
             ...transcriptMetadataState.payload,
@@ -4802,12 +4815,49 @@ function tmuxWindow(session, key, label) {
   }
   const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = setTmuxWindowActiveIndexPending(session);
+  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${label}`, {sequence});
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusAfterAcknowledgedSwitch();
   scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
+}
+
+function terminalConnectionStateNode(session) {
+  return document.getElementById(terminalDomId(session))?.querySelector?.('[data-terminal-connection-state]') || null;
+}
+
+function terminalConnectionStateHtml(session, state, text, options = {}) {
+  const retry = options.retry === true
+    ? `<button type="button" data-terminal-connection-retry="${esc(session)}">${esc(t('common.retry'))}</button>`
+    : '';
+  const sequence = options.sequence === undefined ? '' : ` data-terminal-connection-sequence="${esc(String(options.sequence))}"`;
+  return `<div class="terminal-connection-state terminal-connection-state--${esc(state)}" data-terminal-connection-state="${esc(state)}"${sequence} role="status"><span>${esc(text)}</span>${retry}</div>`;
+}
+
+function showTerminalConnectionState(session, state, text, options = {}) {
+  const container = document.getElementById(terminalDomId(session));
+  if (!container) return null;
+  let node = terminalConnectionStateNode(session);
+  const replacement = document.createElement('div');
+  replacement.innerHTML = terminalConnectionStateHtml(session, state, text, options);
+  const next = replacement.firstElementChild;
+  if (!next) return null;
+  if (node) node.replaceWith(next);
+  else container.appendChild(next);
+  container.classList.add('terminal-connection-pending');
+  return next;
+}
+
+function clearTerminalConnectionState(session, options = {}) {
+  const node = terminalConnectionStateNode(session);
+  if (!node) return false;
+  if (options.sequence !== undefined && String(node.dataset.terminalConnectionSequence || '') !== String(options.sequence)) return false;
+  const container = node.parentElement;
+  node.remove();
+  container?.classList.remove('terminal-connection-pending');
+  return true;
 }
 
 async function ensureTerminalRunning(session) {
@@ -4825,12 +4875,23 @@ async function ensureTerminalRunning(session) {
       return;
     }
     const knownFromTranscriptPayload = Boolean(transcriptMetadataState.loaded && transcriptMetadataState.payload.sessions?.[session]);
+    if (!knownFromTranscriptPayload) showTerminalConnectionState(session, 'connecting', t('tmuxWall.status.connecting'));
     const ensured = knownFromTranscriptPayload || await ensureSession(session);
     if (!ensured) {
-      const container = document.getElementById(terminalDomId(session));
-      if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
+      const message = t('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)});
+      showTerminalConnectionState(session, 'unavailable', message, {retry: true});
+      if (document?.defaultView && attentionAlerts) {
+        emitNotification('terminalConnection', {
+          session,
+          title: sessionLabel(session),
+          body: message,
+          className: 'danger-alert toast',
+          coalesceKey: `terminal-unavailable:${session}`,
+        });
+      }
       return;
     }
+    clearTerminalConnectionState(session);
     startTerminal(session);
   })();
   terminalStartupPromises.set(key, promise);
@@ -4853,6 +4914,7 @@ function connectTerminalSocket(session, item) {
     item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
     dismissTerminalConnectionToasts(session);
+    clearTerminalConnectionState(session);
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
@@ -4883,6 +4945,7 @@ function connectTerminalSocket(session, item) {
       clientPerfEnd(writePerf, {bytes: dataBytes});
       const firstOutput = item.terminalOutputSeen !== true;
       item.terminalOutputSeen = true;
+      clearTerminalConnectionState(session);
       item.fileUnderlineController?.schedule?.({reason: 'output'});
       if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
       scheduleTerminalAttentionHighlight(session);
@@ -6415,9 +6478,8 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  if (!shareViewMode && typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
-  if (!shareViewMode && typeof primeJsDebugStatsBeforeLongLivedStreams === 'function') {
-    await primeJsDebugStatsBeforeLongLivedStreams();
+  if (!shareViewMode && typeof initializeJsDebugStatsBeforeStreams === 'function') {
+    await initializeJsDebugStatsBeforeStreams();
   }
   if (!shareViewMode) installClientEventStream();
   if (!shareViewMode) {

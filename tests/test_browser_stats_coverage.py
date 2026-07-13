@@ -26,7 +26,7 @@ def _morning_after_protocol_history(tmp_path):
             "action": "ping",
             "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
         })
-        assert protocol["version"] == statsd.STATSD_PROTOCOL_VERSION == 20
+        assert protocol["version"] == statsd.STATSD_PROTOCOL_VERSION == 21
         for segment_start, segment_end, bucket_seconds in (
             (retained_start, sleep_start, 600),
             (wake_time, now, 60),

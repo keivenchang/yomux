@@ -44,7 +44,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 20
+STATSD_PROTOCOL_VERSION = 21
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -61,6 +61,7 @@ STATSD_USAGE_ATOM_MIGRATION_MARKER = "usage_atom_migration_version"
 STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY = "usage_atom_migration_status"
 STATSD_USAGE_ATOM_MIGRATION_VERSION = 1
 STATSD_PRICING_REPROJECTION_MARKER = "pricing_reprojection_catalog_revision"
+STATSD_PRICING_PROJECTION_POLICY_VERSION = 2
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
@@ -454,6 +455,7 @@ def projected_usage_component(atom: Any, catalog: Any = None) -> dict[str, Any] 
         if catalog is None or not callable(estimate_rate_band):
             return {}
         band = estimate_rate_band(
+            provider=normalized["provider"],
             direction=normalized["direction"], modality=normalized["modality"], cache_role=normalized["cache_role"],
             unit=normalized["unit"], profile=normalized["pricing_profile"], service_tier=normalized["service_tier"], timestamp=_usage_atom_timestamp_text(normalized["timestamp"]),
         )
@@ -1401,11 +1403,12 @@ class PersistentStatsService:
             return {"ok": True, "reason": "catalog_has_no_status"}
         if revision <= 0:
             return {"ok": True, "reason": "catalog_status_unavailable"}
-        if self.store.metadata_value(STATSD_PRICING_REPROJECTION_MARKER) == str(revision):
+        marker = f"{revision}:policy-{STATSD_PRICING_PROJECTION_POLICY_VERSION}"
+        if self.store.metadata_value(STATSD_PRICING_REPROJECTION_MARKER) == marker:
             self.pricing_reprojection = None
             return {"ok": True, "changed": 0, "reason": "current_catalog"}
         if self.pricing_reprojection is None or int(self.pricing_reprojection["revision"]) != revision:
-            self.pricing_reprojection = {"revision": revision, "after_start": -1, "after_duration": -1, "changed": 0, "processed": 0}
+            self.pricing_reprojection = {"revision": revision, "marker": marker, "after_start": -1, "after_duration": -1, "changed": 0, "processed": 0}
         return {"ok": True, "pending": True, "revision": revision}
 
     def _reproject_cost_summaries_step(self) -> dict[str, Any]:
@@ -1421,7 +1424,7 @@ class PersistentStatsService:
             limit=STATSD_PRICING_REPROJECTION_BATCH_BUCKETS,
         )
         if not buckets:
-            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(pending["revision"]))
+            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(pending["marker"]))
             self.pricing_reprojection = None
             if pending["changed"]:
                 self._encoded_query_cache.clear()
@@ -1447,7 +1450,7 @@ class PersistentStatsService:
         pending["after_start"], pending["after_duration"] = int(last["start"]), int(last["duration"])
         pending["changed"], pending["processed"] = int(pending["changed"]) + changed, int(pending["processed"]) + len(buckets)
         if len(buckets) < STATSD_PRICING_REPROJECTION_BATCH_BUCKETS:
-            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(pending["revision"]))
+            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(pending["marker"]))
             total_changed, processed = int(pending["changed"]), int(pending["processed"])
             self.pricing_reprojection = None
             if total_changed:

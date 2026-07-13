@@ -1,3 +1,36 @@
+const backendHealthState = {consecutiveFailures: 0};
+const backendHealthFailureThreshold = 3;
+
+function syncBackendHealthIndicator() {
+  if (!topbar) return;
+  let indicator = topbar.querySelector('[data-backend-health]');
+  const host = topbar.querySelector('.topbar-right-tools') || topbar;
+  const degraded = backendHealthState.consecutiveFailures >= backendHealthFailureThreshold;
+  if (!degraded) {
+    indicator?.remove();
+    return;
+  }
+  if (!indicator) {
+    indicator = document.createElement('span');
+    indicator.className = 'backend-health-indicator';
+    indicator.dataset.backendHealth = 'unresponsive';
+    indicator.setAttribute('role', 'status');
+    host.prepend(indicator);
+  }
+  indicator.textContent = `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`;
+}
+
+function noteBackendHealthFailure() {
+  backendHealthState.consecutiveFailures += 1;
+  syncBackendHealthIndicator();
+}
+
+function noteBackendHealthSuccess() {
+  if (!backendHealthState.consecutiveFailures) return;
+  backendHealthState.consecutiveFailures = 0;
+  syncBackendHealthIndicator();
+}
+
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
@@ -18,9 +51,11 @@ async function apiFetch(url, options = {}) {
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
+    noteBackendHealthFailure();
     if (apiDebugEnabled) recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
+  noteBackendHealthSuccess();
   if (apiDebugEnabled) {
     const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
     recordApiDebugResponseBytes(event, response);
@@ -65,6 +100,10 @@ async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
   let response;
   try {
     response = await fetch(url, requestOptions);
+    noteBackendHealthSuccess();
+  } catch (error) {
+    noteBackendHealthFailure();
+    throw error;
   } finally {
     if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.fetchMs = performanceNow() - fetchStartedAt;
   }
@@ -575,7 +614,6 @@ function installJsDebugEventCapture() {
 function enableDebugMode() {
   debugModeEnabled = true;
   installJsDebugEventCapture();
-  if (typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
   scheduleJsDebugPanelRefresh();
 }
 

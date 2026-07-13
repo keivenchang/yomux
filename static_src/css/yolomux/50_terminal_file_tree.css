@@ -601,6 +601,39 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   white-space: pre-wrap;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
+.terminal-connection-pending > .xterm {
+  opacity: 0.52;
+}
+.terminal-connection-state {
+  position: absolute;
+  z-index: var(--z-terminal-badge);
+  inset: 50% auto auto 50%;
+  max-width: min(88%, 32rem);
+  display: flex;
+  gap: var(--space-8);
+  align-items: center;
+  padding: var(--space-7) var(--space-10);
+  color: var(--text);
+  background: color-mix(in srgb, var(--overlay-surface-strong) 92%, transparent);
+  border: 1px solid var(--neutral-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 24px var(--paint-shadow-38);
+  translate: -50% -50%;
+  font: 600 var(--ui-font-size-sm)/1.3 var(--ui-font);
+}
+.terminal-connection-state--unavailable {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--line));
+}
+.terminal-connection-state button {
+  flex: none;
+  padding: var(--space-4) var(--space-7);
+  color: inherit;
+  background: var(--panel2);
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
 /* Upload and attention/status messages must stay visually identical. Keep shared box styling on .toast. */
 .toast {
   position: relative;
@@ -610,7 +643,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   background: rgba(255, 244, 194, 0.58);
   border: 1px solid var(--50-terminal-file-tree-server-update-banner-border-88);
   border-radius: var(--radius-lg);
-  box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  box-shadow: 0 16px 42px var(--paint-shadow-38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
 }
 /* The update-available cue uses a solid (opaque) background instead of the translucent default, so it
