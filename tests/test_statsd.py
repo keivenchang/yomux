@@ -1302,6 +1302,44 @@ def test_statsd_completed_agent_scan_persists_in_bounded_pages_without_blocking_
     service.store.close()
 
 
+def test_statsd_agent_token_recovery_coalesces_rollups_without_inline_refresh(monkeypatch, tmp_path):
+    """Historical token pages queue four tiers, then converge between requests."""
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    records = [{"time": 1000 + index, "cpu_total_percent": 1, "cpu_count": 1} for index in range(64)]
+    inline_refreshes = []
+    monkeypatch.setattr(
+        service,
+        "_refresh_persisted_rollups",
+        lambda sample_time: inline_refreshes.append(sample_time) or pytest.fail("recovery must not rebuild rollups per record"),
+    )
+    service.agent_token_scan_id = "scan-rollup"
+    service.agent_token_scan_result = {
+        "scan_id": "scan-rollup", "measurements": [], "atom_records": records,
+        "seen_keys": [], "sample_time": 1100, "previous_state": {},
+    }
+
+    # Install, then persist exactly one record (the intentionally tight
+    # recovery page). The history handler is an ordinary request between turns.
+    assert service._drain_agent_token_scan_result() is True
+    assert service._drain_agent_token_scan_result() is True
+    started = time.perf_counter()
+    history, _binary = service.handle_with_binary({"action": "history", "start": 0, "end": 0})
+    assert history["ok"] is True
+    assert time.perf_counter() - started < 0.1
+    assert inline_refreshes == []
+    assert len(service.rollup_pending) == len(statsd.STATS_HISTORY_PERSISTED_ROLLUP_SECONDS)
+
+    while service.agent_token_scan_persistence is not None:
+        service._drain_agent_token_scan_result()
+    while service.rollup_pending or service.rollup_jobs or service.rollup_backfill is not None:
+        service._rollup_maintenance_step()
+
+    rollups = service.store.query_rollups(duration=60, start=960, end=1080)
+    assert sum(float(bucket["cpu_count"]) for bucket in rollups) == 64
+    assert sum(float(bucket["cpu_total_percent"]) for bucket in rollups) == 64
+    service.store.close()
+
+
 def test_statsd_server_merge_can_defer_full_history_compaction(monkeypatch, tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     monkeypatch.setattr(service, "_compact_history", lambda *_args: pytest.fail("recovery page must not compact the full store"))
@@ -1457,19 +1495,18 @@ def test_statsd_twenty_four_hour_range_uses_bounded_persisted_rollups(tmp_path):
     service.store.close()
 
 
-def test_statsd_rollup_backfill_advances_one_raw_bucket_per_turn(tmp_path):
+def test_statsd_rollup_backfill_uses_bounded_coalesced_work(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     service.store.upsert_bucket(_bucket(start=100, duration=1, sequence=1))
     service.store.upsert_bucket(_bucket(start=101, duration=1, sequence=2))
     service.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
 
-    first = service._rollup_backfill_step()
-    second = service._rollup_backfill_step()
-    done = service._rollup_backfill_step()
+    steps = []
+    while service.rollup_backfill is not None or service.rollup_pending or service.rollup_jobs:
+        steps.append(service._rollup_backfill_step())
 
-    assert first == {"ok": True, "pending": True, "processed": 1}
-    assert second == {"ok": True, "pending": True, "processed": 2}
-    assert done == {"ok": True, "pending": False, "processed": 2}
+    assert steps
+    assert all(step["processed"] <= statsd.STATSD_ROLLUP_MAINTENANCE_PAGE_ROWS for step in steps)
     assert service.store.rollup_bucket(100, 10)["cpu_total_percent"] == 25.0
     service.store.close()
 

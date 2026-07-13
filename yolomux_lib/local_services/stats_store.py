@@ -393,6 +393,25 @@ class StatsStore:
         ).fetchall()
         return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
+    def rollup_source_page(
+        self,
+        *,
+        start: int,
+        end: int,
+        after_start: int = -1,
+        after_duration: int = -1,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Return one ordered raw-bucket page for a persisted rollup window."""
+        rows = self._connection().execute(
+            "SELECT bucket_json FROM stats_buckets "
+            "WHERE start >= ? AND start < ? "
+            "AND (start > ? OR (start = ? AND duration > ?)) "
+            "ORDER BY start,duration LIMIT ?",
+            (int(start), int(end), int(after_start), int(after_start), int(after_duration), max(1, min(int(limit), STATS_STORE_MAX_ROWS_PER_QUERY))),
+        ).fetchall()
+        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
+
     def latest_sequence(self) -> int:
         row = self._connection().execute("SELECT COALESCE(MAX(sequence), 0) FROM stats_buckets").fetchone()
         return int(row[0] or 0)
