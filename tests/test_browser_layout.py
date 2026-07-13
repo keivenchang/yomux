@@ -2105,6 +2105,88 @@ def test_debug_graph_terminal_partial_history_renders_agent_and_model_tokens(bro
     assert metrics["agentVisuals"] > 0 and metrics["modelVisuals"] > 0, metrics
 
 
+def test_debug_graph_one_four_twenty_four_hour_ranges_paint_full_width_without_retry(browser, tmp_path):
+    """The screenshot-014 range matrix must render both history edges."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]');"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          const originalFetch = window.fetch;
+          const requests = [];
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url.toString());
+            const start = Number(url.searchParams.get('history_start'));
+            const end = Math.ceil(Date.now() / 1000);
+            const span = Math.max(1, end - start);
+            const duration = span >= 16 * 60 * 60 ? 600 : (span >= 2 * 60 * 60 ? 60 : 10);
+            const record = (recordStart, sequence) => ({
+              start: recordStart, duration, sequence,
+              system_cpu_total_percent: 20, system_cpu_count: 1,
+              run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1,
+            });
+            return jsonResponse({pid: 4242, started_at: 1, uptime_seconds: span, history: {
+              sequence: requests.length * 10,
+              latest_sequence: requests.length * 10,
+              records: [record(start + duration, requests.length * 10 - 1), record(end - duration, requests.length * 10)],
+              coverage: {
+                mode: 'live', requested_start: start, requested_end: 0,
+                available_start: start, available_end: end,
+                covered_start: start, covered_end: end,
+                complete: true, has_more_older: false, next_older_end: 0,
+                resolution_seconds: duration, source_resolution_seconds: duration,
+                source_records: 2, returned_records: 2,
+              },
+            }});
+          };
+          const results = [];
+          try {
+            for (const rangeSeconds of [60 * 60, 4 * 60 * 60, 24 * 60 * 60]) {
+              clearJsDebugGraphData();
+              resetJsDebugHistoryReadiness();
+              setDebugGraphRange(rangeSeconds, {render: false});
+              await pollJsDebugStatsSample({forceGraphRefresh: true});
+              stopJsDebugStatsPolling();
+              renderDebugPanels({force: true});
+              const graph = document.querySelector('[data-js-debug-graph]');
+              const bars = [...graph.querySelectorAll('[data-js-debug-bar-series="workingAgents"]')]
+                .map(bar => ({x: Number(bar.getAttribute('x')), width: Number(bar.getAttribute('width'))}));
+              const plotWidth = Number(jsDebugGraphGeometry.width);
+              results.push({
+                rangeSeconds,
+                phase: jsDebugHistoryReadinessSnapshot().phase,
+                overlay: graph.querySelector('[data-js-debug-history-overlay]')?.textContent || '',
+                bars,
+                plotWidth,
+              });
+            }
+            return {requests, results};
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert len(metrics["requests"]) == 3, metrics
+    for result in metrics["results"]:
+        assert result["phase"] == "ready" and result["overlay"] == "", result
+        assert len(result["bars"]) == 2, result
+        left = min(bar["x"] for bar in result["bars"])
+        right = max(bar["x"] + bar["width"] for bar in result["bars"])
+        assert left <= result["plotWidth"] * 0.05, result
+        assert right >= result["plotWidth"] * 0.95, result
+
+
 def test_debug_graph_stats_sse_push_advances_live_tail_without_poll(browser, tmp_path):
     """A durable SSE sample paints the live tail without waiting for polling."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
