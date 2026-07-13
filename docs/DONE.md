@@ -1641,3 +1641,15 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 
 - Completed `DOIT.finder-sync-switch-instant-cache.md`. A warm Finder Sync target reconciles its remembered tree synchronously from the bounded shared listing LRU, preserving mounted rows and session-specific disclosure state. The next frame revalidates visible directories in the background; a cold path uses bounded parallel workers.
 - `tests/layout_async.test.js` covers zero blocking warm requests, changed/unchanged revalidation behavior, mounted-node preservation, bounded cold batches, and LRU eviction.
+
+### Mobile terminal keyboard bottom modifiers and Backspace
+
+- Completed and removed `DOIT.keyboard-alt-cmd-bottom-left-add-backspace.md`. The popup keyboard's shared side stack is now Esc, Ctrl, Shift, Ctrl-C, Alt, Cmd, placing Alt/Cmd at the bottom. Its compact primary row exposes the existing one-shot Backspace definition beside Tab and Ctrl-B without duplicating the `\x7f` transport path.
+- The flexible primary grid uses three `minmax(0, 1fr)` tracks. Node contracts and the real coarse-pointer Selenium case pin the order, payload, compact/overflow behavior, and 320x240 containment in both themes.
+- Verification: generated assets and `static_build.py --check` passed; Node layout reported 48/0; focused Selenium reported 2/0; the bounded browser matrix reported 447 passed and 5 skipped. The other canonical lanes passed before the first browser launcher orphaned; that exact lane was stopped and rerun under a 600-second watchdog. Port 8881 restarted as one listener, `/api/ping` returned 401, and the served JS/CSS contain the tested arrays and relative grid.
+
+### First-class YO!cost tab
+
+- Completed and removed `DOIT.yocost-tab.md`. Cost Summary stays a compact default-off card immediately after Model tokens; its explicit More Info action opens or activates a normal `YO!cost` virtual tab instead of a modal. The tab restores/shares like other YO!* tabs and owns an internal scroll region with Agent/Model charts first, one Range/Resolution owner shared with YO!stats, freshness/Refresh, and sortable responsive accounting/attribution tables.
+- Known priced cost remains distinct from unpriced/lower-bound usage. Tables retain all agent, model/effort, component, source, and tmux-window values with per-class token/cost breakdowns, safe transcript Preview links, authoritative pricing links, and reconciling totals. Large selected ranges use one cached aggregate; zoom disables the shared slider until Reset Zoom without a hardcoded viewport width.
+- Verification: `static_build.py --check`, the YO!cost performance suite (2/0), focused YO!cost Selenium (1/0), statsd (75/0), and the bounded browser matrix (447 passed, 5 skipped) passed. All other canonical lanes passed in the integration gate. Port 8881 restarted as one listener with expected `/api/ping` 401, and its post-restart token payload has identical Agent and nested Model totals.
