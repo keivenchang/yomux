@@ -101,6 +101,16 @@ prove older range coverage. Reconnect or server-identity change therefore
 forces a zero-cursor history read, while an SSE outage falls back to the
 bounded polling cadence without inventing samples.
 
+Delivery demand is range-scaled and does not change collection cadence. A
+visible shared YO!stats/YO!cost range of 5m or 15m subscribes to `stats`; a
+range of 30m or longer, or a fixed historical zoom, omits that channel and
+uses one `/api/stats-sample` history request per 60 seconds. Returning to a
+short live range performs an immediate bounded backfill and restores SSE.
+Hidden pages have neither stats demand nor graph polling. The broker's
+aggregate `stats` demand gates `publish_client_event` before event JSON is
+constructed, so per-family durable merges do no per-second publish
+serialization when every connected stats view is coarse or hidden.
+
 Contract coverage lives in `tests/test_server_query.py` (HTTP auth, bounds,
 503/413 taxonomy, one-attempt failure), `tests/test_app.py` (GET/POST mapping
 and compact acknowledgement), `tests/test_statsd.py` (RPC shapes, coverage,

@@ -4119,7 +4119,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(guiSpec.split(chartOrderText).length - 1, 1, 'YO!stats GUI spec has one canonical prose chart-order contract matching the source');
     const sourceKeyOrderText = chartKeys.map(key => `\`${key}\``).join(', ');
     assert.ok(guiSpec.includes(`source-key chart order ${sourceKeyOrderText}`), 'YO!stats coverage inventory names every chart key in shipped order');
-    assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2001;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30001;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 8000;') && debugPaneSource.includes('const jsDebugStatsHistoryMaxTimeoutMs = 30000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30001;'), 'YO!stats retries cold-start samples just after two seconds, then keeps its thirty-second steady cadence and a range-bounded request timeout');
+    assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2001;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30001;') && debugPaneSource.includes('const jsDebugStatsCoarsePollMs = 60001;') && debugPaneSource.includes('const jsDebugStatsLivePushRangeSeconds = 30 * 60;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 8000;') && debugPaneSource.includes('const jsDebugStatsHistoryMaxTimeoutMs = 30000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30001;'), 'YO!stats retries cold-start samples just after two seconds, keeps live views at thirty seconds, and relaxes coarse delivery to one minute');
     assert.ok(/const jsDebugStatsPollState = \{\s*inFlight: false,\s*pending: false,\s*pendingForceGraphRefresh: false,\s*firstSampleReceived: false,\s*lastSampleAtMs: 0,\s*\};/.test(debugPaneSource), 'YO!stats polling lifecycle has one state owner');
     for (const retiredName of ['jsDebugStatsPollInFlight', 'jsDebugStatsPollPending', 'jsDebugStatsPollPendingForceGraphRefresh', 'jsDebugStatsFirstSampleReceived']) {
       assert.equal(debugPaneSource.includes(retiredName), false, `YO!stats retires parallel polling global ${retiredName}`);
@@ -6779,6 +6779,71 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(waitingHtml.includes('Waiting for server stats'), false, 'server metadata replaces the waiting state after a successful sample');
     const emptyAfterSampleHtml = api.debugPanelHtmlForTest();
     assert.ok(emptyAfterSampleHtml.includes('No events yet'), 'after the first server sample, an empty selected range keeps its independent graph-body empty state');
+  });
+
+  await testAsync('YO!stats coarse ranges poll once per minute and short ranges backfill immediately', async () => {
+    let nextTimerId = 0;
+    const timeouts = new Map();
+    const clearedTimeouts = new Set();
+    const api = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, ms) {
+        const id = ++nextTimerId;
+        timeouts.set(id, {callback, ms});
+        return id;
+      },
+      clearTimeout(id) { clearedTimeouts.add(id); },
+    });
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    const requests = [];
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.setFetchForTest((url) => {
+      const requestUrl = String(url);
+      requests.push(requestUrl);
+      const requestCount = requests.filter(item => item.startsWith('/api/stats-sample?')).length;
+      return Promise.resolve(jsonResponse({
+        pid: 4242,
+        started_at: nowSeconds - 100,
+        uptime_seconds: 100,
+        rss_bytes: 1024,
+        cpu_percent: 1,
+        history: {
+          sequence: requestCount,
+          records: [{
+            start: nowSeconds - (requestCount === 1 ? 59 : 1),
+            duration: 1,
+            sequence: requestCount,
+            system_cpu_total_percent: requestCount === 1 ? 20 : 25,
+            system_cpu_count: 1,
+          }],
+          coverage: statsHistoryCoverageForRequest(requestUrl),
+        },
+      }));
+    });
+
+    api.setDebugGraphRangeForTest(60 * 60);
+    for (let index = 0; index < 4; index += 1) await flushAsyncWork();
+    let sampleRequests = requests.filter(item => item.startsWith('/api/stats-sample?'));
+    assert.equal(api.runtimeIntervalStateForTest('debug-stats')?.delay, 60001, 'a one-hour view has one just-over-minute fallback timer');
+    assert.equal(api.jsDebugStatsPollIntervalMsForTest(), 60001, 'the shared cadence owner reports the coarse poll interval');
+    assert.equal(sampleRequests.length, 1, 'entering the coarse range requests one immediate current/history sample');
+    assert.ok(60001 + api.jsDebugStatsHistoryTimeoutMsForTest(60 * 60) <= 70000, 'the minute cadence plus bounded request timeout keeps visible freshness within seventy seconds');
+    assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 1, 'the latest one-minute fetch renders its current cell');
+    const refreshedAtMs = Date.now();
+    const freshLabel = api.debugCostAgeLabelTextForTest(refreshedAtMs);
+    const agedLabel = api.debugCostAgeLabelTextForTest(refreshedAtMs + 65_000);
+    assert.ok(/Last refreshed/.test(agedLabel) && agedLabel !== freshLabel, 'the visible freshness label continues aging between coarse fetches');
+
+    api.setDebugGraphRangeForTest(5 * 60);
+    for (let index = 0; index < 4; index += 1) await flushAsyncWork();
+    sampleRequests = requests.filter(item => item.startsWith('/api/stats-sample?'));
+    assert.equal(api.runtimeIntervalStateForTest('debug-stats')?.delay, 30001, 'returning to five minutes restores the live-view backup cadence');
+    assert.ok(sampleRequests.length >= 2, `returning to a short range immediately requests the SSE-less gap (got ${sampleRequests.length} total samples)`);
+    assert.ok(api.debugGraphBucketSummaryForTest().displayBuckets >= 2, 'the immediate short-range response preserves the older coarse cell and fills the recent gap');
+
+    api.setDocumentVisibilityForTest('hidden');
+    api.syncJsDebugStatsPollingForTest();
+    assert.equal(api.runtimeIntervalStateForTest('debug-stats'), null, 'hidden pages stop the coarse and live polling timer entirely');
   });
 
   await testAsync('YO!stats records disconnected client gaps within shared plot bounds', async () => {
@@ -9819,6 +9884,49 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.syncClientEventDemandForTest({immediate: true});
     state = api.clientEventTransportStateForTest();
     assert.deepEqual(state.demand.channels, ['activity', 'chat', 'core', 'status', 'transcripts', 'yoagent']);
+  });
+
+  test('YO!stats and YO!cost share range-scaled stats demand', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('slot1');
+    slots.slot1 = api.paneStateWithTabs([api.debugPaneItemId, api.yocostItemId], api.debugPaneItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setDocumentVisibilityForTest('visible');
+    api.setNotificationDeliveryForTest({inApp: false, system: false});
+    api.setDebugGraphRangeForTest(15 * 60, {render: false});
+    api.installClientEventStreamForTest();
+    let state = api.clientEventTransportStateForTest();
+    assert.ok(state.demand.channels.includes('stats'), 'a visible 15-minute YO!stats view demands the one-second stats feed');
+    assert.equal(api.jsDebugStatsLivePushEnabledForTest(), true, 'the shared delivery predicate identifies the live short range');
+
+    api.setDebugGraphRangeForTest(60 * 60, {render: false});
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.equal(state.demand.channels.includes('stats'), false, 'a visible one-hour YO!stats view removes stats SSE demand');
+    assert.equal(api.jsDebugStatsLivePushEnabledForTest(), false, 'the shared delivery predicate identifies the coarse range');
+
+    slots.slot1 = api.paneStateWithTabs([api.debugPaneItemId, api.yocostItemId], api.yocostItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.equal(state.demand.channels.includes('stats'), false, 'YO!cost uses the same coarse range and does not create competing demand');
+
+    api.setDebugGraphRangeForTest(5 * 60, {render: false});
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.ok(state.demand.channels.includes('stats'), 'returning the shared range to five minutes immediately restores stats SSE');
+
+    api.setDebugGraphZoomDomainForTest(Date.now() - 60_000, Date.now());
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.equal(state.demand.channels.includes('stats'), false, 'a fixed historical drag zoom does not claim a live-tail feed');
+
+    api.clearDebugGraphZoomForTest({render: false});
+    api.setDocumentVisibilityForTest('hidden');
+    api.syncClientEventDemandForTest({immediate: true});
+    state = api.clientEventTransportStateForTest();
+    assert.equal(state.demand.channels.length, 0, 'a hidden page has no stats or other interactive SSE demand');
   });
 
   test('share host backup polling requires an active share', () => {

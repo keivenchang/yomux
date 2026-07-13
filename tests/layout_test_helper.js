@@ -1264,6 +1264,9 @@ globalThis.__layoutTestApi = {
   debugGraphInnerHtmlForTest: debugGraphInnerHtml,
   debugGraphCostSummaryForTest: debugGraphCostSummaryForBuckets,
   debugGraphCostReportHtmlForTest: debugGraphCostReportHtml,
+  debugCostAgeLabelTextForTest(...args) {
+    return typeof debugCostAgeLabelText === 'function' ? debugCostAgeLabelText(...args) : '';
+  },
   debugGraphGeometryForTest() { return {...jsDebugGraphGeometry}; },
   debugGraphPlotYForValueForTest: debugGraphPlotYForValue,
   debugGraphGridLineYForTest: debugGraphGridLineY,
@@ -1280,6 +1283,12 @@ globalThis.__layoutTestApi = {
   debugSystemCpuBudgetCardHtmlForTest: debugSystemCpuBudgetCardHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsLayoutItemsVisibleForTest: jsDebugStatsLayoutItemsVisible,
+  jsDebugStatsLivePushEnabledForTest(...args) {
+    return typeof jsDebugStatsLivePushEnabled === 'function' ? jsDebugStatsLivePushEnabled(...args) : false;
+  },
+  jsDebugStatsPollIntervalMsForTest(...args) {
+    return typeof jsDebugStatsPollIntervalMs === 'function' ? jsDebugStatsPollIntervalMs(...args) : 0;
+  },
   jsDebugStatsPollingStateForTest() {
     return {
       firstSampleReceived: jsDebugStatsPollState.firstSampleReceived,

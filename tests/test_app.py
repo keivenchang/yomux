@@ -958,6 +958,46 @@ def test_statsd_sample_pushes_its_durable_one_second_delta_to_stats_sse(monkeypa
     assert payload["record"]["sequence"] == payload["sequence"] > 0
 
 
+def test_stats_family_publish_serialization_follows_aggregate_stats_demand(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(
+        webapp.stats_client,
+        "merge_server_records",
+        lambda *_args, **_kwargs: {"ok": True, "sequence": 7},
+    )
+    serialized = []
+    original_publish = webapp.publish_client_event
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload, **kwargs: (
+            serialized.append((event_type, payload))
+            or original_publish(event_type, payload, **kwargs)
+        ),
+    )
+    sample = {"time": 1_000.25, "pid": 123, "cpu_percent": 12.5}
+    record = {"time": 1_000.25, "cpu_total_percent": 12.5, "cpu_count": 1}
+    coarse_id, _coarse_queue = webapp.client_events.subscribe(channels={"core"})
+    try:
+        webapp.merge_stats_family_record("cpu", record, sample)
+        assert serialized == [], "a sole coarse-range subscriber causes no stats JSON publication"
+        assert webapp.client_events.snapshot()["published_by_type"].get("stats_sample") is None
+
+        live_id, live_queue = webapp.client_events.subscribe(channels={"stats"})
+        try:
+            webapp.merge_stats_family_record("cpu", {**record, "time": 1_001.25}, {**sample, "time": 1_001.25})
+            event = live_queue.get_nowait()
+        finally:
+            webapp.client_events.unsubscribe(live_id)
+    finally:
+        webapp.client_events.unsubscribe(coarse_id)
+        webapp.control_server.stop()
+
+    assert [item[0] for item in serialized] == ["stats_sample"]
+    assert event["type"] == "stats_sample"
+    assert webapp.client_events.snapshot()["published_by_type"]["stats_sample"]["events"] == 1
+
+
 def test_cpu_durable_times_keep_one_second_phase_across_wall_clock_jitter(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     samples = iter((1000.9, 1002.0, 1002.99))

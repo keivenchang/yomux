@@ -41657,6 +41657,8 @@ const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
+const jsDebugStatsCoarsePollMs = 60001;
+const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
 const jsDebugStatsHistoryFlushMs = 30000;
@@ -42382,6 +42384,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphSelectionState = null;
   if (!render) return;
+  syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
   refreshDebugGraphSurfaces();
 }
@@ -46461,8 +46464,24 @@ function stopJsDebugStatsPolling() {
   clearRuntimeInterval('debug-stats');
 }
 
+function jsDebugStatsLivePushEnabled() {
+  // A drag zoom is a fixed historical domain. The shared range slider is the
+  // live-tail owner for both YO!stats and YO!cost; only its 5m/15m views need
+  // every durable one-second push.
+  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
+}
+
 function jsDebugStatsPollIntervalMs() {
-  return jsDebugStatsPollState.firstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
+  if (!jsDebugStatsPollState.firstSampleReceived) return jsDebugStatsPollFastMs;
+  return jsDebugStatsLivePushEnabled() ? jsDebugStatsPollMs : jsDebugStatsCoarsePollMs;
+}
+
+function syncJsDebugStatsDeliveryMode() {
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
+  // Re-entering a short live range can follow almost a minute without stats
+  // SSE. Fetch once now so the existing history merger fills that delivery
+  // gap before subsequent one-second pushes arrive.
+  armJsDebugStatsPolling({pollNow: jsDebugStatsLivePushEnabled(), forceGraphRefresh: true});
 }
 
 function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {}) {
@@ -47896,6 +47915,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   activeJsDebugGraphRangeSeconds();
   syncDebugGraphAgentTokenResolution();
   if (!render) return;
+  syncJsDebugStatsDeliveryMode();
   const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
   // An explicit range action is also an explicit retry. Do not let an old
   // automatic-retry backoff make a newly requested domain appear ready while
@@ -48134,6 +48154,7 @@ function handleDebugGraphPointerUp(event, panel) {
       startMs: Number(domain.startMs) + (minRatio * spanMs),
       endMs: Number(domain.startMs) + (maxRatio * spanMs),
     };
+    syncJsDebugStatsDeliveryMode();
     refreshDebugGraphSurfaces();
     requestJsDebugHistoryForCurrentDomain();
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) syncDebugGraphControls(graph);
@@ -70024,7 +70045,8 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
-    if (activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId)) channels.add('stats');
+    if ((activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId))
+        && (typeof jsDebugStatsLivePushEnabled !== 'function' || jsDebugStatsLivePushEnabled())) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
       channels.add('transcripts');

@@ -2283,6 +2283,52 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
     assert result["finishedAt"] - result["startedAt"] < 3000, result
 
 
+def test_debug_graph_delivery_cadence_scales_with_shared_range(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof jsDebugStatsLivePushEnabled === 'function'
+              && typeof clientEventDemandDescriptor === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        setDebugGraphRange(60 * 60, {render: false});
+        const coarse = {
+          live: jsDebugStatsLivePushEnabled(),
+          pollMs: jsDebugStatsPollIntervalMs(),
+          channels: [...clientEventDemandDescriptor().channels],
+        };
+        setDebugGraphRange(15 * 60, {render: false});
+        const shortRange = {
+          live: jsDebugStatsLivePushEnabled(),
+          pollMs: jsDebugStatsPollIntervalMs(),
+          channels: [...clientEventDemandDescriptor().channels],
+        };
+        jsDebugGraphZoomDomain = {startMs: Date.now() - 60000, endMs: Date.now()};
+        const historicalZoom = {
+          live: jsDebugStatsLivePushEnabled(),
+          channels: [...clientEventDemandDescriptor().channels],
+        };
+        clearDebugGraphZoom({render: false});
+        return {coarse, shortRange, historicalZoom};
+        """
+    )
+    assert metrics["coarse"]["live"] is False, metrics
+    assert metrics["coarse"]["pollMs"] == 60001, metrics
+    assert "stats" not in metrics["coarse"]["channels"], metrics
+    assert metrics["shortRange"]["live"] is True, metrics
+    assert metrics["shortRange"]["pollMs"] == 30001, metrics
+    assert "stats" in metrics["shortRange"]["channels"], metrics
+    assert metrics["historicalZoom"]["live"] is False, metrics
+    assert "stats" not in metrics["historicalZoom"]["channels"], metrics
+
+
 def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
