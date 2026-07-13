@@ -201,7 +201,7 @@ def test_statsd_defers_database_migration_until_listener_owns_singleton(monkeypa
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     events = []
     monkeypatch.setattr(service, "import_legacy_history_once", lambda: events.append("import") or {"ok": True})
-    monkeypatch.setattr(service, "_maybe_reproject_cost_summaries", lambda: events.append("reproject") or {"ok": True})
+    monkeypatch.setattr(service, "_schedule_cost_reprojection", lambda: events.append("reproject-scheduled") or {"ok": True})
 
     class Thread:
         def __init__(self, *, target, name, daemon):
@@ -226,10 +226,41 @@ def test_statsd_defers_database_migration_until_listener_owns_singleton(monkeypa
     assert events == [
         "listener-owned",
         "import",
-        "reproject",
+        "reproject-scheduled",
         ("thread", "_sampler_loop", "statsd-sampler", True),
         "sampler-start",
     ]
+    service.store.close()
+
+
+def test_statsd_reprices_startup_history_in_bounded_keyset_turns(monkeypatch, tmp_path):
+    """Startup schedules repricing; every listener turn rewrites only one page."""
+    catalog = _MutablePricingCatalog()
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=catalog)
+    for index in range(3):
+        atom = {
+            "event_id": f"event-{index}", "timestamp": 1000 + index, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+            "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "quantity": 100,
+            "telemetry_complete": True,
+        }
+        service.merge_server_records([{"time": 1000 + index, "usage_atoms": [atom]}], now=1000 + index)
+    catalog.usd = Decimal("3")
+    catalog.revision = 8
+    monkeypatch.setattr(statsd, "STATSD_PRICING_REPROJECTION_BATCH_BUCKETS", 1)
+
+    assert service._schedule_cost_reprojection()["pending"] is True
+    first = service._maybe_reproject_cost_summaries()
+    assert first["pending"] is True
+    assert first["processed"] == 1
+    assert service.store.metadata_value(statsd.STATSD_PRICING_REPROJECTION_MARKER) is None
+    # A ping/status can be served between these calls because no maintenance
+    # loop occupies the listener or moves SQLite to a background thread.
+    assert service.handle({"action": "ping"})["ok"] is True
+    while service.pricing_reprojection is not None:
+        service._maybe_reproject_cost_summaries()
+
+    assert service.store.metadata_value(statsd.STATSD_PRICING_REPROJECTION_MARKER) == "8"
+    assert all(record["cost_summary"]["total_micro_usd"] == 300 for record in service.handle({"action": "history"})["records"])
     service.store.close()
 
 

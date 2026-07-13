@@ -339,6 +339,22 @@ class StatsStore:
         ).fetchall()
         return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
+    def maintenance_buckets_after(
+        self, *, after_start: int = -1, after_duration: int = -1, limit: int = 1
+    ) -> list[dict[str, Any]]:
+        """Read one keyset-bounded maintenance page in durable order.
+
+        Maintenance must visit all retained rows, but it must not materialize
+        them all and monopolize statsd's single RPC/SQLite owner at startup.
+        """
+        rows = self._connection().execute(
+            "SELECT bucket_json FROM stats_buckets "
+            "WHERE start > ? OR (start = ? AND duration > ?) "
+            "ORDER BY start,duration LIMIT ?",
+            (int(after_start), int(after_start), int(after_duration), max(1, min(int(limit), STATS_STORE_MAX_ROWS_PER_QUERY))),
+        ).fetchall()
+        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
+
     def latest_sequence(self) -> int:
         row = self._connection().execute("SELECT COALESCE(MAX(sequence), 0) FROM stats_buckets").fetchone()
         return int(row[0] or 0)

@@ -84,6 +84,7 @@ STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
 STATS_COST_SUMMARY_MAX_BYTES = stats_store.STATS_COST_SUMMARY_MAX_BYTES
 STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
+STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 16
 
 
 def _scan_agent_token_rows_in_worker(
@@ -561,6 +562,10 @@ class PersistentStatsService:
         # may inject its public resolve_rate surface; absent catalog means
         # usage remains visible but explicitly unpriced/lower-bound.
         self.pricing_catalog = pricing_catalog
+        # Repricing remains on the listener/RPC thread, which is the single
+        # SQLite owner. This state makes it cooperative instead of blocking
+        # startup until the full retained history has been rewritten.
+        self.pricing_reprojection: dict[str, Any] | None = None
 
     def _pricing_catalog_metadata(self) -> tuple[str, int]:
         """Read local catalog status for a projection without fetching providers."""
@@ -629,10 +634,11 @@ class PersistentStatsService:
 
     def _idle_shutdown_ready(self) -> bool:
         self._drain_agent_token_scan_result()
+        maintenance = self._maybe_reproject_cost_summaries()
         with self.agent_token_scan_lock:
             scan_active = self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None
         # An elected sampler is active work even while no browser reads YO!stats.
-        return not scan_active and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
+        return not scan_active and not maintenance.get("pending") and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     def _sampler_delay_seconds(self) -> float:
         if self.sampler_failure_count <= 0:
@@ -1087,50 +1093,89 @@ class PersistentStatsService:
         )
         summary["catalog_revisions"] = sorted({int(item.get("catalog_revision") or 0) for item in components if int(item.get("catalog_revision") or 0) > 0})
 
-    def reproject_cost_summaries(self) -> dict[str, Any]:
-        """Reprice retained components without modifying usage/output history."""
-        if self.pricing_catalog is None:
-            return {"ok": True, "changed": 0, "reason": "no_pricing_catalog"}
-        changed = 0
-        next_sequence = int(self.store.diagnostics().get("sequence") or 0)
-        connection = self.store._connection()
-        with connection:
-            for bucket in self.store.all_buckets():
-                summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
-                components = summary.get("components") if isinstance(summary.get("components"), list) else []
-                projected = [projected_usage_component(component, self.pricing_catalog) for component in components]
-                projected_components = [component for component in projected if component is not None]
-                legacy_output_only = not projected_components and bool(bucket.get("tokens_per_agent_total") or bucket.get("agent_token_rates"))
-                replacement = dict(summary)
-                self._recalculate_usage_summary(replacement, projected_components, legacy_output_only=legacy_output_only)
-                self._apply_pricing_catalog_metadata(replacement)
-                if replacement == summary:
-                    continue
-                next_sequence += 1
-                bucket["cost_summary"] = replacement
-                bucket["server_sequence"] = max(int(bucket.get("server_sequence") or 0), next_sequence)
-                bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
-                self.store._upsert_bucket(connection, bucket)
-                changed += 1
-        if changed:
-            self._encoded_query_cache.clear()
-        return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
-
-    def _maybe_reproject_cost_summaries(self) -> dict[str, Any]:
-        """Run at most once for each durable catalog revision in statsd."""
+    def _pricing_catalog_revision(self) -> int | None:
         status = getattr(self.pricing_catalog, "status", None)
         if not callable(status):
-            return {"ok": True, "reason": "catalog_has_no_status"}
+            return None
         try:
-            revision = int((status() or {}).get("catalog_revision") or 0)
+            return max(0, int((status() or {}).get("catalog_revision") or 0))
         except (TypeError, ValueError, sqlite3.Error, OSError):
+            return None
+
+    def _schedule_cost_reprojection(self) -> dict[str, Any]:
+        revision = self._pricing_catalog_revision()
+        if revision is None:
+            return {"ok": True, "reason": "catalog_has_no_status"}
+        if revision <= 0:
             return {"ok": True, "reason": "catalog_status_unavailable"}
-        if revision <= 0 or self.store.metadata_value(STATSD_PRICING_REPROJECTION_MARKER) == str(revision):
+        if self.store.metadata_value(STATSD_PRICING_REPROJECTION_MARKER) == str(revision):
+            self.pricing_reprojection = None
             return {"ok": True, "changed": 0, "reason": "current_catalog"}
-        result = self.reproject_cost_summaries()
-        if result.get("ok"):
-            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(revision))
-        return result
+        if self.pricing_reprojection is None or int(self.pricing_reprojection["revision"]) != revision:
+            self.pricing_reprojection = {"revision": revision, "after_start": -1, "after_duration": -1, "changed": 0, "processed": 0}
+        return {"ok": True, "pending": True, "revision": revision}
+
+    def _reproject_cost_summaries_step(self) -> dict[str, Any]:
+        """Reprice one bounded keyset page on statsd's SQLite owner thread."""
+        pending = self.pricing_reprojection
+        if pending is None:
+            return {"ok": True, "changed": 0, "reason": "current_catalog"}
+        if self._pricing_catalog_revision() != int(pending["revision"]):
+            self.pricing_reprojection = None
+            return self._schedule_cost_reprojection()
+        buckets = self.store.maintenance_buckets_after(
+            after_start=int(pending["after_start"]), after_duration=int(pending["after_duration"]),
+            limit=STATSD_PRICING_REPROJECTION_BATCH_BUCKETS,
+        )
+        if not buckets:
+            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(pending["revision"]))
+            self.pricing_reprojection = None
+            if pending["changed"]:
+                self._encoded_query_cache.clear()
+            return {"ok": True, "changed": int(pending["changed"]), "processed": int(pending["processed"]), "reason": "complete"}
+        changed = 0
+        next_sequence = int(self.store.diagnostics().get("sequence") or 0)
+        with self.store._connection() as connection:
+            for bucket in buckets:
+                summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
+                components = summary.get("components") if isinstance(summary.get("components"), list) else []
+                projected_components = [item for item in (projected_usage_component(component, self.pricing_catalog) for component in components) if item is not None]
+                replacement = dict(summary)
+                self._recalculate_usage_summary(replacement, projected_components, legacy_output_only=not projected_components and bool(bucket.get("tokens_per_agent_total") or bucket.get("agent_token_rates")))
+                self._apply_pricing_catalog_metadata(replacement)
+                if replacement != summary:
+                    next_sequence += 1
+                    bucket["cost_summary"] = replacement
+                    bucket["server_sequence"] = max(int(bucket.get("server_sequence") or 0), next_sequence)
+                    bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
+                    self.store._upsert_bucket(connection, bucket)
+                    changed += 1
+        last = buckets[-1]
+        pending["after_start"], pending["after_duration"] = int(last["start"]), int(last["duration"])
+        pending["changed"], pending["processed"] = int(pending["changed"]) + changed, int(pending["processed"]) + len(buckets)
+        if len(buckets) < STATSD_PRICING_REPROJECTION_BATCH_BUCKETS:
+            self.store.set_metadata_value(STATSD_PRICING_REPROJECTION_MARKER, str(pending["revision"]))
+            total_changed, processed = int(pending["changed"]), int(pending["processed"])
+            self.pricing_reprojection = None
+            if total_changed:
+                self._encoded_query_cache.clear()
+            return {"ok": True, "changed": total_changed, "processed": processed, "reason": "complete"}
+        return {"ok": True, "changed": changed, "processed": int(pending["processed"]), "pending": True, "revision": pending["revision"]}
+
+    def reproject_cost_summaries(self) -> dict[str, Any]:
+        """Synchronously finish an explicit repricing request in bounded pages."""
+        scheduled = self._schedule_cost_reprojection()
+        if not scheduled.get("pending"):
+            return scheduled
+        result: dict[str, Any] = scheduled
+        while self.pricing_reprojection is not None:
+            result = self._reproject_cost_summaries_step()
+        return {"ok": True, "changed": int(result.get("changed") or 0), "sequence": int(self.store.diagnostics().get("sequence") or 0)}
+
+    def _maybe_reproject_cost_summaries(self) -> dict[str, Any]:
+        """Advance at most one bounded repricing page per service turn."""
+        scheduled = self._schedule_cost_reprojection()
+        return self._reproject_cost_summaries_step() if scheduled.get("pending") else scheduled
 
     @staticmethod
     def _agent_token_state_snapshot(value: Any) -> dict[str, dict[str, Any]]:
@@ -2410,8 +2455,8 @@ class PersistentStatsService:
             "started_at": self.started_at,
             "socket": str(self.socket_path),
             "clients": len(self.leases),
-            "queues": {"interactive": 0, "normal": 0, "maintenance": int(scan_result_pending)},
-            "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending else ""),
+            "queues": {"interactive": 0, "normal": 0, "maintenance": int(scan_result_pending) + int(self.pricing_reprojection is not None)},
+            "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending else ("pricing-reprojection" if self.pricing_reprojection is not None else "")),
             "cache": cache,
             "history_profile": dict(self.last_history_profile),
             "last_success": self.last_client_at,
@@ -2681,7 +2726,9 @@ class PersistentStatsService:
     def _start_after_listener(self) -> None:
         """Open/migrate the durable store only after this daemon owns the lock."""
         self.import_legacy_history_once()
-        self._maybe_reproject_cost_summaries()
+        # Socket publication must mean it can answer immediately. The full
+        # retained-history pass advances in bounded listener idle turns.
+        self._schedule_cost_reprojection()
         self.sampler_thread = threading.Thread(target=self._sampler_loop, name="statsd-sampler", daemon=True)
         self.sampler_thread.start()
 
