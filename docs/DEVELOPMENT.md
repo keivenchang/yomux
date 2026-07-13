@@ -206,12 +206,12 @@ Production and development instances can run side-by-side. The project does not 
 | prod | Production checkout | Stable HTTPS port | Stable copy, synced from dev after verification |
 | dev | Any development checkout or git worktree | Non-conflicting HTTPS port | Active development server |
 
-Development servers are HTTPS in normal use. Launch them with `--self-signed --dang --dev` on the port you selected; avoid plain HTTP unless you are testing that path explicitly. `--dev` enables the browser `/api/dev-reload` stream, so an open tab reloads when `static_build.py` rewrites `static/yolomux.css` or `static/yolomux.js`.
+Development servers are self-signed HTTPS by default. Launch them with `--dang --dev` on the port you selected; `--self-signed` remains a redundant compatibility flag, `--cert`/`--key` supplies a certificate, and `--http` is the explicit plain-HTTP test path. If OpenSSL is unavailable and no certificate was supplied, startup warns and falls back to HTTP rather than silently failing. `--dev` enables the browser `/api/dev-reload` stream, so an open tab reloads when `static_build.py` rewrites `static/yolomux.css` or `static/yolomux.js`.
 
 For an ad hoc dev run:
 
 ```bash
-python3 yolomux.py --host 0.0.0.0 --port <port> --self-signed --dang --dev
+python3 yolomux.py --host 0.0.0.0 --port <port> --dang --dev
 ```
 
 ### Restart workflow
@@ -224,7 +224,7 @@ Use `boot.sh` from the checkout you want to serve. `boot.sh` and `yolo-dev-start
 ./boot.sh
 ```
 
-The script accepts any valid TCP port. It defaults to HTTPS `8880` on macOS and `7770` on Linux, with `--self-signed` and `--dang`; `YOLOMUX_PORT` selects an arbitrary primary port and keeps the normal non-dev launch behavior. The macOS dev worktrees conventionally use `8001` through `8003`; the Linux fleet conventionally uses `7771` through `7773`. For a dev worktree, run the script from that checkout and pass the port you chose; non-primary ports use `--dev` automatically:
+The script accepts any valid TCP port. It defaults to HTTPS `8880` on macOS and `7770` on Linux and still passes the compatible `--self-signed` spelling plus `--dang`; the CLI itself now defaults to the same self-signed HTTPS behavior. `YOLOMUX_PORT` selects an arbitrary primary port and keeps the normal non-dev launch behavior. The macOS dev worktrees conventionally use `8001` through `8003`; the Linux fleet conventionally uses `7771` through `7773`. For a dev worktree, run the script from that checkout and pass the port you chose; non-primary ports use `--dev` automatically:
 
 ```bash
 (cd ~/path/to/dev-checkout && ./boot.sh <dev-port>)
@@ -402,7 +402,7 @@ After restart, verify one listener on the intended HTTP port, exactly one `yolom
 
 Local services share one lifecycle and RPC parent. `local_services/rpc.py` owns the versioned length-prefixed JSON envelope with optional bounded binary payload and rolling legacy newline reads. `local_services/runtime.py` owns service-side mode-`0600` Unix socket binding, peer UID checks where available, singleton locks, response correlation, and idle cleanup. `local_services/registry.py` owns client-side discovery, stale PID/socket cleanup, `sys.executable -m <module> --serve` spawning, service records under `STATE_DIR/services/*.service.json` or next to the socket, exponential crash backoff from 0.25 seconds to 8 seconds, and lease-protected idle exit. A service failure may produce stale/pending/unavailable responses, but the web process must not run a retired expensive local fallback.
 
-Stats history requests are bounded by both caller and service. The browser scales its timeout from 8 seconds for short ranges to 30 seconds for 24 hours and keeps the explicit timeout reason for retry/backoff UI. A timed-out current-protocol RPC is never replayed through the legacy fallback, because replay would duplicate queued work during overload. Registry health checks use a short recent-success cache, losing daemon contenders initialize no database state before acquiring the singleton listener, and token recovery/migration runs in one asynchronous single-flight worker so one-second CPU/agent-status sampling stays responsive. Browser history uploads are chunked under both 1,000 records and 96 KiB, below the route's 128 KiB body limit.
+Stats history requests are bounded by both caller and service. The browser scales its timeout from 8 seconds for short ranges to 30 seconds for 24 hours and keeps the explicit timeout reason for retry/backoff UI. A timed-out current-protocol RPC is never replayed through the legacy fallback, because replay would duplicate queued work during overload. Registry health checks use a short recent-success cache, losing daemon contenders initialize no database state before acquiring the singleton listener, and token recovery/migration runs in one asynchronous single-flight worker so one-second CPU/agent-status sampling stays responsive. Live transcript token claims likewise parse files in one filesystem-only worker, while the statsd listener retains SQLite ownership and drains the completed projection between requests; history therefore never queues behind a large transcript family. Browser history uploads are chunked under both 1,000 records and 96 KiB, below the route's 128 KiB body limit. `tests/test_statsd.py::test_statsd_history_listener_stays_responsive_while_sampler_owner_is_slow`, `::test_statsd_history_listener_stays_responsive_while_agent_token_scan_is_slow`, and `::test_statsd_history_profile_separates_sqlite_query_and_assembly`, `tests/test_local_services_rpc.py::test_current_rpc_timeout_never_replays_work_through_legacy_fallback`, `tests/test_local_services_launch.py::test_registry_recent_health_cache_removes_per_action_ping_status_fanout`, and the debug-panel Node suite cover those boundaries.
 
 | Service | Module | Socket | Owns | Idle behavior |
 | --- | --- | --- | --- | --- |

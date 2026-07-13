@@ -481,7 +481,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
     show_label = server_string(locale, "login.show")
     show_aria = server_string(locale, "login.showPassword")
     error_html = f'<div class="login-error" role="alert">{html.escape(error)}</div>' if error else ""
-    command = "python3 yolomux.py --port 9998 --self-signed"
+    command = "python3 yolomux.py --port 9998"
     security_html = "" if secure else (
         f'<div class="login-warning">{server_string(locale, "login.noHttps", command=f"<code>{command}</code>")}</div>'
     )
@@ -548,7 +548,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 """
 
 
-def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_language: str = "") -> str:
+def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_language: str = "", secure: bool = True) -> str:
     # Localize the pre-auth setup chrome via the resolved locale (the JS i18n runtime is not loaded
     # here), the same way login_html() does. The auth.yaml example block is literal config, not UI.
     # The locale is carried pre-auth by request_locale_pref (query/cookie), so the
@@ -569,6 +569,9 @@ def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_langu
         "authUpdated": server_string(locale, "setup.authUpdated"),
     })
     waiting = html.escape(server_string(locale, "setup.waiting"))
+    security_html = "" if secure else (
+        f'<p id="setupSecurity" class="setup-security">{server_string(locale, "setup.httpsRecommended", command="<code>python3 yolomux.py --port 9998</code>")}</p>'
+    )
     return f"""<!doctype html>
 <html {html_lang_dir_attrs(locale)}>
 <head>
@@ -582,7 +585,7 @@ def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_langu
 <main>
   {locale_picker}
   <h1>{set_up} {brand_html("brand-title setup-brand setup-brand-waiting", locale=locale)}</h1>
-  <p id="setupSecurity" class="setup-security">{server_string(locale, "setup.httpsRecommended", command="<code>python3 yolomux.py --port 9998 --self-signed</code>")}</p>
+  {security_html}
   <p>{edit_label} <code>{auth_path}</code></p>
   <pre>users:
   - username: "{login}"

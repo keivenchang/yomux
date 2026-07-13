@@ -292,7 +292,7 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
     catalog = _FakePricingCatalog()
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=catalog)
     atom = {
-        "event_id": "event-1", "timestamp": 1000, "source": "rollout", "provider": "openai", "model": "gpt-5.6",
+        "event_id": "event-1", "timestamp": 1000, "source": "rollout", "transcript": "/tmp/rollout.jsonl", "provider": "openai", "model": "gpt-5.6",
         "model_evidence": "turn_context.payload.model", "effort": "high", "direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens",
         "quantity": 100, "root_thread_id": "root", "agent_thread_id": "child", "parent_thread_id": "root", "depth": 1, "telemetry_complete": True,
         "tmux_key": "s|0|codex", "tmux_label": "s:0:codex", "tmux_session": "s", "tmux_window": "0", "tmux_window_label": "0:codex", "agent_kind": "codex",
@@ -331,6 +331,7 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
     assert summary["models"][0]["output_micro_usd"] == 0
     assert summary["models"][0]["other_micro_usd"] == 0
     assert summary["sources"][0]["agent_thread_id"] == "child"
+    assert summary["sources"][0]["transcript"] == "/tmp/rollout.jsonl"
     assert summary["sources"][0]["input_micro_usd"] == 250
     assert summary["sources"][0]["lower_micro_usd"] == 250
     assert summary["sources"][0]["upper_micro_usd"] == 290
@@ -689,6 +690,7 @@ def test_statsd_live_claim_persists_delta_before_returning_compact_response(tmp_
     assert cost_source["tmux_session"] == "s"
     assert cost_source["tmux_window"] == "0"
     assert cost_source["agent_kind"] == "codex"
+    assert cost_source["transcript"] == str(transcript.resolve())
     cost_window = next(record["cost_summary"]["tmux_windows"][0] for record in history["records"] if record.get("cost_summary", {}).get("tmux_windows"))
     assert cost_window["tmux_key"] == "s|0|codex"
     assert cost_window["tmux_session"] == "s"
@@ -1056,6 +1058,110 @@ def test_statsd_history_listener_stays_responsive_while_sampler_owner_is_slow(mo
     assert response["records"]
     assert elapsed < 0.1
     assert sampler.is_alive() is False
+    service.store.close()
+
+
+def test_statsd_history_listener_stays_responsive_while_agent_token_scan_is_slow(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.store.upsert_bucket(_bucket(sequence=1))
+    entered = threading.Event()
+    release = threading.Event()
+    persisted: list[tuple[list[dict], list[dict]]] = []
+
+    def slow_scan(_rows, _sample_time, _previous_state):
+        entered.set()
+        release.wait(1.0)
+        return ([{"key": "s|0|codex", "tokens": 12}], [])
+
+    def record_persist(measurements, atom_records, _seen_keys, _sample_time, _previous_state):
+        persisted.append((measurements, atom_records))
+        return {"ok": True, "records": []}
+
+    monkeypatch.setattr(service, "_scan_agent_token_rows", slow_scan)
+    monkeypatch.setattr(service, "_persist_agent_token_scan", record_persist)
+
+    started = time.perf_counter()
+    accepted, _binary = service.handle_with_binary({
+        "action": "claim_agent_token_deltas_from_rows",
+        "rows": [{"key": "s|0|codex", "transcript": "/tmp/slow.jsonl", "kind": "codex"}],
+        "seen_keys": ["s|0|codex"],
+        "sample_time": 1002,
+    })
+    accept_elapsed = time.perf_counter() - started
+    assert accepted["accepted"] is True
+    assert accept_elapsed < 0.1
+    assert entered.wait(1.0) is True
+    assert service.common_status()["active_task"] == "agent-token-scan"
+
+    busy, _binary = service.handle_with_binary({
+        "action": "claim_agent_token_deltas_from_rows",
+        "rows": [],
+        "seen_keys": [],
+        "sample_time": 1003,
+    })
+    assert busy["busy"] is True
+
+    started = time.perf_counter()
+    history, _binary = service.handle_with_binary({"action": "history", "start": 0, "end": 0})
+    history_elapsed = time.perf_counter() - started
+    assert history["ok"] is True
+    assert history["records"]
+    assert history_elapsed < 0.1
+
+    release.set()
+    assert service.agent_token_scan_worker is not None
+    service.agent_token_scan_worker.join(timeout=1.0)
+    assert service._drain_agent_token_scan_result() is True
+    assert persisted == [([{"key": "s|0|codex", "tokens": 12}], [])]
+    assert service.common_status()["active_task"] == ""
+    service.store.close()
+
+
+def test_statsd_agent_token_scan_exception_releases_single_flight_slot(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    monkeypatch.setattr(service, "_scan_agent_token_rows", lambda *_args: (_ for _ in ()).throw(AssertionError("broken parser")))
+
+    first = service.start_agent_token_scan_from_rows([], set(), 1000)
+    assert service.agent_token_scan_worker is not None
+    service.agent_token_scan_worker.join(timeout=1.0)
+    assert service._drain_agent_token_scan_result() is True
+    completed = service.finish_agent_token_scan(first["scan_id"])
+    assert completed["done"] is True
+    assert completed["ok"] is False
+    assert "broken parser" in completed["error"]
+
+    monkeypatch.setattr(service, "_scan_agent_token_rows", lambda *_args: ([], []))
+    second = service.start_agent_token_scan_from_rows([], set(), 1001)
+    assert second["accepted"] is True
+    assert second["scan_id"] != first["scan_id"]
+    service._shutdown()
+
+
+def test_statsd_agent_token_scan_does_not_advance_state_when_record_merge_fails(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    previous_state = {
+        "s|0|codex": {
+            "tokens": 10,
+            "time": 1000,
+            "label": "s:0:codex",
+            "source": "transcript",
+            "identity": "same-file",
+            "models": {},
+        }
+    }
+    service._set_agent_token_state(previous_state)
+    monkeypatch.setattr(service, "merge_server_records", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("merge failed")))
+
+    with pytest.raises(ValueError, match="merge failed"):
+        service._persist_agent_token_scan(
+            [{"key": "s|0|codex", "label": "s:0:codex", "tokens": 20, "source": "transcript", "identity": "same-file"}],
+            [],
+            {"s|0|codex"},
+            1060,
+            previous_state,
+        )
+
+    assert service._agent_token_state() == previous_state
     service.store.close()
 
 

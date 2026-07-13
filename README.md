@@ -10,7 +10,7 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 - Python 3.10+
 - tmux
-- `openssl` on `PATH` (only needed for `--self-signed` HTTPS)
+- `openssl` on `PATH` for the default self-signed HTTPS certificate (not needed with `--cert`/`--key` or `--http`)
 
 ## Quickstart
 
@@ -21,14 +21,14 @@ git clone https://github.com/keivenchang/yolomux.git
 cd yolomux
 make setup          # pip install -e ".[yoagent]" + xterm.js assets + build the bundle  (run `make help` for more)
 tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
-python3 yolomux.py --self-signed --dang   # or: make run
+python3 yolomux.py --dang   # or: make run
 ```
 
 `make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Not using `make`? `pip install -e ".[yoagent]"` installs the dependencies + the `yolomux` command (pip also enforces Python 3.10+), then `npm install` for local xterm.js assets.
 
 Native filesystem watching is validated on macOS and Linux. Other Unix-like systems are not a support guarantee: if their `watchfiles` backend cannot start, YOLOmux automatically retains its bounded polling fallback.
 
-Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
+Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. By default YOLOmux creates and reuses a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
 
 ## Runtime architecture
 
@@ -40,7 +40,7 @@ flowchart TB
 
   subgraph server["One yolomux.py web process per port"]
     direction TB
-    http["HTTP/auth/SSE\nrequest threads"]
+    http["HTTPS/auth/SSE\nrequest threads"]
     app["TmuxWebtermApp\ncoordination only"]
     bridge["WebSocket PTY bridge\none request thread"]
     control["Control RPC\nSTATE_DIR/control/yolomux-<pid>-<token>.sock\nmode 0600"]
@@ -284,11 +284,11 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - Use the pane Info Bar to switch tmux sub-windows (`0:bash`, `1:codex`, ...), cycle among a session's repositories with `< N/M >` or pick one from the `N/M` menu, open transcripts (`Tx`), request an AI summary (`AI`), or inspect the event log (`Log`).
 - File -> `Search & Runs` opens a data pane that searches captured session events and summaries, then lists compact run history rows with prompt, cwd, agent, timing, final state, PR, and latest summary.
 - File -> `YO!info` opens a grouped relationship tree over `TmuxSession`, `TmuxWindow`, `TmuxPane`, `RuntimeActor`, observed paths, Git worktrees, local/hosted repositories, branches, pull requests, and Linear work. One worktree and branch inventory is shared by all observed paths and actors that use it; search accepts combinations such as a tmux target plus a branch or PR. A tab with exactly one focused PR shows that PR; when several focused PRs apply it shows an explicit count instead of choosing one arbitrarily.
-- File -> `YO!stats` opens API/SSE events and performance graphs for host CPU/memory, GPU or macOS GPU activity/memory, client traffic, agent status, and agent tokens. Its `System` view shows the serving process, distributed background owner, local service lifecycles, queues and refresh work, index/cache state, event/chat transport, and top API/background timings; it refreshes only while selected and provides a manual Refresh action. Local services render as one transposed live table with services as columns, Queues last, fresh/stale value coloring, `prev:` values after exit, and Started/Last ran relative ages. CPU shows system average plus YOLOmux servers; memory reports actual host/device bytes. Its first graph request shows only `Waiting for server stats...` until the server accepts a sample. Thereafter it loads retained history incrementally: widening a range preserves visible data while the missing interval loads, and one Retry action replaces the same loading slot if that request fails. The server compresses large JSON responses when the browser accepts gzip, and owner/follower servers expose the same durable global history while keeping each browser's client metrics private. Startup callers share one request per resource, so boot, SSE-ready, visibility, and Tabber rendering do not duplicate background-status, auto-approve, or activity reads. Client communication charts tolerate event-driven empty buckets and distinguish shared all-client bad-connection intervals from actual API/SSE, latency, and bandwidth samples, including after 24-hour history compaction; one stale client cannot shade a live peer, and zero labels align with the shared plot baseline. When priced usage is available, the `Cost` toggle immediately after `Model tokens` opens the default-off `Cost summary`: its card pairs Input, Cache, Output, and Total estimated cost with token counts and includes a short per-model token-and-cost synopsis. Select its estimate to inspect displayed-range token-class, model, and agent/source breakdowns plus calculation and source links; non-token units remain separate and it is an API list-price estimate, not an invoice. `est. $…` means the displayed components are priced, retained usage is backfilled, and telemetry is complete; `est. ≥$…` is a lower bound when usage is unpriced or incomplete, or while retained usage is still backfilling. The detailed behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md).
+- File -> `YO!stats` opens API/SSE events and performance graphs for host CPU/memory, GPU or macOS GPU activity/memory, client traffic, agent status, and agent tokens. Its `System` view shows the serving process, distributed background owner, local service lifecycles, queues and refresh work, index/cache state, event/chat transport, and top API/background timings; its `Logs` view shows bounded leveled server/service diagnostics and warns when macOS process discovery falls back from libproc to `lsof`. These views refresh only while selected and provide a manual Refresh action. Local services render as one transposed live table with services as columns, Queues last, fresh/stale value coloring, `prev:` values after exit, and Started/Last ran relative ages. CPU shows system average plus YOLOmux servers; memory reports actual host/device bytes. Its first graph request shows only `Waiting for server stats...` until the server accepts a sample. Thereafter it loads retained history incrementally: widening a range preserves visible data while the missing interval loads, and one Retry action replaces the same loading slot if that request fails. The server compresses large JSON responses when the browser accepts gzip, and owner/follower servers expose the same durable global history while keeping each browser's client metrics private. Startup callers share one request per resource, so boot, SSE-ready, visibility, and Tabber rendering do not duplicate background-status, auto-approve, or activity reads. Client communication charts tolerate event-driven empty buckets and distinguish shared all-client bad-connection intervals from actual API/SSE, latency, and bandwidth samples, including after 24-hour history compaction; one stale client cannot shade a live peer, and zero labels align with the shared plot baseline. When priced usage is available, the `Cost` toggle immediately after `Model tokens` opens the default-off compact `Cost summary`, pairing Input, Cache, Output, and Total estimated cost with token counts. Its explicit `More Info` button opens a scrollable wide modal with token-class, By Agent, and Model Usages tables plus calculation and transcript-source links; JSONL sources open in the file Preview as a rendered event table. Non-token units remain separate and the result is an API list-price estimate, not an invoice. `est. $…` means the displayed components are priced, retained usage is backfilled, and telemetry is complete; `est. ≥$…` is a lower bound when usage is unpriced or incomplete, or while retained usage is still backfilling. The detailed behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md).
 - Operators can rebuild retained YO!stats token/cost components from all discoverable Claude/Codex JSONL transcripts with `python3 tools/rebuild_stats_tokens.py --apply --stop-services`. The offline tool stops every server sharing the state directory, proves exclusive DB ownership, creates a timestamped backup, preserves generated-output and live metrics, and reports transcriptless output-only buckets; see [Offline token/cost history rebuild](docs/DEVELOPMENT.md#offline-tokencost-history-rebuild).
 - The pane header pop-out button opens supported file previews, YO!info, and YO!stats in a detached browser window.
 - File -> `YO!share...` creates short live magic URLs for the current YOLOmux layout. Defaults are short-lived, read-only, http links; write access requires https. The host can extend active shares and see connected users with duration, IP, and browser type. Replay details live in [`docs/specs/SHARE_MIRRORING.md`](docs/specs/SHARE_MIRRORING.md).
-- File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. At 900px and wider they live in an explicit narrow left Side Pane; a missing one recreates that Side Pane, and Side tabs never enter Generic Panes. Below 900px there is no Side Pane and File opens only the selected surface in the sole full-width Generic Pane. Widening restores Finder/Differ/Tabber to the left while leaving YO!* tabs generic. Filesystem permission failures are reported in Finder instead of terminating the request. Quick Search is `Mod+P`; it hides clean deleted file tabs, keeps dirty buffers reachable when their backing path is missing, and restores clean tabs when the file reappears.
+- File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. At 900px and wider they live in an explicit narrow left Side Pane; a missing one recreates that Side Pane, and Side tabs never enter Generic Panes. Below 900px there is no Side Pane and File opens only the selected surface in the sole full-width Generic Pane. Widening restores Finder/Differ/Tabber to the left while leaving YO!* tabs generic. Finder Sync remembers each session's root, expansion, selection, and every touched path; touched ancestors carry that session's `★`. Switching sessions paints the shared bounded cache immediately, then revalidates visible directories in the background. Filesystem permission failures are reported in Finder instead of terminating the request. Quick Search is `Mod+P`; it hides clean deleted file tabs, keeps dirty buffers reachable when their backing path is missing, and restores clean tabs when the file reappears.
 - Quick Open indexes are bounded accelerators. The default keeps at most 100,000 entries per root, starts one lazy local indexer on demand, and excludes common dependency/build directories. Paths displayed by Finder or Differ are batched at two seconds; hidden paths rely on the long safety refresh. The indexer incrementally replaces only changed subtrees and writes row deltas to SQLite. In Finder/File Explorer, right-click any directory and choose **Allow index** to add its root or **Disallow index** to remove it; Preferences -> Finder/File Explorer shows the same indexed-root list. That section also exposes **Quick Open exclusions** for descendants inside those roots. Add one rule per line: a plain absolute or home-relative subtree, `glob:<root-relative glob>` such as `glob:**/.uploads/**`, or `regex:<regular expression>` matched against a root-relative POSIX path such as `regex:(^|/)target(?:/|$)`. Advanced operators can also tune `file_explorer.index_max_files`, `index_refresh_seconds`, `index_persist`, `index_persist_max_files`, `index_persist_max_mb`, and `index_exclude_paths` in `~/.config/yolomux/settings.yaml`.
 - Tabber lists open tabs and tmux sub-windows by recent activity. `Mod+B` hides Finder/Differ/Tabber or restores the default left Side Pane on wide layouts. The top-bar language picker changes the live UI language.
 - YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) for setup and examples.
@@ -315,35 +315,36 @@ The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permis
 All tmux sessions, default behavior:
 
 ```bash
-python3 yolomux.py --self-signed --dang
+python3 yolomux.py --dang
 ```
 
 Custom port (default is `9998`, host defaults to `0.0.0.0`):
 
 ```bash
-python3 yolomux.py --port 8080 --self-signed --dang
+python3 yolomux.py --port 8080 --dang
 ```
 
 Background server:
 
 ```bash
-setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 python3 yolomux.py --self-signed --dang > /tmp/yolomux.log 2>&1 < /dev/null &
+setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 python3 yolomux.py --dang > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
 Specific tmux sessions only, optional filter:
 
 ```bash
-python3 yolomux.py --sessions project1,project2 --self-signed --dang
+python3 yolomux.py --sessions project1,project2 --dang
 ```
 
 ## HTTPS / TLS
 
 ```bash
-python3 yolomux.py --self-signed          # auto-generated cert, stored in ~/.local/state/yolomux/tls/
+python3 yolomux.py                         # default: auto-generated cert under ~/.local/state/yolomux/tls/
 python3 yolomux.py --cert fullchain.pem --key privkey.pem   # bring your own
+python3 yolomux.py --http                  # explicit plain-HTTP opt-out
 ```
 
-`--self-signed` requires `openssl` on `PATH`. Browsers warn because the certificate is self-signed; proceed past the warning.
+HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOLOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; proceed past the warning only when it matches the server you intended to reach. `--http` cannot be combined with `--cert`/`--key`.
 
 ## Authentication & roles
 
@@ -373,7 +374,7 @@ codex --dangerously-bypass-hook-trust             # hook trust bypass
 **`--dang` / `--dangerously-yolo` (server flag).** Makes `+ Claude` / `+ Codex` buttons launch with the dangerous bypass flags:
 
 ```bash
-python3 yolomux.py --self-signed --dang
+python3 yolomux.py --dang
 ```
 
 With `--dang`, `+ Claude` launches `claude --dangerously-skip-permissions`, so permission prompts are bypassed for new Claude sessions (hooks and OAuth login are left intact — see the note above on why `--bare` is not used). `+ Codex` launches `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`, so both command approval/sandbox checks and hook trust checks are bypassed for new Codex sessions.
@@ -412,7 +413,7 @@ sudo ufw allow from <client-ip> to any port 9998 proto tcp
 To keep YOLOmux local-only instead, bind loopback and tunnel from your client:
 
 ```bash
-python3 yolomux.py --host 127.0.0.1 --port 9998 --self-signed --dang
+python3 yolomux.py --host 127.0.0.1 --port 9998 --dang
 autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
 ```
 

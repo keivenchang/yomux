@@ -1120,6 +1120,7 @@ globalThis.__layoutTestApi = {
   fileExplorerSyncTargetDirsForTest: fileExplorerSyncTargetDirs,
   sessionFilesAffectedDirsForTest: sessionFilesAffectedDirs,
   syncFileExplorerRootToPlanForTest: syncFileExplorerRootToPlan,
+  fetchFileExplorerSyncListingsForTest: fetchFileExplorerSyncListings,
   fileExplorerSyncStateForTest() { return {...fileExplorerSyncState}; },
   setFileExplorerVisibleSyncTargetForTest: setFileExplorerVisibleSyncTarget,
   rememberFileExplorerSyncExpandedStateForTest: rememberFileExplorerSyncExpandedState,

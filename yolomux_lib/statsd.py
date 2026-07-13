@@ -43,7 +43,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 11
+STATSD_PROTOCOL_VERSION = 12
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -158,6 +158,13 @@ def normalized_usage_atom(value: Any) -> dict[str, Any] | None:
         # response bodies.  It supports idempotent replay/backfill when a
         # provider did not supply an event identifier.
         event_id = json.dumps([provider, model, timestamp, direction, modality, cache_role, unit, quantity, _usage_atom_text(fields.get("source"), limit=512)], separators=(",", ":"))
+    source = _usage_atom_text(fields.get("source"), limit=512)
+    transcript = _usage_atom_text(fields.get("transcript"), limit=4096)
+    if not transcript and source.startswith("/") and Path(source).suffix.lower() in {".jsonl", ".ndjson"}:
+        # Parser atoms already identify the canonical transcript file that
+        # produced them. Keep it as attribution metadata, outside the event
+        # identity used for idempotent replay.
+        transcript = source
     return {
         "event_id": event_id,
         "timestamp": timestamp,
@@ -190,7 +197,8 @@ def normalized_usage_atom(value: Any) -> dict[str, Any] | None:
         # prior staged atoms without deleting concurrent live usage.
         "backfill_source": _usage_atom_text(fields.get("backfill_source"), limit=512),
         "telemetry_complete": bool(fields.get("telemetry_complete")),
-        "source": _usage_atom_text(fields.get("source"), limit=512),
+        "source": source,
+        "transcript": transcript,
     }
 
 
@@ -296,7 +304,7 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
             return "output"
         return "other"
 
-    def aggregate(keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    def aggregate(keys: tuple[str, ...], *, metadata: tuple[str, ...] = ()) -> list[dict[str, Any]]:
         grouped: dict[tuple[str, ...], dict[str, Any]] = {}
         for atom in atoms:
             identity = tuple(str(atom.get(key) or "") for key in keys)
@@ -308,6 +316,10 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
                 "input_upper_micro_usd": 0, "cache_upper_micro_usd": 0, "output_upper_micro_usd": 0, "other_upper_micro_usd": 0,
                 "token_quantity": 0.0, "input_tokens": 0.0, "cache_tokens": 0.0, "output_tokens": 0.0, "other_tokens": 0.0,
             })
+            for field in metadata:
+                metadata_value = str(atom.get(field) or "").strip()
+                if metadata_value and not row.get(field):
+                    row[field] = metadata_value
             quantity = _usage_atom_number(atom.get("quantity"))
             item_class = billed_class(atom)
             micro_usd = int(atom.get("micro_usd") or 0)
@@ -332,7 +344,7 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
     # source link dishonest even if the subtotal happened to remain correct.
     components = aggregate(("provider", "model", "effort", "pricing_profile", "service_tier", "direction", "modality", "cache_role", "unit", "catalog_revision", "source_url", "effective_from", "rate_usd", "rate_scale"))
     models = aggregate(("provider", "model", "effort"))
-    sources = aggregate(("tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind", "root_thread_id", "agent_thread_id", "parent_thread_id", "endpoint", "tool_name", "source"))
+    sources = aggregate(("tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind", "root_thread_id", "agent_thread_id", "parent_thread_id", "endpoint", "tool_name", "source"), metadata=("transcript",))
     tmux_windows = [row for row in aggregate(("tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind")) if row.get("tmux_key") or row.get("tmux_session") or row.get("tmux_window")]
     known_micro_usd = sum(int(atom.get("micro_usd") or 0) for atom in atoms if atom.get("priced"))
     lower_micro_usd = sum(_component_lower_micro_usd(atom) for atom in atoms)
@@ -441,6 +453,12 @@ class PersistentStatsService:
         self.sampler_failure_count = 0
         self.sampler_thread: threading.Thread | None = None
         self.sampler_wake_event = threading.Event()
+        self.agent_token_scan_lock = threading.Lock()
+        self.agent_token_scan_worker: threading.Thread | None = None
+        self.agent_token_scan_result: dict[str, Any] | None = None
+        self.agent_token_scan_sequence = 0
+        self.agent_token_scan_id = ""
+        self.agent_token_scan_completion: dict[str, Any] | None = None
         # Catalog ownership stays outside statsd.  Tests and the application
         # may inject its public resolve_rate surface; absent catalog means
         # usage remains visible but explicitly unpriced/lower-bound.
@@ -512,8 +530,11 @@ class PersistentStatsService:
         return dict(self.sampler_owner)
 
     def _idle_shutdown_ready(self) -> bool:
+        self._drain_agent_token_scan_result()
+        with self.agent_token_scan_lock:
+            scan_active = self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None
         # An elected sampler is active work even while no browser reads YO!stats.
-        return not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
+        return not scan_active and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     def _sampler_delay_seconds(self) -> float:
         if self.sampler_failure_count <= 0:
@@ -1057,6 +1078,8 @@ class PersistentStatsService:
         seen_keys: set[str],
         sample_time: float,
         fallback_state: Any = None,
+        *,
+        persist_state: bool = True,
     ) -> dict[str, Any]:
         """Atomically claim transcript counter advances in statsd-owned metadata."""
 
@@ -1114,19 +1137,20 @@ class PersistentStatsService:
         for key in list(state):
             if key not in seen_keys:
                 state.pop(key, None)
-        self._set_agent_token_state(state)
+        if persist_state:
+            self._set_agent_token_state(state)
         return {"ok": True, "records": records, "state": state}
 
-    def claim_agent_token_deltas_from_rows(
+    def _scan_agent_token_rows(
         self,
         rows: list[dict[str, Any]],
-        seen_keys: set[str],
         sample_time: float,
-        fallback_state: Any = None,
-    ) -> dict[str, Any]:
+        previous_state: dict[str, dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Parse transcript files without touching the statsd SQLite connection."""
+
         measurements: list[dict[str, Any]] = []
         atom_records: list[dict[str, Any]] = []
-        previous_state = self._agent_token_state(fallback_state)
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -1165,9 +1189,28 @@ class PersistentStatsService:
                     if normalized is not None:
                         normalized.update(tmux_fields)
                         atom_records.append({"time": atom.timestamp, "usage_atoms": [normalized]})
-        claimed = self.claim_agent_token_deltas(measurements, seen_keys, sample_time, fallback_state=fallback_state)
+        return measurements, atom_records
+
+    def _persist_agent_token_scan(
+        self,
+        measurements: list[dict[str, Any]],
+        atom_records: list[dict[str, Any]],
+        seen_keys: set[str],
+        sample_time: float,
+        previous_state: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        claimed = self.claim_agent_token_deltas(
+            measurements,
+            seen_keys,
+            sample_time,
+            fallback_state=previous_state,
+            persist_state=False,
+        )
         records = [*claimed.get("records", []), *atom_records]
         merged = self.merge_server_records(records, now=sample_time) if records else {"ok": True, "changed": 0, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
+        # Commit the counter baseline only after every derived record is
+        # durable. A failed merge must remain retryable on the next scan.
+        self._set_agent_token_state(claimed["state"])
         # Claiming and persistence belong to the statsd writer. Returning the
         # transcript atom stream over the bounded metadata channel could exceed
         # 256 KiB after the baseline had already advanced, permanently losing
@@ -1176,6 +1219,111 @@ class PersistentStatsService:
         claimed["persisted_records"] = len(records)
         claimed["merge"] = merged
         return claimed
+
+    def claim_agent_token_deltas_from_rows(
+        self,
+        rows: list[dict[str, Any]],
+        seen_keys: set[str],
+        sample_time: float,
+        fallback_state: Any = None,
+    ) -> dict[str, Any]:
+        previous_state = self._agent_token_state(fallback_state)
+        measurements, atom_records = self._scan_agent_token_rows(rows, sample_time, previous_state)
+        return self._persist_agent_token_scan(measurements, atom_records, seen_keys, sample_time, previous_state)
+
+    def _drain_agent_token_scan_result(self) -> bool:
+        """Persist one completed filesystem scan on the RPC/SQLite owner thread."""
+
+        with self.agent_token_scan_lock:
+            result = self.agent_token_scan_result
+            if result is None:
+                return False
+            self.agent_token_scan_result = None
+            self.agent_token_scan_worker = None
+            scan_id = str(result.get("scan_id") or self.agent_token_scan_id)
+        error = result.get("error")
+        if error:
+            self.last_sampler_failure = redact_local_service_text(error)
+            with self.agent_token_scan_lock:
+                self.agent_token_scan_completion = {"scan_id": scan_id, "response": {"ok": False, "error": str(error)}}
+            return True
+        try:
+            response = self._persist_agent_token_scan(
+                result["measurements"],
+                result["atom_records"],
+                result["seen_keys"],
+                result["sample_time"],
+                result["previous_state"],
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+            self.last_sampler_failure = redact_local_service_text(exc)
+            response = {"ok": False, "error": str(exc)}
+        with self.agent_token_scan_lock:
+            self.agent_token_scan_completion = {"scan_id": scan_id, "response": response}
+        return True
+
+    def start_agent_token_scan_from_rows(
+        self,
+        rows: list[dict[str, Any]],
+        seen_keys: set[str],
+        sample_time: float,
+        fallback_state: Any = None,
+    ) -> dict[str, Any]:
+        """Start one filesystem-only token scan and return without blocking RPC history."""
+
+        self._drain_agent_token_scan_result()
+        previous_state = self._agent_token_state(fallback_state)
+        with self.agent_token_scan_lock:
+            if self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None:
+                return {"ok": True, "accepted": False, "busy": True, "records": [], "state": previous_state}
+            self.agent_token_scan_sequence += 1
+            scan_id = f"scan-{self.agent_token_scan_sequence}"
+            self.agent_token_scan_id = scan_id
+            worker: threading.Thread
+
+            def run() -> None:
+                try:
+                    measurements, atom_records = self._scan_agent_token_rows(rows, sample_time, previous_state)
+                    result: dict[str, Any] = {
+                        "measurements": measurements,
+                        "atom_records": atom_records,
+                        "seen_keys": seen_keys,
+                        "sample_time": sample_time,
+                        "previous_state": previous_state,
+                        "scan_id": scan_id,
+                    }
+                except Exception as exc:
+                    # A worker boundary must always publish a terminal result;
+                    # otherwise one unexpected parser exception wedges the
+                    # single-flight slot and idle shutdown forever.
+                    result = {"error": str(exc), "scan_id": scan_id}
+                with self.agent_token_scan_lock:
+                    if self.agent_token_scan_worker is worker:
+                        self.agent_token_scan_result = result
+
+            worker = threading.Thread(target=run, name="statsd-agent-token-scan", daemon=True)
+            self.agent_token_scan_worker = worker
+        try:
+            worker.start()
+        except RuntimeError:
+            with self.agent_token_scan_lock:
+                if self.agent_token_scan_worker is worker:
+                    self.agent_token_scan_worker = None
+            raise
+        return {"ok": True, "accepted": True, "busy": False, "scan_id": scan_id, "records": [], "state": previous_state}
+
+    def finish_agent_token_scan(self, scan_id: str) -> dict[str, Any]:
+        """Return one completed async claim while leaving history RPCs interleavable."""
+
+        self._drain_agent_token_scan_result()
+        with self.agent_token_scan_lock:
+            completion = self.agent_token_scan_completion
+            if completion is not None and completion.get("scan_id") == scan_id:
+                self.agent_token_scan_completion = None
+                response = completion.get("response")
+                return {"done": True, **(response if isinstance(response, dict) else {"ok": False, "error": "invalid scan response"})}
+            active = self.agent_token_scan_id == scan_id and self.agent_token_scan_worker is not None
+        return {"ok": True, "done": False, "pending": active}
 
     @staticmethod
     def _agent_token_rate_records(rates: Any) -> list[dict[str, Any]]:
@@ -2061,6 +2209,10 @@ class PersistentStatsService:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def common_status(self) -> dict[str, Any]:
+        with self.agent_token_scan_lock:
+            scan_worker = self.agent_token_scan_worker
+            scan_result_pending = self.agent_token_scan_result is not None
+        scan_running = bool(scan_worker and scan_worker.is_alive())
         try:
             cache = self.store.diagnostics()
             status = {"database": str(self.store.path)}
@@ -2078,8 +2230,8 @@ class PersistentStatsService:
             "started_at": self.started_at,
             "socket": str(self.socket_path),
             "clients": len(self.leases),
-            "queues": {"interactive": 0, "normal": 0, "maintenance": 0},
-            "active_task": "",
+            "queues": {"interactive": 0, "normal": 0, "maintenance": int(scan_result_pending)},
+            "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending else ""),
             "cache": cache,
             "history_profile": dict(self.last_history_profile),
             "last_success": self.last_client_at,
@@ -2217,7 +2369,7 @@ class PersistentStatsService:
             if not isinstance(rows, list) or not isinstance(seen_keys, list):
                 return {"ok": False, "error": "rows and seen_keys are required"}, b""
             try:
-                return self.claim_agent_token_deltas_from_rows(
+                return self.start_agent_token_scan_from_rows(
                     [item for item in rows if isinstance(item, dict)],
                     {str(key) for key in seen_keys},
                     float(request.get("sample_time") or 0.0),
@@ -2225,6 +2377,8 @@ class PersistentStatsService:
                 ), b""
             except (TypeError, ValueError, sqlite3.Error, OSError) as exc:
                 return {"ok": False, "error": str(exc)}, b""
+        if action == "finish_agent_token_scan":
+            return self.finish_agent_token_scan(str(request.get("scan_id") or "")), b""
         if action == "recover_agent_token_history":
             records = request.get("records")
             if not isinstance(records, list):
@@ -2353,6 +2507,11 @@ class PersistentStatsService:
         self.sampler_wake_event.set()
         if self.sampler_thread is not None and self.sampler_thread.is_alive():
             self.sampler_thread.join(timeout=1.0)
+        with self.agent_token_scan_lock:
+            scan_worker = self.agent_token_scan_worker
+        if scan_worker is not None and scan_worker.is_alive():
+            scan_worker.join(timeout=1.0)
+        self._drain_agent_token_scan_result()
         self.store.close()
 
 
@@ -2451,7 +2610,7 @@ class StatsClient(LocalServiceClient):
     ) -> dict[str, Any]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
-        return self.request(
+        response = self.request(
             {
                 "action": "claim_agent_token_deltas_from_rows",
                 "rows": rows,
@@ -2461,6 +2620,17 @@ class StatsClient(LocalServiceClient):
             },
             timeout=3.0,
         )
+        scan_id = str(response.get("scan_id") or "")
+        if not response.get("accepted") or not scan_id:
+            return response
+        deadline = monotonic_clock() + 15.0
+        poll_wait = threading.Event()
+        while monotonic_clock() < deadline:
+            completed = self.request({"action": "finish_agent_token_scan", "scan_id": scan_id}, timeout=1.0)
+            if completed.get("done"):
+                return completed
+            poll_wait.wait(0.01)
+        return {**response, "pending": True}
 
     def recover_agent_token_history(self, records: list[dict[str, Any]], *, now: float) -> dict[str, Any]:
         if not self.ensure_started():

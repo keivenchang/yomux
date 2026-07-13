@@ -17,6 +17,7 @@ from yolomux_lib.server import https_redirect_response
 def cli_args(**overrides):
     values = {
         "self_signed": False,
+        "http": False,
         "cert": None,
         "key": None,
     }
@@ -24,11 +25,31 @@ def cli_args(**overrides):
     return argparse.Namespace(**values)
 
 
-def test_tls_default_is_plain_http():
+def fake_ssl_context(monkeypatch):
+    loaded = {}
+
+    class FakeContext:
+        minimum_version = None
+
+        def load_cert_chain(self, certfile, keyfile):
+            loaded.update(certfile=certfile, keyfile=keyfile)
+
+    context = FakeContext()
+    monkeypatch.setattr(cli.ssl, "SSLContext", lambda _protocol: context)
+    return context, loaded
+
+
+def test_tls_default_is_self_signed_https(monkeypatch, tmp_path):
+    cert_path = tmp_path / "self-signed.crt"
+    key_path = tmp_path / "self-signed.key"
+    monkeypatch.setattr(cli, "ensure_self_signed_cert", lambda: (cert_path, key_path))
+    expected_context, loaded = fake_ssl_context(monkeypatch)
+
     context, message = cli.tls_context_for_args(cli_args())
 
-    assert context is None
-    assert message == ""
+    assert context is expected_context
+    assert loaded == {"certfile": str(cert_path), "keyfile": str(key_path)}
+    assert "self-signed HTTPS certificate" in message
 
 
 def test_tls_requires_cert_and_key_together():
@@ -36,9 +57,53 @@ def test_tls_requires_cert_and_key_together():
         cli.tls_cert_key_paths(cli_args(cert=Path("/tmp/cert.pem")))
 
 
-def test_tls_rejects_self_signed_with_explicit_cert():
-    with pytest.raises(ValueError, match="cannot be combined"):
-        cli.tls_cert_key_paths(cli_args(self_signed=True, cert=Path("/tmp/cert.pem"), key=Path("/tmp/key.pem")))
+def test_tls_explicit_cert_overrides_redundant_self_signed_flag(monkeypatch):
+    expected_context, loaded = fake_ssl_context(monkeypatch)
+
+    context, message = cli.tls_context_for_args(
+        cli_args(self_signed=True, cert=Path("/tmp/cert.pem"), key=Path("/tmp/key.pem"))
+    )
+
+    assert context is expected_context
+    assert loaded == {"certfile": "/tmp/cert.pem", "keyfile": "/tmp/key.pem"}
+    assert message == "Using HTTPS certificate /tmp/cert.pem"
+
+
+@pytest.mark.parametrize("self_signed", [False, True])
+def test_tls_http_opt_out_is_plain_http(self_signed):
+    context, message = cli.tls_context_for_args(cli_args(http=True, self_signed=self_signed))
+
+    assert context is None
+    assert message == "WARNING: TLS disabled by --http; serving plain HTTP."
+
+
+def test_tls_rejects_http_with_explicit_cert():
+    with pytest.raises(ValueError, match="--http cannot be combined with --cert/--key"):
+        cli.tls_cert_key_paths(cli_args(http=True, cert=Path("/tmp/cert.pem"), key=Path("/tmp/key.pem")))
+
+
+def test_tls_self_signed_alias_remains_accepted(monkeypatch, tmp_path):
+    cert_path = tmp_path / "self-signed.crt"
+    key_path = tmp_path / "self-signed.key"
+    monkeypatch.setattr(cli, "ensure_self_signed_cert", lambda: (cert_path, key_path))
+    expected_context, _loaded = fake_ssl_context(monkeypatch)
+
+    context, message = cli.tls_context_for_args(cli_args(self_signed=True))
+
+    assert context is expected_context
+    assert "self-signed HTTPS certificate" in message
+
+
+def test_tls_missing_openssl_falls_back_to_http_with_actionable_warning(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+
+    context, message = cli.tls_context_for_args(cli_args())
+
+    assert context is None
+    assert "openssl not found" in message
+    assert "starting plain HTTP" in message
+    assert "pass --cert/--key, or pass --http explicitly" in message
 
 
 def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch):
@@ -55,8 +120,18 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     assert args.sessions == ["1,2", "ant"]
     assert args.dangerously_yolo is True
     assert args.self_signed is True
+    assert args.http is False
     assert args.print_background_owner is False
     assert args.print_runtime_report is False
+
+
+def test_parse_args_supports_explicit_http_opt_out(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["yolomux.py", "--http"])
+
+    args = cli.parse_args()
+
+    assert args.http is True
+    assert args.self_signed is False
 
 
 def test_print_background_owner_status_outputs_json(monkeypatch, capsys):
@@ -124,6 +199,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         sessions=["1,2", "ant"],
         dangerously_yolo=True,
         self_signed=False,
+        http=False,
         cert=None,
         key=None,
         print_transcripts=False,
@@ -166,7 +242,8 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
             captured["closed"] = True
 
     monkeypatch.setattr(cli, "parse_args", lambda: args)
-    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
+    tls_marker = object()
+    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (tls_marker, "Using self-signed HTTPS certificate /tmp/cert.pem"))
     monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
     monkeypatch.setattr(cli, "TmuxWebtermHTTPServer", FakeServer)
     monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
@@ -177,7 +254,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["sessions"] == ["1", "2", "ant"]
     assert captured["dangerously_yolo"] is True
     assert captured["address"] == ("0.0.0.0", 19001)
-    assert captured["tls_context"] is None
+    assert captured["tls_context"] is tls_marker
     assert captured["dev"] is False  # dev mode off by default
     assert captured["background_owner_port"] == 19001
     assert captured["background_owner_priority"] == 100
@@ -186,6 +263,9 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["stopped"] is True
     assert captured["closed"] is True
     assert "DANGEROUS YOLO mode is enabled" in output
+    assert "Serving YOLOmux on https://localhost:19001/" in output
+    assert "Using self-signed HTTPS certificate /tmp/cert.pem" in output
+    assert "Highly recommend" not in output
 
 
 def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, capsys):
@@ -195,6 +275,7 @@ def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, ca
         sessions=None,
         dangerously_yolo=False,
         self_signed=False,
+        http=False,
         cert=None,
         key=None,
         print_transcripts=False,

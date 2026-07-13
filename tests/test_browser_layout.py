@@ -2350,7 +2350,9 @@ def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_pat
 
 def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_display_range(browser, tmp_path):
     """The cost card follows the Model tokens bucket/range owner, not a second chart state."""
-    browser.set_window_size(375, 680)
+    transcript = tmp_path / "cost-source.jsonl"
+    transcript.write_text('{"type":"session_meta","payload":{"id":"cost-source"}}\n', encoding="utf-8")
+    browser.set_window_size(1280, 800)
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -2359,6 +2361,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     )
     metrics = browser.execute_async_script(
         """
+        const transcriptPath = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
           stopJsDebugStatsPolling();
@@ -2382,7 +2385,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
                 {key: 'bad', direction: 'output', quantity: 1, unit: 'tokens', micro_usd: 0, provider: 'bad', model: 'bad', source_url: 'javascript:alert(1)'},
               ],
               models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000}],
-              sources: [{tmux_key: 'root|0|codex', tmux_label: 'root:0', tmux_session: 'root', tmux_window: '0', tmux_window_label: '0', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', model: 'gpt-5.6-terra', token_quantity: 30, micro_usd: 10000, lower_micro_usd: 10000, upper_micro_usd: 10000}],
+              sources: [{tmux_key: 'root|0|codex', tmux_label: 'root:0', tmux_session: 'root', tmux_window: '0', tmux_window_label: '0', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', transcript: transcriptPath, model: 'gpt-5.6-terra', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000, lower_micro_usd: 10000, upper_micro_usd: 10000}],
               catalog_revision: 'test-catalog', freshness: 'verified',
             },
           }));
@@ -2403,7 +2406,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             return {
               graph, model, card, buckets, expectedAmount,
               renderedAmount: card?.querySelector('.js-debug-cost-estimate')?.textContent || '',
-              renderedTokens: card?.querySelector('.js-debug-cost-token-count')?.textContent || '',
+                renderedTokens: card?.querySelector('.js-debug-cost-token-count')?.textContent || '',
             };
           };
           const initial = cardState();
@@ -2441,9 +2444,9 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             modelUsages: popover?.textContent.includes('Model Usages'),
             sourceAttribution: popover?.textContent.includes('Agent and source attribution'),
             pricingSources: popover?.textContent.includes('Pricing sources'),
-            tmuxBreakdown: popover?.textContent.includes('Cost by tmux window'),
-            tmuxBreakdownRows: popover?.querySelectorAll('.js-debug-cost-tmux-breakdown [role="treeitem"]').length || 0,
-            tmuxBreakdownText: popover?.querySelector('.js-debug-cost-tmux-breakdown')?.textContent || '',
+            agentTable: popover?.textContent.includes('By Agent'),
+            agentRows: popover?.querySelectorAll('[data-js-debug-cost-table="agent"] tbody tr').length || 0,
+            agentTableText: popover?.querySelector('[data-js-debug-cost-table="agent"]')?.textContent || '',
             report: popover?.matches('article.js-debug-cost-report.js-debug-cost-modal-dialog'),
             headings: [...(popover?.querySelectorAll('h1, h2') || [])].map(node => node.textContent.trim()),
             pricingSourcesLast: (() => {
@@ -2454,15 +2457,15 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             pricingSourcesText: popover?.querySelector('.js-debug-cost-pricing-sources')?.textContent || '',
             hasTable: Boolean(popover?.querySelector('table')),
             usageTitle: popover?.querySelector('.js-debug-cost-model-usages h2')?.textContent || '',
-            usageHeaderLabels: [...(popover?.querySelectorAll('.js-debug-cost-usage-header .js-debug-cost-usage-head-cell') || [])].map(node => node.textContent.trim()),
-            usageHeaderRects: [...(popover?.querySelectorAll('.js-debug-cost-usage-header > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
-            usageRows: popover?.querySelectorAll('.js-debug-cost-usage-row').length || 0,
-            usageSegments: popover?.querySelectorAll('.js-debug-cost-usage-segment').length || 0,
-            usageLegendCount: popover?.querySelectorAll('.js-debug-cost-usage-legend').length || 0,
-            usageValueListCount: popover?.querySelectorAll('.js-debug-cost-usage-values').length || 0,
-            usageRowAria: popover?.querySelector('.js-debug-cost-usage-row')?.getAttribute('aria-label') || '',
-            usageMetricTexts: [...(popover?.querySelectorAll('.js-debug-cost-usage-row:first-of-type .js-debug-cost-usage-metric') || [])].map(node => node.textContent.trim()),
-            usageMetricRects: [...(popover?.querySelectorAll('.js-debug-cost-usage-row:first-of-type > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
+            usageHeaderLabels: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] thead th') || [])].map(node => node.textContent.trim()),
+            usageHeaderRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] thead th') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
+            usageRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr').length || 0,
+            usageGrandRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tfoot tr').length || 0,
+            usageRowAria: popover?.querySelector('[data-js-debug-cost-table="model"] tbody tr')?.getAttribute('aria-label') || '',
+            usageMetricTexts: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child .js-debug-cost-table-metric') || [])].map(node => node.textContent.trim()),
+            usageMetricRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
+            totalHeaderInside: (() => { const rect = popover?.querySelector('[data-js-debug-cost-table="model"] thead th:last-child')?.getBoundingClientRect(); return Boolean(rect && popoverRect && rect.right <= popoverRect.right && rect.left >= popoverRect.left); })(),
+            sourceLinkCount: popover?.querySelectorAll('[data-js-debug-cost-transcript-path]').length || 0,
             outerOverflow: popover ? getComputedStyle(popover).overflowY : '',
             bodyOverflow: reportBody ? getComputedStyle(reportBody).overflowY : '',
             scrollTop: reportBody?.scrollTop || 0,
@@ -2564,7 +2567,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
           });
         })().catch(error => done({error: String(error?.stack || error)}));
         """
-    )
+    , str(transcript.resolve()))
     assert "error" not in metrics, metrics
     assert metrics["initialOrder"]["cost"] == metrics["initialOrder"]["model"] + 1, metrics
     assert metrics["toggleOrder"].index("costSummary") == metrics["toggleOrder"].index("modelTokens") + 1, metrics
@@ -2595,9 +2598,9 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["popover"]["dialog"] == "dialog", metrics
     assert metrics["popover"]["modal"] == "true" and metrics["popover"]["overlay"] is True and metrics["popover"]["closeButton"] is True, metrics
     assert metrics["popover"]["insideClickKeptOpen"] is True and metrics["popover"]["backdropClosed"] is True and metrics["popover"]["xClosed"] is True, metrics
-    assert metrics["popover"]["costCalculation"] is True and metrics["popover"]["modelUsages"] is True and metrics["popover"]["sourceAttribution"] is True and metrics["popover"]["pricingSources"] is True and metrics["popover"]["tmuxBreakdown"] is True, metrics
-    assert metrics["popover"]["tmuxBreakdownRows"] == 1 and "root:0" in metrics["popover"]["tmuxBreakdownText"] and "Total $0.0600" in metrics["popover"]["tmuxBreakdownText"], metrics
-    assert metrics["popover"]["report"] is True and metrics["popover"]["hasTable"] is False, metrics
+    assert metrics["popover"]["costCalculation"] is True and metrics["popover"]["modelUsages"] is True and metrics["popover"]["sourceAttribution"] is True and metrics["popover"]["pricingSources"] is True and metrics["popover"]["agentTable"] is True, metrics
+    assert metrics["popover"]["agentRows"] == 1 and "root:0" in metrics["popover"]["agentTableText"] and "$0.0600" in metrics["popover"]["agentTableText"] and "Grand total" in metrics["popover"]["agentTableText"], metrics
+    assert metrics["popover"]["report"] is True and metrics["popover"]["hasTable"] is True, metrics
     assert metrics["popover"]["headings"][0] == "Cost summary details" and "Model Usages" in metrics["popover"]["headings"] and metrics["popover"]["headings"][-1] == "Pricing sources", metrics
     assert metrics["popover"]["pricingSourcesLast"] is True, metrics
     assert sorted(metrics["popover"]["pricingSourceLinks"], key=lambda item: item["href"]) == sorted([
@@ -2605,19 +2608,54 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
         {"text": "https://platform.claude.com/docs/en/about-claude/pricing", "href": "https://platform.claude.com/docs/en/about-claude/pricing"},
     ], key=lambda item: item["href"]), metrics
     assert "javascript:alert" not in metrics["popover"]["pricingSourcesText"], metrics
-    assert metrics["popover"]["usageTitle"] == "Model Usages" and metrics["popover"]["usageRows"] == 1, metrics
-    assert metrics["popover"]["usageHeaderLabels"] == ["Model", "", "Input", "Cached", "Output", "Other", "Total"], metrics
-    assert metrics["popover"]["usageLegendCount"] == 0 and metrics["popover"]["usageValueListCount"] == 0, metrics
-    assert metrics["popover"]["usageSegments"] == 3, metrics
+    assert metrics["popover"]["usageTitle"] == "Model Usages" and metrics["popover"]["usageRows"] == 1 and metrics["popover"]["usageGrandRows"] == 1, metrics
+    assert metrics["popover"]["usageHeaderLabels"] == ["Model", "Input", "Cached", "Output", "Other", "Total"], metrics
     assert metrics["popover"]["usageMetricTexts"] == ["60 tokens$0.0120", "60 tokens$0.0180", "60 tokens$0.0300", "0$0", "180 tokens$0.0600"], metrics
     assert all(label in metrics["popover"]["usageRowAria"] for label in ("gpt-5.6-terra", "Input 60 tokens $0.0120", "Cached 60 tokens $0.0180", "Output 60 tokens $0.0300", "Other 0 $0", "Total 180 tokens $0.0600")), metrics
-    assert len(metrics["popover"]["usageHeaderRects"]) == len(metrics["popover"]["usageMetricRects"]) == 7, metrics
+    assert len(metrics["popover"]["usageHeaderRects"]) == len(metrics["popover"]["usageMetricRects"]) == 6, metrics
     for header_rect, row_rect in zip(metrics["popover"]["usageHeaderRects"], metrics["popover"]["usageMetricRects"]):
         assert abs(header_rect["left"] - row_rect["left"]) <= 1 and abs(header_rect["right"] - row_rect["right"]) <= 1, metrics
     assert metrics["popover"]["outerOverflow"] == "hidden" and metrics["popover"]["bodyOverflow"] == "auto", metrics
     assert metrics["popover"]["scrollHeight"] > metrics["popover"]["clientHeight"] and metrics["popover"]["scrollTop"] > 0, metrics
     assert metrics["popover"]["left"] >= 0 and metrics["popover"]["right"] <= metrics["viewport"]["width"], metrics
     assert metrics["popover"]["top"] >= 0 and metrics["popover"]["bottom"] <= metrics["viewport"]["height"], metrics
+    assert metrics["popover"]["totalHeaderInside"] is True and metrics["popover"]["sourceLinkCount"] == 1, metrics
+
+    browser.set_window_size(375, 680)
+    small = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const details = document.querySelector('[data-js-debug-cost-details]');
+        details?.click();
+        window.__yolomuxTestWaitFor(() => document.querySelector('[data-js-debug-cost-modal]'), {timeoutMs: 1000, intervalMs: 20, description: 'small Cost modal'}).then(() => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const dialog = document.querySelector('.js-debug-cost-modal-dialog');
+            const rect = dialog?.getBoundingClientRect();
+            done({left: rect?.left, right: rect?.right, top: rect?.top, bottom: rect?.bottom, width: innerWidth, height: innerHeight});
+          }));
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in small and small["left"] >= 0 and small["right"] <= small["width"], small
+    assert small["top"] >= 0 and small["bottom"] <= small["height"], small
+
+    source_preview = browser.execute_async_script(
+        """
+        const transcriptPath = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const link = document.querySelector('[data-js-debug-cost-transcript-path]');
+        link?.click();
+        window.__yolomuxTestWaitFor(
+          () => openFiles.has(transcriptPath) && !document.querySelector('[data-js-debug-cost-modal]'),
+          {timeoutMs: 2000, intervalMs: 20, description: 'Cost source transcript Preview open'},
+        ).then(() => done({
+          opened: openFiles.has(transcriptPath),
+          mode: editorViewModeFor(transcriptPath, fileEditorItemFor(transcriptPath)),
+        })).catch(error => done({error: String(error)}));
+        """,
+        str(transcript.resolve()),
+    )
+    assert source_preview == {"opened": True, "mode": "preview"}, source_preview
 
 
 def test_debug_graph_periodic_refresh_preserves_user_scroll(browser, tmp_path):

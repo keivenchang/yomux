@@ -58,7 +58,12 @@ def parse_args() -> argparse.Namespace:
         "--https-self-signed",
         dest="self_signed",
         action="store_true",
-        help="serve HTTPS with an auto-generated self-signed certificate",
+        help="serve HTTPS with an auto-generated self-signed certificate (the default; retained for compatibility)",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="serve plain HTTP instead of the default HTTPS (cannot be combined with --cert/--key)",
     )
     parser.add_argument("--cert", type=Path, default=None, help="TLS certificate PEM path")
     parser.add_argument("--key", type=Path, default=None, help="TLS private key PEM path")
@@ -123,6 +128,10 @@ def self_signed_san() -> str:
     return ",".join(names)
 
 
+class SelfSignedCertificateUnavailable(RuntimeError):
+    """The default certificate cannot be created on this host."""
+
+
 def ensure_self_signed_cert() -> tuple[Path, Path]:
     cert_path, key_path = self_signed_cert_paths()
     if cert_path.exists() and key_path.exists():
@@ -132,7 +141,9 @@ def ensure_self_signed_cert() -> tuple[Path, Path]:
 
     openssl = shutil.which("openssl")
     if not openssl:
-        raise RuntimeError("--self-signed requires openssl; Python's standard library cannot create X.509 certificates")
+        raise SelfSignedCertificateUnavailable(
+            "openssl not found; the default self-signed HTTPS certificate cannot be created"
+        )
 
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     cert_path.parent.chmod(0o700)
@@ -173,20 +184,26 @@ def ensure_self_signed_cert() -> tuple[Path, Path]:
 def tls_cert_key_paths(args: argparse.Namespace) -> tuple[Path | None, Path | None, bool]:
     if bool(args.cert) != bool(args.key):
         raise ValueError("--cert and --key must be provided together")
-    if args.self_signed and (args.cert or args.key):
-        raise ValueError("--self-signed cannot be combined with --cert/--key")
+    if getattr(args, "http", False) and (args.cert or args.key):
+        raise ValueError("--http cannot be combined with --cert/--key")
     if args.cert and args.key:
         return args.cert, args.key, False
-    if args.self_signed:
-        cert_path, key_path = ensure_self_signed_cert()
-        return cert_path, key_path, True
-    return None, None, False
+    if getattr(args, "http", False):
+        return None, None, False
+    cert_path, key_path = ensure_self_signed_cert()
+    return cert_path, key_path, True
 
 
 def tls_context_for_args(args: argparse.Namespace) -> tuple[ssl.SSLContext | None, str]:
-    cert_path, key_path, generated = tls_cert_key_paths(args)
+    try:
+        cert_path, key_path, generated = tls_cert_key_paths(args)
+    except SelfSignedCertificateUnavailable as error:
+        return (
+            None,
+            f"WARNING: {error}; starting plain HTTP. Install openssl, pass --cert/--key, or pass --http explicitly.",
+        )
     if not cert_path or not key_path:
-        return None, ""
+        return None, "WARNING: TLS disabled by --http; serving plain HTTP."
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
@@ -261,10 +278,6 @@ def print_auth_setup_error() -> None:
         "Uncomment and edit the YAML account entries, then refresh the browser.",
         file=sys.stderr,
     )
-    print(
-        "Highly recommend browser login with HTTPS, for example --self-signed.",
-        file=sys.stderr,
-    )
 
 
 def main() -> int:
@@ -317,8 +330,6 @@ def main() -> int:
             print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
             print("YOLOmux created an inactive starter YAML file.")
             print("Leave users: as-is, then uncomment and edit one or more account entries before logging in.")
-            if not tls_context:
-                print(f"Highly recommend that you restart with HTTPS: python3 yolomux.py --port {args.port} --self-signed")
             print(f"YOLOmux is listening on {scheme}://{url_host}:{args.port}/ and will show this setup message in the browser.")
             print("After saving auth.yaml, refresh the browser. No restart is required.")
             print("=" * 78)

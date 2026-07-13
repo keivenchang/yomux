@@ -780,106 +780,17 @@
   border-radius: var(--radius-sm);
   background: var(--muted);
 }
-.js-debug-cost-usage-swatch--input,
-.js-debug-cost-usage-segment--input {
+.js-debug-cost-usage-swatch--input {
   background: var(--js-debug-agent-token-cyan);
 }
-.js-debug-cost-usage-swatch--cache,
-.js-debug-cost-usage-segment--cache {
+.js-debug-cost-usage-swatch--cache {
   background: var(--js-debug-agent-token-orange);
 }
-.js-debug-cost-usage-swatch--output,
-.js-debug-cost-usage-segment--output {
+.js-debug-cost-usage-swatch--output {
   background: var(--js-debug-agent-token-magenta);
 }
-.js-debug-cost-usage-swatch--other,
-.js-debug-cost-usage-segment--other {
+.js-debug-cost-usage-swatch--other {
   background: var(--js-debug-agent-token-beige);
-}
-.js-debug-cost-usage-chart {
-  --js-debug-cost-usage-grid-template: minmax(9rem, 1.45fr) minmax(4.5rem, 0.85fr) repeat(5, minmax(4.6rem, 0.7fr));
-  display: grid;
-  gap: var(--space-3);
-  overflow-x: auto;
-  padding-bottom: var(--space-1);
-}
-.js-debug-cost-usage-header,
-.js-debug-cost-usage-row {
-  display: grid;
-  grid-template-columns: var(--js-debug-cost-usage-grid-template);
-  gap: var(--space-3);
-  align-items: center;
-  min-width: 0;
-}
-.js-debug-cost-usage-header {
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  font: 700 var(--ui-font-size-2xs)/1.2 var(--ui-font);
-}
-.js-debug-cost-usage-head-cell {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--space-2);
-  white-space: nowrap;
-}
-.js-debug-cost-usage-head-cell--input,
-.js-debug-cost-usage-head-cell--cache,
-.js-debug-cost-usage-head-cell--output,
-.js-debug-cost-usage-head-cell--other,
-.js-debug-cost-usage-head-cell--total {
-  justify-content: flex-end;
-}
-.js-debug-cost-usage-head-cell--bar {
-  min-height: var(--space-4);
-}
-.js-debug-cost-usage-track {
-  height: var(--space-6);
-  overflow: hidden;
-  background: var(--line);
-  border-radius: var(--radius-sm);
-}
-.js-debug-cost-usage-fill {
-  display: flex;
-  width: max(2px, var(--js-debug-cost-model-share));
-  height: 100%;
-  overflow: hidden;
-  border-radius: inherit;
-}
-.js-debug-cost-usage-segment {
-  flex: 0 0 var(--js-debug-cost-class-share);
-  min-width: 1px;
-  height: 100%;
-}
-.js-debug-cost-usage-model {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  color: var(--muted);
-  font: 600 var(--ui-font-size-2xs)/1.35 var(--mono-font);
-}
-.js-debug-cost-usage-model strong,
-.js-debug-cost-usage-metric strong,
-.js-debug-cost-usage-metric small {
-  font-family: var(--mono-font);
-}
-.js-debug-cost-usage-model strong,
-.js-debug-cost-usage-metric strong {
-  color: var(--text);
-}
-.js-debug-cost-usage-metric {
-  display: grid;
-  min-width: 0;
-  gap: var(--space-1);
-  text-align: end;
-  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
-}
-.js-debug-cost-usage-metric small {
-  color: var(--muted);
-}
-.js-debug-cost-usage-metric--total {
-  padding-inline-start: var(--space-2);
-  border-inline-start: 1px solid var(--line);
 }
 .js-debug-cost-model-list > li {
   overflow-wrap: anywhere;
@@ -932,9 +843,9 @@
 .js-debug-cost-modal-dialog {
   display: flex;
   flex-direction: column;
-  width: min(40rem, calc(100vw - (2 * var(--space-12))));
+  width: min(var(--dialog-wide-inline-size), calc(100vw - (2 * var(--space-12))));
   max-width: calc(100vw - (2 * var(--space-12)));
-  max-height: min(68vh, 42rem);
+  max-height: min(88vh, calc(100dvh - (2 * var(--space-12))), 58rem);
   padding: var(--space-10);
   overflow: hidden;
   background: var(--panel);
@@ -943,6 +854,42 @@
   box-shadow: var(--app-modal-dialog-shadow);
   color: var(--text);
   container-type: inline-size;
+}
+.js-debug-cost-table-wrap {
+  max-inline-size: 100%;
+}
+.js-debug-cost-table {
+  min-inline-size: min(100%, var(--dialog-compact-inline-size));
+}
+.js-debug-cost-table th:not(:first-child) {
+  color: var(--muted);
+}
+.js-debug-cost-table th > .js-debug-cost-usage-swatch {
+  margin-inline-end: var(--space-2);
+}
+.js-debug-cost-table tbody th,
+.js-debug-cost-table tfoot th {
+  color: var(--text);
+  font-weight: 700;
+}
+.js-debug-cost-table tfoot th,
+.js-debug-cost-table tfoot td {
+  border-block-start: 2px solid var(--line);
+  border-block-end: 0;
+}
+.js-debug-cost-table-metric {
+  display: grid;
+  gap: var(--space-1);
+}
+.js-debug-cost-table-metric strong,
+.js-debug-cost-table-metric small {
+  font-family: var(--mono-font);
+}
+.js-debug-cost-table-metric small {
+  color: var(--muted);
+}
+.js-debug-cost-transcript-link {
+  overflow-wrap: anywhere;
 }
 .js-debug-cost-report-title {
   flex: none;
@@ -1096,13 +1043,6 @@
   }
   .js-debug-cost-summary .js-debug-chart-title {
     flex-basis: 100%;
-  }
-  .js-debug-cost-usage-chart {
-    --js-debug-cost-usage-grid-template: minmax(7.5rem, 1.3fr) repeat(5, minmax(3.9rem, 0.7fr));
-  }
-  .js-debug-cost-usage-head-cell--bar,
-  .js-debug-cost-usage-track {
-    display: none;
   }
   .js-debug-cost-catalog {
     grid-template-columns: repeat(2, minmax(0, 1fr));

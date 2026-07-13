@@ -660,6 +660,74 @@ async function runLayoutAsyncSuite() {
     assert.ok(api.fileExplorerFsResourceKeysForTest().length <= api.fileExplorerMemoryCacheLimitForTest, 'the reused listing cache remains under the shared LRU bound');
   });
 
+  await testAsync('Finder Sync revalidates a warm tree after its cache-first frame without collapsing it', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerDirListingForTest('/repo', [{name: 'old.txt', kind: 'file'}]);
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const items = JSON.parse(options.body).requests;
+      requests.push(items.map(item => item.path));
+      return Promise.resolve(jsonResponse({
+        responses: items.map(item => ({
+          id: item.id,
+          ok: true,
+          status: 200,
+          payload: {entries: [{name: 'new.txt', kind: 'file'}]},
+        })),
+      }));
+    });
+    const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
+    const sync = api.syncFileExplorerRootToPlanForTest(plan, '1');
+    assert.equal(requests.length, 0, 'the cache-first render performs no request before its frame');
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/old.txt"]'), 'the cached row is visible synchronously');
+    await sync;
+    assert.equal(frames.length, 1, 'one deferred revalidation frame is scheduled');
+    frames.shift()();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(requests.length, 1, 'background listings settle in one batched request after the frame');
+    assert.deepStrictEqual([...new Set(requests[0])], ['/repo'], 'revalidation is scoped to the visible cached directory');
+    assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/old.txt"]'), null, 'a changed cached row is removed in place after revalidation');
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/new.txt"]'), 'the changed directory appears after revalidation');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'background freshness does not collapse or invent disclosure state');
+  });
+
+  await testAsync('Finder Sync cold listings start in bounded parallel batches and share the LRU bound', async () => {
+    const api = loadYolomux('', ['1']);
+    const directories = Array.from({length: 12}, (_value, index) => `/cold/${index}`);
+    const batches = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const items = JSON.parse(options.body).requests;
+      batches.push(items.map(item => item.path));
+      return Promise.resolve(jsonResponse({
+        responses: items.map(item => ({id: item.id, ok: true, status: 200, payload: {entries: []}})),
+      }));
+    });
+    const listings = await api.fetchFileExplorerSyncListingsForTest(directories, {force: true});
+    assert.equal(listings.size, directories.length, 'every cold directory settles');
+    assert.equal(batches[0].length, 8, 'the first response is awaited only after all eight bounded workers have started');
+    assert.deepStrictEqual(batches.map(batch => batch.length), [8, 4], 'twelve cold listings take two bounded batches rather than twelve sequential round trips');
+
+    const limit = api.fileExplorerMemoryCacheLimitForTest;
+    for (let index = 0; index < limit + 5; index += 1) {
+      api.setFileExplorerDirListingForTest(`/lru/${index}`, []);
+    }
+    const keys = api.fileExplorerFsResourceKeysForTest();
+    assert.equal(keys.length, limit, 'the shared filesystem-resource LRU remains strictly bounded');
+    assert.equal(keys.some(key => key.endsWith('/lru/0')), false, 'the oldest listing is evicted');
+    assert.equal(keys.some(key => key.endsWith(`/lru/${limit + 4}`)), true, 'the newest listing remains cached');
+  });
+
   test('Finder Sync cold and stale paths share bounded parallel fetch and deferred revalidation owners', () => {
     const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
     const syncOwner = source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab('));
