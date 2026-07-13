@@ -3741,23 +3741,74 @@ function debugGraphCostTokenTotals(summary) {
   return totals;
 }
 
-function debugGraphCostAggregateRows(rows, keyFields) {
-  const grouped = new Map();
-  const subtotalFields = ['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd'];
-  const tokenFields = ['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens'];
-  for (const row of rows || []) {
-    const key = keyFields.map(field => String(row?.[field] || '')).join('\u0000') || 'unknown';
-    const current = grouped.get(key) || {...row, ...Object.fromEntries([...subtotalFields, ...tokenFields].map(field => [field, 0]))};
-    for (const field of subtotalFields) current[field] += debugGraphCostInteger(row?.[field]);
-    for (const field of tokenFields) current[field] += Math.max(0, Number(row?.[field]) || 0);
+const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
+const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']);
+const DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS = Object.freeze(['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
+const DEBUG_GRAPH_COST_MODEL_KEY_FIELDS = Object.freeze(['provider', 'model', 'effort']);
+const DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
+const DEBUG_GRAPH_COST_TMUX_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind']);
+let jsDebugCostSummaryCache = {signature: '', summary: null};
+
+function debugGraphCostAggregateRowInto(grouped, row, keyFields) {
+  if (!row || typeof row !== 'object') return;
+  let key = '';
+  for (let index = 0; index < keyFields.length; index += 1) {
+    if (index) key += '\u0000';
+    key += String(row[keyFields[index]] || '');
+  }
+  key ||= 'unknown';
+  const current = grouped.get(key) || {...row};
+  if (!grouped.has(key)) {
+    for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) current[field] = 0;
+    for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] = 0;
     grouped.set(key, current);
   }
+  for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) current[field] += debugGraphCostInteger(row?.[field]);
+  for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] += Math.max(0, Number(row?.[field]) || 0);
+}
+
+function debugGraphCostAggregateValues(grouped) {
   return [...grouped.values()].sort((left, right) => debugGraphCostMicroUsd(right) - debugGraphCostMicroUsd(left)
     || String(left?.model || left?.label || left?.key || '').localeCompare(String(right?.model || right?.label || right?.key || '')));
 }
 
+function debugGraphCostAggregateRows(rows, keyFields) {
+  const grouped = new Map();
+  for (const row of rows || []) {
+    debugGraphCostAggregateRowInto(grouped, row, keyFields);
+  }
+  return debugGraphCostAggregateValues(grouped);
+}
+
+function debugGraphCostSummarySignature(buckets) {
+  if (!Array.isArray(buckets) || !buckets.length) {
+    return `0:${jsDebugStatsAgentTokenSequence}:${jsDebugUsageAtomBackfill.state || ''}:${jsDebugUsageAtomBackfill.sources || 0}:${jsDebugUsageAtomBackfill.missing || 0}`;
+  }
+  const first = buckets[0] || {};
+  const last = buckets[buckets.length - 1] || {};
+  return [
+    buckets.length,
+    Number(first.startMs ?? first.start ?? 0) || 0,
+    Number(first.durationMs ?? first.duration ?? 0) || 0,
+    Number(first.sequence ?? 0) || 0,
+    Number(last.startMs ?? last.start ?? 0) || 0,
+    Number(last.durationMs ?? last.duration ?? 0) || 0,
+    Number(last.sequence ?? 0) || 0,
+    jsDebugStatsAgentTokenSequence,
+    jsDebugUsageAtomBackfill.state || '',
+    jsDebugUsageAtomBackfill.sources || 0,
+    jsDebugUsageAtomBackfill.missing || 0,
+  ].join(':');
+}
+
 function debugGraphCostSummaryForBuckets(buckets) {
+  const signature = debugGraphCostSummarySignature(buckets);
+  if (signature && jsDebugCostSummaryCache.signature === signature && jsDebugCostSummaryCache.summary) return jsDebugCostSummaryCache.summary;
   const summaries = (buckets || []).map(bucket => bucket?.costSummary).filter(Boolean);
+  const componentRows = new Map();
+  const modelRows = new Map();
+  const sourceRows = new Map();
+  const tmuxRows = new Map();
   const result = {
     totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
     unpricedCount: 0, unpricedTokenQuantity: 0, components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
@@ -3772,10 +3823,10 @@ function debugGraphCostSummaryForBuckets(buckets) {
     result.complete = result.complete && summary.complete === true;
     result.unpricedCount += debugGraphCostInteger(summary.unpricedCount);
     result.unpricedTokenQuantity += Math.max(0, Number(summary.unpricedTokenQuantity) || 0);
-    result.components.push(...debugGraphCostRows(summary.components));
-    result.models.push(...debugGraphCostRows(summary.models));
-    result.sources.push(...debugGraphCostRows(summary.sources));
-    result.tmuxWindows.push(...debugGraphCostRows(summary.tmuxWindows));
+    for (const row of debugGraphCostRows(summary.components)) debugGraphCostAggregateRowInto(componentRows, row, DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS);
+    for (const row of debugGraphCostRows(summary.models)) debugGraphCostAggregateRowInto(modelRows, row, DEBUG_GRAPH_COST_MODEL_KEY_FIELDS);
+    for (const row of debugGraphCostRows(summary.sources)) debugGraphCostAggregateRowInto(sourceRows, row, DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS);
+    for (const row of debugGraphCostRows(summary.tmuxWindows)) debugGraphCostAggregateRowInto(tmuxRows, row, DEBUG_GRAPH_COST_TMUX_KEY_FIELDS);
     result.catalogRevision = summary.catalogRevision || result.catalogRevision;
     result.activeCatalogRevision = summary.activeCatalogRevision || result.activeCatalogRevision;
     result.freshness = summary.freshness || result.freshness;
@@ -3783,11 +3834,12 @@ function debugGraphCostSummaryForBuckets(buckets) {
   // Effective price/source evidence is part of a billable component identity:
   // retaining it prevents a displayed-range reprice boundary from being
   // misleadingly collapsed into one synthetic rate row.
-  result.components = debugGraphCostAggregateRows(result.components, ['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
-  result.models = debugGraphCostAggregateRows(result.models, ['provider', 'model', 'effort']);
-  result.sources = debugGraphCostAggregateRows(result.sources, ['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
-  result.tmuxWindows = debugGraphCostAggregateRows(result.tmuxWindows, ['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind']);
+  result.components = debugGraphCostAggregateValues(componentRows);
+  result.models = debugGraphCostAggregateValues(modelRows);
+  result.sources = debugGraphCostAggregateValues(sourceRows);
+  result.tmuxWindows = debugGraphCostAggregateValues(tmuxRows);
   if (result.backfill.state !== 'complete') result.complete = false;
+  jsDebugCostSummaryCache = {signature, summary: result};
   return result;
 }
 
