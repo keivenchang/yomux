@@ -52789,6 +52789,13 @@ function appendJsonLinesTableCell(row, tagName, cell, className = '') {
   return node;
 }
 
+function jsonLinesTableColumnClass(column) {
+  const normalized = String(column || '').trim().toLowerCase();
+  if (normalized === 'payload') return 'file-editor-jsonl-payload';
+  if (normalized === 'timestamp' || normalized === 'time' || normalized === 'type') return 'file-editor-jsonl-compact-column';
+  return '';
+}
+
 function renderJsonLinesTablePreviewInto(container, path, text) {
   const preview = jsonLinesTablePreview(path, text);
   const wrapper = document.createElement('div');
@@ -52803,9 +52810,21 @@ function renderJsonLinesTablePreviewInto(container, path, text) {
   });
   wrapper.appendChild(header);
   const table = document.createElement('table');
+  table.className = 'file-editor-jsonl-table';
+  const colgroup = document.createElement('colgroup');
+  preview.columns.forEach(column => {
+    const col = document.createElement('col');
+    const className = jsonLinesTableColumnClass(column);
+    if (className) col.className = className;
+    col.dataset.jsonlField = column;
+    colgroup.appendChild(col);
+  });
+  if (preview.overflowColumns.length) colgroup.appendChild(document.createElement('col'));
+  if (!preview.columns.length && !preview.overflowColumns.length) colgroup.appendChild(document.createElement('col'));
+  table.appendChild(colgroup);
   const head = document.createElement('thead');
   const headingRow = document.createElement('tr');
-  preview.columns.forEach(column => appendJsonLinesTableCell(headingRow, 'th', {text: column, title: column}));
+  preview.columns.forEach(column => appendJsonLinesTableCell(headingRow, 'th', {text: column, title: column}, jsonLinesTableColumnClass(column)));
   if (preview.overflowColumns.length) {
     appendJsonLinesTableCell(headingRow, 'th', {
       text: `… +${preview.overflowColumns.length}`,
@@ -52828,7 +52847,7 @@ function renderJsonLinesTablePreviewInto(container, path, text) {
       raw.colSpan = columnSpan;
       raw.dataset.unparsedLine = String(row.lineNumber);
     } else {
-      row.cells.forEach(cell => appendJsonLinesTableCell(tr, 'td', cell));
+      row.cells.forEach((cell, index) => appendJsonLinesTableCell(tr, 'td', cell, jsonLinesTableColumnClass(preview.columns[index])));
       if (row.overflow) appendJsonLinesTableCell(tr, 'td', row.overflow, 'file-editor-jsonl-overflow');
     }
     body.appendChild(tr);

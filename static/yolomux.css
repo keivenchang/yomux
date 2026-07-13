@@ -16445,7 +16445,20 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   font-weight: 800;
 }
 .file-editor-jsonl-preview table {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
   font-family: var(--mono-font);
+}
+.file-editor-jsonl-preview col.file-editor-jsonl-compact-column {
+  inline-size: clamp(8ch, 18%, 18ch);
+}
+.file-editor-jsonl-preview col.file-editor-jsonl-payload {
+  inline-size: auto;
+}
+.file-editor-jsonl-preview th,
+.file-editor-jsonl-preview td {
+  max-width: none;
 }
 .file-editor-jsonl-preview thead th {
   position: sticky;

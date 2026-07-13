@@ -1410,7 +1410,10 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
         const markdown = makePanel('/home/test/repo/docs/README.md', {kind: 'text', content: mdText, original: mdText, dirty: false, language: 'markdown'});
         const validJson = makePanel('/home/test/repo/config.json', {kind: 'text', content: '{"b":2,"a":1}', original: '{"b":2,"a":1}', dirty: false, language: 'json'});
         const invalidJson = makePanel('/home/test/repo/bad.json', {kind: 'text', content: '{"b":', original: '{"b":', dirty: false, language: 'json'});
-        const jsonl = makePanel('/home/test/repo/events.jsonl', {kind: 'text', content: '{"id":1}\\n{"id":2}\\n', original: '', dirty: false, language: 'json'});
+        const jsonl = makePanel('/home/test/repo/events.jsonl', {kind: 'text', content: [
+          JSON.stringify({timestamp: '2026-07-12T19:00:00Z', type: 'assistant', payload: {message: 'short'}}),
+          JSON.stringify({timestamp: '2026-07-12T19:00:01Z', type: 'tool', payload: {message: 'x'.repeat(120)}}),
+        ].join('\\n'), original: '', dirty: false, language: 'json'});
         const badJsonl = makePanel('/home/test/repo/bad.jsonl', {kind: 'text', content: '{"id":1}\\n{"id":\\n', original: '', dirty: false, language: 'json'});
         const geojson = makePanel('/home/test/repo/map.geojson', {kind: 'text', content: '{"type":"FeatureCollection","features":[]}', original: '', dirty: false, language: 'json'});
         const notebookText = JSON.stringify({cells: [{cell_type: 'markdown', source: ['# Title\\n']}, {cell_type: 'code', source: ['print(1)\\n'], outputs: [{output_type: 'stream'}]}]});
@@ -1441,6 +1444,26 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
         };
         const jsonlDarkTheme = jsonlThemeMetrics(false);
         const jsonlLightTheme = jsonlThemeMetrics(true);
+        const jsonlLayout = () => {
+          const preview = jsonl.panel.querySelector('.file-editor-jsonl-preview');
+          const table = preview?.querySelector('table');
+          const payload = preview?.querySelector('th.file-editor-jsonl-payload');
+          const compact = preview?.querySelector('th.file-editor-jsonl-compact-column');
+          const previewRect = preview?.getBoundingClientRect();
+          const tableRect = table?.getBoundingClientRect();
+          const payloadRect = payload?.getBoundingClientRect();
+          const compactRect = compact?.getBoundingClientRect();
+          return {
+            previewWidth: previewRect?.width || 0,
+            tableWidth: tableRect?.width || 0,
+            payloadWidth: payloadRect?.width || 0,
+            compactWidth: compactRect?.width || 0,
+            payloadTitle: Array.from(preview?.querySelectorAll('td.file-editor-jsonl-payload') || []).at(-1)?.title || '',
+          };
+        };
+        const jsonlWideLayout = jsonlLayout();
+        jsonl.panel.style.width = '460px';
+        const jsonlNarrowLayout = jsonlLayout();
         document.body.classList.remove('theme-light', 'editor-theme-light');
         return {
           markdown: {
@@ -1470,6 +1493,8 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
             tableOverflowX: getComputedStyle(jsonl.panel.querySelector('.file-editor-jsonl-preview')).overflowX,
             darkTheme: jsonlDarkTheme,
             lightTheme: jsonlLightTheme,
+            wideLayout: jsonlWideLayout,
+            narrowLayout: jsonlNarrowLayout,
           },
           badJsonl: {
             header: badJsonl.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
@@ -1527,7 +1552,8 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
     assert "JSON parse error" in metrics["invalidJson"]["header"], metrics
     assert metrics["invalidJson"]["error"], metrics
     assert "JSONL preview" in metrics["jsonl"]["header"], metrics
-    assert metrics["jsonl"]["headers"] == ["id"] and metrics["jsonl"]["cells"] == ["1", "2"], metrics
+    assert metrics["jsonl"]["headers"] == ["timestamp", "type", "payload"], metrics
+    assert metrics["jsonl"]["cells"][0:3] == ["2026-07-12T19:00:00Z", "assistant", '{"message":"short"}'], metrics
     assert metrics["jsonl"]["modeButtons"][:3] == ["edit", "preview", "split"], metrics
     assert metrics["jsonl"]["tableOverflowX"] == "auto", metrics
     for theme in ("darkTheme", "lightTheme"):
@@ -1535,6 +1561,13 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
         assert abs(metrics["jsonl"][theme]["headingWidth"] - metrics["jsonl"][theme]["cellWidth"]) < 0.5, metrics
         assert metrics["jsonl"][theme]["headingBackground"] != "rgba(0, 0, 0, 0)", metrics
         assert metrics["jsonl"][theme]["cellColor"] != "rgba(0, 0, 0, 0)", metrics
+    wide = metrics["jsonl"]["wideLayout"]
+    narrow = metrics["jsonl"]["narrowLayout"]
+    assert abs(wide["tableWidth"] - wide["previewWidth"]) < 1.5, metrics
+    assert abs(narrow["tableWidth"] - narrow["previewWidth"]) < 1.5, metrics
+    assert narrow["payloadWidth"] < wide["payloadWidth"], metrics
+    assert wide["payloadWidth"] > wide["compactWidth"], metrics
+    assert len(wide["payloadTitle"]) > 120, metrics
     assert metrics["badJsonl"]["unparsed"] == '{"id":' and metrics["badJsonl"]["unparsedLine"] == "2", metrics
     assert "GeoJSON preview" in metrics["geojson"]["header"] and '"FeatureCollection"' in metrics["geojson"]["text"], metrics
     assert "Notebook preview" in metrics["notebook"]["header"], metrics
