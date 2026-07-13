@@ -673,7 +673,7 @@
   "finder.sort.oldest": "oldest",
   "finder.sort.za": "Z-A",
   "finder.symlink.broken": "(broken)",
-  "finder.syncTarget.title": "Synced working path for {session}",
+  "finder.syncTarget.title": "Modified by {session}",
   "finder.toolbar.copyPath": "Copy current path",
   "finder.toolbar.dates": "Show modified dates",
   "finder.toolbar.datesLabel": "date",
