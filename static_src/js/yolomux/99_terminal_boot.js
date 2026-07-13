@@ -6841,7 +6841,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
-    if (activeItems.includes(debugPaneItemId)) channels.add('stats');
+    if (activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId)) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
       channels.add('transcripts');

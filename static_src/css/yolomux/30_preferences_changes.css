@@ -1157,6 +1157,17 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.js-debug-live-tail {
+  stroke: color-mix(in srgb, var(--active-accent-bright) 72%, transparent);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  pointer-events: none;
+  opacity: 0.8;
+}
+body.theme-light .js-debug-live-tail {
+  stroke: color-mix(in srgb, var(--active-accent) 82%, var(--text));
+  opacity: 0.72;
+}
 .js-debug-hover-line {
   opacity: 0;
   stroke: color-mix(in srgb, var(--text) 46%, transparent);

@@ -3968,7 +3968,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     assert.ok(html.includes('data-js-debug-resolution-seconds="10"'), 'the default fifteen-minute YO!stats graph reports its automatic ten-second display resolution');
     assert.equal(html.includes('data-js-debug-scale='), false, 'YO!stats does not expose manual aggregation controls');
-    for (const range of ['60', '300', '900', '1800', '3600', '7200', '14400', '28800', '57600', '86400']) {
+    for (const range of ['300', '900', '1800', '3600', '7200', '14400', '28800', '57600', '86400']) {
       assert.ok(html.includes(`data-js-debug-range="${range}"`), `YO!stats graph exposes the ${range}s range slider tick`);
     }
     assert.ok(html.includes('data-js-debug-range-slider') && html.includes('data-js-debug-range-label'), 'YO!stats uses a compact range slider instead of a row of range buttons');
@@ -4270,7 +4270,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(summary.resolutionSeconds, 10, 'YO!stats uses a bounded ten-second display resolution for the recent 15-minute domain');
     assert.equal(summary.rangeSeconds, 900, 'YO!stats graph defaults to the 15-minute time range');
     assert.equal(summary.displayBuckets, 0, 'two-hour-old timing samples are hidden from the default 15-minute range');
-    assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
+    assert.deepStrictEqual(Array.from(summary.availableRangeSeconds), [300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], 'YO!stats keeps all range slider stops available');
     assert.deepStrictEqual([...summary.series], ['api', 'sse', 'latency', 'bandwidth', ...DEBUG_AGENT_STATUS_SERIES, 'tokensPerAgent', 'systemCpu', 'systemMemory'], 'graph tracks the fixed API, SSE, latency, bandwidth, agent activity, agent token, CPU, and system-memory series while process series are discovered dynamically');
     assert.ok(summary.pendingServerBuckets > 0, 'browser-observed API/SSE graph buckets are queued for server retention');
     api.recordJsDebugStatsSampleForTest({
@@ -4646,6 +4646,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const clientId = api.jsDebugStatsClientIdForRequestForTest();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(60, {render: false});
+    api.setDebugGraphResolutionOverrideForTest(1);
     api.debugGraphApplyServerHistoryForTest({
       sequence: 3,
       records: [{
@@ -4988,6 +4989,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const thisClientId = api.jsDebugStatsClientIdForRequestForTest();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(60, {render: false});
+    api.setDebugGraphResolutionOverrideForTest(1);
     api.debugGraphApplyServerHistoryForTest({
       sequence: 72,
       records: [{
@@ -5660,10 +5662,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(prevented, 1, 'range slider pointerdown is not claimed before native input can fire');
     slider.value = '7.4';
     input({type: 'input', target: slider, preventDefault() {}});
-    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider input updates state without claiming native dragging');
+    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 57600, 'range slider input updates state without claiming native dragging');
     assert.equal(slider.value, '7.4', 'range slider input keeps fractional thumb position while dragging');
     change({type: 'change', target: slider, preventDefault() {}});
-    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 28800, 'range slider change commits the matching range stop after dragging');
+    assert.equal(api.debugGraphBucketSummaryForTest().rangeSeconds, 57600, 'range slider change commits the matching range stop after dragging');
     assert.equal(slider.value, '7', 'range slider change snaps the thumb to the nearest preset stop');
     pointerdown({type: 'pointerdown', target: chartToggle, preventDefault() { prevented += 1; }});
     assert.equal(api.debugGraphBucketSummaryForTest().charts.includes('cpu'), true, 'chart pointerdown does not reflow the grid beneath its follow-up pointer event');
@@ -6649,8 +6651,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const now = Date.now();
     const bucketStart = offsetMs => Math.floor(((now - offsetMs) / 1000) / 5) * 5;
     const peerBucketStart = bucketStart(25_000);
-    const peerMidpointX = (((peerBucketStart * 1000) + 2500 - (now - 60_000)) / 60_000) * 600;
+    const peerMidpointX = (((peerBucketStart * 1000) + 2500 - (now - 300_000)) / 300_000) * 600;
     api.setDebugGraphRangeForTest(60);
+    api.setDebugGraphResolutionOverrideForTest(1);
     api.debugGraphApplyServerHistoryForTest({
       sequence: 202,
       records: [
@@ -6707,7 +6710,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const noDataRanges = chart => [...chart.matchAll(/data-js-debug-no-data-range="[^"]+"[^>]* x="([0-9.]+)"[^>]* width="([0-9.]+)"/g)]
       .map(match => ({start: Number(match[1]), end: Number(match[1]) + Number(match[2])}));
     const countChart = chartHtml('count');
-    assert.equal((countChart.match(/data-js-debug-no-data-range="/g) || []).length, 1, 'Client API&SSE only shades the portion after 30 seconds without this-client communication');
+    assert.equal((countChart.match(/data-js-debug-no-data-range="/g) || []).length, 2, 'Client API&SSE shades each portion after 30 seconds without this-client communication across the minimum 5m range');
     assert.equal(noDataRanges(countChart).some(range => range.start <= peerMidpointX && range.end >= peerMidpointX), false, 'a sub-30-second quiet period around peer traffic is not marked as missing this-client communication');
     for (const chart of ['latency', 'bandwidth']) {
       assert.ok(new RegExp(`data-js-debug-chart="${chart}"[\\s\\S]*data-js-debug-no-data-range=`).test(html), `YO!stats shades no-data spans in client ${chart} chart`);

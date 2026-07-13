@@ -53,6 +53,8 @@ function runYostatsPerformanceSuite() {
     });
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(60, {render: false});
+    assert.equal(api.debugGraphBucketSummaryForTest(now).rangeSeconds, 5 * 60, 'retired 1m preferences normalize to the first 5m range');
+    api.setDebugGraphResolutionOverrideForTest(1);
     api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
     const buckets = api.debugGraphDisplayBucketsForTest(now);
     const byKey = new Map(api.debugGraphSeriesDataForTest(now).map(series => [series.key, series]));
@@ -97,6 +99,7 @@ function runYostatsPerformanceSuite() {
     const uninterrupted = loadYolomux('?debug=1&sessions=debug', ['1']);
     uninterrupted.clearJsDebugEventsForTest();
     uninterrupted.setDebugGraphRangeForTest(60, {render: false});
+    uninterrupted.setDebugGraphResolutionOverrideForTest(1);
     uninterrupted.debugGraphApplyServerHistoryForTest({
       sequence: 60,
       records: Array.from({length: 60}, (_unused, index) => ({

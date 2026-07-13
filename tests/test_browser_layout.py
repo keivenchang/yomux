@@ -2014,6 +2014,233 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
     assert result["finishedAt"] - result["startedAt"] < 3000, result
 
 
+def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof refreshDebugGraphElement === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Date.now();
+          const start = Math.floor(now / 10000) * 10;
+          const record = sequence => ({
+            start,
+            duration: 10,
+            sequence,
+            api_count: sequence,
+            sse_count: 1,
+            cpu_total_percent: 20 + sequence,
+            cpu_count: 1,
+            system_cpu_total_percent: 40,
+            system_cpu_count: 1,
+            tokens_per_agent_total: 120,
+            agent_token_samples: 1,
+            agent_token_rates: [{
+              key: '1|0|codex', label: '1:0:codex', total: 120, samples: 1, tokens: 120, seconds: 60, source: 'transcript',
+              model_rates: {'gpt-5.6-sol': {total: 120, samples: 1, tokens: 120, seconds: 60}},
+            }],
+            cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 120}]},
+          });
+          debugGraphApplyServerHistory({sequence: 1, records: [record(1)]});
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+          });
+          setDebugGraphChartVisible('modelTokens', true);
+          setDebugGraphRange(300);
+          renderDebugPanels({force: true});
+
+          const graph = document.querySelector('[data-js-debug-graph]');
+          const body = graph.querySelector('[data-js-debug-graph-body]');
+          const controlSelectors = [
+            '[data-js-debug-range-slider]',
+            '[data-js-debug-resolution-override]',
+            '[data-js-debug-chart-layout]',
+            '[data-js-debug-chart-toggle]',
+            '[data-js-debug-model-token-dimension-select]',
+          ];
+          const controls = controlSelectors.map(selector => graph.querySelector(selector));
+          if (controls.some(control => !control)) return done({error: 'missing stable control fixture'});
+          let bodyMutationCallbacks = 0;
+          const observer = new MutationObserver(() => { bodyMutationCallbacks += 1; });
+          observer.observe(body, {childList: true});
+          controls[1].focus();
+          const focusedRefreshResults = [0, 1, 2].map(() => refreshDebugGraphElement(graph, {force: true}));
+          const focusedBodySame = graph.querySelector('[data-js-debug-graph-body]') === body;
+          const focusedControlsSame = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
+          controls[1].blur();
+          await new Promise(resolve => setTimeout(resolve, 80));
+          observer.disconnect();
+          const controlsAfterBlurSame = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
+          const deferredPending = graph.dataset.jsDebugGraphRefreshPending || '';
+
+          const renderedBeforeTicks = Number(graph.dataset.jsDebugGraphRenderedAt);
+          for (let sequence = 2; sequence <= 6; sequence += 1) {
+            applyJsDebugStatsSamplePush({sequence, record: record(sequence), sample: {time: Date.now() / 1000}});
+          }
+          await new Promise(resolve => setTimeout(resolve, 120));
+          const renderedAfterTicks = Number(graph.dataset.jsDebugGraphRenderedAt);
+          const controlIdentityAfterTicks = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
+          setDebugGraphRange(900);
+          const renderedAfterRange = Number(graph.dataset.jsDebugGraphRenderedAt);
+
+          setDebugGraphRange(300);
+          refreshDebugGraphElement(graph, {force: true});
+          const live = graph.querySelector('[data-js-debug-live-tail]');
+          const settledBefore = [...graph.querySelectorAll('[data-js-debug-series], [data-js-debug-moving-average]')].map(node => node.getAttribute('points'));
+          const liveBefore = live ? {x2: live.getAttribute('x2'), y1: Number(live.getAttribute('y1')), min: Number(live.dataset.jsDebugLiveYMin), max: Number(live.dataset.jsDebugLiveYMax)} : null;
+          await new Promise(resolve => setTimeout(resolve, 180));
+          const liveAfter = live ? {x2: live.getAttribute('x2'), y1: Number(live.getAttribute('y1')), frames: Number(live.dataset.jsDebugLiveFrame || 0)} : null;
+          const settledAfter = [...graph.querySelectorAll('[data-js-debug-series], [data-js-debug-moving-average]')].map(node => node.getAttribute('points'));
+
+          setDebugGraphRange(4 * 60 * 60);
+          const longRangeLiveCount = graph.querySelectorAll('[data-js-debug-live-tail]').length;
+          const longRangeBody = graph.querySelector('[data-js-debug-graph-body]').innerHTML;
+          await new Promise(resolve => setTimeout(resolve, 120));
+          const longRangeStatic = graph.querySelector('[data-js-debug-graph-body]').innerHTML === longRangeBody;
+
+          setDebugGraphRange(300);
+          const hiddenLive = graph.querySelector('[data-js-debug-live-tail]');
+          await new Promise(resolve => setTimeout(resolve, 100));
+          const hiddenFramesBefore = Number(hiddenLive?.dataset.jsDebugLiveFrame || 0);
+          Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
+          document.dispatchEvent(new Event('visibilitychange'));
+          await new Promise(resolve => setTimeout(resolve, 150));
+          const hiddenFramesAfter = Number(hiddenLive?.dataset.jsDebugLiveFrame || 0);
+          Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
+          document.dispatchEvent(new Event('visibilitychange'));
+
+          done({
+            focusedRefreshResults,
+            focusedBodySame,
+            focusedControlsSame,
+            controlsAfterBlurSame,
+            bodyMutationCallbacks,
+            deferredPending,
+            renderedBeforeTicks,
+            renderedAfterTicks,
+            renderedAfterRange,
+            controlIdentityAfterTicks,
+            firstRangeStop: Number(graph.querySelector('datalist option')?.dataset.jsDebugRange),
+            oneMinuteLabelCount: [...graph.querySelectorAll('[data-js-debug-range-control] *')].filter(node => node.textContent?.trim() === '1m').length,
+            liveBefore,
+            liveAfter,
+            settledSame: JSON.stringify(settledBefore) === JSON.stringify(settledAfter),
+            longRangeLiveCount,
+            longRangeStatic,
+            hiddenFramesBefore,
+            hiddenFramesAfter,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["focusedRefreshResults"] == [False, False, False], metrics
+    assert metrics["focusedBodySame"] is True and metrics["focusedControlsSame"] is True, metrics
+    assert metrics["controlsAfterBlurSame"] is True, metrics
+    assert metrics["bodyMutationCallbacks"] == 1 and metrics["deferredPending"] == "", metrics
+    assert metrics["renderedAfterTicks"] == metrics["renderedBeforeTicks"], metrics
+    assert metrics["renderedAfterRange"] > metrics["renderedAfterTicks"], metrics
+    assert metrics["controlIdentityAfterTicks"] is True, metrics
+    assert metrics["firstRangeStop"] == 300 and metrics["oneMinuteLabelCount"] == 0, metrics
+    assert metrics["liveBefore"] and metrics["liveAfter"], metrics
+    assert metrics["liveBefore"]["x2"] != metrics["liveAfter"]["x2"] and metrics["liveAfter"]["frames"] > 0, metrics
+    assert metrics["liveBefore"]["min"] <= metrics["liveAfter"]["y1"] <= metrics["liveBefore"]["max"], metrics
+    assert metrics["settledSame"] is True, metrics
+    assert metrics["longRangeLiveCount"] == 0 and metrics["longRangeStatic"] is True, metrics
+    assert metrics["hiddenFramesAfter"] == metrics["hiddenFramesBefore"], metrics
+
+
+def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug,1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof clientEventDemandDescriptor === 'function' && typeof selectSession === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Date.now();
+          const records = Array.from({length: 12}, (_unused, index) => ({
+            start: Math.floor((now - ((11 - index) * 5000)) / 1000),
+            duration: 5,
+            sequence: index + 1,
+            cpu_total_percent: 10 + index,
+            cpu_count: 1,
+            tokens_per_agent_total: 100 + index,
+            agent_token_samples: 1,
+            agent_token_rates: [{
+              key: '1|0|codex', label: '1:0:codex', total: 100 + index, samples: 1, tokens: 100 + index, seconds: 60, source: 'transcript',
+              model_rates: {'gpt-5.6-sol': {total: 100 + index, samples: 1, tokens: 100 + index, seconds: 60}},
+            }],
+            cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 100 + index}]},
+          }));
+          debugGraphApplyServerHistory({sequence: records.length, records});
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+          });
+          setDebugGraphChartVisible('modelTokens', true);
+          setDebugGraphRange(300);
+          selectSession(yocostItemId, {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const demandCostOnly = clientEventDemandDescriptor();
+          const costPanel = document.getElementById(panelDomId(yocostItemId));
+          const svg = costPanel?.querySelector('[data-js-debug-chart="modelTokens"] .js-debug-line-chart');
+          const rect = svg?.getBoundingClientRect();
+          if (!svg || !rect?.width) return done({error: 'missing YO!cost zoom fixture'});
+          const eventInit = clientX => ({bubbles: true, cancelable: true, pointerId: 45, pointerType: 'mouse', button: 0, buttons: 1, clientX, clientY: rect.top + rect.height / 2});
+          const startX = rect.left + rect.width * 0.2;
+          const endX = rect.left + rect.width * 0.7;
+          svg.dispatchEvent(new PointerEvent('pointerdown', eventInit(startX)));
+          svg.dispatchEvent(new PointerEvent('pointermove', eventInit(endX)));
+          svg.dispatchEvent(new PointerEvent('pointerup', eventInit(endX)));
+          const costDomainState = debugGraphDomain();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const costReset = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-zoom-reset]');
+          const costDomain = [Math.floor(costDomainState.startMs), Math.floor(costDomainState.endMs)];
+          document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-zoom-reset]')?.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const resetCostZoomed = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-chart-grid]')?.dataset.jsDebugZoomed === 'true';
+          selectSession('1', {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const originalActivePaneItems = activePaneItems;
+          activePaneItems = () => ['1'];
+          const demandNeither = clientEventDemandDescriptor();
+          activePaneItems = originalActivePaneItems;
+          done({
+            costDemandChannels: demandCostOnly.channels,
+            costDemandActive: demandCostOnly.active_panes,
+            costZoomed: costDomainState.zoomed === true,
+            costReset: costReset?.textContent || '',
+            costDomain,
+            resetCostZoomed,
+            neitherChannels: demandNeither.channels,
+            neitherActive: demandNeither.active_panes,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert "stats" in metrics["costDemandChannels"] and "__yocost__" in metrics["costDemandActive"], metrics
+    assert metrics["costZoomed"] is True and metrics["costDomain"][1] > metrics["costDomain"][0], metrics
+    assert metrics["costReset"] == "Reset Zoom", metrics
+    assert metrics["resetCostZoomed"] is False, metrics
+    assert "stats" not in metrics["neitherChannels"], metrics
+
+
 def test_debug_graph_terminal_partial_history_renders_agent_and_model_tokens(browser, tmp_path):
     """A known-unavailable prefix must not discard the valid token payload."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
@@ -3900,6 +4127,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         const sliderAfterZoomRect = sliderAfterZoom?.getBoundingClientRect();
         const resetRightGap = resetRect && resetControlRect ? resetControlRect.right - resetRect.right : NaN;
         const sliderBeforeLabelGap = labelRect && sliderAfterZoomRect ? labelRect.left - sliderAfterZoomRect.right : NaN;
+        const sliderDisabledWhileZoomed = sliderAfterZoom?.disabled === true && sliderAfterZoom?.getAttribute('aria-disabled') === 'true';
         reset?.dispatchEvent(new PointerEvent('pointerdown', eventInit(endX)));
         const afterResetGrid = document.querySelector('[data-js-debug-chart-grid]');
 
@@ -3926,7 +4154,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           zoomed,
           zoomSeconds: (zoomEnd - zoomStart) / 1000,
           resetText: reset?.textContent || '',
-          sliderDisabledWhileZoomed: sliderAfterZoom?.disabled === true && sliderAfterZoom?.getAttribute('aria-disabled') === 'true',
+          sliderDisabledWhileZoomed,
           resetRightGap,
           sliderBeforeLabelGap,
           resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
@@ -3934,18 +4162,18 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["stops"] == [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], metrics
+    assert metrics["stops"] == [300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], metrics
     assert metrics["sliderMin"] == "0"
-    assert metrics["sliderMax"] == "9"
+    assert metrics["sliderMax"] == "8"
     assert metrics["sliderStep"] == "any", metrics
-    assert metrics["sliderValue"] == "1"
+    assert metrics["sliderValue"] == "0"
     assert metrics["sliderPointerDefaultAllowed"] is True, metrics
     assert metrics["sliderSurvivedPointerDown"] is True, metrics
     assert metrics["sliderSurvivedInputDrag"] is True, metrics
     assert metrics["sliderSurvivedPassiveRefreshDuringDrag"] is True, metrics
     assert metrics["sliderValueDuringInput"] == "7.4", metrics
     assert metrics["sliderValueAfterSnap"] == "7", metrics
-    assert 28790 <= metrics["sliderInputSeconds"] <= 28810, metrics
+    assert 57590 <= metrics["sliderInputSeconds"] <= 57610, metrics
     assert metrics["hoverFirstX"] == metrics["hoverSecondX"] == "150.0", metrics
     assert float(metrics["hoverOpacity"]) > 0.0, metrics
     assert metrics["hoverTooltip"]["hidden"] is False, metrics
