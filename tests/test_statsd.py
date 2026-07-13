@@ -1256,7 +1256,12 @@ def test_statsd_completed_agent_scan_persists_in_bounded_pages_without_blocking_
         "seen_keys": [], "sample_time": 1200, "previous_state": {},
     }
     pages = []
-    monkeypatch.setattr(service, "merge_server_records", lambda page, **_kwargs: pages.append(len(page)) or {"ok": True, "changed": len(page)})
+    compact_flags = []
+    monkeypatch.setattr(
+        service,
+        "merge_server_records",
+        lambda page, **kwargs: (pages.append(len(page)), compact_flags.append(kwargs.get("compact")), {"ok": True, "changed": len(page)})[-1],
+    )
 
     # The completion handoff does no SQLite merge, so a history request is not
     # queued behind all 130 records (the former synchronous behavior).
@@ -1271,10 +1276,21 @@ def test_statsd_completed_agent_scan_persists_in_bounded_pages_without_blocking_
     while service.agent_token_scan_persistence is not None:
         service._drain_agent_token_scan_result()
     assert pages == [64, 64, 2]
+    assert compact_flags == [False, False, False]
     assert service._agent_token_state() == {}
     done = service.finish_agent_token_scan("scan-1")
     assert done["done"] is True
     assert done["persisted_records"] == 130
+    service.store.close()
+
+
+def test_statsd_server_merge_can_defer_full_history_compaction(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    monkeypatch.setattr(service, "_compact_history", lambda *_args: pytest.fail("recovery page must not compact the full store"))
+
+    result = service.merge_server_records([{"time": 1000, "cpu_total_percent": 1, "cpu_count": 1}], now=1000, compact=False)
+
+    assert result["changed"] == 1
     service.store.close()
 
 

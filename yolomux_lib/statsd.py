@@ -1004,9 +1004,9 @@ class PersistentStatsService:
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
             self.store.upsert_bucket(bucket)
             changed += 1
+        if changed and compact:
+            self._compact_history(sample_now)
         if changed:
-            if compact:
-                self._compact_history(sample_now)
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
 
@@ -1506,7 +1506,12 @@ class PersistentStatsService:
             records = persistence["records"]
             page = records[offset:offset + STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS]
         try:
-            merged = self.merge_server_records(page, now=persistence["sample_time"]) if page else {"ok": True, "changed": 0}
+            # Recovery records are already assigned to their retention tier
+            # from their historical timestamps. Full-store compaction here
+            # would turn every bounded page back into a multi-second listener
+            # stall. Normal live maintenance keeps its existing compaction
+            # path; recovery deliberately defers it.
+            merged = self.merge_server_records(page, now=persistence["sample_time"], compact=False) if page else {"ok": True, "changed": 0}
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             # Keep the exact pending cursor and uncommitted baseline. A later
             # listener turn retries the idempotent atom page instead of
