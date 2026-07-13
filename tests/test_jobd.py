@@ -325,3 +325,8 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
     assert crashed.status == "failed"
     assert recovered.status == "completed"
     assert json.loads(recovered.result) == {"a": 2, "z": 1}
+
+
+def test_jobd_task_registry_generation_is_independent_from_transport_version():
+    assert jobd.JOBD_PROTOCOL_VERSION == 2
+    assert jobd.JOBD_PROTOCOL_VERSION != jobd.LOCAL_RPC_VERSION

@@ -1229,6 +1229,120 @@ def test_debug_graph_live_tail_refresh_stays_ready_without_older_overlay(browser
     assert metrics["finalPhase"] == "ready", metrics
 
 
+def test_debug_graph_pending_backfill_is_retryable_and_recovers_in_browser(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]')"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalFetch = window.fetch;
+          try {
+            stopJsDebugStatsPolling();
+            clearJsDebugGraphData();
+            resetJsDebugHistoryReadiness();
+            let requests = 0;
+            const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+              status: 200, headers: {'Content-Type': 'application/json'},
+            }));
+            window.fetch = input => {
+              requests += 1;
+              const url = new URL(String(input), location.href);
+              if (requests === 1) return response({history: {
+                coverage: {pending: true, reason: 'Backfill in progress', retry_after_seconds: 5},
+              }});
+              const start = Number(url.searchParams.get('history_start'));
+              const end = Math.ceil(Date.now() / 1000) + 1;
+              return response({history: {sequence: 2, records: [], coverage: {
+                mode: 'live', requested_start: start, requested_end: 0,
+                covered_start: start, covered_end: end, resolution_seconds: 1,
+                complete: true, has_more_older: false, next_older_end: 0,
+                intervals: [{start, end, resolution_seconds: 1}], store_intervals: {}, epochs: [],
+              }}});
+            };
+            await pollJsDebugStatsSample();
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const pending = {
+              phase: jsDebugHistoryReadinessSnapshot().phase,
+              text: graph?.querySelector('[data-js-debug-history-overlay]')?.textContent || '',
+              retryButton: Boolean(graph?.querySelector('[data-js-debug-history-retry]')),
+            };
+            setJsDebugHistoryReadiness('retrying', {nextAutoRetryAtMs: 0});
+            await pollJsDebugStatsSample();
+            return {requests, pending, finalPhase: jsDebugHistoryReadinessSnapshot().phase};
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["pending"]["phase"] == "retrying", metrics
+    assert "Backfill in progress" in metrics["pending"]["text"], metrics
+    assert metrics["pending"]["retryButton"] is False, metrics
+    assert metrics["requests"] == 2, metrics
+    assert metrics["finalPhase"] == "ready", metrics
+
+
+def test_yocost_drag_defers_all_dom_repaint_work_and_flushes_once(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1", sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof renderYoCostPanels === 'function' && typeof flushDeferredJsDebugPanelRefresh === 'function'"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('cost');
+          next.cost = paneStateWithTabs([yocostItemId], yocostItemId);
+          applyLayoutSlots(next, {focusSession: yocostItemId, forceFull: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const panel = document.querySelector('.js-yocost-panel');
+          const body = panel?.querySelector('.js-yocost-body');
+          if (!body) throw new Error('YO!cost body did not mount');
+          const childBefore = body.firstElementChild;
+          dragState.item = yocostItemId;
+          const started = performance.now();
+          const directResult = renderYoCostPanels({force: true});
+          refreshDebugPanelsFromEvents({force: true});
+          scheduleJsDebugPanelRefresh({force: true});
+          const during = {
+            elapsedMs: performance.now() - started,
+            sameChild: body.firstElementChild === childBefore,
+            directResult,
+            deferred: jsDebugRenderDragDeferred,
+          };
+          dragState.item = null;
+          const flushed = flushDeferredJsDebugPanelRefresh();
+          await new Promise(resolve => setTimeout(resolve, 40));
+          return {
+            during,
+            flushed,
+            deferredAfter: jsDebugRenderDragDeferred,
+            bodyConnected: body.isConnected,
+          };
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["during"]["elapsedMs"] <= 50, metrics
+    assert metrics["during"]["sameChild"] is True, metrics
+    assert metrics["during"]["directResult"] is False, metrics
+    assert metrics["during"]["deferred"] is True, metrics
+    assert metrics["flushed"] is True, metrics
+    assert metrics["deferredAfter"] is False, metrics
+    assert metrics["bodyConnected"] is True, metrics
+
+
 def test_debug_graph_layout_reconciliation_polls_only_on_stats_activation(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
     WebDriverWait(browser, 5).until(
@@ -4003,7 +4117,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     assert metrics["memoryShown"] is True, metrics
     assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
     assert metrics["layoutLabel"] == "Size:", metrics
-    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
+    assert metrics["toggleLabels"] == ["CPU", "Servers load", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
     assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["saved"] == {
         "subTab": "events",
@@ -4011,7 +4125,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
         "resolutionOverrideSeconds": 0,
             "chartLayout": 0,
             "modelTokenDimension": "output",
-            "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil"],
+            "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil", "serversLoad"],
         "visibleCharts": ["cpu", "memory"],
     }, metrics
 

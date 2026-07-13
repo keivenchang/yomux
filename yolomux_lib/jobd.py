@@ -35,6 +35,7 @@ from .local_services.runtime import redact_local_service_text
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
 from .local_services.client import LocalServiceClient
+from .metadata import _discover_indexed_repo_roots
 from .transcripts import compact_transcript_items
 from .transcripts import compact_transcript_items_since
 from .transcripts import compact_transcript_lines
@@ -43,7 +44,9 @@ from .transcripts import newest_transcript_timestamp
 from .transcripts import transcript_activity_state_from_text
 
 
-JOBD_PROTOCOL_VERSION = LOCAL_RPC_VERSION
+# The envelope transport remains LOCAL_RPC_VERSION. Bump this service generation whenever the
+# registered task/result contract changes so a newly restarted web process retires an older daemon.
+JOBD_PROTOCOL_VERSION = 2
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_MAX_WORKERS = 2
 JOBD_MAX_QUEUE = 64
@@ -91,10 +94,6 @@ def _indexed_repo_roots(payload: bytes) -> bytes:
         if not path.is_absolute() or ".." in path.parts:
             raise ValueError("indexed directory must be absolute and normalized")
         indexed_dirs.append(str(path))
-    # Import locally so ordinary jobd startup does not initialize metadata/git
-    # helpers until this maintenance task actually runs.
-    from .metadata import _discover_indexed_repo_roots
-
     result = {"roots": _discover_indexed_repo_roots(indexed_dirs)}
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 

@@ -161,6 +161,8 @@ function dockviewRootBoundaryDropIntent(event) {
 
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
+  const targetSlot = dockviewSlotForGroupId(event.group.id || '');
+  const targetRect = targetSlot ? layoutSlotScreenRect(targetSlot) : null;
   const fileSurfaceContent = event.nativeEvent?.target?.closest?.(
     '.file-explorer-tree-panel, .file-explorer-changes-panel, .file-tree-row',
   );
@@ -169,18 +171,17 @@ function dockviewPaneContentDropInfo(event) {
   // split. Vertical Side splits remain available from the tab menu and actual pane-edge chrome.
   const zone = narrowSingleColumnMode() || fileSurfaceContent
     ? 'middle'
-    : (event.position === 'center' ? 'middle' : event.position);
+    : (event.nativeEvent && targetRect ? dropZoneForRect(event.nativeEvent, targetRect) : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
-  const targetSlot = dockviewSlotForGroupId(event.group.id || '');
   if (!item || !targetSlot) return null;
   const sourceSlot = slotForItem(item) || dockviewSlotForGroupId(data?.groupId || '');
   const intent = {
     item,
     sourceSlot,
     targetSlot,
-    targetRect: layoutSlotScreenRect(targetSlot),
+    targetRect,
     zone,
     createsPane: layoutSplitZone(zone),
   };
@@ -749,6 +750,9 @@ function dockviewFinishTabPointerDrag(event) {
     && dropIntentAllowsSession(state.item, contentIntent)
   ) {
     window.setTimeout(() => {
+      // Dockview's onWillDrop may have committed an edge split after the document-level pointer
+      // fallback queued this center move. Do not collapse that newer app-owned transaction.
+      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
       if (slotForItem(state.item) === contentTargetSlot) return;
       void moveSessionToSlot(state.item, contentTargetSlot, state.slot, paneTabs(contentTargetSlot).length);
     }, 0);
@@ -1342,6 +1346,7 @@ function dockviewInit() {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
+        dockviewLayoutState.tabDropHandledAt = Date.now();
         queueMicrotask(() => {
           void splitSessionAtSlot(paneIntent.item, paneIntent.targetSlot, paneIntent.zone, paneIntent.sourceSlot);
         });
