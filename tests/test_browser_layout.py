@@ -8217,7 +8217,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), grabber: box(document.getElementById('smart-key-grabber')), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
-        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display};
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, shellVisibility: getComputedStyle(shell).visibility, sideDisplay: getComputedStyle(side).display, sideVisibility: getComputedStyle(side).visibility, bottomDisplay: getComputedStyle(bottom).display, bottomVisibility: getComputedStyle(bottom).visibility, dpadDisplay: getComputedStyle(dpad).display, dpadVisibility: getComputedStyle(dpad).visibility};
         return {
           pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
           paneDisplay: getComputedStyle(pane).display,
@@ -8265,7 +8265,10 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["bar"]["height"] < metrics["pane"]["height"], metrics
     assert metrics["normal"]["shellDisplay"] == metrics["normal"]["sideDisplay"] == metrics["normal"]["bottomDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
     assert metrics["overflow"]["rowDisplay"] == "grid", metrics
-    assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == metrics["overflow"]["bottomDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
+    assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == metrics["overflow"]["bottomDisplay"] == "grid" and metrics["overflow"]["dpadDisplay"] == "grid", metrics
+    assert metrics["overflow"]["shellVisibility"] == metrics["overflow"]["sideVisibility"] == metrics["overflow"]["bottomVisibility"] == metrics["overflow"]["dpadVisibility"] == "hidden", metrics
+    assert metrics["overflow"]["bar"] == metrics["normal"]["bar"], metrics
+    assert abs(metrics["overflow"]["more"]["left"] - metrics["normal"]["more"]["left"]) <= 0.5 and abs(metrics["overflow"]["more"]["top"] - metrics["normal"]["more"]["top"]) <= 0.5, metrics
     assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
     assert metrics["overflow"]["more"]["right"] <= metrics["overflow"]["row"]["right"] + 0.5, metrics
     assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
@@ -8624,6 +8627,88 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     assert metrics["beforeKeyTapState"]["x"] == metrics["afterKeyTapState"]["x"], metrics
     assert metrics["beforeKeyTapState"]["y"] == metrics["afterKeyTapState"]["y"], metrics
     assert {"type": "input", "data": "\t"} in metrics["keyFrames"], metrics
+
+
+def test_live_touch_terminal_default_above_more_toggle_keeps_physical_corner(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+    )
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=8881&layout=slot1&tabs=slot1:8881",
+            sessions=["8881"],
+            terminal_css=".terminal { width: 100%; height: 100%; }",
+            grid_width=834,
+            grid_height=1048,
+        )
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return typeof terminalMobileAccessoryState === 'function' && document.querySelector('[data-terminal-mobile-toggle=\"8881\"]') !== null"
+            )
+        )
+        metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const launcher = document.querySelector('[data-terminal-mobile-toggle="8881"]');
+            const bar = document.querySelector('[data-terminal-mobile-keybar="8881"]');
+            const pane = launcher.closest('.tab-pane');
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height};
+            };
+            const tap = node => {
+              const rect = node.getBoundingClientRect();
+              const clientX = rect.left + rect.width / 2;
+              const clientY = rect.top + rect.height / 2;
+              const init = {bubbles: true, cancelable: true, pointerId: 91, pointerType: 'touch', button: 0, buttons: 1, clientX, clientY, isPrimary: true};
+              node.dispatchEvent(new PointerEvent('pointerdown', init));
+              node.dispatchEvent(new PointerEvent('pointerup', {...init, buttons: 0}));
+              node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX, clientY}));
+            };
+            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            (async () => {
+              tap(launcher);
+              await settle();
+              const snapshots = [];
+              for (let index = 0; index < 6; index += 1) {
+                const state = {...terminalMobileAccessoryState('8881')};
+                const more = state.more
+                  ? bar.querySelector('.mobile-terminal-keyrow--more [data-terminal-mobile-key="more"]')
+                  : bar.querySelector('.mobile-terminal-keyrow-shell [data-terminal-mobile-key="more"]');
+                snapshots.push({bar: box(bar), more: box(more), launcher: box(launcher), pane: box(pane), placement: bar.dataset.terminalMobilePlacement, state});
+                tap(more);
+                await settle();
+              }
+              done({viewport: {width: innerWidth, height: innerHeight}, snapshots, errors: window.__bootErrors || []});
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+    assert metrics.get("error") is None, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["viewport"] == {"width": 834, "height": 1112}, metrics
+    assert len(metrics["snapshots"]) == 6, metrics
+    assert {snapshot["placement"] for snapshot in metrics["snapshots"]} == {"above"}, metrics
+    assert {snapshot["state"]["more"] for snapshot in metrics["snapshots"]} == {False, True}, metrics
+    first = metrics["snapshots"][0]
+    for snapshot in metrics["snapshots"]:
+        assert all(abs(snapshot["bar"][key] - first["bar"][key]) <= 0.5 for key in ("left", "top", "right", "bottom", "width", "height")), metrics
+        assert all(abs(snapshot["more"][key] - first["more"][key]) <= 0.5 for key in ("left", "top", "right", "bottom")), metrics
+        assert 0 <= snapshot["launcher"]["top"] - snapshot["bar"]["bottom"] <= 16, metrics
+        assert snapshot["bar"]["left"] >= snapshot["pane"]["left"] - 0.5 and snapshot["bar"]["right"] <= snapshot["pane"]["right"] + 0.5, metrics
+        assert snapshot["bar"]["top"] >= snapshot["pane"]["top"] - 0.5 and snapshot["bar"]["bottom"] <= snapshot["pane"]["bottom"] + 0.5, metrics
 
 
 def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browser, tmp_path):

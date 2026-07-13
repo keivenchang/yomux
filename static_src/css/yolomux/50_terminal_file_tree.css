@@ -159,11 +159,13 @@
 .mobile-terminal-keybar--more .mobile-terminal-key-side,
 .mobile-terminal-keybar--more .mobile-terminal-key-dpad,
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-bottom {
-  display: none;
+  visibility: hidden;
+  pointer-events: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow--more {
   grid-column: 1 / -1;
-  grid-row: 1;
+  grid-row: 1 / 4;
+  align-self: start;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-3);

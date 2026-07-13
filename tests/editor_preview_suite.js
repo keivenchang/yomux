@@ -884,6 +884,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(primaryPlacement.side, overflowPlacement.side, 'a content-size toggle preserves its already-open palette side');
     assert.equal(primaryPlacement.y, overflowPlacement.y, 'a below-launcher palette keeps its launcher-adjacent top edge fixed while content changes size');
     assert.deepStrictEqual(primaryAgainPlacement, primaryPlacement, 'returning to primary content has no stale-size corrective placement');
+    const stableAboveState = {x: null, y: null, palettePlacement: null};
+    const stableAbovePane = {left: 0, top: 0, width: 320, height: 400};
+    const stableAboveLauncher = {left: 272, top: 352, width: 40, height: 40};
+    const stableAbovePlacements = Array.from({length: 6}, () => api.terminalMobileAccessoryPalettePlacementForTest(stableAboveState, stableAbovePane, stableAboveLauncher, {width: 288, height: 196}));
+    assert.equal(stableAbovePlacements.every(placement => placement.side === 'above'), true, 'the default launcher stays above across repeated more toggles');
+    assert.equal(stableAbovePlacements.every(placement => placement.x === stableAbovePlacements[0].x && placement.y === stableAbovePlacements[0].y), true, 'one fixed primary/overflow viewport box keeps default-above placement stable');
+    assert.ok(/\.mobile-terminal-keybar--more \.mobile-terminal-keyrow-shell,[\s\S]*visibility:\s*hidden[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more\s*\{[\s\S]*grid-row:\s*1 \/ 4/.test(css), 'overflow overlays the preserved primary grid footprint instead of shrinking the palette box');
     const clampedPlacementState = {x: null, y: null, palettePlacement: null};
     const clampedLauncher = {left: 272, top: 192, width: 40, height: 40};
     const clampedPrimary = api.terminalMobileAccessoryPalettePlacementForTest(clampedPlacementState, anchoredPane, clampedLauncher, {width: 288, height: 100});
