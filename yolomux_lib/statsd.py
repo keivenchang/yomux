@@ -78,14 +78,21 @@ STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_sampl
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATSD_SAMPLE_INTERVAL_SECONDS = 1.0
+# The owner sample includes bounded host probes.  Leave a small transport
+# margin beyond the one-second cadence so a completed ~0.9s sample is not
+# falsely classified as failed by envelope serialization/scheduling overhead.
+STATSD_OWNER_SAMPLE_TIMEOUT_SECONDS = 1.2
 STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS = 5.0
 STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS = 60.0
 STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
 STATS_COST_SUMMARY_MAX_BYTES = stats_store.STATS_COST_SUMMARY_MAX_BYTES
 STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
-STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 16
-STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 64
+# Both maintenance paths run on the sole SQLite/RPC owner.  Keep a single
+# durable record per turn: a large JSON payload can cost far more than a
+# simple record count suggests on a memory-constrained host.
+STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 1
+STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 1
 
 
 def _scan_agent_token_rows_in_worker(
@@ -688,7 +695,7 @@ class PersistentStatsService:
                     response = send_yolomux_control_request(
                         owner,
                         {"action": "statsd_sample", "token_consumer": time.time() < self.agent_token_consumer_until},
-                        timeout=0.9,
+                        timeout=STATSD_OWNER_SAMPLE_TIMEOUT_SECONDS,
                     )
                     if not response.get("ok"):
                         self.last_sampler_failure = redact_local_service_text(response.get("error") or "stats owner unavailable")

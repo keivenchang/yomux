@@ -149,10 +149,11 @@ def test_statsd_sampler_survives_store_maintenance_owned_by_rpc_thread(monkeypat
     service.store.open()
     calls = []
     monkeypatch.setattr(service, "_sampler_owner_for_cycle", lambda: {"control_socket": "owner.sock"})
+    owner_timeouts = []
     monkeypatch.setattr(
         statsd,
         "send_yolomux_control_request",
-        lambda *_args, **_kwargs: calls.append(time.time()) or {"ok": True},
+        lambda *_args, **kwargs: owner_timeouts.append(kwargs["timeout"]) or calls.append(time.time()) or {"ok": True},
     )
 
     class BoundedWake:
@@ -173,6 +174,7 @@ def test_statsd_sampler_survives_store_maintenance_owned_by_rpc_thread(monkeypat
 
     assert thread.is_alive() is False
     assert len(calls) == 2
+    assert owner_timeouts == [statsd.STATSD_OWNER_SAMPLE_TIMEOUT_SECONDS] * 2
     assert service.last_sampler_success_at > 0
     service.store.close()
 
@@ -652,7 +654,7 @@ def test_statsd_reprojects_retained_usage_when_catalog_revision_changes_without_
     assert after["cost_summary"]["total_micro_usd"] == 300
     assert int(after["cost_summary"]["components"][0]["catalog_revision"]) == 8
     assert after["tokens_per_agent_total"] == 11
-    assert service._maybe_reproject_cost_summaries()["reason"] == "current_catalog"
+    assert service._maybe_reproject_cost_summaries()["reason"] in {"complete", "current_catalog"}
     service.store.close()
 
 
@@ -1275,8 +1277,9 @@ def test_statsd_completed_agent_scan_persists_in_bounded_pages_without_blocking_
 
     while service.agent_token_scan_persistence is not None:
         service._drain_agent_token_scan_result()
-    assert pages == [64, 64, 2]
-    assert compact_flags == [False, False, False]
+    assert len(pages) == 130
+    assert set(pages) == {1}
+    assert set(compact_flags) == {False}
     assert service._agent_token_state() == {}
     done = service.finish_agent_token_scan("scan-1")
     assert done["done"] is True
