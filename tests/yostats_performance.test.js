@@ -66,6 +66,8 @@ function runYostatsPerformanceSuite() {
     assert.equal(memory.provenanceValues[20].held, true, 'a held point is explicitly presentation-only');
     assert.equal(memory.provenanceValues[20].sampleTimeMs, start, 'held points retain the real source timestamp');
     assert.equal(memory.provenanceValues[20].sampleCount, 3, 'held points retain the real aggregate sample count');
+    assert.match(api.debugGraphHeldProvenanceTextForTest([memory.provenanceValues[20]]), /^\u21b3 .+ · n=3$/, 'held hover text visibly identifies the real source time and sample count');
+    assert.equal(api.debugGraphHeldProvenanceTextForTest([memory.provenanceValues[0]]), '', 'ordinary observed values do not get a misleading held-source annotation');
     assert.equal(memory.provenanceValues[30], null, 'an explicit outage clears the hold before its nominal expiry');
     assert.equal(memory.hasDataValues.slice(31, 40).some(Boolean), false, 'the display does not bridge the post-outage gap');
     assert.equal(memory.provenanceValues[45].sampleTimeMs, start + 40_000, 'a recovered observation becomes the new provenance owner');
@@ -90,6 +92,7 @@ function runYostatsPerformanceSuite() {
     assert.match(memoryHtml, /data-js-debug-series="systemMemory"[^>]*data-js-debug-series-segment="1"/, 'the recovered gauge is marked as a separate segment');
     const source = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.match(source, /function debugGraphHoverProvenanceAtTime[\s\S]*series\.provenanceValues[\s\S]*data-js-debug-hover-provenance/, 'hover diagnostics consume the same preserved sample provenance');
+    assert.match(source, /data-js-debug-hover-source[\s\S]*source\.textContent = sourceText[\s\S]*source\.hidden = !sourceText/, 'held-source provenance is visible in the graph hover instead of only a private attribute');
 
     const uninterrupted = loadYolomux('?debug=1&sessions=debug', ['1']);
     uninterrupted.clearJsDebugEventsForTest();
@@ -108,6 +111,41 @@ function runYostatsPerformanceSuite() {
     const uninterruptedMemory = uninterrupted.debugGraphSeriesDataForTest(now).find(series => series.key === 'systemMemory');
     assert.equal(uninterruptedMemory.samples, 1, 'the uninterrupted minute projection still reports one real sample');
     assert.equal(uninterruptedMemory.displaySamples, 60, 'one minute gauge sample may paint exactly sixty one-second display slots');
+  });
+
+  test('System reports every stats sampler family without replacing aggregate health', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const nowSeconds = 2_000_000;
+    const html = api.debugSystemStatsSamplerCardHtmlForTest([{
+      service: 'statsd',
+      sampler_alive: true,
+      sampler_last_cycle_seconds: 0.25,
+      sampler_late_cycles: 4,
+      sampler_missed_cycles: 2,
+      history_requests: 20,
+      history_cache_hits: 18,
+      history_profile: {assemble_ms: 3, returned_records: 42, source_records: 43},
+      sampler_families: {
+        cpu: {cadence_seconds: 1, alive: true, running: true, attempts: 100, successes: 99, failures: 1, late_cycles: 2, missed_cycles: 3, last_runtime_seconds: 0.012, last_success_at: nowSeconds - 2, last_failure: 'timeout'},
+        agent_status: {cadence_seconds: 10, alive: true, attempts: 20, successes: 20, last_runtime_ms: 8, last_success_at: nowSeconds - 4},
+        gpu: {cadence_seconds: 10, alive: false, attempts: 10, successes: 8, failures: 2, late_cycles: 1, missed_cycles: 1, last_runtime_seconds: 0.4, last_success_at: nowSeconds - 12, last_failure: 'GPU unavailable'},
+        system_memory: {cadence_ms: 60_000, alive: true, attempts: 5, successes: 5, last_runtime_seconds: 0.02, last_success_age_seconds: 30},
+        agent_tokens: {interval_seconds: 60, alive: true, attempts: 6, successes: 6, last_runtime_seconds: 0.03, last_success_at: nowSeconds - 30},
+      },
+    }], nowSeconds);
+    assert.match(html, /YO!stats sampler/, 'the existing aggregate sampler card remains');
+    assert.match(html, /Last cycle[\s\S]*Late \/ missed deadlines[\s\S]*History cache hit rate/, 'legacy aggregate sampler health remains visible');
+    for (const family of ['cpu', 'agent_status', 'gpu', 'system_memory', 'agent_tokens']) {
+      assert.match(html, new RegExp(`data-js-debug-sampler-family="${family}"`), `${family} has a compact status row`);
+    }
+    assert.match(html, /data-js-debug-sampler-family="cpu"[\s\S]*100 \/ 99 \/ 1[\s\S]*2 \/ 3[\s\S]*timeout/, 'family rows expose attempt, result, deadline, and failure details');
+    assert.match(html, /data-js-debug-sampler-family="gpu"[\s\S]*GPU unavailable/, 'a failing sampler exposes its latest failure');
+    assert.match(html, /data-js-debug-sampler-family="system_memory"[\s\S]*60s/, 'millisecond cadence telemetry is normalized for display');
+    assert.match(html, /data-js-debug-sampler-family="agent_tokens"[\s\S]*60s/, 'minute token cadence is explicit');
+    assert.match(html, /js-debug-system-card--wide[\s\S]*data-js-debug-sampler-families[\s\S]*<table/, 'the family list uses the existing compact scrollable table layout');
+    const source = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.match(source, /function refreshDebugSystemViews[\s\S]*const scrollTop = view\.scrollTop[\s\S]*restoreElementScrollPosition\(view, scrollTop, scrollLeft\)/, 'System refresh preserves vertical scroll while sampler telemetry updates');
+    assert.match(source, /function refreshDebugSystemViews[\s\S]*const scrollLeft = view\.scrollLeft[\s\S]*restoreElementScrollPosition\(view, scrollTop, scrollLeft\)/, 'System refresh preserves horizontal scroll while sampler telemetry updates');
   });
 
   test('YO!cost reuses the selected big-range cost aggregate instead of recomputing every render', () => {

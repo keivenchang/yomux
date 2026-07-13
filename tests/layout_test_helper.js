@@ -1256,6 +1256,7 @@ globalThis.__layoutTestApi = {
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
+  debugGraphHeldProvenanceTextForTest: debugGraphHeldProvenanceText,
   debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
   debugGraphInnerHtmlForTest: debugGraphInnerHtml,
@@ -1273,6 +1274,7 @@ globalThis.__layoutTestApi = {
   debugGraphCostTmuxBreakdownHtmlForTest: debugGraphCostTmuxBreakdownHtml,
   debugGraphCostModelUsageChartHtmlForTest: debugGraphCostModelUsageChartHtml,
   debugGraphCostSourceTreeHtmlForTest: debugGraphCostSourceTreeHtml,
+  debugSystemStatsSamplerCardHtmlForTest: debugSystemStatsSamplerCardHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {

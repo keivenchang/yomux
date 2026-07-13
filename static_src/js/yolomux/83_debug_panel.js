@@ -3739,6 +3739,16 @@ function debugGraphHoverProvenanceAtTime(chart, timestamp) {
   });
 }
 
+function debugGraphHeldProvenanceText(provenance) {
+  const held = (provenance || []).filter(item => item?.held === true && Number.isFinite(Number(item.sampleTimeMs)));
+  if (!held.length) return '';
+  const sampleTimeMs = Math.max(...held.map(item => Number(item.sampleTimeMs)));
+  const sampleCount = held
+    .filter(item => Number(item.sampleTimeMs) === sampleTimeMs)
+    .reduce((total, item) => total + Math.max(0, Number(item.sampleCount) || 0), 0);
+  return `↳ ${debugGraphExactTimeLabel(sampleTimeMs)} · n=${debugSystemNumber(sampleCount)}`;
+}
+
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
@@ -3805,7 +3815,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       </div>
       ${debugGraphXAxisHtml(domain)}
     </div>`}
-    ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time></div>'}
+    ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time><span data-js-debug-hover-source-separator aria-hidden="true" hidden> · </span><span data-js-debug-hover-source hidden></span></div>'}
   </section>`;
 }
 
@@ -5236,20 +5246,84 @@ function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
   </table></div>`;
 }
 
-function debugSystemStatsSamplerCardHtml(services = []) {
+function debugSystemSamplerFamilyEntries(value) {
+  if (Array.isArray(value)) {
+    return value.map((family, index) => [String(family?.family || family?.name || index), family || {}]);
+  }
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).filter(([, family]) => family && typeof family === 'object');
+}
+
+function debugSystemSamplerFamilyNumber(family, ...keys) {
+  for (const key of keys) {
+    if (family?.[key] == null) continue;
+    const value = Number(family[key]);
+    if (Number.isFinite(value)) return Math.max(0, value);
+  }
+  return 0;
+}
+
+function debugSystemSamplerFamilySuccessAge(family, nowSeconds) {
+  const reportedAge = debugSystemSamplerFamilyNumber(family, 'last_success_age_seconds');
+  if (reportedAge > 0) return relativeTimeFormat(reportedAge);
+  let succeededAt = debugSystemSamplerFamilyNumber(family, 'last_success_at', 'last_success');
+  if (succeededAt > 1e12) succeededAt /= 1000;
+  return succeededAt > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - succeededAt)) : '—';
+}
+
+function debugSystemSamplerFamilySeconds(family, secondsKeys, millisecondsKeys) {
+  const seconds = debugSystemSamplerFamilyNumber(family, ...secondsKeys);
+  if (seconds > 0) return seconds;
+  return debugSystemSamplerFamilyNumber(family, ...millisecondsKeys) / 1000;
+}
+
+function debugSystemSamplerFamiliesHtml(value, nowSeconds = Date.now() / 1000) {
+  const families = debugSystemSamplerFamilyEntries(value);
+  if (!families.length) return '';
+  return `<div class="js-debug-system-table-wrap" data-js-debug-sampler-families><table class="js-debug-system-table">
+    <thead><tr><th>Family</th><th>Cadence</th><th>Alive / running</th><th>Attempts / successes / failures</th><th>Late / missed</th><th>Last runtime</th><th>Last success</th><th>Last failure</th></tr></thead>
+    <tbody>${families.map(([name, family]) => {
+      const cadence = debugSystemSamplerFamilySeconds(family, ['cadence_seconds', 'interval_seconds'], ['cadence_ms', 'interval_ms']);
+      const runtime = debugSystemSamplerFamilySeconds(family, ['last_runtime_seconds', 'runtime_seconds', 'last_runtime'], ['last_runtime_ms', 'runtime_ms']);
+      const running = family.running === true || family.in_flight === true;
+      const alive = family.alive === true || family.sampler_alive === true || running;
+      const attempts = debugSystemSamplerFamilyNumber(family, 'attempts', 'attempt_count');
+      const successes = debugSystemSamplerFamilyNumber(family, 'successes', 'success_count');
+      const failures = debugSystemSamplerFamilyNumber(family, 'failures', 'failure_count');
+      const late = debugSystemSamplerFamilyNumber(family, 'late', 'late_cycles');
+      const missed = debugSystemSamplerFamilyNumber(family, 'missed', 'missed_cycles');
+      return `<tr data-js-debug-sampler-family="${esc(name)}">
+        <th scope="row">${esc(name)}</th><td>${esc(cadence > 0 ? debugGraphTerseTimeText(cadence * 1000) : '—')}</td>
+        <td>${alive ? 'Yes' : 'No'} / ${running ? 'Yes' : 'No'}</td>
+        <td>${esc(`${debugSystemNumber(attempts)} / ${debugSystemNumber(successes)} / ${debugSystemNumber(failures)}`)}</td>
+        <td>${esc(`${debugSystemNumber(late)} / ${debugSystemNumber(missed)}`)}</td>
+        <td>${esc(runtime > 0 ? debugGraphTerseTimeText(runtime * 1000) : '—')}</td>
+        <td>${esc(debugSystemSamplerFamilySuccessAge(family, nowSeconds))}</td>
+        <td>${esc(family.last_failure || '—')}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() / 1000) {
   const statsd = (services || []).find(service => String(service?.service || '') === 'statsd') || {};
   const profile = statsd.history_profile && typeof statsd.history_profile === 'object' ? statsd.history_profile : {};
   const requests = Math.max(0, Number(statsd.history_requests) || 0);
   const hits = Math.min(requests, Math.max(0, Number(statsd.history_cache_hits) || 0));
   const hitRate = requests > 0 ? `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})` : '—';
-  return debugSystemCardHtml('YO!stats sampler', debugSystemRowsHtml([
+  const aggregate = debugSystemRowsHtml([
     ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
     ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
     ['Late / missed deadlines', `${debugSystemNumber(statsd.sampler_late_cycles)} / ${debugSystemNumber(statsd.sampler_missed_cycles)}`],
     ['History cache hit rate', hitRate],
     ['Last history latency', debugGraphTerseTimeText(Number(profile.assemble_ms || 0))],
     ['Last history query', `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`],
-  ]));
+  ]);
+  return debugSystemCardHtml(
+    'YO!stats sampler',
+    `${aggregate}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`,
+    {wide: true},
+  );
 }
 
 function debugSystemInnerHtml() {
@@ -5807,6 +5881,14 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   const provenance = debugGraphHoverProvenanceAtTime(chart, timestamp);
   if (provenance.length) tooltip.setAttribute('data-js-debug-hover-provenance', JSON.stringify(provenance));
   else tooltip.removeAttribute('data-js-debug-hover-provenance');
+  const sourceText = debugGraphHeldProvenanceText(provenance);
+  const source = tooltip.querySelector('[data-js-debug-hover-source]');
+  const sourceSeparator = tooltip.querySelector('[data-js-debug-hover-source-separator]');
+  if (source) {
+    source.textContent = sourceText;
+    source.hidden = !sourceText;
+  }
+  if (sourceSeparator) sourceSeparator.hidden = !sourceText;
   debugGraphSetHoverLegendItems(chart, timestamp);
   for (const item of panel.querySelectorAll('[data-js-debug-hover-tooltip]')) item.hidden = item !== tooltip;
   tooltip.hidden = false;
