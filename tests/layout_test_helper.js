@@ -1132,8 +1132,12 @@ globalThis.__layoutTestApi = {
     return record ? {
       expandedPaths: [...record.expandedPaths],
       manualCollapsedPaths: [...record.manualCollapsedPaths].sort(),
+      cursorPath: record.cursorPath || '',
+      selectedPaths: [...(record.selectedPaths || [])].sort(),
+      anchorPath: record.anchorPath || '',
     } : null;
   },
+  restoreFileExplorerSyncCursorStateForTest: restoreFileExplorerSyncCursorState,
   touchFileExplorerSyncTargetRecordForTest(targetKey) { return Boolean(fileExplorerSyncTargetRecord(targetKey, true, true)); },
   fileExplorerSyncTargetRecordKeysForTest() { return [...fileExplorerSyncTargetRecords.keys()]; },
   fileExplorerMemoryCacheLimitForTest: fileExplorerMemoryCacheLimit,
@@ -2174,6 +2178,7 @@ globalThis.__layoutTestApi = {
   pendingSessionButtonsRenderForTest() { return pendingSessionButtonsRender; },
   setPendingSessionButtonsRenderForTest(value) { pendingSessionButtonsRender = Boolean(value); },
   setDocumentActiveElementForTest(element) { document.activeElement = element; },
+  documentActiveElementForTest() { return document.activeElement; },
   topbarControlIsActiveForTest: topbarControlIsActive,
   flushPendingSessionButtonsRenderForTest: flushPendingSessionButtonsRender,
   pendingPreferencesRenderForTest() { return pendingPreferencesRender; },
@@ -2490,6 +2495,7 @@ globalThis.__layoutTestApi = {
       manual: fileExplorerManualSelectionActive,
     };
   },
+  fileExplorerSelectionLeadForTest() { return fileExplorerSelectionLead; },
   setFileExplorerSelectionForTest(paths, anchor = null) {
     fileExplorerSelectedPaths.clear();
     for (const path of paths || []) fileExplorerSelectedPaths.add(path);

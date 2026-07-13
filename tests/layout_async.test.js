@@ -591,6 +591,9 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/a')), {
       expandedPaths: ['/repo/a/src'],
       manualCollapsedPaths: ['/repo/a/src'],
+      cursorPath: '',
+      selectedPaths: [],
+      anchorPath: '',
     }, 'one target record owns both disclosure fields');
 
     api.setFileExplorerVisibleSyncTargetForTest('1', '/repo/b');
@@ -600,6 +603,9 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/b')), {
       expandedPaths: ['/repo/b/lib'],
       manualCollapsedPaths: [],
+      cursorPath: '',
+      selectedPaths: [],
+      anchorPath: '',
     }, 'a second target receives an independent complete record');
 
     api.resetFileExplorerSyncManualCollapsesForTest({session: '1', root: '/repo/a'});
@@ -616,6 +622,70 @@ async function runLayoutAsyncSuite() {
     assert.equal(source.includes('fileExplorerExpandedBySyncTarget'), false, 'retired expansion map stays absent');
     assert.equal(source.includes('fileExplorerSyncManualCollapsedByTarget'), false, 'retired manual-collapse map stays absent');
     assert.ok(source.includes('const fileExplorerSyncTargetRecords = new Map()'), 'one target-record map remains');
+  });
+
+  await testAsync('Finder Sync remembers independent same-root keyboard cursors without taking focus', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const root = '/home/test';
+    api.setFileExplorerDirListingForTest(root, [
+      {name: 'one.txt', kind: 'file'},
+      {name: 'two.txt', kind: 'file'},
+    ]);
+    const terminal = new TestElement('terminal');
+    terminal.classList.add('xterm');
+    api.setDocumentActiveElementForTest(terminal);
+    const firstPlan = {session: '1', root, expandPaths: [], affectedDirs: [root]};
+    const secondPlan = {session: '2', root, expandPaths: [], affectedDirs: [root]};
+
+    await api.syncFileExplorerRootToPlanForTest(firstPlan, '1');
+    const firstRow = api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/home/test/one.txt"]');
+    let firstScrolls = 0;
+    firstRow.scrollIntoView = () => { firstScrolls += 1; };
+    api.selectFileTreePath('/home/test/one.txt');
+    await api.syncFileExplorerRootToPlanForTest(secondPlan, '2');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest(`1\x1f${root}`)), {
+      expandedPaths: [],
+      manualCollapsedPaths: [],
+      cursorPath: '/home/test/one.txt',
+      selectedPaths: ['/home/test/one.txt'],
+      anchorPath: '/home/test/one.txt',
+    }, 'leaving a target stores its cursor and selection in the existing session+root record');
+
+    api.selectFileTreePath('/home/test/two.txt');
+    await api.syncFileExplorerRootToPlanForTest(firstPlan, '1');
+    const restoredOne = api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/home/test/one.txt"]');
+    assert.equal(api.fileExplorerSelectionLeadForTest(), '/home/test/one.txt', 'returning to session 1 restores its own lead row');
+    assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/home/test/one.txt'], 'the remembered lead is selected after restore');
+    assert.equal(api.fileExplorerTreeForTest().getAttribute('aria-activedescendant'), restoredOne.id, 'the tree active-descendant names the restored cursor row');
+    assert.ok(firstScrolls >= 1, 'returning to session 1 scrolls its restored cursor into view');
+    assert.equal(api.documentActiveElementForTest(), terminal, 'cursor restore never steals terminal/browser focus');
+
+    await api.syncFileExplorerRootToPlanForTest(secondPlan, '2');
+    assert.equal(api.fileExplorerSelectionLeadForTest(), '/home/test/two.txt', 'the same-root session 2 record remains independent');
+  });
+
+  await testAsync('Finder Sync cursor restore falls back to a visible ancestor without a fetch', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const root = '/home/test';
+    api.setFileExplorerDirListingForTest(root, [{name: 'project', kind: 'dir'}]);
+    api.setFileExplorerDirListingForTest(`${root}/project`, [{name: 'inside.txt', kind: 'file'}]);
+    let fetchCalls = 0;
+    api.setFetchForTest(() => {
+      fetchCalls += 1;
+      return Promise.reject(new Error('cursor restoration must stay cache-first'));
+    });
+    const expandedPlan = {session: '1', root, expandPaths: [`${root}/project`], affectedDirs: [`${root}/project`]};
+    const collapsedPlan = {session: '2', root, expandPaths: [], affectedDirs: [root]};
+    await api.syncFileExplorerRootToPlanForTest(expandedPlan, '1');
+    api.selectFileTreePath(`${root}/project/inside.txt`);
+    api.setFileExplorerExpandedForTest([]); // emulate a manually collapsed parent before leaving session 1
+    await api.syncFileExplorerRootToPlanForTest(collapsedPlan, '2');
+    await api.syncFileExplorerRootToPlanForTest({session: '1', root, expandPaths: [], affectedDirs: [root]}, '1');
+    assert.equal(api.fileExplorerSelectionLeadForTest(), `${root}/project`, 'a hidden remembered child degrades to its visible ancestor');
+    assert.equal(api.fileExplorerTreeForTest().getAttribute('aria-activedescendant'), api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/home/test/project"]').id, 'fallback cursor remains exposed to assistive tree navigation');
+    assert.equal(fetchCalls, 0, 'restoring a collapsed cursor adds no blocking fetch');
   });
 
   await testAsync('Finder Sync warm session switches render synchronously from the bounded listing cache', async () => {

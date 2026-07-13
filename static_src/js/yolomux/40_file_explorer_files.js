@@ -853,7 +853,13 @@ function fileExplorerSyncTargetRecord(targetKey, create = false, touch = false) 
   if (!key) return null;
   let record = fileExplorerSyncTargetRecords.get(key) || null;
   if (!record && create) {
-    record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    record = {
+      expandedPaths: [],
+      manualCollapsedPaths: new Set(),
+      cursorPath: '',
+      selectedPaths: [],
+      anchorPath: '',
+    };
   }
   if (record && (touch || !fileExplorerSyncTargetRecords.has(key))) {
     setLimitedMapEntry(fileExplorerSyncTargetRecords, key, record, fileExplorerMemoryCacheLimit);
@@ -867,12 +873,85 @@ function rememberFileExplorerSyncExpandedState(session = fileExplorerVisibleSync
   if (!key) return;
   const record = fileExplorerSyncTargetRecord(key, true, true);
   record.expandedPaths = fileExplorerExpandedPathsForRoot(root);
+  // This is deliberately one target record with disclosure state: a same-root session must retain
+  // its own keyboard cursor rather than borrowing the other session's global Finder selection.
+  record.cursorPath = fileExplorerSyncCursorPathForRoot(root, fileExplorerSelectionLead);
+  record.selectedPaths = fileExplorerSyncPathsForRoot(root, fileExplorerSelectedPaths);
+  record.anchorPath = fileExplorerSyncCursorPathForRoot(root, fileExplorerSelectionAnchor);
 }
 
 function rememberedFileExplorerSyncExpandedPaths(session, root) {
   const key = fileExplorerSyncTargetKey(session, root);
   const paths = fileExplorerSyncTargetRecord(key)?.expandedPaths;
   return Array.isArray(paths) ? fileExplorerExpandedPathsForRoot(root, paths) : [];
+}
+
+function fileExplorerSyncCursorPathForRoot(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const normalizedPath = normalizeDirectoryPath(path || '');
+  return normalizedRoot && normalizedPath && normalizedPath !== normalizedRoot
+    && pathIsInsideDirectory(normalizedPath, normalizedRoot) ? normalizedPath : '';
+}
+
+function fileExplorerSyncPathsForRoot(root, paths) {
+  return Array.from(new Set(Array.from(paths || [])
+    .map(path => fileExplorerSyncCursorPathForRoot(root, path))
+    .filter(Boolean))).sort();
+}
+
+function fileExplorerVisibleSyncCursorPath(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  let candidate = fileExplorerSyncCursorPathForRoot(normalizedRoot, path);
+  while (candidate) {
+    for (const container of fileExplorerTreeContainers()) {
+      if (selectableFileTreeRows(container).some(row => row.dataset.path === candidate)) return candidate;
+    }
+    const parent = normalizeDirectoryPath(dirnameOf(candidate));
+    candidate = parent && parent !== candidate && parent !== normalizedRoot ? parent : '';
+  }
+  return '';
+}
+
+function fileExplorerTreeActiveDescendantId(container, path) {
+  const containers = fileExplorerTreeContainers();
+  const index = Math.max(0, containers.indexOf(container));
+  return `file-explorer-tree-${index}-${encodeURIComponent(path)}`;
+}
+
+function syncFileExplorerTreeActiveDescendant(cursorPath = '') {
+  for (const container of fileExplorerTreeContainers()) {
+    const row = selectableFileTreeRows(container).find(item => item.dataset.path === cursorPath) || null;
+    if (!row) {
+      container.removeAttribute?.('aria-activedescendant');
+      continue;
+    }
+    const id = fileExplorerTreeActiveDescendantId(container, cursorPath);
+    if (row.id !== id) row.id = id;
+    container.setAttribute?.('aria-activedescendant', id);
+    // Deliberately do not call focus(): Finder Sync must not take keyboard ownership away from a terminal.
+    if (!scrollFileTreeRowIntoView(container, row)) row.scrollIntoView?.({block: 'nearest'});
+  }
+}
+
+function restoreFileExplorerSyncCursorState(session, root) {
+  const key = fileExplorerSyncTargetKey(session, root);
+  const record = fileExplorerSyncTargetRecord(key, false, true);
+  const rememberedSelection = fileExplorerSyncPathsForRoot(root, record?.selectedPaths);
+  const requestedCursor = fileExplorerSyncCursorPathForRoot(root, record?.cursorPath);
+  let cursorPath = fileExplorerVisibleSyncCursorPath(root, requestedCursor);
+  if (!cursorPath) {
+    cursorPath = rememberedSelection.map(path => fileExplorerVisibleSyncCursorPath(root, path)).find(Boolean) || '';
+  }
+  const visibleSelection = rememberedSelection.filter(path => fileExplorerVisibleSyncCursorPath(root, path) === path);
+  fileExplorerSelectedPaths.clear();
+  for (const path of visibleSelection) fileExplorerSelectedPaths.add(path);
+  if (cursorPath) fileExplorerSelectedPaths.add(cursorPath);
+  fileExplorerSelectionLead = cursorPath || null;
+  const anchorPath = fileExplorerVisibleSyncCursorPath(root, record?.anchorPath);
+  fileExplorerSelectionAnchor = anchorPath || cursorPath || null;
+  updateFileExplorerCurrentFileHighlight();
+  syncFileExplorerTreeActiveDescendant(cursorPath);
+  return cursorPath;
 }
 
 function setFileExplorerVisibleSyncTarget(session, root) {
@@ -1094,7 +1173,7 @@ function resetFileExplorerSyncManualCollapsesIfNeeded(plan) {
     let record = fileExplorerSyncTargetRecord(targetKey);
     rememberFileExplorerSyncManualCollapseState();
     fileExplorerSyncManualCollapseTargetKey = targetKey;
-    if (!record && targetKey) record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    if (!record && targetKey) record = fileExplorerSyncTargetRecord(targetKey, true, false);
     if (record) setLimitedMapEntry(fileExplorerSyncTargetRecords, targetKey, record, fileExplorerMemoryCacheLimit);
     fileExplorerSyncManualCollapsedPaths = record?.manualCollapsedPaths || new Set();
   }
@@ -1704,6 +1783,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
       const currentDirectories = fileExplorerSyncListingDirectories(plan, currentRenderPaths);
       const completeEntriesByDir = cachedFileExplorerSyncListings(currentDirectories) || entriesByDir;
       renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir);
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
       updateFileExplorerSessionHighlightRows(plan.session);
     }).catch(error => console.warn('Finder sync background revalidation failed', error));
   });
@@ -1734,6 +1814,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
     if (cachedListings) {
       changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings) || changed;
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
       markFileExplorerSyncPlanApplied(plan);
@@ -1745,6 +1826,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     if (fetchedListings.has(normalizeDirectoryPath(plan.root))) {
       changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings) || changed;
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
       markFileExplorerSyncPlanApplied(plan);
