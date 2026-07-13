@@ -1192,6 +1192,7 @@ def test_background_status_includes_performance_summary():
         "role": app_module.BACKGROUND_ROLE_SESSION_FILES,
         "surface": "payload",
         "count": 1,
+        "compute_ms_total": 12.5,
         "compute_ms_avg": 12.5,
         "compute_ms_max": 12.5,
         "payload_bytes_total": len(json.dumps({"files": [{"path": "/repo/a.py"}]}, sort_keys=True, separators=(",", ":")).encode("utf-8")),
@@ -1318,6 +1319,35 @@ def test_performance_metrics_payload_ranks_response_bytes():
     assert [row["surface"] for row in payload["top_payload_bytes"][:2]] == ["GET /api/large", "GET /api/small"]
     assert payload["top_payload_bytes"][0]["payload_bytes_total"] == 600
     assert payload["top_payload_bytes"][0]["count"] == 2
+
+
+def test_server_cpu_budget_warns_after_sustained_window_with_top_consumers(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    logs = []
+    events = []
+    monkeypatch.setattr(app_module, "emit_server_log", lambda *args, **kwargs: logs.append((args, kwargs)))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: events.append((args, kwargs)))
+    try:
+        webapp.record_performance_sample("http-endpoint", "POST /api/fs/batch", compute_ms=40.0)
+        webapp.record_performance_sample("session-files", "phase:git-snapshot", compute_ms=25.0)
+        first = webapp.update_server_cpu_budget({"cpu_percent": 31.0}, now=1000.0)
+        early = webapp.update_server_cpu_budget({"cpu_percent": 35.0}, now=1299.0)
+        warned = webapp.update_server_cpu_budget({"cpu_percent": 36.0}, now=1300.0)
+        duplicate = webapp.update_server_cpu_budget({"cpu_percent": 37.0}, now=1400.0)
+        recovered = webapp.update_server_cpu_budget({"cpu_percent": 10.0}, now=1401.0)
+    finally:
+        webapp.control_server.stop()
+
+    assert first["status"] == early["status"] == "watching"
+    assert warned["status"] == duplicate["status"] == "warning"
+    assert warned["sustained_seconds"] == 300.0
+    assert warned["top_consumers"][:2] == [
+        {"role": "http-endpoint", "surface": "POST /api/fs/batch", "count": 1, "compute_ms_total": 40.0},
+        {"role": "session-files", "surface": "phase:git-snapshot", "count": 1, "compute_ms_total": 25.0},
+    ]
+    assert len(logs) == 1 and logs[0][0][:2] == ("warning", "stats-cpu")
+    assert len(events) == 1 and events[0][0][1] == "server_cpu_budget_warning"
+    assert recovered["status"] == "ok" and recovered["sustained_seconds"] == 0.0
 
 
 def test_runtime_python_profile_reports_named_native_threads():

@@ -56,6 +56,17 @@ class StatsSampleRecord:
 
 
 @dataclass
+class CpuBudgetRecord:
+    """Own sustained server-CPU warning state for the one-second CPU sampler."""
+
+    exceeded_since: float = 0.0
+    last_warning_at: float = 0.0
+    warning_emitted: bool = False
+    current_percent: float = 0.0
+    top_consumers: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class TranscriptsPayloadCacheRecord:
     stored_at: float | None = None
     payload: dict[str, Any] | None = None
@@ -109,6 +120,7 @@ class StatsHistoryService:
 
     sample_lock: threading.Lock = field(default_factory=threading.Lock)
     sample_record: StatsSampleRecord = field(default_factory=StatsSampleRecord)
+    cpu_budget_record: CpuBudgetRecord = field(default_factory=CpuBudgetRecord)
     agent_token_lock: threading.Lock = field(default_factory=threading.Lock)
     agent_token_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_activity_state: dict[str, dict[str, Any]] = field(default_factory=dict)

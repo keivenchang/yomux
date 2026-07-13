@@ -122,6 +122,7 @@ from .events import mutate_yolomux_state
 from .events import search_snippet
 from .events import read_yolomux_state
 from .events import update_yolomux_state
+from .server_logs import emit_server_log
 from .agent_tui import classify_agent_pane
 from .agent_tui import normalized_prompt_state
 from .chat_store import ChatStore
@@ -931,6 +932,8 @@ FILESYSTEM_WATCH_KEYFRAME_SECONDS = 60.0
 PERFORMANCE_RECORD_LIMIT = 4096
 PERFORMANCE_RECENT_LIMIT = 120
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
+SERVER_CPU_BUDGET_PERCENT = 30.0
+SERVER_CPU_BUDGET_SUSTAINED_SECONDS = 300.0
 BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
 BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
 # The event's storage owner determines whether another server must be notified immediately.
@@ -2683,6 +2686,7 @@ class TmuxWebtermApp:
         sample, record_cpu_sample = self.current_stats_sample()
         if not record_cpu_sample:
             return
+        self.update_server_cpu_budget(sample)
         scheduled_time = getattr(self.stats_metric_thread_context, "scheduled_time", None)
         if scheduled_time is not None:
             sample = {**sample, "time": float(scheduled_time)}
@@ -8536,6 +8540,7 @@ class TmuxWebtermApp:
                 "role": item["role"],
                 "surface": item["surface"],
                 "count": item["count"],
+                "compute_ms_total": round(float(item["compute_ms_total"]), 3),
                 "compute_ms_avg": round(float(item["compute_ms_total"]) / count, 3),
                 "compute_ms_max": round(float(item["compute_ms_max"]), 3),
                 "payload_bytes_total": item["payload_bytes_total"],
@@ -8553,6 +8558,90 @@ class TmuxWebtermApp:
             "summary": summary_rows,
             "top_payload_bytes": top_payload_rows,
             "recent": records[-PERFORMANCE_RECENT_LIMIT:],
+        }
+
+    def server_cpu_budget_top_consumers(self, limit: int = 3) -> list[dict[str, Any]]:
+        """Return bounded endpoint/background owners ranked by aggregate compute."""
+
+        rows = [
+            dict(row)
+            for row in self.performance_metrics_payload().get("summary", [])
+            if isinstance(row, dict) and str(row.get("role") or "")
+        ]
+        rows.sort(key=lambda row: (
+            -float(row.get("compute_ms_total") or 0.0),
+            -int(row.get("count") or 0),
+            str(row.get("role") or ""),
+            str(row.get("surface") or ""),
+        ))
+        return [
+            {
+                "role": str(row.get("role") or ""),
+                "surface": str(row.get("surface") or ""),
+                "count": max(0, int(row.get("count") or 0)),
+                "compute_ms_total": round(max(0.0, float(row.get("compute_ms_total") or 0.0)), 3),
+            }
+            for row in rows[:max(1, int(limit or 3))]
+        ]
+
+    def update_server_cpu_budget(self, sample: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+        """Advance the sustained-CPU warning without adding another sampler."""
+
+        sample_time = float(now if now is not None else sample.get("time") or time.time())
+        cpu_percent = max(0.0, self.float_value(sample.get("cpu_percent"), 0.0))
+        record = self.stats_history_service.cpu_budget_record
+        record.current_percent = cpu_percent
+        if cpu_percent <= SERVER_CPU_BUDGET_PERCENT:
+            record.exceeded_since = 0.0
+            record.warning_emitted = False
+            record.top_consumers = []
+            return self.server_cpu_budget_payload(now=sample_time)
+        if record.exceeded_since <= 0:
+            record.exceeded_since = sample_time
+        sustained_seconds = max(0.0, sample_time - record.exceeded_since)
+        if sustained_seconds >= SERVER_CPU_BUDGET_SUSTAINED_SECONDS and not record.warning_emitted:
+            record.warning_emitted = True
+            record.last_warning_at = sample_time
+            record.top_consumers = self.server_cpu_budget_top_consumers()
+            consumer_text = ", ".join(
+                f"{row['role']}:{row['surface']}={row['compute_ms_total']:.1f}ms"
+                for row in record.top_consumers
+            ) or "no profiled consumers"
+            message = (
+                f"YOLOmux CPU {cpu_percent:.1f}% exceeded {SERVER_CPU_BUDGET_PERCENT:.0f}% "
+                f"for {sustained_seconds:.0f}s; top compute: {consumer_text}"
+            )
+            emit_server_log(
+                "warning", "stats-cpu", message,
+                category="performance", dedupe_key="server-cpu-budget", dedupe_seconds=SERVER_CPU_BUDGET_SUSTAINED_SECONDS,
+            )
+            self.log_event(
+                None,
+                "server_cpu_budget_warning",
+                message,
+                {
+                    "cpu_percent": round(cpu_percent, 3),
+                    "budget_percent": SERVER_CPU_BUDGET_PERCENT,
+                    "sustained_seconds": round(sustained_seconds, 3),
+                    "top_consumers": json.dumps(record.top_consumers, separators=(",", ":")),
+                },
+            )
+        return self.server_cpu_budget_payload(now=sample_time)
+
+    def server_cpu_budget_payload(self, *, now: float | None = None) -> dict[str, Any]:
+        record = self.stats_history_service.cpu_budget_record
+        sample_time = float(now if now is not None else time.time())
+        sustained_seconds = max(0.0, sample_time - record.exceeded_since) if record.exceeded_since > 0 else 0.0
+        status = "warning" if record.warning_emitted else ("watching" if record.exceeded_since > 0 else "ok")
+        return {
+            "status": status,
+            "current_percent": round(record.current_percent, 3),
+            "budget_percent": SERVER_CPU_BUDGET_PERCENT,
+            "sustained_budget_seconds": SERVER_CPU_BUDGET_SUSTAINED_SECONDS,
+            "sustained_seconds": round(sustained_seconds, 3),
+            "exceeded_since": record.exceeded_since,
+            "last_warning_at": record.last_warning_at,
+            "top_consumers": [dict(row) for row in record.top_consumers],
         }
 
     def runtime_python_profile(self, duration_seconds: Any = 0.5, interval_seconds: Any = 0.01) -> dict[str, Any]:
@@ -8854,6 +8943,7 @@ class TmuxWebtermApp:
                 "system_cpu_percent": float(sample.get("system_cpu_percent") or 0.0),
                 "rss_bytes": int(sample.get("rss_bytes") or 0),
             },
+            "cpu_budget": self.server_cpu_budget_payload(),
         }
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
