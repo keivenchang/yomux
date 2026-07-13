@@ -253,6 +253,7 @@ function terminalMobileAccessoryState(session, options = {}) {
       cmdLocked: false,
       more: false,
       open: false,
+      palettePlacement: null,
       x: null,
       y: null,
       palettePress: null,
@@ -447,45 +448,65 @@ function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, 
   const below = paneHeight - bottom;
   const leftRoom = left;
   const rightRoom = paneWidth - right;
+  const previous = state?.palettePlacement || null;
   const moved = terminalMobileAccessoryMoved(state);
-  let side = 'above';
-  if (!moved && above >= height + gap) {
-    side = 'above';
-  } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
-    side = 'below';
-  } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
-    side = 'left';
-  } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
-    side = 'right';
-  } else if (below <= gap * 2 && above >= height + gap) {
-    side = 'above';
-  } else {
-    const candidates = [
-      {side: 'above', room: above, fits: above >= height + gap},
-      {side: 'below', room: below, fits: below >= height + gap},
-      {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
-      {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
-    ];
-    const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
-    side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+  let side = previous?.side || 'above';
+  if (!previous) {
+    if (!moved && above >= height + gap) {
+      side = 'above';
+    } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
+      side = 'below';
+    } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
+      side = 'left';
+    } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
+      side = 'right';
+    } else if (below <= gap * 2 && above >= height + gap) {
+      side = 'above';
+    } else {
+      const candidates = [
+        {side: 'above', room: above, fits: above >= height + gap},
+        {side: 'below', room: below, fits: below >= height + gap},
+        {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
+        {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
+      ];
+      const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
+      side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+    }
+  }
+  let anchor = Number(previous?.anchor);
+  if (!Number.isFinite(anchor)) {
+    anchor = side === 'above' ? top - gap
+      : side === 'below' ? bottom + gap
+        : side === 'left' ? left - gap
+          : right + gap;
   }
   let x = right - width;
-  let y = top - height - gap;
+  let y = anchor - height;
   if (side === 'below') {
     x = left;
-    y = bottom + gap;
+    y = anchor;
   } else if (side === 'left') {
-    x = left - width - gap;
+    x = anchor - width;
     y = top;
   } else if (side === 'right') {
-    x = right + gap;
+    x = anchor;
     y = top;
   }
-  return {
+  const placement = {
     side,
     x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
     y: Math.round(terminalMobileAccessoryClamp(y, 0, paneHeight - height)),
   };
+  if (state) {
+    state.palettePlacement = {
+      side,
+      anchor: side === 'above' ? placement.y + height
+        : side === 'below' ? placement.y
+          : side === 'left' ? placement.x + width
+            : placement.x,
+    };
+  }
+  return placement;
 }
 
 function terminalMobileAccessoryLauncherDragPosition(press, event) {
@@ -542,6 +563,9 @@ function syncTerminalMobileAccessoryState(session) {
   const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
   bar.hidden = state.open !== true;
   bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+  // Set both visibility levers before measuring. Measuring after only the class change observes a
+  // hybrid primary/overflow layout and creates a second corrective placement on the next sync.
+  if (more) more.hidden = state.more !== true;
   if (launcher) {
     const open = state.open === true;
     launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -577,7 +601,6 @@ function syncTerminalMobileAccessoryState(session) {
     bar.style.transform = positionedBlock ? 'none' : '';
     delete bar.dataset.terminalMobilePlacement;
   }
-  if (more) more.hidden = state.more !== true;
   for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
   return true;
@@ -587,7 +610,10 @@ function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
   if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
   if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
-  if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
+  if (key === 'open' && state.open !== true) {
+    dismissTerminalMobileAccessories(session);
+    state.palettePlacement = null;
+  }
   state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
   return state[key];
@@ -724,6 +750,7 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
     press.longPressed = true;
     state.open = true;
     state.more = true;
+    state.palettePlacement = null;
     syncTerminalMobileAccessoryState(session);
   }, terminalMobileAccessoryLongPressMs);
   return true;
@@ -743,6 +770,7 @@ function moveTerminalMobileAccessoryLauncherPress(session, event) {
   const position = terminalMobileAccessoryLauncherDragPosition(press, event);
   state.x = position.x;
   state.y = position.y;
+  state.palettePlacement = null;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
   event.stopPropagation();
@@ -811,6 +839,7 @@ function moveTerminalMobileAccessoryPalettePress(session, event) {
   const position = terminalMobileAccessoryLauncherDragPosition(press, event);
   state.x = position.x;
   state.y = position.y;
+  state.palettePlacement = null;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
   event.stopPropagation();

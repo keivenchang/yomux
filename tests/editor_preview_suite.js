@@ -875,6 +875,23 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(placed.side, side, `${name} launcher uses expected palette side`);
       assert.ok(placed.x >= 0 && placed.y >= 0 && placed.x + 120 <= 320 && placed.y + 80 <= 240, `${name} palette remains clamped inside pane`);
     }
+    const anchoredPlacementState = {x: 12, y: 0, palettePlacement: null};
+    const anchoredPane = {left: 0, top: 0, width: 320, height: 240};
+    const anchoredLauncher = {left: 12, top: 0, width: 40, height: 40};
+    const primaryPlacement = api.terminalMobileAccessoryPalettePlacementForTest(anchoredPlacementState, anchoredPane, anchoredLauncher, {width: 260, height: 96});
+    const overflowPlacement = api.terminalMobileAccessoryPalettePlacementForTest(anchoredPlacementState, anchoredPane, anchoredLauncher, {width: 288, height: 156});
+    const primaryAgainPlacement = api.terminalMobileAccessoryPalettePlacementForTest(anchoredPlacementState, anchoredPane, anchoredLauncher, {width: 260, height: 96});
+    assert.equal(primaryPlacement.side, overflowPlacement.side, 'a content-size toggle preserves its already-open palette side');
+    assert.equal(primaryPlacement.y, overflowPlacement.y, 'a below-launcher palette keeps its launcher-adjacent top edge fixed while content changes size');
+    assert.deepStrictEqual(primaryAgainPlacement, primaryPlacement, 'returning to primary content has no stale-size corrective placement');
+    const clampedPlacementState = {x: null, y: null, palettePlacement: null};
+    const clampedLauncher = {left: 272, top: 192, width: 40, height: 40};
+    const clampedPrimary = api.terminalMobileAccessoryPalettePlacementForTest(clampedPlacementState, anchoredPane, clampedLauncher, {width: 288, height: 100});
+    const clampedOverflow = api.terminalMobileAccessoryPalettePlacementForTest(clampedPlacementState, anchoredPane, clampedLauncher, {width: 288, height: 230});
+    const clampedPrimaryAgain = api.terminalMobileAccessoryPalettePlacementForTest(clampedPlacementState, anchoredPane, clampedLauncher, {width: 288, height: 100});
+    assert.equal(clampedPrimary.side, clampedOverflow.side, 'an overflow clamp does not re-side the already-open palette');
+    assert.equal(clampedOverflow.y, 0, 'an oversized overflow clamps once at the pane edge');
+    assert.equal(clampedPrimaryAgain.y + 100, clampedOverflow.y + 230, 'the one-time clamp persists its fixed edge when primary content returns');
     assert.deepStrictEqual(canonical(api.terminalMobileAccessoryLauncherDragPositionForTest(
       {startClientX: 292, startClientY: 212, startX: 272, startY: 192, paneWidth: 320, paneHeight: 240, launcherWidth: 40, launcherHeight: 40},
       {clientX: 20, clientY: 20},

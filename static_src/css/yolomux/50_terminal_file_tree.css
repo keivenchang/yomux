@@ -178,6 +178,10 @@
 .mobile-terminal-keybar--more .mobile-terminal-keyrow--more .mobile-terminal-key--more {
   grid-column: 4;
   grid-row: 1;
+  width: 36px;
+  min-width: 36px;
+  padding-inline: 0;
+  justify-self: end;
 }
 .mobile-terminal-key-dpad {
   grid-column: 2;

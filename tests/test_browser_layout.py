@@ -8517,11 +8517,24 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
                 placement: bar.dataset.terminalMobilePlacement,
                 state: stateSnapshot(),
               };
+              const stableToggleState = terminalMobileAccessoryState('1');
+              stableToggleState.x = 12;
+              stableToggleState.y = 0;
+              stableToggleState.palettePlacement = null;
+              syncTerminalMobileAccessoryState('1');
+              await settle();
+              const toggleSnapshots = [];
+              for (let index = 0; index < 5; index += 1) {
+                const activeMore = bar.querySelector('.mobile-terminal-keyrow--more:not([hidden]) [data-terminal-mobile-key="more"]') || bar.querySelector('.mobile-terminal-keyrow-shell [data-terminal-mobile-key="more"]');
+                toggleSnapshots.push({bar: box(bar), launcher: box(launcher), more: box(activeMore), placement: bar.dataset.terminalMobilePlacement, state: stateSnapshot()});
+                tap(activeMore);
+                await settle();
+              }
               const beforeKeyTapState = stateSnapshot();
               tap(bar.querySelector('[data-terminal-mobile-key="tab"]'));
               await settle();
               const afterKeyTapState = stateSnapshot();
-              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, grabber: grabber ? box(grabber) : null, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
+              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, grabber: grabber ? box(grabber) : null, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, toggleSnapshots, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
             })().catch(error => done({error: String(error?.stack || error)}));
             """
         )
@@ -8603,6 +8616,11 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     assert metrics["reopenedAfterPaletteDrag"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
     assert metrics["reopenedAfterPaletteDrag"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
     assert metrics["reopenedAfterPaletteDrag"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert len(metrics["toggleSnapshots"]) == 5, metrics
+    assert {snapshot["placement"] for snapshot in metrics["toggleSnapshots"]} == {"below"}, metrics
+    assert len({round(snapshot["bar"]["top"], 1) for snapshot in metrics["toggleSnapshots"]}) == 1, metrics
+    assert len({round(snapshot["more"]["left"], 1) for snapshot in metrics["toggleSnapshots"]}) == 1 and len({round(snapshot["more"]["top"], 1) for snapshot in metrics["toggleSnapshots"]}) == 1, metrics
+    assert all(snapshot["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5 and snapshot["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5 and snapshot["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5 and snapshot["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5 for snapshot in metrics["toggleSnapshots"]), metrics
     assert metrics["beforeKeyTapState"]["x"] == metrics["afterKeyTapState"]["x"], metrics
     assert metrics["beforeKeyTapState"]["y"] == metrics["afterKeyTapState"]["y"], metrics
     assert {"type": "input", "data": "\t"} in metrics["keyFrames"], metrics
