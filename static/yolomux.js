@@ -41640,6 +41640,10 @@ const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
 const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
+const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
+  tenSecondGauge: 10 * 1000,
+  minuteGauge: 60 * 1000,
+});
 const jsDebugGraphThisClientId = 'this-client';
 const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
 const jsDebugGraphThisClientAggregate = 'thisClient';
@@ -41780,7 +41784,13 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
-  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
+  {
+    key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid',
+    value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0,
+    hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    sampleCount: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0),
+    displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
+  },
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
@@ -44318,6 +44328,10 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       color: jsDebugGraphGpuDeviceColors[index % jsDebugGraphGpuDeviceColors.length],
       value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
+      sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, gpuDeviceId: deviceId})?.samples || 0),
+      familyHasData: bucket => [...(bucket?.hostMetrics?.gpuDevices?.values?.() || [])]
+        .some(item => Number(item?.samples || 0) > 0),
+      displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
     }));
 }
 
@@ -44328,22 +44342,91 @@ function debugGraphHostMetricSeriesDefs(buckets) {
   ];
 }
 
+function debugGraphDisplayHoldOutage(bucket) {
+  return Number(bucket?.disconnectedMs || 0) > 0;
+}
+
+function debugGraphProjectSeriesSamples(def, buckets) {
+  const holdMs = Math.max(0, Number(def?.displayHoldMs) || 0);
+  const values = [];
+  const hasDataValues = [];
+  const observedDataValues = [];
+  const provenanceValues = [];
+  let heldSample = null;
+  for (const [index, bucket] of (buckets || []).entries()) {
+    const value = def.value(bucket);
+    const observed = def.hasData(bucket) === true;
+    if (observed) {
+      const bucketStartMs = Number(bucket?.startMs) || 0;
+      const requestedSampleTimeMs = typeof def.sampleTimeMs === 'function' ? Number(def.sampleTimeMs(bucket)) : NaN;
+      const sampleTimeMs = Number.isFinite(requestedSampleTimeMs) ? requestedSampleTimeMs : bucketStartMs;
+      const requestedSampleCount = typeof def.sampleCount === 'function' ? Number(def.sampleCount(bucket)) : 1;
+      const sampleCount = Number.isFinite(requestedSampleCount) ? Math.max(0, requestedSampleCount) : 0;
+      const provenance = {
+        sampleTimeMs,
+        sampleCount,
+        sourceBucketStartMs: bucketStartMs,
+        sourceBucketDurationMs: Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs),
+        sourceIndex: index,
+        expiresAtMs: holdMs > 0 ? sampleTimeMs + holdMs : sampleTimeMs,
+        held: false,
+      };
+      values.push(value);
+      hasDataValues.push(true);
+      observedDataValues.push(true);
+      provenanceValues.push(provenance);
+      heldSample = holdMs > 0 ? {value, provenance} : null;
+      continue;
+    }
+    const familyObserved = typeof def.familyHasData === 'function' && def.familyHasData(bucket) === true;
+    if (familyObserved || debugGraphDisplayHoldOutage(bucket)) heldSample = null;
+    const bucketStartMs = Number(bucket?.startMs) || 0;
+    const bucketDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+    const bucketEndMs = bucketStartMs + bucketDurationMs;
+    const held = heldSample && bucketStartMs >= heldSample.provenance.sampleTimeMs
+      && bucketEndMs <= heldSample.provenance.expiresAtMs;
+    values.push(held ? heldSample.value : value);
+    hasDataValues.push(Boolean(held));
+    observedDataValues.push(false);
+    provenanceValues.push(held ? {...heldSample.provenance, held: true} : null);
+  }
+  return {values, hasDataValues, observedDataValues, provenanceValues};
+}
+
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
   const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
-    const values = buckets.map(bucket => def.value(bucket));
-    const hasDataValues = buckets.map(bucket => def.hasData(bucket));
-    const sampleValues = values.filter((_value, index) => hasDataValues[index]);
-    const sampleTimes = times.filter((_time, index) => hasDataValues[index]);
+    const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
+    const sampleValues = values.filter((_value, index) => observedDataValues[index]);
+    const sampleTimes = provenanceValues
+      .filter((_provenance, index) => observedDataValues[index])
+      .map(provenance => provenance.sampleTimeMs);
     const samples = sampleValues.length;
-    const max = Math.max(0, ...sampleValues);
-    const current = sampleValues.length ? sampleValues[sampleValues.length - 1] : 0;
+    const displayValues = values.filter((_value, index) => hasDataValues[index]);
+    const displaySamples = displayValues.length;
+    const max = Math.max(0, ...displayValues);
+    const current = displayValues.length ? displayValues[displayValues.length - 1] : 0;
     const movingAverageSamples = Number(def.movingAverageSamples || 0);
     const movingAverageValues = movingAverageSamples > 0 ? debugGraphMovingAverageValues(sampleValues, movingAverageSamples) : [];
-    return {...localizedDef, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
+    return {
+      ...localizedDef,
+      values,
+      times,
+      durations,
+      hasDataValues,
+      observedDataValues,
+      provenanceValues,
+      movingAverageValues,
+      movingAverageTimes: sampleTimes,
+      movingAverageSamples,
+      max,
+      current,
+      samples,
+      displaySamples,
+    };
   });
 }
 
@@ -44788,9 +44871,10 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
   // CPU is sampled best-effort.  Its absent intervals are facts, not zeroes or
   // a signal to draw a smooth line between the two surrounding samples.
   const cpuSeries = series?.processCpu === true || series?.key === 'cpu' || series?.key === 'systemCpu';
+  const heldGaugeSeries = Number(series?.displayHoldMs || 0) > 0;
   const gapThresholdMs = series?.clientMetric === true
     ? debugGraphCommunicationGapThresholdMs([series])
-    : (cpuSeries ? 1 : 0);
+    : ((cpuSeries || heldGaugeSeries) ? 1 : 0);
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
@@ -45129,6 +45213,29 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   return debugGraphValueText(value, data.group.unit);
 }
 
+function debugGraphHoverProvenanceAtTime(chart, timestamp) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  if (!data) return [];
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  if (index < 0) return [];
+  return data.groupSeries.flatMap(series => {
+    if (Array.isArray(series.hasDataValues) && series.hasDataValues[index] !== true) return [];
+    const provenance = Array.isArray(series.provenanceValues) ? series.provenanceValues[index] : null;
+    return provenance ? [{series: series.key, ...provenance}] : [];
+  });
+}
+
+function debugGraphHeldProvenanceText(provenance) {
+  const held = (provenance || []).filter(item => item?.held === true && Number.isFinite(Number(item.sampleTimeMs)));
+  if (!held.length) return '';
+  const sampleTimeMs = Math.max(...held.map(item => Number(item.sampleTimeMs)));
+  const sampleCount = held
+    .filter(item => Number(item.sampleTimeMs) === sampleTimeMs)
+    .reduce((total, item) => total + Math.max(0, Number(item.sampleCount) || 0), 0);
+  return `↳ ${debugGraphExactTimeLabel(sampleTimeMs)} · n=${debugSystemNumber(sampleCount)}`;
+}
+
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
@@ -45195,7 +45302,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       </div>
       ${debugGraphXAxisHtml(domain)}
     </div>`}
-    ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time></div>'}
+    ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time><span data-js-debug-hover-source-separator aria-hidden="true" hidden> · </span><span data-js-debug-hover-source hidden></span></div>'}
   </section>`;
 }
 
@@ -46626,20 +46733,84 @@ function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
   </table></div>`;
 }
 
-function debugSystemStatsSamplerCardHtml(services = []) {
+function debugSystemSamplerFamilyEntries(value) {
+  if (Array.isArray(value)) {
+    return value.map((family, index) => [String(family?.family || family?.name || index), family || {}]);
+  }
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).filter(([, family]) => family && typeof family === 'object');
+}
+
+function debugSystemSamplerFamilyNumber(family, ...keys) {
+  for (const key of keys) {
+    if (family?.[key] == null) continue;
+    const value = Number(family[key]);
+    if (Number.isFinite(value)) return Math.max(0, value);
+  }
+  return 0;
+}
+
+function debugSystemSamplerFamilySuccessAge(family, nowSeconds) {
+  const reportedAge = debugSystemSamplerFamilyNumber(family, 'last_success_age_seconds');
+  if (reportedAge > 0) return relativeTimeFormat(reportedAge);
+  let succeededAt = debugSystemSamplerFamilyNumber(family, 'last_success_at', 'last_success');
+  if (succeededAt > 1e12) succeededAt /= 1000;
+  return succeededAt > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - succeededAt)) : '—';
+}
+
+function debugSystemSamplerFamilySeconds(family, secondsKeys, millisecondsKeys) {
+  const seconds = debugSystemSamplerFamilyNumber(family, ...secondsKeys);
+  if (seconds > 0) return seconds;
+  return debugSystemSamplerFamilyNumber(family, ...millisecondsKeys) / 1000;
+}
+
+function debugSystemSamplerFamiliesHtml(value, nowSeconds = Date.now() / 1000) {
+  const families = debugSystemSamplerFamilyEntries(value);
+  if (!families.length) return '';
+  return `<div class="js-debug-system-table-wrap" data-js-debug-sampler-families><table class="js-debug-system-table">
+    <thead><tr><th>Family</th><th>Cadence</th><th>Alive / running</th><th>Attempts / successes / failures</th><th>Late / missed</th><th>Last runtime</th><th>Last success</th><th>Last failure</th></tr></thead>
+    <tbody>${families.map(([name, family]) => {
+      const cadence = debugSystemSamplerFamilySeconds(family, ['cadence_seconds', 'interval_seconds'], ['cadence_ms', 'interval_ms']);
+      const runtime = debugSystemSamplerFamilySeconds(family, ['last_runtime_seconds', 'runtime_seconds', 'last_runtime'], ['last_runtime_ms', 'runtime_ms']);
+      const running = family.running === true || family.in_flight === true;
+      const alive = family.alive === true || family.sampler_alive === true || running;
+      const attempts = debugSystemSamplerFamilyNumber(family, 'attempts', 'attempt_count');
+      const successes = debugSystemSamplerFamilyNumber(family, 'successes', 'success_count');
+      const failures = debugSystemSamplerFamilyNumber(family, 'failures', 'failure_count');
+      const late = debugSystemSamplerFamilyNumber(family, 'late', 'late_cycles');
+      const missed = debugSystemSamplerFamilyNumber(family, 'missed', 'missed_cycles');
+      return `<tr data-js-debug-sampler-family="${esc(name)}">
+        <th scope="row">${esc(name)}</th><td>${esc(cadence > 0 ? debugGraphTerseTimeText(cadence * 1000) : '—')}</td>
+        <td>${alive ? 'Yes' : 'No'} / ${running ? 'Yes' : 'No'}</td>
+        <td>${esc(`${debugSystemNumber(attempts)} / ${debugSystemNumber(successes)} / ${debugSystemNumber(failures)}`)}</td>
+        <td>${esc(`${debugSystemNumber(late)} / ${debugSystemNumber(missed)}`)}</td>
+        <td>${esc(runtime > 0 ? debugGraphTerseTimeText(runtime * 1000) : '—')}</td>
+        <td>${esc(debugSystemSamplerFamilySuccessAge(family, nowSeconds))}</td>
+        <td>${esc(family.last_failure || '—')}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() / 1000) {
   const statsd = (services || []).find(service => String(service?.service || '') === 'statsd') || {};
   const profile = statsd.history_profile && typeof statsd.history_profile === 'object' ? statsd.history_profile : {};
   const requests = Math.max(0, Number(statsd.history_requests) || 0);
   const hits = Math.min(requests, Math.max(0, Number(statsd.history_cache_hits) || 0));
   const hitRate = requests > 0 ? `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})` : '—';
-  return debugSystemCardHtml('YO!stats sampler', debugSystemRowsHtml([
+  const aggregate = debugSystemRowsHtml([
     ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
     ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
     ['Late / missed deadlines', `${debugSystemNumber(statsd.sampler_late_cycles)} / ${debugSystemNumber(statsd.sampler_missed_cycles)}`],
     ['History cache hit rate', hitRate],
     ['Last history latency', debugGraphTerseTimeText(Number(profile.assemble_ms || 0))],
     ['Last history query', `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`],
-  ]));
+  ]);
+  return debugSystemCardHtml(
+    'YO!stats sampler',
+    `${aggregate}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`,
+    {wide: true},
+  );
 }
 
 function debugSystemInnerHtml() {
@@ -47194,6 +47365,17 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
   tooltip.querySelector('[data-js-debug-hover-max]').textContent = debugGraphHoverValueAtTime(chart, timestamp);
   tooltip.querySelector('[data-js-debug-hover-time]').textContent = debugGraphExactTimeLabel(timestamp);
+  const provenance = debugGraphHoverProvenanceAtTime(chart, timestamp);
+  if (provenance.length) tooltip.setAttribute('data-js-debug-hover-provenance', JSON.stringify(provenance));
+  else tooltip.removeAttribute('data-js-debug-hover-provenance');
+  const sourceText = debugGraphHeldProvenanceText(provenance);
+  const source = tooltip.querySelector('[data-js-debug-hover-source]');
+  const sourceSeparator = tooltip.querySelector('[data-js-debug-hover-source-separator]');
+  if (source) {
+    source.textContent = sourceText;
+    source.hidden = !sourceText;
+  }
+  if (sourceSeparator) sourceSeparator.hidden = !sourceText;
   debugGraphSetHoverLegendItems(chart, timestamp);
   for (const item of panel.querySelectorAll('[data-js-debug-hover-tooltip]')) item.hidden = item !== tooltip;
   tooltip.hidden = false;
@@ -62485,7 +62667,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
-  {action: 'copy', labelKey: 'common.copy', ariaLabelKey: 'common.copy'},
+  {action: 'copy', label: '⌘C', ariaLabelKey: 'common.copy', ariaLabelSuffix: 'Cmd-C'},
   {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
   {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
   {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
@@ -62510,12 +62692,16 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
+// Overflow refers to shared definitions instead of creating parallel key definitions that could
+// drift from their terminal-byte behavior.
+const terminalMobileAccessoryMoreActions = Object.freeze(['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r']);
 const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
-// Backspace uses its existing terminal-byte definition; the utility column ends in Alt/Cmd.
+// Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
 const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift']);
+const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -62536,6 +62722,7 @@ function terminalMobileAccessoryState(session, options = {}) {
       cmdLocked: false,
       more: false,
       open: false,
+      palettePlacement: null,
       x: null,
       y: null,
       palettePress: null,
@@ -62573,7 +62760,7 @@ function terminalMobileAccessoryButtonHtml(session, definition, state, extraClas
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const label = definition.labelKey ? t(definition.labelKey) : definition.label;
-  const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
+  const ariaLabel = `${definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel}${definition.ariaLabelSuffix ? ` (${definition.ariaLabelSuffix})` : ''}`;
   return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
@@ -62730,45 +62917,65 @@ function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, 
   const below = paneHeight - bottom;
   const leftRoom = left;
   const rightRoom = paneWidth - right;
+  const previous = state?.palettePlacement || null;
   const moved = terminalMobileAccessoryMoved(state);
-  let side = 'above';
-  if (!moved && above >= height + gap) {
-    side = 'above';
-  } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
-    side = 'below';
-  } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
-    side = 'left';
-  } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
-    side = 'right';
-  } else if (below <= gap * 2 && above >= height + gap) {
-    side = 'above';
-  } else {
-    const candidates = [
-      {side: 'above', room: above, fits: above >= height + gap},
-      {side: 'below', room: below, fits: below >= height + gap},
-      {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
-      {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
-    ];
-    const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
-    side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+  let side = previous?.side || 'above';
+  if (!previous) {
+    if (!moved && above >= height + gap) {
+      side = 'above';
+    } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
+      side = 'below';
+    } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
+      side = 'left';
+    } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
+      side = 'right';
+    } else if (below <= gap * 2 && above >= height + gap) {
+      side = 'above';
+    } else {
+      const candidates = [
+        {side: 'above', room: above, fits: above >= height + gap},
+        {side: 'below', room: below, fits: below >= height + gap},
+        {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
+        {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
+      ];
+      const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
+      side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+    }
+  }
+  let anchor = Number(previous?.anchor);
+  if (!Number.isFinite(anchor)) {
+    anchor = side === 'above' ? top - gap
+      : side === 'below' ? bottom + gap
+        : side === 'left' ? left - gap
+          : right + gap;
   }
   let x = right - width;
-  let y = top - height - gap;
+  let y = anchor - height;
   if (side === 'below') {
     x = left;
-    y = bottom + gap;
+    y = anchor;
   } else if (side === 'left') {
-    x = left - width - gap;
+    x = anchor - width;
     y = top;
   } else if (side === 'right') {
-    x = right + gap;
+    x = anchor;
     y = top;
   }
-  return {
+  const placement = {
     side,
     x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
     y: Math.round(terminalMobileAccessoryClamp(y, 0, paneHeight - height)),
   };
+  if (state) {
+    state.palettePlacement = {
+      side,
+      anchor: side === 'above' ? placement.y + height
+        : side === 'below' ? placement.y
+          : side === 'left' ? placement.x + width
+            : placement.x,
+    };
+  }
+  return placement;
 }
 
 function terminalMobileAccessoryLauncherDragPosition(press, event) {
@@ -62786,17 +62993,20 @@ function terminalMobileAccessoryHtml(session) {
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
   const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
   const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
+  const bottomKeys = terminalMobileAccessoryBottomActions.map(key).join('');
   // The overflow button remains the rightmost control in both palette states. Keeping the return
   // target in one physical corner avoids a touch user hunting for it after the content switches.
-  const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
+  const moreKeys = [...terminalMobileAccessoryMoreActions.map(key), key('more')].join('');
   const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
   return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
+      <div class="mobile-terminal-key-grabber" aria-hidden="true"></div>
       <div class="mobile-terminal-key-side">
         ${sideKeys}
       </div>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
       <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
+      <div class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom">${bottomKeys}</div>
       <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
     </div>`;
 }
@@ -62822,6 +63032,9 @@ function syncTerminalMobileAccessoryState(session) {
   const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
   bar.hidden = state.open !== true;
   bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+  // Set both visibility levers before measuring. Measuring after only the class change observes a
+  // hybrid primary/overflow layout and creates a second corrective placement on the next sync.
+  if (more) more.hidden = state.more !== true;
   if (launcher) {
     const open = state.open === true;
     launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -62857,7 +63070,6 @@ function syncTerminalMobileAccessoryState(session) {
     bar.style.transform = positionedBlock ? 'none' : '';
     delete bar.dataset.terminalMobilePlacement;
   }
-  if (more) more.hidden = state.more !== true;
   for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
   return true;
@@ -62867,7 +63079,10 @@ function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
   if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
   if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
-  if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
+  if (key === 'open' && state.open !== true) {
+    dismissTerminalMobileAccessories(session);
+    state.palettePlacement = null;
+  }
   state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
   return state[key];
@@ -63004,6 +63219,7 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
     press.longPressed = true;
     state.open = true;
     state.more = true;
+    state.palettePlacement = null;
     syncTerminalMobileAccessoryState(session);
   }, terminalMobileAccessoryLongPressMs);
   return true;
@@ -63023,6 +63239,7 @@ function moveTerminalMobileAccessoryLauncherPress(session, event) {
   const position = terminalMobileAccessoryLauncherDragPosition(press, event);
   state.x = position.x;
   state.y = position.y;
+  state.palettePlacement = null;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
   event.stopPropagation();
@@ -63091,6 +63308,7 @@ function moveTerminalMobileAccessoryPalettePress(session, event) {
   const position = terminalMobileAccessoryLauncherDragPosition(press, event);
   state.x = position.x;
   state.y = position.y;
+  state.palettePlacement = null;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
   event.stopPropagation();
