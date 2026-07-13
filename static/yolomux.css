@@ -394,7 +394,6 @@
   --z-file-conflict-dialog: 270;
   --z-file-editor-actions: 220;
   --z-file-editor-dialog: 275;
-  --z-cost-summary-modal: var(--z-file-editor-dialog);
   --z-share-presence: 320;
   --z-share-popup-mirror: calc(var(--z-share-presence) + 1);
   --z-share-viewer-banner: calc(var(--z-share-presence) + 2);
@@ -1505,7 +1504,6 @@ body.theme-light {
   .share-field input[type="text"],
   .file-explorer-path,
   .file-explorer-path-inline,
-  .js-debug-cost-modal-close,
   .js-debug-hover-tooltip {
     border: 1px solid var(--line);
     border-radius: var(--radius-control);
@@ -1520,7 +1518,6 @@ body.theme-light {
   .terminal-drop-suggestions,
   .file-editor-preview-fallback,
   .markdown-image-error,
-  .js-debug-cost-modal-close,
   .mermaid-preview-error {
     border: 1px solid var(--line);
     background: var(--panel2);
@@ -5161,26 +5158,6 @@ body :is(
   color: var(--text);
   font-family: var(--mono-font);
 }
-.js-debug-cost-modal {
-  z-index: var(--z-cost-summary-modal);
-  place-items: center;
-  padding: clamp(var(--space-6), 4vw, var(--space-12));
-}
-.js-debug-cost-modal-dialog {
-  display: flex;
-  flex-direction: column;
-  width: min(var(--dialog-wide-inline-size), calc(100vw - (2 * var(--space-12))));
-  max-width: calc(100vw - (2 * var(--space-12)));
-  max-height: min(88vh, calc(100dvh - (2 * var(--space-12))), 58rem);
-  padding: var(--space-10);
-  overflow: hidden;
-  background: var(--panel);
-  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--app-modal-dialog-shadow);
-  color: var(--text);
-  container-type: inline-size;
-}
 .js-debug-cost-table-wrap {
   max-inline-size: 100%;
 }
@@ -5189,6 +5166,28 @@ body :is(
 }
 .js-debug-cost-table th:not(:first-child) {
   color: var(--muted);
+}
+.js-debug-cost-table th[aria-sort] {
+  white-space: nowrap;
+}
+.js-debug-cost-sort {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.js-debug-cost-sort:hover,
+.js-debug-cost-sort:focus-visible {
+  color: var(--active-control-text);
+}
+.js-debug-cost-sort:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
 }
 .js-debug-cost-table th > .js-debug-cost-usage-swatch {
   margin-inline-end: var(--space-2);
@@ -5232,24 +5231,45 @@ body :is(
   color: var(--text);
   font: 700 var(--ui-font-size-lg)/1.25 var(--ui-font);
 }
-.js-debug-cost-modal-close {
-  flex: none;
-  width: 2rem;
-  height: 2rem;
-  font: 800 var(--ui-font-size-lg)/1 var(--ui-font);
-  cursor: pointer;
-}
-.js-debug-cost-modal-close:hover,
-.js-debug-cost-modal-close:focus-visible {
-  border-color: var(--active-control-border);
-  outline: 0;
-  box-shadow: var(--active-control-focus-shadow-compact);
-}
 .js-debug-cost-report-body {
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
   padding-top: var(--space-5);
+}
+.js-yocost-panel .js-yocost-body,
+.js-yocost-panel .js-yocost-scroll,
+.js-yocost-panel .js-debug-cost-report,
+.js-yocost-panel .js-debug-cost-report-body {
+  min-inline-size: 0;
+}
+.js-yocost-panel .js-yocost-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.js-yocost-data-age {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-block-end: var(--space-6);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-debug-range-slider:disabled {
+  cursor: not-allowed;
+  filter: grayscale(1);
+  opacity: 0.52;
+}
+.js-yocost-panel .js-debug-cost-report {
+  display: flex;
+  flex-direction: column;
+  inline-size: 100%;
+  max-inline-size: 100%;
+}
+.js-yocost-panel .js-debug-cost-report-body {
+  overflow: visible;
 }
 .js-debug-cost-report-body > p {
   margin: var(--space-4) 0;

@@ -973,6 +973,8 @@ const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
+const yocostItemId = '__yocost__';
+function yocostTabLabel() { return 'YO!cost'; }
 const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
   {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
   {itemId: searchHistoryItemId},
@@ -1428,6 +1430,24 @@ const TAB_TYPES = [
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
+  virtualPanelTabType({
+    key: 'yocost',
+    id: yocostItemId,
+    aliases: ['yocost', 'yo!cost', 'yo-cost', yocostItemId],
+    label: () => yocostTabLabel(),
+    sortRank: 0.71,
+    detail: () => debugGraphCostText('debug.cost.details', 'Cost summary details'),
+    createPanel: () => createYoCostPanel(),
+    renderAttached: () => renderYoCostPanels(),
+    relocalize: (_item, panel) => {
+      renderYoCostPanels({force: true});
+      relocalizeYoCostPanelChrome(panel);
+    },
+    className: () => 'yocost-item',
+    icon: 'chart',
+    panePlacement: panePlacementSideAllowed,
+    minWidth: () => minSplitPaneWidthPx(),
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1478,6 +1498,7 @@ function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
+function isYoCostItem(item) { return tabTypeForItem(item)?.key === 'yocost'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -1588,7 +1609,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId];
   if (!shareViewMode) items.splice(2, 0, chatItemId);
   return [...items, ...dynamicVirtualLayoutItems];
 }

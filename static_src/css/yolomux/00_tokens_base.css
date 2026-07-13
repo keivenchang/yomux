@@ -393,7 +393,6 @@
   --z-file-conflict-dialog: 270;
   --z-file-editor-actions: 220;
   --z-file-editor-dialog: 275;
-  --z-cost-summary-modal: var(--z-file-editor-dialog);
   --z-share-presence: 320;
   --z-share-popup-mirror: calc(var(--z-share-presence) + 1);
   --z-share-viewer-banner: calc(var(--z-share-presence) + 2);
@@ -1504,7 +1503,6 @@ body.theme-light {
   .share-field input[type="text"],
   .file-explorer-path,
   .file-explorer-path-inline,
-  .js-debug-cost-modal-close,
   .js-debug-hover-tooltip {
     border: 1px solid var(--line);
     border-radius: var(--radius-control);
@@ -1519,7 +1517,6 @@ body.theme-light {
   .terminal-drop-suggestions,
   .file-editor-preview-fallback,
   .markdown-image-error,
-  .js-debug-cost-modal-close,
   .mermaid-preview-error {
     border: 1px solid var(--line);
     background: var(--panel2);

@@ -410,7 +410,7 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
         for atom in atoms:
             identity = tuple(str(atom.get(key) or "") for key in keys)
             row = grouped.setdefault(identity, {key: identity[index] for index, key in enumerate(keys)} | {
-                "quantity": 0.0, "micro_usd": 0, "count": 0, "unpriced_count": 0,
+                "quantity": 0.0, "micro_usd": 0, "count": 0, "unpriced_count": 0, "unpriced_token_quantity": 0.0,
                 "lower_micro_usd": 0, "upper_micro_usd": 0,
                 "input_micro_usd": 0, "cache_micro_usd": 0, "output_micro_usd": 0, "other_micro_usd": 0,
                 "input_lower_micro_usd": 0, "cache_lower_micro_usd": 0, "output_lower_micro_usd": 0, "other_lower_micro_usd": 0,
@@ -438,6 +438,8 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
             if str(atom.get("unit") or "tokens").lower() == "tokens":
                 row["token_quantity"] += quantity
                 row[f"{item_class}_tokens"] += quantity
+                if not atom.get("priced"):
+                    row["unpriced_token_quantity"] += quantity
         return sorted(grouped.values(), key=lambda row: (-int(row["micro_usd"]), tuple(str(row[key]) for key in keys)))
 
     # A price revision is part of an atomic billable class.  Grouping events
@@ -452,6 +454,11 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
     upper_micro_usd = sum(max(_component_lower_micro_usd(atom), _component_upper_micro_usd(atom)) for atom in atoms)
     priced_count = sum(1 for atom in atoms if atom.get("priced"))
     unpriced_count = sum(1 for atom in atoms if not atom.get("priced"))
+    unpriced_token_quantity = sum(
+        _usage_atom_number(atom.get("quantity"))
+        for atom in atoms
+        if not atom.get("priced") and str(atom.get("unit") or "tokens").lower() == "tokens"
+    )
     complete = not bool(raw.get("truncated")) and not bool(raw.get("lower_bound")) and unpriced_count == 0
     revisions = sorted({int(atom.get("catalog_revision") or 0) for atom in atoms if int(atom.get("catalog_revision") or 0) > 0})
     return {
@@ -464,6 +471,7 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
         "priced_count": priced_count,
         "complete": complete,
         "unpriced_count": unpriced_count,
+        "unpriced_token_quantity": unpriced_token_quantity,
         "components": components,
         "models": models,
         "sources": sources,
@@ -2248,7 +2256,7 @@ class PersistentStatsService:
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
         return record
 
-    def _merge_bucket(self, target: dict[str, Any], source: dict[str, Any]) -> None:
+    def _merge_bucket(self, target: dict[str, Any], source: dict[str, Any], *, coalesce_cost_components: bool = False) -> None:
         for field in stats_store.SERVER_FIELDS:
             target[field] = float(target.get(field) or 0.0) + float(source.get(field) or 0.0)
         target["sequence"] = max(int(target.get("sequence") or 0), int(source.get("sequence") or 0), int(source.get("server_sequence") or 0))
@@ -2295,6 +2303,12 @@ class PersistentStatsService:
             target_components.append(copy.deepcopy(item))
             seen_components.add(identity)
         target_summary["components"] = target_components
+        if coalesce_cost_components and len(target_components) > 1:
+            # History response buckets are temporary transport aggregates.  Keep
+            # durable atoms untouched, but coalesce their equivalent billing
+            # dimensions here so a 24h range does not serialize every raw event.
+            target_components = self._coalesced_backfill_components(target_components)
+            target_summary["components"] = target_components
         valid_target_components = [item for item in target_components if isinstance(item, dict)]
         known_micro_usd = sum(int(item.get("micro_usd") or 0) for item in valid_target_components if item.get("priced"))
         lower_micro_usd = sum(_component_lower_micro_usd(item) for item in valid_target_components)
@@ -2441,7 +2455,7 @@ class PersistentStatsService:
                     anchor = start or 0
                     bucket_key = (anchor + ((bucket_start - anchor) // target_resolution) * target_resolution, target_resolution)
                 target = grouped.setdefault(bucket_key, stats_store.empty_bucket(*bucket_key))
-                self._merge_bucket(target, bucket)
+                self._merge_bucket(target, bucket, coalesce_cost_components=True)
             return [
                 self._record_from_bucket(bucket, client_id, include_agent_tokens=include_agent_tokens)
                 for _key, bucket in sorted(grouped.items())

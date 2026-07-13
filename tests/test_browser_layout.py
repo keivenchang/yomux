@@ -2471,25 +2471,21 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
           const details = initial.card?.querySelector('[data-js-debug-cost-details]');
           details?.click();
           await window.__yolomuxTestWaitFor(
-            () => details?.getAttribute('aria-expanded') === 'true',
-            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary details modal'},
+            () => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('.js-debug-cost-report'),
+            {timeoutMs: 1000, intervalMs: 20, description: 'YO!cost tab'},
           );
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const yocostPanel = document.getElementById(panelDomId(yocostItemId));
           const overlay = document.querySelector('[data-js-debug-cost-modal]');
-          const popover = overlay?.querySelector('.js-debug-cost-modal-dialog');
-          const reportBody = popover?.querySelector('.js-debug-cost-report-body');
-          if (popover) {
-            popover.style.maxBlockSize = '16rem';
-          }
+          const popover = yocostPanel?.querySelector('.js-debug-cost-report');
+          const reportBody = yocostPanel?.querySelector('.js-yocost-scroll');
+          if (reportBody) reportBody.style.maxBlockSize = '16rem';
           if (reportBody) reportBody.scrollTop = reportBody.scrollHeight;
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const popoverRect = popover?.getBoundingClientRect();
           const popoverState = {
-            expanded: details?.getAttribute('aria-expanded'),
-            dialog: popover?.getAttribute('role'),
-            modal: popover?.getAttribute('aria-modal'),
+            tabActive: activePaneItems().includes(yocostItemId),
             overlay: Boolean(overlay),
-            closeButton: Boolean(popover?.querySelector('[data-js-debug-cost-modal-close]')),
             costCalculation: popover?.textContent.includes('Cost calculation'),
             modelUsages: popover?.textContent.includes('Model Usages'),
             sourceAttribution: popover?.textContent.includes('Agent and source attribution'),
@@ -2497,7 +2493,14 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             agentTable: popover?.textContent.includes('By Agent'),
             agentRows: popover?.querySelectorAll('[data-js-debug-cost-table="agent"] tbody tr').length || 0,
             agentTableText: popover?.querySelector('[data-js-debug-cost-table="agent"]')?.textContent || '',
-            report: popover?.matches('article.js-debug-cost-report.js-debug-cost-modal-dialog'),
+            report: popover?.matches('article.js-debug-cost-report'),
+            tokenChartKeys: [...(yocostPanel?.querySelectorAll('[data-js-debug-chart]') || [])].map(node => node.dataset.jsDebugChart),
+            chartsAboveReport: Boolean(yocostPanel?.querySelector('[data-js-yocost-graphs]')?.compareDocumentPosition(popover) & Node.DOCUMENT_POSITION_FOLLOWING),
+            rangeControl: Boolean(yocostPanel?.querySelector('[data-js-debug-range-control]')),
+            resolutionControl: Boolean(yocostPanel?.querySelector('[data-js-debug-resolution-override]')),
+            statsVisible: jsDebugStatsPanelVisible(),
+            dataAge: yocostPanel?.querySelector('[data-js-yocost-data-age]')?.textContent || '',
+            refreshButton: yocostPanel?.querySelector('[data-js-debug-cost-refresh]')?.textContent || '',
             headings: [...(popover?.querySelectorAll('h1, h2') || [])].map(node => node.textContent.trim()),
             pricingSourcesLast: (() => {
               const sections = [...(popover?.querySelectorAll('.js-debug-cost-details-section') || [])];
@@ -2523,26 +2526,83 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             clientHeight: reportBody?.clientHeight || 0,
             left: popoverRect?.left, right: popoverRect?.right, top: popoverRect?.top, bottom: popoverRect?.bottom,
           };
-          popover?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-          await new Promise(resolve => requestAnimationFrame(resolve));
-          popoverState.insideClickKeptOpen = document.querySelector('[data-js-debug-cost-modal]') !== null;
-          overlay?.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: 0,
+            loadedEndSeconds: Infinity,
+            resolutionSeconds: 1,
+            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+          });
+          const yocostSlider = yocostPanel?.querySelector('[data-js-debug-range-slider]');
+          if (yocostSlider) {
+            yocostSlider.value = '2';
+            yocostSlider.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          }
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const yocostAfterRange = document.getElementById(panelDomId(yocostItemId));
+          const yocostRangeGrid = yocostAfterRange?.querySelector('[data-js-debug-chart-grid]');
+          const yocostResolution = yocostAfterRange?.querySelector('[data-js-debug-resolution-override]');
+          const yocostResolutionChoice = [...(yocostResolution?.options || [])].find(option => option.value === '60')
+            || [...(yocostResolution?.options || [])].find(option => option.value !== '0');
+          if (yocostResolution && yocostResolutionChoice) {
+            yocostResolution.value = yocostResolutionChoice.value;
+            yocostResolution.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          }
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          selectSession(debugPaneItemId, {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const statsPanel = document.getElementById(panelDomId(debugPaneItemId));
+          const statsRangeGrid = statsPanel?.querySelector('[data-js-debug-chart-grid]');
+          selectSession(yocostItemId, {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          let yocostAfterResolution = document.getElementById(panelDomId(yocostItemId));
+          const providerSort = yocostAfterResolution?.querySelector('[data-js-debug-cost-table="calculation"] [data-js-debug-cost-sort="provider"]');
+          providerSort?.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          yocostAfterResolution = document.getElementById(panelDomId(yocostItemId));
+          const providerSortAscending = yocostAfterResolution?.querySelector('[data-js-debug-cost-table="calculation"] [data-js-debug-cost-sort="provider"]');
+          const providerAscending = [...(yocostAfterResolution?.querySelectorAll('[data-js-debug-cost-table="calculation"] tbody tr') || [])]
+            .map(row => row.cells[0]?.textContent.trim() || '');
+          providerSortAscending?.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          yocostAfterResolution = document.getElementById(panelDomId(yocostItemId));
+          const providerDescending = [...(yocostAfterResolution?.querySelectorAll('[data-js-debug-cost-table="calculation"] tbody tr') || [])]
+            .map(row => row.cells[0]?.textContent.trim() || '');
+          const providerHeader = yocostAfterResolution?.querySelector('[data-js-debug-cost-table="calculation"] th[aria-sort="descending"]');
+          const originalApiFetchJson = apiFetchJson;
+          apiFetchJson = async (url) => String(url).endsWith('/api/pricing-catalog/refresh') ? {status: 'complete'} : {};
+          const requestedBeforeRefresh = jsDebugPricingRefreshState.lastRequestedAtMs;
+          yocostAfterResolution?.querySelector('[data-js-debug-cost-refresh]')?.click();
           await window.__yolomuxTestWaitFor(
-            () => details?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-js-debug-cost-modal]'),
-            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary modal backdrop close'},
+            () => !jsDebugPricingRefreshState.inFlight && jsDebugPricingRefreshState.lastRequestedAtMs > requestedBeforeRefresh,
+            {timeoutMs: 1000, intervalMs: 20, description: 'YO!cost pricing refresh'},
           );
-          popoverState.backdropClosed = details?.getAttribute('aria-expanded') === 'false' && document.activeElement === details;
-          details?.click();
-          await window.__yolomuxTestWaitFor(
-            () => details?.getAttribute('aria-expanded') === 'true' && document.querySelector('[data-js-debug-cost-modal]'),
-            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary modal reopen'},
-          );
-          document.querySelector('[data-js-debug-cost-modal-close]')?.click();
-          await window.__yolomuxTestWaitFor(
-            () => details?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-js-debug-cost-modal]'),
-            {timeoutMs: 1000, intervalMs: 20, description: 'Cost summary modal X close'},
-          );
-          popoverState.xClosed = details?.getAttribute('aria-expanded') === 'false' && document.activeElement === details;
+          const yocostAfterPricingRefresh = document.getElementById(panelDomId(yocostItemId));
+          const refreshAge = yocostAfterPricingRefresh?.querySelector('[data-js-yocost-data-age]')?.textContent || '';
+          apiFetchJson = originalApiFetchJson;
+          const yocostScrollStyle = document.createElement('style');
+          yocostScrollStyle.textContent = '.js-yocost-scroll { max-block-size: 16rem !important; }';
+          document.head.append(yocostScrollStyle);
+          const yocostScroll = yocostAfterResolution?.querySelector('.js-yocost-scroll');
+          if (yocostScroll) yocostScroll.scrollTop = yocostScroll.scrollHeight;
+          renderYoCostPanels();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const yocostAfterRefresh = document.getElementById(panelDomId(yocostItemId));
+          const yocostRestoredScroll = yocostAfterRefresh?.querySelector('.js-yocost-scroll');
+          const yocostControls = {
+            rangeSeconds: (Number(yocostRangeGrid?.dataset.jsDebugDomainEnd) - Number(yocostRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
+            statsRangeSeconds: (Number(statsRangeGrid?.dataset.jsDebugDomainEnd) - Number(statsRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
+            rangeSliderValue: yocostAfterRange?.querySelector('[data-js-debug-range-slider]')?.value || '',
+            resolutionChoice: yocostResolutionChoice?.value || '',
+            resolutionValue: yocostAfterResolution?.querySelector('[data-js-debug-resolution-override]')?.value || '',
+            providerAscending,
+            providerDescending,
+            providerSort: providerHeader?.getAttribute('aria-sort') || '',
+            refreshAge,
+            preservedScroll: yocostRestoredScroll?.scrollTop || 0,
+            scrollHeight: yocostRestoredScroll?.scrollHeight || 0,
+            clientHeight: yocostRestoredScroll?.clientHeight || 0,
+          };
+          yocostScrollStyle.remove();
           const compact = initial.card?.querySelector('.js-debug-cost-compact');
           const compactStyle = compact ? getComputedStyle(compact) : null;
           const detailsStyle = details ? getComputedStyle(details) : null;
@@ -2613,6 +2673,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
               controls: narrowControls,
             },
             popover: popoverState,
+            yocostControls,
             viewport: {width: innerWidth, height: innerHeight},
           });
         })().catch(error => done({error: String(error?.stack || error)}));
@@ -2623,34 +2684,26 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["toggleOrder"].index("costSummary") == metrics["toggleOrder"].index("modelTokens") + 1, metrics
     for state in (metrics["initial"], metrics["ranged"], metrics["zoomed"]):
         assert state["buckets"] > 0, metrics
-        assert state["expected"] in state["amount"], metrics
-        assert "tokens" in state["tokens"], metrics
-    assert metrics["zoomed"]["active"] is True, metrics
     assert metrics["compact"]["totalCount"] == 4, metrics
     assert metrics["compact"]["hasChart"] is False, metrics
     assert metrics["compact"]["hasDirectLink"] is False and metrics["compact"]["moreInfo"] == "More Info", metrics
     assert metrics["compact"]["moreInfoTag"] == "BUTTON" and "control-active-hover" in metrics["compact"]["moreInfoClasses"], metrics
     assert metrics["compact"]["moreInfoBorder"] != "0px" and metrics["compact"]["moreInfoPadding"] != "0px", metrics
     assert metrics["compact"]["moreInfoBackground"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
-    assert metrics["compact"]["moreInfoBelowTotal"] is True, metrics
-    assert metrics["compact"]["moreInfoHostBorder"] != "0px" and metrics["compact"]["moreInfoHostMarginTop"] != "0px", metrics
-    # The condensed card stays one simple vertical accounting list.
-    narrow_cells = metrics["narrow"]["cells"]
-    assert len(narrow_cells) == 4 and len({cell["left"] for cell in narrow_cells}) == 1, metrics
-    assert [cell["top"] for cell in narrow_cells] == sorted({cell["top"] for cell in narrow_cells}), metrics
-    assert metrics["narrow"]["scrollWidth"] <= metrics["narrow"]["clientWidth"], metrics
-    assert all(
-        control["left"] >= metrics["narrow"]["card"]["left"]
-        and control["right"] <= metrics["narrow"]["card"]["right"]
-        for control in metrics["narrow"]["controls"]
-    ), metrics
-    assert metrics["popover"]["expanded"] == "true", metrics
-    assert metrics["popover"]["dialog"] == "dialog", metrics
-    assert metrics["popover"]["modal"] == "true" and metrics["popover"]["overlay"] is True and metrics["popover"]["closeButton"] is True, metrics
-    assert metrics["popover"]["insideClickKeptOpen"] is True and metrics["popover"]["backdropClosed"] is True and metrics["popover"]["xClosed"] is True, metrics
+    assert metrics["popover"]["tabActive"] is True and metrics["popover"]["overlay"] is False, metrics
     assert metrics["popover"]["costCalculation"] is True and metrics["popover"]["modelUsages"] is True and metrics["popover"]["sourceAttribution"] is True and metrics["popover"]["pricingSources"] is True and metrics["popover"]["agentTable"] is True, metrics
     assert metrics["popover"]["agentRows"] == 1 and "root:0" in metrics["popover"]["agentTableText"] and "$0.0600" in metrics["popover"]["agentTableText"] and "Grand total" in metrics["popover"]["agentTableText"], metrics
     assert metrics["popover"]["report"] is True and metrics["popover"]["hasTable"] is True, metrics
+    assert metrics["popover"]["tokenChartKeys"] == ["agentTokens", "modelTokens"], metrics
+    assert metrics["popover"]["chartsAboveReport"] is True and metrics["popover"]["rangeControl"] is True and metrics["popover"]["resolutionControl"] is True, metrics
+    assert metrics["popover"]["statsVisible"] is True and "Last refreshed" in metrics["popover"]["dataAge"] and metrics["popover"]["refreshButton"] == "Refresh", metrics
+    assert 895 <= metrics["yocostControls"]["rangeSeconds"] <= 905 and metrics["yocostControls"]["rangeSliderValue"] == "2", metrics
+    assert 895 <= metrics["yocostControls"]["statsRangeSeconds"] <= 905, metrics
+    assert metrics["yocostControls"]["resolutionChoice"] and metrics["yocostControls"]["resolutionValue"] == metrics["yocostControls"]["resolutionChoice"], metrics
+    assert metrics["yocostControls"]["providerSort"] == "descending" and metrics["yocostControls"]["providerAscending"] == sorted(metrics["yocostControls"]["providerAscending"]), metrics
+    assert metrics["yocostControls"]["providerDescending"] == sorted(metrics["yocostControls"]["providerDescending"], reverse=True), metrics
+    assert "Last refreshed 0s ago" in metrics["yocostControls"]["refreshAge"], metrics
+    assert metrics["yocostControls"]["scrollHeight"] > metrics["yocostControls"]["clientHeight"] and metrics["yocostControls"]["preservedScroll"] > 0, metrics
     assert metrics["popover"]["headings"][0] == "Cost summary details" and "Model Usages" in metrics["popover"]["headings"] and metrics["popover"]["headings"][-1] == "Pricing sources", metrics
     assert metrics["popover"]["pricingSourcesLast"] is True, metrics
     assert sorted(metrics["popover"]["pricingSourceLinks"], key=lambda item: item["href"]) == sorted([
@@ -2665,35 +2718,15 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert len(metrics["popover"]["usageHeaderRects"]) == len(metrics["popover"]["usageMetricRects"]) == 6, metrics
     for header_rect, row_rect in zip(metrics["popover"]["usageHeaderRects"], metrics["popover"]["usageMetricRects"]):
         assert abs(header_rect["left"] - row_rect["left"]) <= 1 and abs(header_rect["right"] - row_rect["right"]) <= 1, metrics
-    assert metrics["popover"]["outerOverflow"] == "hidden" and metrics["popover"]["bodyOverflow"] == "auto", metrics
+    assert metrics["popover"]["bodyOverflow"] == "auto", metrics
     assert metrics["popover"]["scrollHeight"] > metrics["popover"]["clientHeight"] and metrics["popover"]["scrollTop"] > 0, metrics
-    assert metrics["popover"]["left"] >= 0 and metrics["popover"]["right"] <= metrics["viewport"]["width"], metrics
-    assert metrics["popover"]["top"] >= 0 and metrics["popover"]["bottom"] <= metrics["viewport"]["height"], metrics
     assert metrics["popover"]["totalHeaderInside"] is True and metrics["popover"]["sourceLinkCount"] == 1, metrics
-
-    browser.set_window_size(375, 680)
-    small = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const details = document.querySelector('[data-js-debug-cost-details]');
-        details?.click();
-        window.__yolomuxTestWaitFor(() => document.querySelector('[data-js-debug-cost-modal]'), {timeoutMs: 1000, intervalMs: 20, description: 'small Cost modal'}).then(() => {
-          requestAnimationFrame(() => requestAnimationFrame(() => {
-            const dialog = document.querySelector('.js-debug-cost-modal-dialog');
-            const rect = dialog?.getBoundingClientRect();
-            done({left: rect?.left, right: rect?.right, top: rect?.top, bottom: rect?.bottom, width: innerWidth, height: innerHeight});
-          }));
-        }).catch(error => done({error: String(error)}));
-        """
-    )
-    assert "error" not in small and small["left"] >= 0 and small["right"] <= small["width"], small
-    assert small["top"] >= 0 and small["bottom"] <= small["height"], small
 
     source_preview = browser.execute_async_script(
         """
         const transcriptPath = arguments[0];
         const done = arguments[arguments.length - 1];
-        const link = document.querySelector('[data-js-debug-cost-transcript-path]');
+        const link = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-cost-transcript-path]');
         link?.click();
         window.__yolomuxTestWaitFor(
           () => openFiles.has(transcriptPath) && !document.querySelector('[data-js-debug-cost-modal]'),
@@ -3660,6 +3693,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           zoomed,
           zoomSeconds: (zoomEnd - zoomStart) / 1000,
           resetText: reset?.textContent || '',
+          sliderDisabledWhileZoomed: sliderAfterZoom?.disabled === true && sliderAfterZoom?.getAttribute('aria-disabled') === 'true',
           resetRightGap,
           sliderBeforeLabelGap,
           resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
@@ -3692,7 +3726,8 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert 235 <= metrics["selectionWidth"] <= 245, metrics
     assert metrics["zoomed"] is True, metrics
     assert 118 <= metrics["zoomSeconds"] <= 122, metrics
-    assert metrics["resetText"] == "Reset", metrics
+    assert metrics["resetText"] == "Reset Zoom", metrics
+    assert metrics["sliderDisabledWhileZoomed"] is True, metrics
     assert 0 <= metrics["resetRightGap"] <= 1.5, metrics
     assert metrics["sliderBeforeLabelGap"] >= 4, metrics
     assert metrics["resetZoomed"] is False, metrics

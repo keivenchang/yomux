@@ -45,7 +45,7 @@ async function runSidePaneSuite() {
     );
     assert.deepStrictEqual(
       Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideAllowed).map(([key]) => key),
-      ['info', 'yoagent', 'chat', 'debug'],
+      ['info', 'yoagent', 'chat', 'debug', 'yocost'],
     );
     assert.equal(policies.preferences, api.panePlacementGenericOnly);
     assert.equal(policies['search-history'], api.panePlacementGenericOnly);
@@ -59,6 +59,7 @@ async function runSidePaneSuite() {
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.finderItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.infoItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.debugPaneItemId), true);
+    assert.equal(api.paneRoleAllowsItem(sideLeft, api.yocostItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, '1'), false);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.prefsItemId), false);
     assert.equal(api.paneRoleAllowsItem(generic, api.finderItemId), false);

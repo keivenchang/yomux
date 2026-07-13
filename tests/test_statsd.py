@@ -360,6 +360,7 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
     assert summary["upper_micro_usd"] == 290
     assert summary["complete"] is False
     assert summary["unpriced_count"] == 1
+    assert summary["unpriced_token_quantity"] == 8
     assert summary["catalog_revision"] == 7
     assert summary["active_catalog_revision"] == 0
     assert summary["freshness"] == "unknown"
@@ -391,8 +392,9 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
         "agent_kind": "codex",
         "quantity": 108.0,
         "micro_usd": 250,
-        "count": 2,
-        "unpriced_count": 1,
+            "count": 2,
+            "unpriced_count": 1,
+            "unpriced_token_quantity": 8.0,
         "lower_micro_usd": 250,
         "upper_micro_usd": 290,
         "input_micro_usd": 250,

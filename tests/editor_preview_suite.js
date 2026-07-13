@@ -2001,7 +2001,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '__yocost__', '3']);
   });
 
   test('new file editors reuse the existing editor pane', () => {
@@ -3816,7 +3816,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.debugModeExplicitUrlEnabledForTest(), true, 'debug=1 is tracked separately from menu-opened YO!stats');
     api.recordClientPerfCounterForTest('focusSet', 0.2, {nodes: 1});
     assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-client-perf'), 'explicit debug=1 graph shows raw client-work counters');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,yocost,image-viewer,file-editor');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane');
     assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'YO!stats pane serializes to the readable debug item');
     const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
@@ -4081,7 +4081,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const sourceKeyOrderText = chartKeys.map(key => `\`${key}\``).join(', ');
     assert.ok(guiSpec.includes(`source-key chart order ${sourceKeyOrderText}`), 'YO!stats coverage inventory names every chart key in shipped order');
     assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2001;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30001;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 8000;') && debugPaneSource.includes('const jsDebugStatsHistoryMaxTimeoutMs = 30000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30001;'), 'YO!stats retries cold-start samples just after two seconds, then keeps its thirty-second steady cadence and a range-bounded request timeout');
-    assert.ok(/const jsDebugStatsPollState = \{\s*inFlight: false,\s*pending: false,\s*pendingForceGraphRefresh: false,\s*firstSampleReceived: false,\s*\};/.test(debugPaneSource), 'YO!stats polling lifecycle has one state owner');
+    assert.ok(/const jsDebugStatsPollState = \{\s*inFlight: false,\s*pending: false,\s*pendingForceGraphRefresh: false,\s*firstSampleReceived: false,\s*lastSampleAtMs: 0,\s*\};/.test(debugPaneSource), 'YO!stats polling lifecycle has one state owner');
     for (const retiredName of ['jsDebugStatsPollInFlight', 'jsDebugStatsPollPending', 'jsDebugStatsPollPendingForceGraphRefresh', 'jsDebugStatsFirstSampleReceived']) {
       assert.equal(debugPaneSource.includes(retiredName), false, `YO!stats retires parallel polling global ${retiredName}`);
     }
@@ -4105,7 +4105,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function scheduleJsDebugPanelRefresh\(options = \{\}\) \{[\s\S]*if \(options\.force === true\) jsDebugRenderForce = true;[\s\S]*if \(jsDebugRenderTimer\) return;[\s\S]*const force = jsDebugRenderForce;[\s\S]*jsDebugRenderForce = false;[\s\S]*refreshDebugPanelsFromEvents\(\{force\}\)/.test(debugPaneSource), 'YO!stats latches a forced redraw into an already-pending shared refresh');
     assert.equal((debugPaneSource.match(/scheduleJsDebugPanelRefresh\(\{force: firstSampleApplied \|\| forceGraphRefresh\}\);/g) || []).length, 2, 'YO!stats forces first samples and widened-history responses through the shared refresh path');
     assert.ok(/if \(event\.type === 'pointerdown'\)[\s\S]*jsDebugGraphRangeSliderDragging = true;[\s\S]*return true;[\s\S]*if \(event\.type === 'change'\)[\s\S]*jsDebugGraphRangeSliderDragging = false;[\s\S]*setDebugGraphRangeFromSlider/.test(debugPaneSource), 'YO!stats range dragging preserves the native input and commits only on change');
-    assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
+    assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)[\s\S]*itemIsActivePaneTab\(yocostItemId\)/.test(debugPaneSource), 'YO!stats polling is shared by the visible YO!stats and YO!cost tabs');
     assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*syncJsDebugStatsPolling\(\{pollNow: true\}\)/.test(debugPaneSource), 'every Chrome-style pane-tab activation re-arms or stops the shared YO!stats sampler');
     assert.ok(/function syncJsDebugStatsPolling\(\{pollNow = true, forceGraphRefresh = false\} = \{\}\)[\s\S]*armJsDebugStatsPolling\(\{pollNow, forceGraphRefresh\}\)/.test(debugPaneSource), 'YO!stats uses one polling synchronizer for layout and browser visibility changes');
     assert.ok(/document\.addEventListener\('visibilitychange'[\s\S]*forceGraphRefresh: visible/.test(debugPaneSource), 'YO!stats forces a catch-up graph redraw when Chrome makes the page visible again');
@@ -5362,7 +5362,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(systemCpu.hasDataValues.includes(true) && systemCpu.values.includes(0), 'a sampled zero remains data, distinct from an unsampled gap');
   });
 
-  test('YO!stats Cost summary is a compact non-chart card with full accounting in its popover', () => {
+  test('YO!stats Cost summary is a compact non-chart card that opens YO!cost', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
@@ -5407,6 +5407,19 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(summary.upperMicroUsd, 330000, 'Cost summary exposes the upper edge of the displayed estimate range');
     assert.ok(/group\.key === 'modelTokens' && debugGraphChartVisible\('costSummary'\)[\s\S]*items\.push\(debugGraphCostSummaryHtml\(groupBuckets, domain\)\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Cost summary consumes the exact Model tokens/min bucket helper, including compact wide-range history');
     const html = api.debugPanelHtmlForTest();
+    const reportHtml = api.debugGraphCostReportHtmlForTest(summary, {startMs: now - 60000, endMs: now});
+    const unpricedReportHtml = api.debugGraphCostReportHtmlForTest({
+      knownMicroUsd: 200000,
+      lowerMicroUsd: 200000,
+      upperMicroUsd: 950000,
+      pricedCount: 1,
+      complete: false,
+      unpricedCount: 1,
+      unpricedTokenQuantity: 50,
+      components: [{provider: 'openai', model: 'unknown-model', direction: 'input', unit: 'tokens', priced: false, unpriced_count: 1, unpriced_token_quantity: 50, token_quantity: 50, upper_micro_usd: 750000}],
+      models: [], sources: [], tmuxWindows: [],
+    }, {startMs: now - 60000, endMs: now});
+    assert.ok(unpricedReportHtml.includes('data-js-debug-cost-table="unpriced"') && unpricedReportHtml.includes('Known priced total') && unpricedReportHtml.includes('$0.20') && unpricedReportHtml.includes('Unpriced tokens') && unpricedReportHtml.includes('50 tokens') && unpricedReportHtml.includes('Worst-case additional estimate') && unpricedReportHtml.includes('$0.75') && unpricedReportHtml.includes('openai · unknown-model (input)'), 'unpriced usage keeps known cost, token volume, worst-case increment, and affected model/class explicit instead of widening the headline opaquely');
     const modelIndex = html.indexOf('data-js-debug-chart="modelTokens"');
     const costIndex = html.indexOf('data-js-debug-summary-group="costSummary"');
     assert.ok(modelIndex >= 0 && costIndex > modelIndex, 'Cost summary is immediately ordered after Model tokens/min in the graph stack');
@@ -5426,19 +5439,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(cardHeader.includes('js-debug-cost-estimate'), 'the Cost card heading carries the plain estimate text');
     assert.equal(cardHeader.includes('data-js-debug-cost-details'), false, 'the Cost card header keeps More Info out of the title/control row');
     const cardFooter = html.slice(html.indexOf('</dl>', costIndex), html.indexOf('</section>', costIndex));
-    assert.ok(/<span class="js-debug-cost-modal-host"><button[^>]*class="[^"]*\bjs-debug-cost-details\b[^"]*\bcontrol-active-hover\b[^"]*"[^>]*data-js-debug-cost-details[^>]*aria-haspopup="dialog"[^>]*>More Info<\/button><template data-js-debug-cost-modal-template>/.test(cardFooter), 'the Cost card exposes More Info below the Total row with its sibling modal template');
+    assert.ok(/<span class="js-debug-cost-modal-host"><button[^>]*class="[^"]*\bjs-debug-cost-details\b[^"]*\bcontrol-active-hover\b[^"]*"[^>]*data-js-debug-cost-details[^>]*>More Info<\/button><\/span>/.test(cardFooter), 'the Cost card exposes More Info below the Total row as the YO!cost tab opener');
     assert.equal(cardBody.includes('<a '), false, 'the Cost card compact accounting list contains no pricing links');
     assert.equal(cardBody.includes('js-debug-cost-usage-chart'), false, 'the Cost card compact accounting list contains no model usage chart');
-    const fullModelTableEvidence = ['<template data-js-debug-cost-modal-template>', '>Model Usages<', 'data-js-debug-cost-table="model"', 'gpt-5.6-terra · med', 'claude-opus-4-8 · xhigh', 'gpt-5.6-sol · high', 'gpt-5.6-sol · low', 'gpt-image-2'].map(value => [value, html.includes(value)]);
-    assert.ok(fullModelTableEvidence.every(([_value, present]) => present) && !html.includes('· +'), `the full report stores a semantic model table with every model and effort instead of truncating to a +N suffix: ${JSON.stringify(fullModelTableEvidence)}`);
-    const modelUsagesSection = html.slice(html.indexOf('<section class="js-debug-cost-model-usages'), html.indexOf('<section class="js-debug-cost-details-section">\n    <h2>Cost calculation</h2>'));
-    assert.ok(modelUsagesSection.includes('<thead>') && modelUsagesSection.includes('<tbody>') && modelUsagesSection.includes('<tfoot>') && modelUsagesSection.includes('<th scope="col">Model</th>') && modelUsagesSection.includes('>Cached</th>') && modelUsagesSection.includes('>Grand total</th>'), 'report Model Usages uses one semantic table with class headings and a grand-total row');
+    assert.equal(html.includes('data-js-debug-cost-modal-template'), false, 'the Cost card retains no modal template');
+    assert.equal(html.includes('app-modal-overlay js-debug-cost-modal'), false, 'the Cost card retains no modal surface');
+    const modelUsagesSection = reportHtml.slice(reportHtml.indexOf('<section class="js-debug-cost-model-usages'), reportHtml.indexOf('<section class="js-debug-cost-details-section">\n    <h2>Cost calculation</h2>'));
     assert.ok(modelUsagesSection.includes('23.5k tokens') && modelUsagesSection.includes('$0.0705') && modelUsagesSection.includes('125k tokens') && modelUsagesSection.includes('$0.0375') && modelUsagesSection.includes('<strong>0</strong><small>$0</small>'), 'every model row pairs per-class token counts and costs, including explicit zero cells');
     assert.ok(modelUsagesSection.includes('aria-label="gpt-5.6-terra · med: Total 149k tokens $0.1450; Input 23.5k tokens $0.0705; Cached 125k tokens $0.0375; Output 0 $0.0370; Other 0 $0"'), 'each model row keeps an accessible per-class token and cost summary');
     assert.equal(cardBody.includes('js-debug-line-chart') || cardBody.includes('data-js-debug-axis') || cardBody.includes('data-js-debug-bar-'), false, 'Cost summary is not a cost-per-minute chart');
-    assert.ok(html.includes('data-js-debug-cost-details') && html.includes('aria-haspopup="dialog"') && html.includes('<article class="js-debug-cost-modal-dialog js-debug-cost-report"') && html.includes('data-js-debug-cost-modal-close') && html.includes('class="js-debug-cost-report-body"') && html.includes('152k tokens') && html.includes('Input: 23.5k tokens') && html.includes('Cache: 125k tokens') && html.includes('Output: 3.7k tokens') && html.includes('Other: 0 tokens') && html.includes('Cost calculation') && html.includes('By Agent') && html.includes('Model Usages') && html.includes('Agent and source attribution') && html.includes('<table'), 'More Info opens a bounded report whose inner body owns complete by-agent and by-model tables plus calculation and source content');
-    assert.ok(html.includes('data-js-debug-cost-transcript-path="/tmp/root.jsonl"') && html.includes('>Root Codex</a>'), 'a source with a canonical transcript path renders a Preview link');
-    assert.equal(/data-js-debug-cost-transcript-path[^>]*>Research subagent</.test(html), false, 'a source without a transcript path remains plain text with no dead link');
+    assert.ok(reportHtml.includes('152k tokens') && reportHtml.includes('Cost calculation') && reportHtml.includes('By Agent') && reportHtml.includes('Model Usages') && reportHtml.includes('Agent and source attribution') && reportHtml.includes('<table'), 'YO!cost owns the complete by-agent and by-model report content');
+    assert.ok(reportHtml.includes('data-js-debug-cost-transcript-path="/tmp/root.jsonl"') && reportHtml.includes('>Root Codex</a>'), 'a source with a canonical transcript path renders a Preview link');
+    assert.equal(/data-js-debug-cost-transcript-path[^>]*>Research subagent</.test(reportHtml), false, 'a source without a transcript path remains plain text with no dead link');
     const unsafePathHtml = api.debugGraphCostSourceTreeHtmlForTest([{source: 'Unsafe', transcript: '/tmp/../outside.jsonl', token_quantity: 1}]);
     assert.equal(unsafePathHtml.includes('data-js-debug-cost-transcript-path'), false, 'a traversal-shaped non-canonical transcript path never becomes a Preview link');
     const multiAgentHtml = api.debugGraphCostTmuxBreakdownHtmlForTest({tmuxWindows: [
@@ -5453,20 +5465,20 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     ], [], {report: true});
     assert.equal((multiModelHtml.match(/<tr aria-label=/g) || []).length, 2, 'every distinct model renders one semantic row');
     for (const model of ['gpt-a', 'claude-b']) assert.match(multiModelHtml, new RegExp(`aria-label="[^"]*${model}[^"]*Total[^"]*Input[^"]*Cached[^"]*Output[^"]*Other`), `${model} exposes every token-and-cost class plus Total`);
-    const sourceTreeIndex = html.indexOf('Agent and source attribution');
-    const pricingSourcesIndex = html.indexOf('Pricing sources');
-    const pricingSourcesSection = html.slice(pricingSourcesIndex, html.indexOf('</article>', pricingSourcesIndex));
+    const sourceTreeIndex = reportHtml.indexOf('Agent and source attribution');
+    const pricingSourcesIndex = reportHtml.indexOf('Pricing sources');
+    const pricingSourcesSection = reportHtml.slice(pricingSourcesIndex, reportHtml.indexOf('</article>', pricingSourcesIndex));
     assert.ok(pricingSourcesIndex > sourceTreeIndex, 'the consolidated Pricing sources section is rendered last after source attribution');
     assert.equal((pricingSourcesSection.match(/href="https:\/\/platform\.openai\.com\/pricing"/g) || []).length, 1, 'duplicate component pricing URLs collapse to one bottom-section source link');
     assert.equal((pricingSourcesSection.match(/href="https:\/\/platform\.claude\.com\/docs\/en\/about-claude\/pricing"/g) || []).length, 1, 'distinct authoritative pricing URLs stay visible in the bottom section');
     assert.equal(pricingSourcesSection.includes('javascript:alert'), false, 'unsafe component source URLs are filtered from the consolidated pricing sources list');
     const costSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(costSource.includes('data-js-debug-cost-refresh') && costSource.includes("/api/pricing-catalog/refresh") && costSource.includes("/api/pricing-catalog', {cache: 'no-store'}") && costSource.includes('readOnlyMode ? \'\'') && costSource.includes('} catch (error) {\n    jsDebugPricingRefreshState.inFlight = false;'), 'the card exposes the server-owned Refresh control only to writable/admin sessions, polls its bounded status, clears a failed request state, and never crawls from the browser');
-    assert.ok(html.includes('Catalog revision') && html.includes('>9<') && html.includes('Catalog freshness') && html.includes('seed-only') && html.includes('Priced coverage') && html.includes('>4/4<') && html.includes('Formula:') && html.includes('23,500 tokens × $3/1,000,000 tokens') && html.includes('2026-07-01T00:00:00Z') && html.includes('Unpriced exclusions') && html.includes('Estimated API list-price range $0.2560 – $0.3300') && html.includes('href="https://platform.openai.com/pricing"') && html.includes('>openai · gpt-5.6-terra<') && html.includes('>s:build</strong>') && html.includes('role="tree"') && html.includes('aria-level="2"'), 'the report discloses active catalog state, safe pricing links, formulas, by-agent arithmetic, and hierarchical source attribution');
-    const tmuxSection = html.slice(html.indexOf('By Agent'), html.indexOf('Model Usages'));
+    assert.ok(reportHtml.includes('Catalog revision') && reportHtml.includes('>9<') && reportHtml.includes('Catalog freshness') && reportHtml.includes('seed-only') && reportHtml.includes('Priced coverage') && reportHtml.includes('>4/4<') && reportHtml.includes('data-js-debug-cost-table="calculation"') && reportHtml.includes('23.5k tokens') && reportHtml.includes('2026-07-01T00:00:00Z') && reportHtml.includes('Unpriced exclusions') && reportHtml.includes('Estimated API list-price range $0.2560 – $0.3300') && reportHtml.includes('href="https://platform.openai.com/pricing"') && reportHtml.includes('>openai · gpt-5.6-terra<') && reportHtml.includes('data-js-debug-cost-table="source"') && reportHtml.includes('data-js-debug-cost-table="catalog"'), 'the report discloses active catalog state, safe pricing links, by-agent arithmetic, and source attribution in shared tables');
+    const tmuxSection = reportHtml.slice(reportHtml.indexOf('By Agent'), reportHtml.indexOf('Model Usages'));
     assert.equal((tmuxSection.match(/>s:build</g) || []).length, 1, 'parent and subagent costs under one tmux window render as one combined tmux row');
     assert.ok(tmuxSection.includes('data-js-debug-cost-table="agent"') && tmuxSection.includes('23.5k tokens') && tmuxSection.includes('125k tokens') && tmuxSection.includes('3.7k tokens') && tmuxSection.includes('$0.2560 – $0.3300') && tmuxSection.includes('Grand total'), 'agent row and grand total pair class counts/costs and equal parent plus subagent once');
-    assert.equal((html.match(/<li>/g) || []).length > 24, true, 'the Cost report renders all available rows without the former 24-row caps');
+    assert.ok((reportHtml.match(/data-js-debug-cost-table=/g) || []).length >= 5, 'the Cost report renders every section in a shared table shell without former list/tree caps');
 
     assert.ok(costSource.includes("debugGraphCostRangeUsdText(summary)") && costSource.includes("debug.cost.range") && costSource.includes("'est. —, Σ displayed'"), 'an interval with no priceable component is distinctly unestimated while incomplete priced ranges render as low-high estimates');
   });

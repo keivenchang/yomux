@@ -974,6 +974,8 @@ const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
+const yocostItemId = '__yocost__';
+function yocostTabLabel() { return 'YO!cost'; }
 const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
   {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
   {itemId: searchHistoryItemId},
@@ -1429,6 +1431,24 @@ const TAB_TYPES = [
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
+  virtualPanelTabType({
+    key: 'yocost',
+    id: yocostItemId,
+    aliases: ['yocost', 'yo!cost', 'yo-cost', yocostItemId],
+    label: () => yocostTabLabel(),
+    sortRank: 0.71,
+    detail: () => debugGraphCostText('debug.cost.details', 'Cost summary details'),
+    createPanel: () => createYoCostPanel(),
+    renderAttached: () => renderYoCostPanels(),
+    relocalize: (_item, panel) => {
+      renderYoCostPanels({force: true});
+      relocalizeYoCostPanelChrome(panel);
+    },
+    className: () => 'yocost-item',
+    icon: 'chart',
+    panePlacement: panePlacementSideAllowed,
+    minWidth: () => minSplitPaneWidthPx(),
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1479,6 +1499,7 @@ function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
+function isYoCostItem(item) { return tabTypeForItem(item)?.key === 'yocost'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -1589,7 +1610,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId];
   if (!shareViewMode) items.splice(2, 0, chatItemId);
   return [...items, ...dynamicVirtualLayoutItems];
 }
@@ -41534,6 +41555,7 @@ const jsDebugStatsPollState = {
   pending: false,
   pendingForceGraphRefresh: false,
   firstSampleReceived: false,
+  lastSampleAtMs: 0,
 };
 const jsDebugStatsUploadState = {
   timer: null,
@@ -41567,8 +41589,8 @@ const jsDebugGraphModelTokenDimensions = Object.freeze([
   Object.freeze({key: 'cacheWrite', labelKey: 'debug.modelTokens.cacheWrite', fallback: 'Cache write'}),
 ]);
 let jsDebugGraphModelTokenDimension = 'output';
-const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null};
-const jsDebugCostModalState = {overlay: null, anchor: null, keydown: null};
+const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
+const jsDebugCostComponentSortState = {key: 'cost', direction: 'desc'};
 const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 60, label: '1m'},
@@ -42781,7 +42803,7 @@ function debugGraphMergeAgentTokenRates(target, source) {
 function debugGraphMergeCostSummary(target, source) {
   if (!source?.costSummary) return;
   const current = target.costSummary || {
-    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0,
+    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
     components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
   };
   current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd);
@@ -42791,6 +42813,7 @@ function debugGraphMergeCostSummary(target, source) {
   current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount);
   current.complete = current.complete && source.costSummary.complete === true;
   current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount);
+  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0);
   current.components.push(...debugGraphCostRows(source.costSummary.components));
   current.models.push(...debugGraphCostRows(source.costSummary.models));
   current.sources.push(...debugGraphCostRows(source.costSummary.sources));
@@ -43023,6 +43046,7 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     payload.system_cpu_percent,
   ].some(value => Number.isFinite(Number(value)));
   const firstSampleApplied = sampleApplied && !jsDebugStatsPollState.firstSampleReceived;
+  if (sampleApplied) jsDebugStatsPollState.lastSampleAtMs = Date.now();
   if (firstSampleApplied) {
     jsDebugStatsPollState.firstSampleReceived = true;
     armJsDebugStatsPolling();
@@ -43140,6 +43164,7 @@ function debugGraphApplyServerCostSummary(bucket, source) {
     pricedCount: debugGraphCostInteger(source.priced_count),
     complete: source.complete === true,
     unpricedCount: debugGraphCostInteger(source.unpriced_count),
+    unpricedTokenQuantity: Math.max(0, Number(source.unpriced_token_quantity) || 0),
     components: debugGraphCostRows(source.components),
     models: debugGraphCostRows(source.models),
     sources: debugGraphCostRows(source.sources),
@@ -44252,13 +44277,14 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const sliderId = 'js-debug-range-options';
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
-  const rangeLabel = zoomed ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
+  const rangeLabel = zoomed ? debugGraphCostRangeText(debugGraphDomain(nowMs)) : jsDebugGraphRangeLabel(activeRange, nowMs);
+  const resetLabel = `${t('common.reset')} ${t('debug.graph.control.zoom')}`;
   return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
     <span class="js-debug-range-prefix" aria-hidden="true">${esc(t('debug.graph.control.timeRange'))}</span>
-    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
+    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}"${zoomed ? ' disabled aria-disabled="true"' : ''}>
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
     <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
-    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('common.reset'))}</button>` : ''}
+    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(resetLabel)}</button>` : ''}
   </div>`;
 }
 
@@ -45205,7 +45231,7 @@ function debugGraphCostTokenTotals(summary) {
 function debugGraphCostAggregateRows(rows, keyFields) {
   const grouped = new Map();
   const subtotalFields = ['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd'];
-  const tokenFields = ['quantity', 'token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens'];
+  const tokenFields = ['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens'];
   for (const row of rows || []) {
     const key = keyFields.map(field => String(row?.[field] || '')).join('\u0000') || 'unknown';
     const current = grouped.get(key) || {...row, ...Object.fromEntries([...subtotalFields, ...tokenFields].map(field => [field, 0]))};
@@ -45221,7 +45247,7 @@ function debugGraphCostSummaryForBuckets(buckets) {
   const summaries = (buckets || []).map(bucket => bucket?.costSummary).filter(Boolean);
   const result = {
     totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
-    unpricedCount: 0, components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
+    unpricedCount: 0, unpricedTokenQuantity: 0, components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
     backfill: {...jsDebugUsageAtomBackfill},
   };
   for (const summary of summaries) {
@@ -45232,6 +45258,7 @@ function debugGraphCostSummaryForBuckets(buckets) {
     result.pricedCount += debugGraphCostInteger(summary.pricedCount);
     result.complete = result.complete && summary.complete === true;
     result.unpricedCount += debugGraphCostInteger(summary.unpricedCount);
+    result.unpricedTokenQuantity += Math.max(0, Number(summary.unpricedTokenQuantity) || 0);
     result.components.push(...debugGraphCostRows(summary.components));
     result.models.push(...debugGraphCostRows(summary.models));
     result.sources.push(...debugGraphCostRows(summary.sources));
@@ -45317,7 +45344,7 @@ function debugGraphCostAllPricingSourcesHtml(components) {
   if (!links.length) return '';
   return `<section class="js-debug-cost-details-section js-debug-cost-pricing-sources">
     <h2>${esc(debugGraphCostText('debug.cost.pricingSources', 'Pricing sources'))}</h2>
-    <ul class="js-debug-cost-report-list">${links.map(({url, label}) => `<li><strong>${esc(label)}:</strong> <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></li>`).join('')}</ul>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="pricing-sources"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</th><th scope="col">URL</th></tr></thead><tbody>${links.map(({url, label}) => `<tr><th scope="row">${esc(label)}</th><td><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></td></tr>`).join('')}</tbody></table></div>
   </section>`;
 }
 
@@ -45384,19 +45411,58 @@ function debugGraphCostComponentFormulaText(row) {
   return `${quantity.toLocaleString()} ${String(row?.unit || 'unit')} × ${rate}`;
 }
 
+function debugGraphCostComponentSortValue(row, key) {
+  if (key === 'tokens') return Math.max(0, Number(row?.quantity) || 0);
+  if (key === 'rate') {
+    const rate = Number(row?.rate_usd);
+    const scale = Math.max(1, Number(row?.rate_scale) || 1);
+    return Number.isFinite(rate) ? rate / scale : -1;
+  }
+  if (key === 'cost') return debugGraphCostMicroUsd(row);
+  if (key === 'effective') {
+    const timestamp = Date.parse(String(row?.effective_from || ''));
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+  if (key === 'cache') return String(row?.cache_role || '');
+  if (key === 'source') return String(row?.source_url || '');
+  return String(row?.[key] || '');
+}
+
+function debugGraphCostSortedComponentRows(rows) {
+  const {key, direction} = jsDebugCostComponentSortState;
+  const multiplier = direction === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => {
+    const leftValue = debugGraphCostComponentSortValue(left, key);
+    const rightValue = debugGraphCostComponentSortValue(right, key);
+    const comparison = typeof leftValue === 'number' && typeof rightValue === 'number'
+      ? leftValue - rightValue
+      : String(leftValue).localeCompare(String(rightValue));
+    return (comparison * multiplier) || debugGraphCostComponentLabel(left).localeCompare(debugGraphCostComponentLabel(right));
+  });
+}
+
+function debugGraphCostComponentSortHeaderHtml(key, label) {
+  const active = jsDebugCostComponentSortState.key === key;
+  const ariaSort = active ? (jsDebugCostComponentSortState.direction === 'asc' ? 'ascending' : 'descending') : 'none';
+  const nextDirection = active && jsDebugCostComponentSortState.direction === 'asc' ? 'descending' : 'ascending';
+  return `<th scope="col" aria-sort="${ariaSort}"><button type="button" class="js-debug-cost-sort control-active-hover" data-js-debug-cost-sort="${esc(key)}" data-js-debug-cost-next-sort="${nextDirection}">${esc(label)}</button></th>`;
+}
+
 function debugGraphCostComponentDetailsHtml(rows) {
   if (!rows.length) return '';
-  const formulaLabel = debugGraphCostText('debug.cost.formula', 'Formula');
-  const rateLabel = debugGraphCostText('debug.cost.rate', 'Rate');
-  const effectiveLabel = debugGraphCostText('debug.cost.effective', 'Effective');
-  const estimatedLabel = debugGraphCostText('debug.cost.estimated', 'Estimated');
+  const headers = [
+    ['provider', 'Provider'], ['model', 'Model'], ['effort', 'Effort'], ['direction', 'Direction'],
+    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')], ['modality', 'Modality'], ['unit', 'Unit'],
+    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['rate', debugGraphCostText('debug.cost.rate', 'Rate')],
+    ['cost', debugGraphCostText('debug.cost.estimated', 'Cost')], ['effective', debugGraphCostText('debug.cost.effective', 'Effective')],
+    ['source', debugGraphCostText('debug.cost.source', 'Pricing source')],
+  ];
   return `<section class="js-debug-cost-details-section">
     <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
-    <ul class="js-debug-cost-report-list">${rows.map(row => {
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
       const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      const source = url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—';
-      return `<li><div><strong>${esc(debugGraphCostComponentLabel(row))}</strong> — ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</div><ul><li><span>${esc(formulaLabel)}:</span> ${esc(debugGraphCostComponentFormulaText(row))}</li><li><span>${esc(rateLabel)}:</span> ${esc(debugGraphCostComponentRateText(row))}</li><li><span>${esc(effectiveLabel)}:</span> ${esc(String(row?.effective_from || '—'))}</li><li><span>${esc(estimatedLabel)}:</span> ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</li><li><span>${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}:</span> ${source}</li></ul></li>`;
-    }).join('')}</ul>
+      return `<tr><td>${esc(String(row?.provider || '—'))}</td><td>${esc(String(row?.model || '—'))}</td><td>${esc(String(row?.effort || '—'))}</td><td>${esc(String(row?.direction || '—'))}</td><td>${esc(String(row?.cache_role || '—'))}</td><td>${esc(String(row?.modality || '—'))}</td><td>${esc(String(row?.unit || '—'))}</td><td>${esc(debugGraphTokensText(row?.quantity))}</td><td>${esc(debugGraphCostComponentRateText(row))}</td><td>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</td><td>${esc(String(row?.effective_from || '—'))}</td><td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</td></tr>`;
+    }).join('')}</tbody></table></div>
   </section>`;
 }
 
@@ -45497,10 +45563,7 @@ function debugGraphCostSourceTreeHtml(rows) {
   if (!rows.length) return '';
   return `<section class="js-debug-cost-details-section">
     <h2>${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}</h2>
-    <ul class="js-debug-cost-source-tree" role="tree" aria-label="${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}">${rows.map(row => {
-      const level = String(row?.agent_thread_id || '') && String(row?.agent_thread_id || '') !== String(row?.root_thread_id || '') ? 2 : 1;
-      return `<li role="treeitem" aria-level="${level}" tabindex="0"><span class="js-debug-cost-source-label">${debugGraphCostSourceLabelHtml(row)}</span><span class="js-debug-cost-source-subtotals">${esc(debugGraphCostSubtotalText(row))}</span></li>`;
-    }).join('')}</ul>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="source"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th><th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${debugGraphCostSourceLabelHtml(row)}</th><td>${esc(debugGraphTokensText(row?.token_quantity))}</td><td>${esc(debugGraphCostSubtotalText(row))}</td></tr>`).join('')}</tbody></table></div>
   </section>`;
 }
 
@@ -45509,12 +45572,13 @@ function debugGraphCostCatalogDetailsHtml(summary) {
   const freshness = String(summary.freshness || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
   const exclusions = Math.max(0, Number(summary.unpricedCount) || 0);
   const priced = Math.max(0, Number(summary.pricedCount) || 0);
-  return `<dl class="js-debug-cost-catalog">
-    <div><dt>${esc(debugGraphCostText('debug.cost.catalogRevision', 'Catalog revision'))}</dt><dd>${esc(revision)}</dd></div>
-    <div><dt>${esc(debugGraphCostText('debug.cost.freshness', 'Catalog freshness'))}</dt><dd>${esc(freshness)}</dd></div>
-    <div><dt>${esc(debugGraphCostText('debug.cost.coverage', 'Priced coverage'))}</dt><dd>${esc(`${priced}/${priced + exclusions}`)}</dd></div>
-    <div><dt>${esc(debugGraphCostText('debug.cost.exclusions', 'Unpriced exclusions'))}</dt><dd>${esc(String(exclusions))}</dd></div>
-  </dl>`;
+  const rows = [
+    [debugGraphCostText('debug.cost.catalogRevision', 'Catalog revision'), revision],
+    [debugGraphCostText('debug.cost.freshness', 'Catalog freshness'), freshness],
+    [debugGraphCostText('debug.cost.coverage', 'Priced coverage'), `${priced}/${priced + exclusions}`],
+    [debugGraphCostText('debug.cost.exclusions', 'Unpriced exclusions'), String(exclusions)],
+  ];
+  return `<div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="catalog"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function debugGraphCostBackfillText(summary) {
@@ -45525,17 +45589,42 @@ function debugGraphCostBackfillText(summary) {
   return debugGraphCostText('debug.cost.backfillPending', 'Backfill pending');
 }
 
-function debugGraphCostDetailsModalHtml(summary, domain) {
+function debugGraphCostUnpricedUsage(summary) {
+  const rows = debugGraphCostRows(summary?.components).filter(row => row?.priced === false || Math.max(0, Number(row?.unpriced_count) || 0) > 0);
+  const labels = [...new Set(rows.map(row => {
+    const model = [row?.provider, row?.model].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || debugGraphCostText('debug.cost.unknown', 'Unknown');
+    const itemClass = debugGraphCostClass(row);
+    return `${model} (${itemClass})`;
+  }))];
+  const rowsTokenQuantity = rows.reduce((total, row) => total + Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0)), 0);
+  const tokenQuantity = Math.max(0, Number(summary?.unpricedTokenQuantity) || rowsTokenQuantity);
+  const knownMicroUsd = debugGraphCostInteger(summary?.knownMicroUsd);
+  const upperMicroUsd = Math.max(knownMicroUsd, debugGraphCostInteger(summary?.upperMicroUsd));
+  return {tokenQuantity, worstCaseMicroUsd: upperMicroUsd - knownMicroUsd, labels};
+}
+
+function debugGraphCostUnknownUsageHtml(summary) {
+  if (Math.max(0, Number(summary?.unpricedCount) || 0) === 0) return '';
+  const usage = debugGraphCostUnpricedUsage(summary);
+  const rows = [
+    [debugGraphCostText('debug.cost.knownTotal', 'Known priced total'), debugGraphCostUsdText(summary?.knownMicroUsd)],
+    [debugGraphCostText('debug.cost.unpricedTokens', 'Unpriced tokens'), debugGraphTokensText(usage.tokenQuantity)],
+    [debugGraphCostText('debug.cost.worstCase', 'Worst-case additional estimate'), debugGraphCostUsdText(usage.worstCaseMicroUsd)],
+    [debugGraphCostText('debug.cost.unpricedModels', 'Unpriced model/classes'), usage.labels.join(', ') || debugGraphCostText('debug.cost.unknown', 'Unknown')],
+  ];
+  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div></section>`;
+}
+
+function debugGraphCostReportHtml(summary, domain) {
   const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0;
   const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
   const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
   const total = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
   const tokens = debugGraphCostTokenTotals(summary);
   const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
-  return `<article class="js-debug-cost-modal-dialog js-debug-cost-report" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+  return `<article class="js-debug-cost-report" aria-label="${esc(title)}">
     <div class="js-debug-cost-report-title">
       <h1>${esc(title)}</h1>
-      <button type="button" class="js-debug-cost-modal-close" data-js-debug-cost-modal-close aria-label="${esc(t('common.close'))}" title="${esc(t('common.close'))}">×</button>
     </div>
     <div class="js-debug-cost-report-body">
       <p class="meta-muted">${esc(debugGraphCostRangeText(domain))}</p>
@@ -45543,6 +45632,7 @@ function debugGraphCostDetailsModalHtml(summary, domain) {
       <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.total', 'Summary'))}</h2>
         <ul class="js-debug-cost-report-list"><li><strong>${esc(debugGraphCostText('debug.cost.total', 'Estimated total'))}:</strong> ${esc(total)}</li><li><strong>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}:</strong> ${esc(debugGraphTokensText(tokens.total))}<ul><li>${esc(`${debugGraphCostText('debug.cost.input', 'Input')}: ${debugGraphTokensText(tokens.input)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.cache', 'Cache')}: ${debugGraphTokensText(tokens.cache)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.output', 'Output')}: ${debugGraphTokensText(tokens.output)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.other', 'Other')}: ${debugGraphTokensText(tokens.other)}`)}</li></ul></li></ul>
       </section>
+      ${debugGraphCostUnknownUsageHtml(summary)}
       <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.catalogRevision', 'Pricing catalog'))}</h2>${debugGraphCostCatalogDetailsHtml(summary)}</section>
       ${debugGraphCostTmuxBreakdownHtml(summary)}
       ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true})}
@@ -45593,7 +45683,7 @@ function debugGraphCostSummaryHtml(buckets, domain) {
     <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
       ${compactRows.map(([label, value, tokenCount]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
     </dl>
-    <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-expanded="false" aria-haspopup="dialog" aria-label="${esc(accessible)}">${esc(moreInfo)}</button><template data-js-debug-cost-modal-template>${debugGraphCostDetailsModalHtml(summary, domain)}</template></span>
+    <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-label="${esc(accessible)}">${esc(moreInfo)}</button></span>
   </section>`;
 }
 
@@ -45601,7 +45691,8 @@ async function refreshDebugCostPricing() {
   if (readOnlyMode || jsDebugPricingRefreshState.inFlight) return;
   jsDebugPricingRefreshState.inFlight = true;
   jsDebugPricingRefreshState.error = '';
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+  jsDebugPricingRefreshState.lastRequestedAtMs = Date.now();
+  refreshDebugGraphSurfaces();
   try {
     const payload = await apiFetchJson('/api/pricing-catalog/refresh', {method: 'POST'});
     jsDebugPricingRefreshState.status = String(payload?.status || 'running');
@@ -45614,7 +45705,7 @@ async function refreshDebugCostPricing() {
     jsDebugPricingRefreshState.inFlight = false;
     jsDebugPricingRefreshState.error = userMessageText(error, t('common.requestFailed'));
   } finally {
-    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+    refreshDebugGraphSurfaces();
   }
 }
 
@@ -45639,10 +45730,10 @@ async function refreshDebugCostPricingStatus() {
     jsDebugPricingRefreshState.inFlight = false;
     jsDebugPricingRefreshState.error = userMessageText(error, t('common.requestFailed'));
   }
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+  refreshDebugGraphSurfaces();
 }
 
-function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
+function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true} = {}) {
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
@@ -45658,7 +45749,7 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
       // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
       // displayed bucket array, including the compact wide-range history, but adds no axes,
       // bars, or independent range state.
-      if (group.key === 'modelTokens' && debugGraphChartVisible('costSummary')) {
+      if (includeCostSummary && group.key === 'modelTokens' && debugGraphChartVisible('costSummary')) {
         items.push(debugGraphCostSummaryHtml(groupBuckets, domain));
       }
       return items;
@@ -45736,7 +45827,7 @@ function jsDebugStatsPanelVisible() {
   return debugModeEnabled === true
     && document.visibilityState !== 'hidden'
     && typeof itemIsActivePaneTab === 'function'
-    && itemIsActivePaneTab(debugPaneItemId);
+    && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
 }
 
 function jsDebugStatsTokenConsumerEnabled() {
@@ -46547,6 +46638,101 @@ function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(d
   return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
 }
 
+function yoCostPanelHtml() {
+  const nowMs = Date.now();
+  const buckets = debugGraphDisplayBuckets(nowMs);
+  const tokenGroups = jsDebugGraphChartGroups.filter(group => group.key === 'agentTokens' || group.key === 'modelTokens');
+  const charts = buckets.length
+    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {includeCostSummary: false})
+    : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
+  const costBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
+  const refreshedAtMs = Math.max(Number(jsDebugStatsPollState.lastSampleAtMs) || 0, Number(jsDebugPricingRefreshState.lastRequestedAtMs) || 0);
+  const ageSeconds = refreshedAtMs > 0 ? Math.max(0, Math.floor((nowMs - refreshedAtMs) / 1000)) : null;
+  const age = ageSeconds === null ? t('common.notAvailable') : ageSeconds < 60 ? `${ageSeconds}s ago` : relativeTimeFormat(ageSeconds);
+  const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
+  const refresh = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
+  const ageLabel = debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-data-age" data-js-yocost-data-age>${esc(ageLabel)}${refresh}</div>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+}
+
+function openYoCostTranscriptPreview(event) {
+  const link = event.target?.closest?.('[data-js-debug-cost-transcript-path]');
+  if (!link) return false;
+  event.preventDefault();
+  const path = debugGraphCostTranscriptPath({transcript: link.dataset.jsDebugCostTranscriptPath});
+  if (!path) return true;
+  Promise.resolve(openFileInEditor(path, basenameOf(path), {viewMode: 'preview', userInitiated: true}))
+    .catch(() => emitNotification('previewOpen', {item: fileEditorItemFor(path), title: t('preview.openFailed', {path}), className: 'attention-alert toast'}));
+  return true;
+}
+
+function handleYoCostTableSort(event, panel) {
+  const button = event.target?.closest?.('[data-js-debug-cost-sort]');
+  if (!button || !panel?.contains(button)) return false;
+  event.preventDefault();
+  const key = String(button.dataset.jsDebugCostSort || 'cost');
+  const nextDirection = jsDebugCostComponentSortState.key === key && jsDebugCostComponentSortState.direction === 'asc' ? 'desc' : 'asc';
+  jsDebugCostComponentSortState.key = key;
+  jsDebugCostComponentSortState.direction = nextDirection;
+  renderYoCostPanels();
+  return true;
+}
+
+function bindYoCostPanel(panel) {
+  if (!panel || panel.dataset.jsYoCostBound === 'true') return;
+  panel.dataset.jsYoCostBound = 'true';
+  panel.addEventListener('pointerdown', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('click', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    if (handleYoCostTableSort(event, panel)) return;
+    openYoCostTranscriptPreview(event);
+  });
+  syncJsDebugStatsPolling({pollNow: !jsDebugStatsPollState.firstSampleReceived});
+}
+
+function createYoCostPanel() {
+  enableDebugMode();
+  const panel = document.createElement('article');
+  panel.className = 'panel js-yocost-panel';
+  panel.id = panelDomId(yocostItemId);
+  panel.innerHTML = panelFrameHtml({
+    item: yocostItemId,
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div><button type="button" class="panel-detail-close" data-detail-toggle="${esc(yocostItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button></div>`,
+    bodyClass: 'preferences-body js-yocost-body',
+    bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+  });
+  bindPanelShell(panel, yocostItemId);
+  bindYoCostPanel(panel);
+  return panel;
+}
+
+function renderYoCostPanels() {
+  for (const panel of document.querySelectorAll('.js-yocost-panel')) {
+    const body = panel.querySelector('.js-yocost-body');
+    const scroll = body?.querySelector('.js-yocost-scroll');
+    const scrollTop = scroll?.scrollTop || 0;
+    const scrollLeft = scroll?.scrollLeft || 0;
+    if (body) {
+      body.innerHTML = `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`;
+      restoreElementScrollPosition(body.querySelector('.js-yocost-scroll'), scrollTop, scrollLeft);
+    }
+    bindYoCostPanel(panel);
+  }
+}
+
+function refreshDebugGraphSurfaces({force = true} = {}) {
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force});
+  renderYoCostPanels();
+}
+
+function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(yocostItemId))) {
+  return relocalizeVirtualPanelChrome(panel, yocostTabLabel());
+}
+
 function createDebugPanel() {
   enableDebugMode();
   const panel = document.createElement('article');
@@ -46582,6 +46768,7 @@ function renderDebugPanels(options = {}) {
     }
     bindDebugPanel(panel);
   }
+  renderYoCostPanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -46589,6 +46776,7 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
+  renderYoCostPanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -46633,7 +46821,7 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
     graph.className = debugGraphClassName(nowMs);
     graph.innerHTML = debugGraphInnerHtml(nowMs);
     restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
-    bindDebugCostSummaryModalButtons(graph);
+    bindDebugCostSummaryTabButtons(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
@@ -46643,73 +46831,14 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   return true;
 }
 
-function closeDebugCostSummaryModal({restoreFocus = true} = {}) {
-  const {overlay, anchor, keydown} = jsDebugCostModalState;
-  if (keydown) document.removeEventListener('keydown', keydown, true);
-  if (overlay) overlay.remove();
-  if (anchor) {
-    anchor.setAttribute('aria-expanded', 'false');
-    if (restoreFocus && document.contains(anchor)) anchor.focus({preventScroll: true});
-  }
-  jsDebugCostModalState.overlay = null;
-  jsDebugCostModalState.anchor = null;
-  jsDebugCostModalState.keydown = null;
-}
-
-function openDebugCostSummaryModal(anchor) {
-  const template = anchor?.closest?.('.js-debug-cost-modal-host')?.querySelector?.(':scope > template[data-js-debug-cost-modal-template]');
-  if (!template) return;
-  closeDebugCostSummaryModal({restoreFocus: false});
-  const overlay = document.createElement('div');
-  overlay.className = 'app-modal-overlay js-debug-cost-modal';
-  overlay.dataset.jsDebugCostModal = 'true';
-  overlay.appendChild(template.content.cloneNode(true));
-  const close = () => closeDebugCostSummaryModal();
-  const onKeydown = event => {
-    if (event.key !== 'Escape') return;
-    event.preventDefault();
-    close();
-  };
-  overlay.addEventListener('click', event => {
-    const transcriptLink = event.target?.closest?.('[data-js-debug-cost-transcript-path]');
-    if (transcriptLink) {
-      event.preventDefault();
-      const path = debugGraphCostTranscriptPath({transcript: transcriptLink.dataset.jsDebugCostTranscriptPath});
-      if (!path) return;
-      Promise.resolve(openFileInEditor(path, basenameOf(path), {viewMode: 'preview', userInitiated: true}))
-        .then(() => closeDebugCostSummaryModal())
-        .catch(() => emitNotification('previewOpen', {item: fileEditorItemFor(path), title: t('preview.openFailed', {path}), className: 'attention-alert toast'}));
-      return;
-    }
-    if (event.target === overlay || event.target?.closest?.('[data-js-debug-cost-modal-close]')) {
-      event.preventDefault();
-      close();
-    }
-  });
-  document.addEventListener('keydown', onKeydown, true);
-  jsDebugCostModalState.overlay = overlay;
-  jsDebugCostModalState.anchor = anchor;
-  jsDebugCostModalState.keydown = onKeydown;
-  anchor.setAttribute('aria-expanded', 'true');
-  appOverlayRootElement().appendChild(overlay);
-  overlay.querySelector('[data-js-debug-cost-modal-close]')?.focus?.({preventScroll: true});
-}
-
-function bindDebugCostSummaryModalButtons(graph) {
+function bindDebugCostSummaryTabButtons(graph) {
   if (!graph) return;
   graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
     if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
-    const template = anchor.closest('.js-debug-cost-modal-host')?.querySelector(':scope > template[data-js-debug-cost-modal-template]');
-    if (!template) return;
     anchor.dataset.jsDebugCostDetailsBound = 'true';
     anchor.addEventListener('click', event => {
       event.preventDefault();
-      openDebugCostSummaryModal(anchor);
-    });
-    anchor.addEventListener('keydown', event => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      closeDebugCostSummaryModal();
+      selectSession(yocostItemId, {userInitiated: true});
     });
   });
 }
@@ -46785,9 +46914,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
       generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
     });
   }
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    refreshDebugGraphElement(graph, {force: true});
-  }
+  refreshDebugGraphSurfaces();
 }
 
 function setDebugGraphResolutionOverride(value) {
@@ -46795,14 +46922,14 @@ function setDebugGraphResolutionOverride(value) {
   const seconds = Math.max(0, Number(value) || 0);
   jsDebugGraphResolutionOverrideSeconds = [0, 1, 2, 5, 10, 30, 60, 120, 300, 600].includes(seconds) ? seconds : 0;
   saveJsDebugStatsUiPreferences();
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+  refreshDebugGraphSurfaces();
 }
 
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
   saveJsDebugStatsUiPreferences();
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+  refreshDebugGraphSurfaces();
 }
 
 function retryJsDebugHistory() {
@@ -47104,7 +47231,7 @@ function handleDebugGraphControlEvent(event, panel) {
 function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
-  bindDebugCostSummaryModalButtons(panel.querySelector('[data-js-debug-graph]'));
+  bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
   syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
   syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
   panel.addEventListener('pointerdown', event => {

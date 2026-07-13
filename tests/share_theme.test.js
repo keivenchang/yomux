@@ -39,7 +39,7 @@ async function runShareThemeSuite() {
   test('cross-surface host state survives layout, share, and terminal transitions', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,yocost,image-viewer,file-editor');
     const virtualItems = {
       info: api.infoItemId,
       yoagent: api.yoagentItemId,
@@ -51,6 +51,7 @@ async function runShareThemeSuite() {
       'search-history': api.searchHistoryItemId,
       preferences: api.prefsItemId,
       debug: api.debugPaneItemId,
+      yocost: api.yocostItemId,
     };
     const virtualTypes = api.TAB_TYPES.filter(type => Object.hasOwn(virtualItems, type.key));
     assert.equal(virtualTypes.length, Object.keys(virtualItems).length, 'all virtual panels are registered through the one descriptor factory');
