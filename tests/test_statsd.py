@@ -1378,6 +1378,100 @@ def test_statsd_large_agent_scan_streams_atoms_to_bounded_spool(monkeypatch, tmp
     service.store.close()
 
 
+def test_statsd_cpu_write_stays_responsive_during_atom_spool_maintenance(monkeypatch, tmp_path):
+    """One bounded token-maintenance turn cannot starve the one-second writer."""
+
+    spool = tmp_path / "latency-atoms.sqlite3"
+    with sqlite3.connect(spool) as connection:
+        connection.execute("CREATE TABLE atoms (bucket_start INTEGER NOT NULL, duration INTEGER NOT NULL, event_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket_start, duration, event_key))")
+        for index in range(16):
+            normalized = statsd.normalized_usage_atom(_spool_test_atom(index, 1050.0))
+            connection.execute(
+                "INSERT INTO atoms VALUES(?, ?, ?, ?)",
+                (1050, 1, statsd._agent_token_spool_identity(normalized), json.dumps(normalized)),
+            )
+    persistence = {
+        "path": str(spool), "cursor_start": -1, "cursor_duration": -1, "cursor_event": "",
+        "target_state": {"s|0|codex": 1060}, "sample_time": 1060, "count": 16, "changed": 0,
+    }
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    monkeypatch.setattr(service, "_load_agent_token_atom_spool", lambda: dict(persistence))
+    original_merge = service.merge_server_records
+    maintenance_started = threading.Event()
+    atom_page_sizes = []
+
+    def bounded_slow_merge(records, **kwargs):
+        atom_count = sum(len(record.get("usage_atoms") or []) for record in records)
+        if atom_count:
+            atom_page_sizes.append(atom_count)
+            maintenance_started.set()
+            time.sleep(0.2 * atom_count)
+            return {"ok": True, "changed": len(records), "sequence": 0}
+        return original_merge(records, **kwargs)
+
+    monkeypatch.setattr(service, "merge_server_records", bounded_slow_merge)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = statsd.StatsClient(service.socket_path, service.store.path)
+    deadline = time.monotonic() + 2.0
+    while not client.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.healthy() is True
+    assert maintenance_started.wait(2.0) is True
+
+    started = time.monotonic()
+    response = client.merge_server_records(
+        [{"time": time.time(), "cpu_total_percent": 1, "cpu_count": 1}],
+        compact=False, refresh_rollups=False, timeout=0.9,
+    )
+    elapsed = time.monotonic() - started
+
+    client.request({"action": "shutdown"})
+    worker.join(timeout=2.0)
+    assert response["ok"] is True
+    assert atom_page_sizes[0] == 1
+    assert elapsed < 0.9
+
+
+def test_statsd_hot_write_does_not_probe_or_restart_on_contention(monkeypatch, tmp_path):
+    client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    requests = []
+    monkeypatch.setattr(client, "request", lambda payload, timeout: requests.append((payload, timeout)) or {"ok": False, "error": "timed out"})
+    monkeypatch.setattr(client, "ensure_started", lambda: pytest.fail("contention must not trigger health probes or launches"))
+
+    response = client.merge_server_records(
+        [{"time": 1000, "cpu_count": 1}], compact=False, refresh_rollups=False, timeout=0.9,
+    )
+
+    assert response == {"ok": False, "error": "timed out"}
+    assert len(requests) == 1
+    assert requests[0][1] == 0.9
+
+
+def test_statsd_hot_write_starts_only_when_socket_transport_is_absent(monkeypatch, tmp_path):
+    client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    responses = iter([
+        {"ok": False, "error": "No such file or directory", "_transport_error": "absent"},
+        {"ok": True, "changed": 1},
+    ])
+    monkeypatch.setattr(client, "request", lambda _payload, timeout: next(responses))
+    starts = []
+    monkeypatch.setattr(client, "ensure_started", lambda: starts.append(True) or True)
+
+    response = client.merge_server_records([{"time": 1000, "cpu_count": 1}])
+
+    assert response["ok"] is True
+    assert starts == [True]
+
+
+def test_statsd_hot_write_does_not_start_for_application_not_found(monkeypatch, tmp_path):
+    client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    monkeypatch.setattr(client, "request", lambda _payload, timeout: {"ok": False, "error": "model not found"})
+    monkeypatch.setattr(client, "ensure_started", lambda: pytest.fail("application errors must not launch statsd"))
+
+    assert client.update_sampler_family("cpu", {}) == {"ok": False, "error": "model not found"}
+
+
 def test_statsd_live_token_rates_advance_while_historical_atom_spool_is_pending(monkeypatch, tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     previous_state = {

@@ -217,8 +217,9 @@ def run_local_rpc_service(
                                     write_message(connection, None, {"ok": False, "error": "response too large"}, legacy=True)
                                 except OSError:
                                     pass
-                    if on_idle():
-                        stop_event.set()
+                    # A completed request may have more clients queued behind it.
+                    # Maintenance runs only after an actual accept timeout so
+                    # background work cannot jump ahead of interactive RPCs.
             except KeyboardInterrupt:
                 stop_event.set()
         finally:

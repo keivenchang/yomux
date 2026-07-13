@@ -2580,7 +2580,10 @@ class TmuxWebtermApp:
     def merge_stats_family_record(self, family: str, record: dict[str, Any], sample: dict[str, Any]) -> dict[str, Any]:
         self.assert_stats_metric_write_allowed()
         now = float(record.get("time") or sample.get("time") or time.time())
-        merged = self.stats_client.merge_server_records([record], now=now)
+        merged = self.stats_client.merge_server_records(
+            [record], now=now, compact=False, refresh_rollups=False,
+            timeout=0.9 if family == "cpu" else 3.0,
+        )
         if not merged.get("ok"):
             raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
         sequence = max(0, int(merged.get("sequence") or 0))

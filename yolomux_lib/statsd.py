@@ -44,7 +44,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 16
+STATSD_PROTOCOL_VERSION = 17
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -99,7 +99,9 @@ STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
 # simple record count suggests on a memory-constrained host.
 STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 1
 STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 1
-STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS = 128
+# A page executes on statsd's sole SQLite/RPC owner. One atom is the bounded
+# unit: a "record" may carry expensive pricing and summary projection work.
+STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS = 1
 
 
 def _scan_agent_token_rows_in_worker(
@@ -733,6 +735,7 @@ class PersistentStatsService:
         # rebuild those windows inline on the RPC thread.
         self.rollup_pending: set[tuple[int, int]] = set()
         self.rollup_jobs: dict[tuple[int, int], dict[str, Any]] = {}
+        self.maintenance_turn = 0
 
     def _pricing_catalog_metadata(self) -> tuple[str, int]:
         """Read local catalog status for a projection without fetching providers."""
@@ -759,10 +762,17 @@ class PersistentStatsService:
         summary["active_catalog_revision"] = revision
 
     def _idle_shutdown_ready(self) -> bool:
-        self._drain_agent_token_atom_worker()
-        self._drain_agent_token_scan_result()
-        maintenance = self._maybe_reproject_cost_summaries()
-        rollup_maintenance = self._rollup_maintenance_step()
+        # The listener and SQLite writer are intentionally one thread. Advance
+        # exactly one maintenance family after an actual 100ms accept timeout;
+        # doing token + pricing + rollup work in one turn starves queued CPU RPCs.
+        maintenance_kind = self.maintenance_turn % 3
+        self.maintenance_turn += 1
+        if maintenance_kind == 0:
+            self._drain_agent_token_scan_result()
+        elif maintenance_kind == 1:
+            self._maybe_reproject_cost_summaries()
+        else:
+            self._rollup_maintenance_step()
         with self.agent_token_scan_lock:
             scan_active = (
                 self.agent_token_scan_worker is not None
@@ -772,7 +782,9 @@ class PersistentStatsService:
                 or self.agent_token_atom_persistence is not None
             )
         # An elected sampler is active work even while no browser reads YO!stats.
-        return not scan_active and not maintenance.get("pending") and not rollup_maintenance.get("pending") and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
+        maintenance_pending = self.pricing_reprojection is not None
+        rollup_pending = bool(self.rollup_pending or self.rollup_jobs or self.rollup_backfill is not None)
+        return not scan_active and not maintenance_pending and not rollup_pending and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     @staticmethod
     def _legacy_client_bucket(snapshot: Any) -> dict[str, Any] | None:
@@ -3084,7 +3096,12 @@ class PersistentStatsService:
             if not isinstance(records, list):
                 return {"ok": False, "error": "records must be a list"}, b""
             try:
-                return self.merge_server_records([record for record in records if isinstance(record, dict)], now=request.get("now")), b""
+                return self.merge_server_records(
+                    [record for record in records if isinstance(record, dict)],
+                    now=request.get("now"),
+                    compact=request.get("compact") is not False,
+                    refresh_rollups=request.get("refresh_rollups") is not False,
+                ), b""
             except (TypeError, ValueError, sqlite3.Error) as exc:
                 return {"ok": False, "error": str(exc)}, b""
         if action == "claim_agent_token_deltas":
@@ -3343,10 +3360,38 @@ class StatsClient(LocalServiceClient):
             timeout=3.0,
         )
 
-    def merge_server_records(self, records: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _transport_requires_start(response: dict[str, Any]) -> bool:
+        # The shared RPC client classifies connect failures before redaction.
+        # Do not infer process death from application text or a busy timeout.
+        return response.get("_transport_error") in {"absent", "refused"}
+
+    def _request_live_or_start(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        """Use the live socket first; contention is not evidence the daemon died."""
+
+        response = self.request(payload, timeout=timeout)
+        if response.get("ok") is not False or not self._transport_requires_start(response):
+            return response
         if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}
-        return self.request({"action": "merge_server_records", "records": records, "now": now}, timeout=3.0)
+            return response
+        return self.request(payload, timeout=timeout)
+
+    def merge_server_records(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        now: float | None = None,
+        compact: bool = True,
+        refresh_rollups: bool = True,
+        timeout: float = 3.0,
+    ) -> dict[str, Any]:
+        return self._request_live_or_start(
+            {
+                "action": "merge_server_records", "records": records, "now": now,
+                "compact": compact, "refresh_rollups": refresh_rollups,
+            },
+            timeout=timeout,
+        )
 
     def claim_agent_token_deltas(
         self,
@@ -3430,9 +3475,9 @@ class StatsClient(LocalServiceClient):
         return self.request({"action": "set_token_consumer_until", "consumer_until": consumer_until}, timeout=1.0)
 
     def update_sampler_family(self, family: str, status: dict[str, Any]) -> dict[str, Any]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}
-        return self.request({"action": "update_sampler_family", "family": family, "status": status}, timeout=1.0)
+        return self._request_live_or_start(
+            {"action": "update_sampler_family", "family": family, "status": status}, timeout=1.0,
+        )
 
     def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
