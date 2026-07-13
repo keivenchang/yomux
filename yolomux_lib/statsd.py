@@ -71,6 +71,7 @@ STATS_HISTORY_TIERS = (
     (12 * 60 * 60, 5 * 60),
     (STATS_HISTORY_RETENTION_SECONDS, 10 * 60),
 )
+STATS_HISTORY_PERSISTED_ROLLUP_SECONDS = (10, 60, 300, 600)
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
 STATS_AGENT_TOKEN_SCHEMA_VERSION = 4
@@ -1010,12 +1011,26 @@ class PersistentStatsService:
             bucket["server_sequence"] = next_sequence
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
             self.store.upsert_bucket(bucket)
+            self._refresh_persisted_rollups(sample_time)
             changed += 1
         if changed and compact:
             self._compact_history(sample_now)
         if changed:
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
+
+    def _refresh_persisted_rollups(self, sample_time: float) -> None:
+        """Rebuild only the aggregate windows touched by one durable write."""
+
+        for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS:
+            start = int(math.floor(sample_time / duration) * duration)
+            sources = self.store.query_buckets(start=start, end=start + duration)
+            if not sources:
+                continue
+            aggregate = stats_store.empty_bucket(start, duration)
+            for source in sources:
+                self._merge_bucket(aggregate, source)
+            self.store.upsert_rollup(aggregate)
 
     def _merge_usage_components(self, bucket: dict[str, Any], atoms: Any) -> bool:
         """Persist a bounded, idempotent component projection in one bucket."""
@@ -2365,16 +2380,30 @@ class PersistentStatsService:
         coverage_started = time.perf_counter()
         coverage_facts = self.store.query_coverage(start=start, end=end)
         coverage_ms = (time.perf_counter() - coverage_started) * 1000
-        query_started = time.perf_counter()
-        source_buckets = self.store.query_buckets(after_sequence=after_sequence if not end else 0, start=start, end=end)
-        query_ms = (time.perf_counter() - query_started) * 1000
         available_start = coverage_facts["available_start"]
         available_end = coverage_facts["available_end"]
         retained_resolution = coverage_facts["retained_resolution"]
         effective_resolution = max(resolution, retained_resolution)
-        if max_points and source_buckets:
+        if max_points:
             span = max(1, (end or available_end) - (start or available_start))
             effective_resolution = max(effective_resolution, math.ceil(span / max_points))
+        # Live cursor deltas must remain raw so their sequence semantics are
+        # exact. Persisted rollups serve bounded range/zoom reads only.
+        persisted_rollup = next((duration for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS if duration >= effective_resolution), 0) if end else 0
+        query_started = time.perf_counter()
+        source_buckets = (
+            self.store.query_rollups(duration=persisted_rollup, start=start, end=end)
+            if persisted_rollup and end
+            else self.store.query_buckets(after_sequence=after_sequence if not end else 0, start=start, end=end)
+        )
+        # A new database has no historic rollups yet; range reads must stay
+        # exact while incremental writes backfill the durable aggregate tiers.
+        if persisted_rollup and end and not source_buckets:
+            source_buckets = self.store.query_buckets(start=start, end=end)
+            persisted_rollup = 0
+        query_ms = (time.perf_counter() - query_started) * 1000
+        if persisted_rollup:
+            effective_resolution = persisted_rollup
         def encode_records(target_resolution: int) -> list[dict[str, Any]]:
             grouped: dict[tuple[int, int], dict[str, Any]] = {}
             for bucket in source_buckets:

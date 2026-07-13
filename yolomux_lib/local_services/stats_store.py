@@ -201,6 +201,12 @@ class StatsStore:
               PRIMARY KEY (start, duration, metric_key),
               FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS stats_rollups (
+              start INTEGER NOT NULL, duration INTEGER NOT NULL, sequence INTEGER NOT NULL,
+              bucket_json TEXT NOT NULL,
+              PRIMARY KEY (start, duration)
+            );
+            CREATE INDEX IF NOT EXISTS stats_rollups_duration_start ON stats_rollups(duration, start);
             """
         )
         connection.execute(
@@ -267,6 +273,38 @@ class StatsStore:
             (int(start), int(duration)),
         ).fetchone()
         return normalize_bucket(json.loads(str(row[0]))) if row is not None else None
+
+    def rollup_bucket(self, start: int, duration: int) -> dict[str, Any] | None:
+        row = self._connection().execute(
+            "SELECT bucket_json FROM stats_rollups WHERE start=? AND duration=?",
+            (int(start), int(duration)),
+        ).fetchone()
+        return normalize_bucket(json.loads(str(row[0]))) if row is not None else None
+
+    def upsert_rollup(self, bucket: dict[str, Any]) -> None:
+        normalized = normalize_bucket(bucket)
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "INSERT INTO stats_rollups(start,duration,sequence,bucket_json) VALUES(?,?,?,?) "
+                "ON CONFLICT(start,duration) DO UPDATE SET sequence=excluded.sequence,bucket_json=excluded.bucket_json",
+                (normalized["start"], normalized["duration"], normalized["sequence"], self._encode(normalized)),
+            )
+
+    def query_rollups(self, *, duration: int, start: int = 0, end: int = 0) -> list[dict[str, Any]]:
+        clauses = ["duration = ?"]
+        values: list[Any] = [max(1, int(duration))]
+        if start:
+            clauses.append("start + duration > ?")
+            values.append(max(0, int(start)))
+        if end:
+            clauses.append("start < ?")
+            values.append(max(0, int(end)))
+        rows = self._connection().execute(
+            f"SELECT bucket_json FROM stats_rollups WHERE {' AND '.join(clauses)} ORDER BY start",
+            values,
+        ).fetchall()
+        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
     def replace_buckets(self, buckets: list[dict[str, Any]]) -> None:
         """Atomically replace the durable history after compaction/import."""

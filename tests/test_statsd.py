@@ -116,6 +116,19 @@ def test_stats_store_wal_round_trip_preserves_bucket_and_normalized_rows(tmp_pat
     reopened.close()
 
 
+def test_stats_store_keeps_rollups_outside_raw_history_rows(tmp_path):
+    store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
+    raw = _bucket(start=100, duration=1, sequence=1)
+    rollup = _bucket(start=60, duration=60, sequence=2)
+    store.upsert_bucket(raw)
+    store.upsert_rollup(rollup)
+
+    assert store.query_buckets() == [raw]
+    assert store.rollup_bucket(60, 60) == rollup
+    assert store.query_rollups(duration=60, start=60, end=120) == [rollup]
+    store.close()
+
+
 def test_statsd_new_owner_negotiates_old_and_current_protocols(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
 
@@ -1397,6 +1410,26 @@ def test_stats_store_replace_is_one_rollback_safe_transaction(tmp_path):
         store.replace_buckets([_bucket(start=101, sequence=2), invalid])
 
     assert [bucket["sequence"] for bucket in store.query_buckets()] == [1]
+
+
+def test_statsd_persists_and_serves_coarse_rollups_for_bounded_range(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    now = 10_000
+    service.merge_server_records(
+        [{"time": now + second, "cpu_total_percent": 1, "cpu_count": 1} for second in range(10)],
+        now=now + 10,
+        compact=False,
+    )
+
+    rollup = service.store.rollup_bucket(now, 10)
+    history = service.handle({"action": "history", "start": now, "end": now + 10, "resolution_seconds": 10})
+
+    assert rollup is not None
+    assert rollup["cpu_total_percent"] == 10
+    assert history["coverage"]["resolution_seconds"] == 10
+    assert len(history["records"]) == 1
+    assert history["records"][0]["cpu_total_percent"] == 10
+    service.store.close()
 
 
 def test_statsd_history_uses_cached_cursor_delta_and_point_budget(tmp_path):
