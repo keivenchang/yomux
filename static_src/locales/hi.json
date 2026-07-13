@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "निगरानी जारी है",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} के लिए {session}",
-  "yolo.titleReadonly": "YOLO {state} के लिए {session}; केवल पढ़ने योग्य पहुंच"
+  "yolo.titleReadonly": "YOLO {state} के लिए {session}; केवल पढ़ने योग्य पहुंच",
+  "debug.graph.chart.serversLoad": "सर्वर लोड",
+  "debug.graph.chart.serversLoad.desc": "प्रत्येक स्थानीय YOLOmux सेवा के लिए CPU प्रतिशत, हर 10 सेकंड में नमूना लिया गया।",
+  "debug.graph.serviceLoad.range": "न्यूनतम {minimum} · औसत {average} · अधिकतम {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "जीवित/चल रहा है",
+  "debug.system.sampler.header.aliveRun.short": "जीवित/भागो",
+  "debug.system.sampler.header.attSuccFails.full": "प्रयास/सफलता/असफलता",
+  "debug.system.sampler.header.attSuccFails.short": "प्रयास/सफल/विफल",
+  "debug.system.sampler.header.cadence.full": "ताल",
+  "debug.system.sampler.header.cadence.short": "प्रत्येक",
+  "debug.system.sampler.header.family.short": "परिवार",
+  "debug.system.sampler.header.lastFail.short": "अंतिम असफलता",
+  "debug.system.sampler.header.lastOk.full": "आखिरी सफलता",
+  "debug.system.sampler.header.lastOk.short": "अंतिम ठीक है",
+  "debug.system.sampler.header.lateMiss.full": "देर /चूक",
+  "debug.system.sampler.header.lateMiss.short": "देर/चूक",
+  "debug.system.sampler.header.runtime.full": "अंतिम रनटाइम",
+  "debug.system.sampler.header.runtime.short": "रनटाइम"
 }

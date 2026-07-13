@@ -4010,7 +4010,7 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
           chat: {subscribers: 1, store: {message_rows: 4, typing_leases: 0}},
           local_services: {totals: {processes: 2, cpu_percent: 1.5, rss_bytes: 2048}, services: [
             {service: 'indexd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
-            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0, normal: 0, background: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}},
+            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0, normal: 0, background: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}, sampler_families: {agent_status: {cadence_seconds: 10, alive: true, attempts: 3, successes: 2, failures: 1}, system_memory: {cadence_seconds: 60, alive: true, attempts: 2, successes: 2, failures: 0}}},
             {service: 'jobd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
             {service: 'approvald', pid: 333, healthy: false, started_at: fakeNow / 1000 - 12, uptime_seconds: 12, resources: {cpu_percent: 1, rss_bytes: 1024}},
           ]},
@@ -4056,6 +4056,10 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
             bad: node.querySelector('.js-debug-system-state')?.classList.contains('js-debug-system-state--bad'),
           }));
           const wrap = table.closest('.js-debug-system-local-services-wrap');
+          const samplerTable = view.querySelector('.js-debug-system-sampler-table');
+          const samplerWrap = samplerTable?.closest('.js-debug-system-table-wrap');
+          const samplerFirstCells = [...(samplerTable?.querySelectorAll('tbody th:first-child') || [])];
+          const samplerHeaders = [...(samplerTable?.querySelectorAll('thead th') || [])];
           const labelCells = [...table.querySelectorAll('tbody th')];
           const pidRect = pidCell.getBoundingClientRect();
           const queueRect = queueCell.getBoundingClientRect();
@@ -4072,6 +4076,14 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
             queueWrapStyle: getComputedStyle(queueCell).whiteSpace,
             queueSharesColumnWidth: Math.abs(queueRect.width - pidRect.width) <= 1,
             queueCanWrapTaller: queueRect.height > pidRect.height + 2,
+            samplerScrolls: samplerWrap.scrollWidth > samplerWrap.clientWidth + 1,
+            samplerFamilyNowrap: samplerFirstCells.every(node => getComputedStyle(node).whiteSpace === 'nowrap'),
+            samplerFamilySingleLine: samplerFirstCells.every(node => {
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              return range.getClientRects().length <= 1;
+            }),
+            samplerHeaders: samplerHeaders.map(node => ({text: node.textContent.trim(), title: node.title, aria: node.getAttribute('aria-label')})),
           };
           view.style.width = '920px';
           refreshDebugSystemViews();
@@ -4196,6 +4208,12 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert metrics["narrowMetrics"]["queueWrapStyle"] == "normal", metrics
     assert metrics["narrowMetrics"]["queueSharesColumnWidth"] is True, metrics
     assert metrics["narrowMetrics"]["queueCanWrapTaller"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerScrolls"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerFamilyNowrap"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerFamilySingleLine"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerHeaders"][3] == {
+        "text": "att/succ/fails", "title": "Attempts / successes / failures", "aria": "Attempts / successes / failures",
+    }, metrics
     assert all(service["textAlign"] in {"end", "right"} for service in metrics["wideServices"]), metrics
     assert all(set(service["cellTextAligns"]) == {service["textAlign"]} for service in metrics["wideServices"]), metrics
     assert all(service["aligned"] for service in metrics["wideServices"]), metrics
@@ -4206,6 +4224,64 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert metrics["roleLayouts"][0]["scrolls"] is False, metrics
     assert metrics["roleLayouts"][1]["scrolls"] is True, metrics
     assert all(item["labelWidth"] >= 120 and item["serviceWidth"] >= 120 for item in metrics["roleLayouts"]), metrics
+
+
+def test_servers_load_chart_is_after_cpu_default_off_and_persists(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-chart-toggle=\"serversLoad\"]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const buttons = [...document.querySelectorAll('[data-js-debug-chart-toggle]')];
+        const cpuIndex = buttons.findIndex(button => button.dataset.jsDebugChartToggle === 'cpu');
+        const loadButton = buttons.find(button => button.dataset.jsDebugChartToggle === 'serversLoad');
+        const defaultPressed = loadButton.getAttribute('aria-pressed');
+        const sampleStart = Math.floor(Date.now() / 1000);
+        debugGraphApplyServerHistory({sequence: 41, records: [{
+          start: sampleStart, duration: 10, sequence: 41,
+          host_metrics: {service_load: {
+            statsd: {label: 'statsd', cpu_total_percent: 12, cpu_samples: 2, cpu_min_percent: 4, cpu_max_percent: 8},
+            jobd: {label: 'jobd', cpu_total_percent: 3, cpu_samples: 1, cpu_min_percent: 3, cpu_max_percent: 3},
+          }},
+        }]});
+        loadButton.click();
+        const chart = document.querySelector('[data-js-debug-chart="serversLoad"]');
+        const svg = chart?.querySelector('.js-debug-line-chart');
+        if (svg) {
+          const rect = svg.getBoundingClientRect();
+          const grid = chart.closest('[data-js-debug-chart-grid]');
+          const domainStart = Number(grid.dataset.jsDebugDomainStart);
+          const domainEnd = Number(grid.dataset.jsDebugDomainEnd);
+          const ratio = ((sampleStart * 1000 + 5000) - domainStart) / (domainEnd - domainStart);
+          svg.dispatchEvent(new PointerEvent('pointermove', {bubbles: true, clientX: rect.left + ratio * rect.width, clientY: rect.top + rect.height / 2}));
+        }
+        return {
+          defaultPressed,
+          immediatelyAfterCpu: buttons[cpuIndex + 1]?.dataset.jsDebugChartToggle === 'serversLoad',
+          pressed: loadButton.getAttribute('aria-pressed'),
+          chart: Boolean(chart),
+          legends: [...(chart?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.textContent.trim()).sort(),
+          tooltip: chart?.querySelector('[data-js-debug-hover-max]')?.textContent || '',
+          savedVisible: JSON.parse(localStorage.getItem('yolomux.stats.ui_preferences.v1') || '{}').visibleCharts || [],
+        };
+        """
+    )
+    assert metrics["defaultPressed"] == "false", metrics
+    assert metrics["immediatelyAfterCpu"] is True, metrics
+    assert metrics["pressed"] == "true" and metrics["chart"] is True, metrics
+    assert metrics["legends"] == ["jobd", "statsd"], metrics
+    assert "statsd: 6.0% (min 4.0% · avg 6.0% · max 8.0%)" in metrics["tooltip"], metrics
+    assert metrics["savedVisible"] == ["serversLoad"], metrics
+
+    browser.refresh()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('[data-js-debug-chart-toggle=\"serversLoad\"]')?.getAttribute('aria-pressed') === 'true';"
+        )
+    )
 
 
 def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browser, tmp_path):

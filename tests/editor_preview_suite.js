@@ -3930,7 +3930,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.debugGraphBarVerticalGeometryForTest(0, 0, 5, true)), {y: 119.25, height: 0.75}, 'a visible zero bar ends at the shared plot baseline instead of extending below it');
     assert.match(api.debugGraphPlotOverlayRectHtmlForTest('probe', 'data-probe', 0, 0, 1, 'probe'), / y="8"[^>]* height="112"/, 'plot overlays inherit the shared plot bounds instead of a parallel full-SVG rectangle');
     assert.ok(html.includes('viewBox="0 0 600 120"'), 'YO!stats chart viewBox consumes the shared SVG geometry');
-    for (const chart of ['memory', 'gpuUtil', 'gpuMemory']) {
+    for (const chart of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']) {
       assert.ok(html.includes(`data-js-debug-chart-toggle="${chart}" aria-pressed="false"`), `${chart} starts off in the persistent chart-toggle group`);
     }
     assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
@@ -3947,12 +3947,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(systemSource.includes('oldLocalServicesCard') && systemSource.includes('replaceWith(oldLocalServicesCard)'), 'System refresh preserves the Local Services card so the table updates in place');
     assert.ok(systemSource.includes('updateDebugSystemLocalServiceCell') && systemSource.includes('if (cell.textContent !== value.display) cell.textContent = value.display'), 'Local Services mutates stable cells instead of rebuilding unchanged text nodes');
     assert.ok(systemSource.includes('function debugSystemStatsSamplerCardHtml') && systemSource.includes('History cache hit rate') && systemSource.includes('Last history latency'), 'System exposes statsd sampler cadence, cache hit-rate, and last history latency through the existing local-service payload');
+    const samplerHtml = api.debugSystemStatsSamplerCardHtmlForTest([{service: 'statsd', sampler_families: {agent_status: {cadence_seconds: 10, alive: true, attempts: 4, successes: 3, failures: 1}}}], graphNow / 1000);
+    assert.ok(samplerHtml.includes('js-debug-system-fixed-table js-debug-system-sampler-table') && samplerHtml.includes('>att/succ/fails<') && samplerHtml.includes('title="Attempts / successes / failures"'), 'sampler families use the shared fixed table shell with localized condensed headers and full tooltips');
+    assert.ok(samplerHtml.includes('>agent_status</th>') && samplerHtml.includes('<dd>—</dd>'), 'sampler family names stay whole and unavailable history-query detail collapses to an em dash');
     assert.ok(systemSource.includes("recordJsDebugStatsDiagnostic('warning', `retry entered") && systemSource.includes("recordJsDebugStatsDiagnostic('info', 'retry exited") && systemSource.includes('coverage rejected:') && systemSource.includes('history request timed out after') && systemSource.includes('owner changed from PID') && systemSource.includes('retained rollup'), 'Logs has explicit leveled reasons for every YO!stats degraded-path transition');
     assert.ok(systemSource.includes('DEBUG_SYSTEM_SERVICE_FRESH_MS = 60_000') && systemSource.includes('js-debug-system-service-cell--fresh') && systemSource.includes('js-debug-system-service-cell--stale'), 'Local Services has the 60s fresh/stale recency classes');
     assert.ok(systemSource.includes("key: 'started'") && systemSource.includes("key: 'lastRan'") && systemSource.indexOf("key: 'queues'") > systemSource.indexOf("key: 'lastFailure'"), 'Local Services table includes Started/Last ran and keeps Queues last');
     assert.ok(systemSource.includes("t('debug.system.localServices.prevValue'") && systemSource.includes("t('debug.system.localServices.exitedAgo'"), 'Local Services prev/exited labels are localized');
     const systemCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
-    assert.ok(systemCss.includes('.js-debug-system-local-services-wrap') && systemCss.includes('.js-debug-system-service-cell--prev') && systemCss.includes('color: var(--muted)'), 'Local Services CSS covers narrow overflow and muted prev/stale cells');
+    assert.ok(systemCss.includes('.js-debug-system-fixed-table') && systemCss.includes('.js-debug-system-service-cell--prev') && systemCss.includes('color: var(--muted)'), 'the shared System-table shell covers narrow overflow while Local Services keeps muted prev/stale cells');
     assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
     assert.ok(html.includes('data-js-debug-stat="api">2<'), 'debug panel surfaces the API call count');
     assert.ok(html.includes('data-js-debug-graph'), 'YO!stats graph sub-tab renders a graph container');
@@ -3992,6 +3995,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const chartKeys = [...chartGroupsSource.matchAll(/\{key: '([^']+)'/g)].map(match => match[1]);
     const chartLabels = {
       cpu: 'CPU',
+      serversLoad: 'Servers Load',
       memory: 'System memory',
       activity: 'Agent status',
       agentTokens: 'Agent tokens/min',
@@ -5124,6 +5128,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             'gpu:0': {label: 'GPU 0 (GPU Model A)', util_total_percent: 70, memory_used_total_bytes: 60 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 80 * 1024 * 1024 * 1024, samples: 1},
             'gpu:1': {label: 'GPU 1', util_total_percent: 0, memory_used_total_bytes: 30 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 48 * 1024 * 1024 * 1024, samples: 1},
           },
+          service_load: {
+            statsd: {label: 'statsd', cpu_total_percent: 12, cpu_samples: 2, cpu_min_percent: 4, cpu_max_percent: 8, rss_total_bytes: 2048, rss_samples: 2, rss_min_bytes: 1024, rss_max_bytes: 1024},
+            jobd: {label: 'jobd', cpu_total_percent: 3, cpu_samples: 1, cpu_min_percent: 3, cpu_max_percent: 3, rss_total_bytes: 1024, rss_samples: 1, rss_min_bytes: 1024, rss_max_bytes: 1024},
+          },
         },
       }],
     });
@@ -5131,11 +5139,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(allSeries.some(series => series.hostMetric === 'cpu'), false, 'CPU does not add generic host process-name groups');
     assert.equal(allSeries.some(series => series.hostProcessId === 'cpu:python'), false, 'CPU does not add generic python process lines');
     assert.deepStrictEqual([...allSeries.filter(series => series.hostMetric === 'gpuUtil').map(series => series.label)], ['GPU 0 (GPU Model A)', 'GPU 1'], 'multiple GPUs render device labels instead of process names');
+    assert.deepStrictEqual([...allSeries.filter(series => series.serviceLoad === true).map(series => series.label)], ['jobd', 'statsd'], 'Servers Load creates one stable dynamic series per sampled running service');
+    api.setDebugGraphChartVisibleForTest('serversLoad', true);
     api.setDebugGraphChartVisibleForTest('memory', true);
     api.setDebugGraphChartVisibleForTest('gpuUtil', true);
     api.setDebugGraphChartVisibleForTest('gpuMemory', true);
     const html = api.debugPanelHtmlForTest();
     assert.match(html, /data-js-debug-chart="cpu" data-js-debug-chart-kind="line"/, 'CPU renders only YOLOmux and system lines');
+    assert.match(html, /data-js-debug-chart="serversLoad"[\s\S]*data-js-debug-legend="serviceLoad:jobd"[\s\S]*data-js-debug-legend="serviceLoad:statsd"/, 'Servers Load toggle renders the per-service chart and legend');
     assert.match(html, /data-js-debug-series="cpu"[^>]*data-js-debug-line-pattern="solid"[^>]*--js-debug-series-color: var\(--active-accent-bright\)/, 'yolomux.py remains the theme-colored solid CPU line');
     assert.doesNotMatch(html, /data-js-debug-series="host:cpu:/, 'generic host CPU process lines stay out of the CPU chart');
     assert.match(html, /data-js-debug-axis-max="memory"[^>]*>64(?:\.0)?GB</, 'System memory uses the host capacity as an actual-memory axis');

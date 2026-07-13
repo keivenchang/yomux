@@ -2616,5 +2616,22 @@
   "yolo.status.watching": "obserwowanie",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} dla {session}",
-  "yolo.titleReadonly": "YOLO {state} za {session}; Dostęp tylko do odczytu"
+  "yolo.titleReadonly": "YOLO {state} za {session}; Dostęp tylko do odczytu",
+  "debug.graph.chart.serversLoad": "Serwery ładują się",
+  "debug.graph.chart.serversLoad.desc": "Procent procesora dla każdej lokalnej usługi YOLOmux, próbkowany co 10 sekund.",
+  "debug.graph.serviceLoad.range": "min {minimum} · średnia {average} · maks. {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "Żywy / biegający",
+  "debug.system.sampler.header.aliveRun.short": "żyje/biega",
+  "debug.system.sampler.header.attSuccFails.full": "Próby / sukcesy / porażki",
+  "debug.system.sampler.header.attSuccFails.short": "att/powodzenie/niepowodzenie",
+  "debug.system.sampler.header.cadence.full": "Kadencja",
+  "debug.system.sampler.header.cadence.short": "każdy",
+  "debug.system.sampler.header.family.short": "Rodzina",
+  "debug.system.sampler.header.lastFail.short": "ostatnia porażka",
+  "debug.system.sampler.header.lastOk.full": "Ostatni sukces",
+  "debug.system.sampler.header.lastOk.short": "ostatnie ok",
+  "debug.system.sampler.header.lateMiss.full": "Spóźniony/nieodebrany",
+  "debug.system.sampler.header.lateMiss.short": "spóźniony/spóźniony",
+  "debug.system.sampler.header.runtime.full": "Ostatni czas działania",
+  "debug.system.sampler.header.runtime.short": "czas wykonania"
 }

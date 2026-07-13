@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "감시 중",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} 에 대한 {session}",
-  "yolo.titleReadonly": "{session}에 대해 YOLO {state}; 읽기 전용 액세스"
+  "yolo.titleReadonly": "{session}에 대해 YOLO {state}; 읽기 전용 액세스",
+  "debug.graph.chart.serversLoad": "서버 로드",
+  "debug.graph.chart.serversLoad.desc": "10초마다 샘플링된 각 로컬 YOLOmux 서비스의 CPU 비율입니다.",
+  "debug.graph.serviceLoad.range": "최소 {minimum} · 평균 {average} · 최대 {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "살아있다 / 달리고 있다",
+  "debug.system.sampler.header.aliveRun.short": "살아있다/달리다",
+  "debug.system.sampler.header.attSuccFails.full": "시도 / 성공 / 실패",
+  "debug.system.sampler.header.attSuccFails.short": "att/성공/실패",
+  "debug.system.sampler.header.cadence.full": "케이던스",
+  "debug.system.sampler.header.cadence.short": "모든",
+  "debug.system.sampler.header.family.short": "가족",
+  "debug.system.sampler.header.lastFail.short": "마지막 실패",
+  "debug.system.sampler.header.lastOk.full": "마지막 성공",
+  "debug.system.sampler.header.lastOk.short": "마지막으로 알았어",
+  "debug.system.sampler.header.lateMiss.full": "지각/부재",
+  "debug.system.sampler.header.lateMiss.short": "지각/부재",
+  "debug.system.sampler.header.runtime.full": "마지막 런타임",
+  "debug.system.sampler.header.runtime.short": "런타임"
 }

@@ -1016,6 +1016,38 @@ class PersistentStatsService:
                 item["memory_capacity_total_bytes"] = float(item.get("memory_capacity_total_bytes") or 0.0) + PersistentStatsService._positive_finite(raw_item.get("memory_capacity_bytes"))
                 item["samples"] = float(item.get("samples") or 0.0) + 1.0
                 changed = True
+        service_load = metrics.get("service_load")
+        if isinstance(service_load, dict):
+            values = target.setdefault("service_load", {})
+            for raw_key, raw_item in service_load.items():
+                if not isinstance(raw_item, dict):
+                    continue
+                key = str(raw_key or "").strip()[:128]
+                if not key:
+                    continue
+                item = values.setdefault(key, {
+                    "label": str(raw_item.get("label") or key)[:160],
+                    "cpu_total_percent": 0.0, "cpu_samples": 0.0,
+                    "rss_total_bytes": 0.0, "rss_samples": 0.0,
+                })
+                item["label"] = str(raw_item.get("label") or item.get("label") or key)[:160]
+                for prefix in ("cpu", "rss"):
+                    total_key = f"{prefix}_total_{'percent' if prefix == 'cpu' else 'bytes'}"
+                    samples_key = f"{prefix}_samples"
+                    minimum_key = f"{prefix}_min_{'percent' if prefix == 'cpu' else 'bytes'}"
+                    maximum_key = f"{prefix}_max_{'percent' if prefix == 'cpu' else 'bytes'}"
+                    samples = PersistentStatsService._positive_finite(raw_item.get(samples_key))
+                    if samples <= 0:
+                        continue
+                    total = PersistentStatsService._positive_finite(raw_item.get(total_key))
+                    minimum = PersistentStatsService._positive_finite(raw_item.get(minimum_key))
+                    maximum = PersistentStatsService._positive_finite(raw_item.get(maximum_key))
+                    previous_samples = float(item.get(samples_key) or 0.0)
+                    item[total_key] = float(item.get(total_key) or 0.0) + total
+                    item[samples_key] = previous_samples + samples
+                    item[minimum_key] = min(float(item.get(minimum_key) or minimum), minimum) if previous_samples > 0 else minimum
+                    item[maximum_key] = max(float(item.get(maximum_key) or 0.0), maximum)
+                    changed = True
         return changed
 
     def merge_server_records(
@@ -2816,6 +2848,26 @@ class PersistentStatsService:
                             continue
                         if isinstance(value, (int, float)):
                             item[field] = float(item.get(field) or 0.0) + float(value)
+            source_services = source_metrics.get("service_load") if isinstance(source_metrics.get("service_load"), dict) else {}
+            target_services = target_metrics.setdefault("service_load", {})
+            for service_key, source_item in source_services.items():
+                if not isinstance(source_item, dict):
+                    continue
+                item = target_services.setdefault(str(service_key), {"label": str(source_item.get("label") or service_key)})
+                item["label"] = str(source_item.get("label") or item.get("label") or service_key)
+                for prefix in ("cpu", "rss"):
+                    unit = "percent" if prefix == "cpu" else "bytes"
+                    total_key, samples_key = f"{prefix}_total_{unit}", f"{prefix}_samples"
+                    minimum_key, maximum_key = f"{prefix}_min_{unit}", f"{prefix}_max_{unit}"
+                    source_samples = float(source_item.get(samples_key) or 0.0)
+                    if source_samples <= 0:
+                        continue
+                    previous_samples = float(item.get(samples_key) or 0.0)
+                    source_minimum = float(source_item.get(minimum_key) or 0.0)
+                    item[total_key] = float(item.get(total_key) or 0.0) + float(source_item.get(total_key) or 0.0)
+                    item[samples_key] = previous_samples + source_samples
+                    item[minimum_key] = min(float(item.get(minimum_key) or source_minimum), source_minimum) if previous_samples > 0 else source_minimum
+                    item[maximum_key] = max(float(item.get(maximum_key) or 0.0), float(source_item.get(maximum_key) or 0.0))
 
     def _encoded_history(self, request: dict[str, Any]) -> dict[str, Any]:
         history_started = time.perf_counter()

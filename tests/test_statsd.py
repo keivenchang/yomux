@@ -2048,6 +2048,40 @@ def test_statsd_persists_and_serves_coarse_rollups_for_bounded_range(tmp_path):
     service.store.close()
 
 
+def test_statsd_service_load_preserves_min_avg_max_rollups_and_sleep_gaps(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+
+    def record(sample_time, cpu, rss):
+        return {
+            "time": sample_time,
+            "host_metrics": {"service_load": {"statsd": {
+                "label": "statsd",
+                "cpu_total_percent": cpu, "cpu_min_percent": cpu, "cpu_max_percent": cpu, "cpu_samples": 1,
+                "rss_total_bytes": rss, "rss_min_bytes": rss, "rss_max_bytes": rss, "rss_samples": 1,
+            }}},
+            "_stats_coverage": {
+                "family": "service_load", "epoch_id": "owner:service-load:1",
+                "cadence_seconds": 10, "owner_generation": 1,
+            },
+        }
+
+    for sample_time, cpu, rss in ((100, 10, 1000), (105, 30, 3000), (140, 20, 2000)):
+        service.merge_server_records([record(sample_time, cpu, rss)], now=sample_time, compact=False)
+
+    rollup = service.store.rollup_bucket(100, 10)
+    statsd_load = rollup["host_metrics"]["service_load"]["statsd"]
+    coverage = service.store.query_coverage(start=100, end=150)
+    service_intervals = [(item["start"], item["end"]) for item in coverage["store_intervals"]["service_load"]]
+
+    assert statsd_load["cpu_total_percent"] == 40
+    assert statsd_load["cpu_samples"] == 2
+    assert statsd_load["cpu_min_percent"] == 10
+    assert statsd_load["cpu_max_percent"] == 30
+    assert statsd_load["rss_total_bytes"] == 4000
+    assert service_intervals == [(100, 115), (140, 150)]
+    service.store.close()
+
+
 def test_statsd_twenty_four_hour_range_uses_bounded_persisted_rollups(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     start = 86_400

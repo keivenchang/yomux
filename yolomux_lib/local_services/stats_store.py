@@ -22,10 +22,11 @@ STATS_STORE_MAX_ROWS_PER_QUERY = 20_000
 STATS_COST_SUMMARY_MAX_COMPONENTS = 4096
 STATS_COST_SUMMARY_MAX_BYTES = 160 * 1024
 STATS_COVERAGE_MAX_INTERVALS = 128
-STATS_COVERAGE_FAMILIES = ("raw", "cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory")
+STATS_COVERAGE_FAMILIES = ("raw", "cpu", "service_load", "agent_status", "agent_tokens", "cost", "gpu", "system_memory")
 STATS_COVERAGE_LEGACY_CADENCE = {
     "raw": 1,
     "cpu": 1,
+    "service_load": 10,
     "agent_status": 10,
     "agent_tokens": 60,
     "cost": 60,
@@ -72,6 +73,7 @@ def empty_host_metrics() -> dict[str, Any]:
         "gpu_util_processes": {},
         "gpu_memory_processes": {},
         "gpu_devices": {},
+        "service_load": {},
     }
 
 
@@ -284,7 +286,7 @@ class StatsStore:
             if isinstance(values, dict):
                 connection.execute("INSERT INTO stats_agent_rates VALUES(?,?,?,?)", (start, duration, str(rate_key), self._encode(values)))
         for metric_key, values in host_metrics.items():
-            if isinstance(values, dict):
+            if isinstance(values, dict) and (metric_key != "service_load" or values):
                 connection.execute("INSERT INTO stats_host_metrics VALUES(?,?,?,?)", (start, duration, str(metric_key), self._encode(values)))
 
     def upsert_bucket(self, bucket: dict[str, Any]) -> None:

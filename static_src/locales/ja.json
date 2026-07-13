@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "監視中",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} {session}用",
-  "yolo.titleReadonly": "YOLO {state} {session} 用。読み取り専用アクセス"
+  "yolo.titleReadonly": "YOLO {state} {session} 用。読み取り専用アクセス",
+  "debug.graph.chart.serversLoad": "サーバーの負荷",
+  "debug.graph.chart.serversLoad.desc": "各ローカル YOLOmux サービスの CPU パーセント (10 秒ごとにサンプリング)。",
+  "debug.graph.serviceLoad.range": "最小 {minimum} · 平均 {average} · 最大 {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "生きている/走っている",
+  "debug.system.sampler.header.aliveRun.short": "生きている/逃げる",
+  "debug.system.sampler.header.attSuccFails.full": "試み/成功/失敗",
+  "debug.system.sampler.header.attSuccFails.short": "成功/成功/失敗",
+  "debug.system.sampler.header.cadence.full": "ケイデンス",
+  "debug.system.sampler.header.cadence.short": "ごとに",
+  "debug.system.sampler.header.family.short": "家族",
+  "debug.system.sampler.header.lastFail.short": "最後の失敗",
+  "debug.system.sampler.header.lastOk.full": "最後の成功",
+  "debug.system.sampler.header.lastOk.short": "最後にわかりました",
+  "debug.system.sampler.header.lateMiss.full": "遅刻・欠席",
+  "debug.system.sampler.header.lateMiss.short": "遅刻/欠席",
+  "debug.system.sampler.header.runtime.full": "最終ランタイム",
+  "debug.system.sampler.header.runtime.short": "ランタイム"
 }

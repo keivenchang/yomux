@@ -2598,6 +2598,7 @@ def test_stats_metric_families_have_independent_named_cadences():
     try:
         specs = webapp.stats_metric_family_specs()
         assert specs["cpu"][1]() == 1.0
+        assert specs["service_load"][1]() == 10.0
         assert specs["agent_status"][1]() == 10.0
         assert specs["gpu"][1]() == 10.0
         assert specs["system_memory"][1]() == 60.0

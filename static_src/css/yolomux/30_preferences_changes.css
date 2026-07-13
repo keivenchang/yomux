@@ -256,22 +256,27 @@
 .js-debug-system-state--bad {
   color: var(--bad);
 }
-.js-debug-system-local-services-wrap {
-  max-width: 100%;
-  overflow-x: auto;
-}
-.js-debug-system-local-services-table {
-  --js-debug-system-local-services-field-width: 10rem;
-  --js-debug-system-local-services-service-width: 9rem;
+.js-debug-system-fixed-table {
+  --js-debug-system-first-column-width: 10rem;
+  --js-debug-system-table-min-width: 46rem;
   table-layout: fixed;
-  width: max(100%, var(--js-debug-system-local-services-min-width, 46rem));
+  width: max(100%, var(--js-debug-system-table-min-width));
 }
-.js-debug-system-table.js-debug-system-local-services-table th:first-child,
-.js-debug-system-table.js-debug-system-local-services-table td:first-child {
-  width: var(--js-debug-system-local-services-field-width);
-  min-width: var(--js-debug-system-local-services-field-width);
+.js-debug-system-table.js-debug-system-fixed-table th:first-child,
+.js-debug-system-table.js-debug-system-fixed-table td:first-child {
+  width: var(--js-debug-system-first-column-width);
+  min-width: var(--js-debug-system-first-column-width);
   white-space: nowrap;
   overflow-wrap: normal;
+}
+.js-debug-system-local-services-table {
+  --js-debug-system-first-column-width: 10rem;
+  --js-debug-system-local-services-service-width: 9rem;
+  --js-debug-system-table-min-width: var(--js-debug-system-local-services-min-width, 46rem);
+}
+.js-debug-system-sampler-table {
+  --js-debug-system-first-column-width: 9rem;
+  --js-debug-system-table-min-width: 56rem;
 }
 .js-debug-system-local-services-table th:not(:first-child) {
   width: var(--js-debug-system-local-services-service-width);

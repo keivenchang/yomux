@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "กำลังเฝ้าดู",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} สําหรับ {session}",
-  "yolo.titleReadonly": "YOLO {state} สําหรับ {session}; การเข้าถึงแบบอ่านอย่างเดียว"
+  "yolo.titleReadonly": "YOLO {state} สําหรับ {session}; การเข้าถึงแบบอ่านอย่างเดียว",
+  "debug.graph.chart.serversLoad": "โหลดเซิร์ฟเวอร์",
+  "debug.graph.chart.serversLoad.desc": "เปอร์เซ็นต์ CPU สำหรับแต่ละบริการ YOLOmux ในเครื่อง สุ่มตัวอย่างทุกๆ 10 วินาที",
+  "debug.graph.serviceLoad.range": "ต่ำสุด {minimum} · เฉลี่ย {average} · สูงสุด {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "มีชีวิตอยู่/กำลังวิ่งอยู่",
+  "debug.system.sampler.header.aliveRun.short": "มีชีวิตอยู่/วิ่ง",
+  "debug.system.sampler.header.attSuccFails.full": "ความพยายาม/ความสำเร็จ/ความล้มเหลว",
+  "debug.system.sampler.header.attSuccFails.short": "Att/สำเร็จ/ล้มเหลว",
+  "debug.system.sampler.header.cadence.full": "จังหวะ",
+  "debug.system.sampler.header.cadence.short": "ทุก ๆ",
+  "debug.system.sampler.header.family.short": "ครอบครัว",
+  "debug.system.sampler.header.lastFail.short": "ล้มเหลวครั้งสุดท้าย",
+  "debug.system.sampler.header.lastOk.full": "ความสำเร็จครั้งสุดท้าย",
+  "debug.system.sampler.header.lastOk.short": "สุดท้ายตกลง",
+  "debug.system.sampler.header.lateMiss.full": "สาย/พลาด",
+  "debug.system.sampler.header.lateMiss.short": "สาย/พลาด",
+  "debug.system.sampler.header.runtime.full": "รันไทม์ล่าสุด",
+  "debug.system.sampler.header.runtime.short": "รันไทม์"
 }

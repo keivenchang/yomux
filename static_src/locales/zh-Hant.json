@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "正在監看",
   "yolo.title": "優樂 {state}",
   "yolo.titleForSession": "優樂 {session} {state}",
-  "yolo.titleReadonly": "優樂 {session} {state}；唯讀存取"
+  "yolo.titleReadonly": "優樂 {session} {state}；唯讀存取",
+  "debug.graph.chart.serversLoad": "伺服器負載",
+  "debug.graph.chart.serversLoad.desc": "每個本地 優!複用器 服務的 CPU 百分比，每 10 秒採樣一次。",
+  "debug.graph.serviceLoad.range": "最小值 {minimum} · 平均值 {average} · 最大值 {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "活著/奔跑",
+  "debug.system.sampler.header.aliveRun.short": "活著/奔跑",
+  "debug.system.sampler.header.attSuccFails.full": "嘗試/成功/失敗",
+  "debug.system.sampler.header.attSuccFails.short": "att/succ/失敗",
+  "debug.system.sampler.header.cadence.full": "節奏",
+  "debug.system.sampler.header.cadence.short": "每個",
+  "debug.system.sampler.header.family.short": "家庭",
+  "debug.system.sampler.header.lastFail.short": "最後失敗",
+  "debug.system.sampler.header.lastOk.full": "最後的成功",
+  "debug.system.sampler.header.lastOk.short": "最後還好",
+  "debug.system.sampler.header.lateMiss.full": "遲到/錯過",
+  "debug.system.sampler.header.lateMiss.short": "遲到/錯過",
+  "debug.system.sampler.header.runtime.full": "上次運行時間",
+  "debug.system.sampler.header.runtime.short": "運行時"
 }

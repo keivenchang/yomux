@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "izleniyor",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} {session} için",
-  "yolo.titleReadonly": "YOLO {state} yerine {session}; okunabilir erişim"
+  "yolo.titleReadonly": "YOLO {state} yerine {session}; okunabilir erişim",
+  "debug.graph.chart.serversLoad": "Sunucu Yükü",
+  "debug.graph.chart.serversLoad.desc": "Her yerel YOLOmux hizmeti için CPU yüzdesi, her 10 saniyede bir örneklenir.",
+  "debug.graph.serviceLoad.range": "min {minimum} · ort {average} · maks. {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "Hayatta / koşuyor",
+  "debug.system.sampler.header.aliveRun.short": "canlı/kaç",
+  "debug.system.sampler.header.attSuccFails.full": "Denemeler / başarılar / başarısızlıklar",
+  "debug.system.sampler.header.attSuccFails.short": "att/succ/başarısız",
+  "debug.system.sampler.header.cadence.full": "Ritim",
+  "debug.system.sampler.header.cadence.short": "her",
+  "debug.system.sampler.header.family.short": "Aile",
+  "debug.system.sampler.header.lastFail.short": "son başarısızlık",
+  "debug.system.sampler.header.lastOk.full": "Son başarı",
+  "debug.system.sampler.header.lastOk.short": "son tamam",
+  "debug.system.sampler.header.lateMiss.full": "Geç / cevapsız",
+  "debug.system.sampler.header.lateMiss.short": "geç/özledim",
+  "debug.system.sampler.header.runtime.full": "Son çalışma zamanı",
+  "debug.system.sampler.header.runtime.short": "çalışma zamanı"
 }

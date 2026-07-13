@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "đang theo dõi",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} cho {session}",
-  "yolo.titleReadonly": "YOLO {state} cho {session}; Truy cập chỉ đọc"
+  "yolo.titleReadonly": "YOLO {state} cho {session}; Truy cập chỉ đọc",
+  "debug.graph.chart.serversLoad": "Tải máy chủ",
+  "debug.graph.chart.serversLoad.desc": "Phần trăm CPU cho mỗi dịch vụ YOLOmux cục bộ, được lấy mẫu 10 giây một lần.",
+  "debug.graph.serviceLoad.range": "tối thiểu {minimum} · trung bình {average} · tối đa {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "Còn sống / đang chạy",
+  "debug.system.sampler.header.aliveRun.short": "sống/chạy",
+  "debug.system.sampler.header.attSuccFails.full": "Nỗ lực/thành công/thất bại",
+  "debug.system.sampler.header.attSuccFails.short": "att/thành công/thất bại",
+  "debug.system.sampler.header.cadence.full": "nhịp",
+  "debug.system.sampler.header.cadence.short": "mỗi",
+  "debug.system.sampler.header.family.short": "gia đình",
+  "debug.system.sampler.header.lastFail.short": "lần thất bại cuối cùng",
+  "debug.system.sampler.header.lastOk.full": "Thành công cuối cùng",
+  "debug.system.sampler.header.lastOk.short": "cuối cùng được rồi",
+  "debug.system.sampler.header.lateMiss.full": "Trễ/bỏ lỡ",
+  "debug.system.sampler.header.lateMiss.short": "trễ/trễ",
+  "debug.system.sampler.header.runtime.full": "Lần chạy cuối cùng",
+  "debug.system.sampler.header.runtime.short": "thời gian chạy"
 }

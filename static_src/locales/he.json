@@ -2570,5 +2570,22 @@
   "yolo.status.watching": "עוקב",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} עבור {session}",
-  "yolo.titleReadonly": "YOLO {state} עבור {session}; גישה לקריאה בלבד"
+  "yolo.titleReadonly": "YOLO {state} עבור {session}; גישה לקריאה בלבד",
+  "debug.graph.chart.serversLoad": "טעינת שרתים",
+  "debug.graph.chart.serversLoad.desc": "אחוז מעבד עבור כל שירות YOLOmux מקומי, נדגמים כל 10 שניות.",
+  "debug.graph.serviceLoad.range": "min {minimum} · ממוצע {average} · מקסימום {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "חי / רץ",
+  "debug.system.sampler.header.aliveRun.short": "חי/רוץ",
+  "debug.system.sampler.header.attSuccFails.full": "ניסיונות / הצלחות / כישלונות",
+  "debug.system.sampler.header.attSuccFails.short": "נסיונות/הצלחות/כשלונות",
+  "debug.system.sampler.header.cadence.full": "קידנס",
+  "debug.system.sampler.header.cadence.short": "כל",
+  "debug.system.sampler.header.family.short": "משפחה",
+  "debug.system.sampler.header.lastFail.short": "כישלון אחרון",
+  "debug.system.sampler.header.lastOk.full": "הצלחה אחרונה",
+  "debug.system.sampler.header.lastOk.short": "אחרון בסדר",
+  "debug.system.sampler.header.lateMiss.full": "מאוחר / החמצה",
+  "debug.system.sampler.header.lateMiss.short": "מאוחר/פספוס",
+  "debug.system.sampler.header.runtime.full": "זמן ריצה אחרון",
+  "debug.system.sampler.header.runtime.short": "זמן ריצה"
 }

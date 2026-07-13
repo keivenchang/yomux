@@ -325,6 +325,8 @@ For exact UI behavior, edge cases, and coverage, see [`docs/specs/GUI.md`](docs/
 
 The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permissions & YOLO](#agent-permissions--yolo).
 
+- The optional `Servers Load` chart sits immediately after CPU and persists one line per running local service from an independent 10-second sampler. It reuses existing service-status CPU/RSS values, retains min/average/max rollups and honest coverage gaps, and starts off. System tables share non-wrapping first columns and table-local narrow scrolling; sampler headings use localized compact labels with full tooltips.
+
 ## Running options
 
 All tmux sessions, default behavior:

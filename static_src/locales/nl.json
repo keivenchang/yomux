@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "bewaken",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} voor {session}",
-  "yolo.titleReadonly": "YOLO {state} voor {session}; Alleen-lezen toegang"
+  "yolo.titleReadonly": "YOLO {state} voor {session}; Alleen-lezen toegang",
+  "debug.graph.chart.serversLoad": "Servers laden",
+  "debug.graph.chart.serversLoad.desc": "CPU-percentage voor elke lokale YOLOmux-service, elke 10 seconden bemonsterd.",
+  "debug.graph.serviceLoad.range": "min {minimum} · gemiddeld {average} · max {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "Levend / rennend",
+  "debug.system.sampler.header.aliveRun.short": "levend/rennen",
+  "debug.system.sampler.header.attSuccFails.full": "Pogingen / successen / mislukkingen",
+  "debug.system.sampler.header.attSuccFails.short": "att/succ/mislukt",
+  "debug.system.sampler.header.cadence.full": "Cadans",
+  "debug.system.sampler.header.cadence.short": "elke",
+  "debug.system.sampler.header.family.short": "Familie",
+  "debug.system.sampler.header.lastFail.short": "laatste mislukt",
+  "debug.system.sampler.header.lastOk.full": "Laatste succes",
+  "debug.system.sampler.header.lastOk.short": "laatste oké",
+  "debug.system.sampler.header.lateMiss.full": "Te laat / gemist",
+  "debug.system.sampler.header.lateMiss.short": "laat/miss",
+  "debug.system.sampler.header.runtime.full": "Laatste looptijd",
+  "debug.system.sampler.header.runtime.short": "looptijd"
 }

@@ -2708,5 +2708,22 @@
   "yolo.status.watching": "جارٍ المراقبة",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} ل {session}",
-  "yolo.titleReadonly": "YOLO {state} ل {session}; الوصول للقراءة فقط"
+  "yolo.titleReadonly": "YOLO {state} ل {session}; الوصول للقراءة فقط",
+  "debug.graph.chart.serversLoad": "تحميل الخوادم",
+  "debug.graph.chart.serversLoad.desc": "النسبة المئوية لوحدة المعالجة المركزية لكل خدمة YOLOmux محلية، يتم أخذ عينات منها كل 10 ثوانٍ.",
+  "debug.graph.serviceLoad.range": "الحد الأدنى {minimum} · المتوسط {average} · الحد الأقصى {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "حي / جاري",
+  "debug.system.sampler.header.aliveRun.short": "على قيد الحياة/تشغيل",
+  "debug.system.sampler.header.attSuccFails.full": "محاولات / نجاحات / إخفاقات",
+  "debug.system.sampler.header.attSuccFails.short": "أت/نجاح/فشل",
+  "debug.system.sampler.header.cadence.full": "الإيقاع",
+  "debug.system.sampler.header.cadence.short": "كل",
+  "debug.system.sampler.header.family.short": "العائلة",
+  "debug.system.sampler.header.lastFail.short": "فشل الأخير",
+  "debug.system.sampler.header.lastOk.full": "النجاح الأخير",
+  "debug.system.sampler.header.lastOk.short": "آخر موافق",
+  "debug.system.sampler.header.lateMiss.full": "متأخرا / غاب",
+  "debug.system.sampler.header.lateMiss.short": "متأخر/ملكة جمال",
+  "debug.system.sampler.header.runtime.full": "وقت التشغيل الأخير",
+  "debug.system.sampler.header.runtime.short": "وقت التشغيل"
 }

@@ -41671,7 +41671,7 @@ const jsDebugStatsHistoryPostMaxBytes = 96 * 1024;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['serversLoad', 'memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
@@ -41828,6 +41828,7 @@ const jsDebugGraphSeries = Object.freeze([
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Servers load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: 10},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
@@ -42720,6 +42721,7 @@ function debugGraphNewHostMetrics() {
     gpuUtilProcesses: new Map(),
     gpuMemoryProcesses: new Map(),
     gpuDevices: new Map(),
+    serviceLoad: new Map(),
   };
 }
 
@@ -43076,6 +43078,26 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
         targetHost.gpuDevices.set(key, item);
       }
     }
+    if (sourceHost.serviceLoad instanceof Map) {
+      for (const [key, sourceItem] of sourceHost.serviceLoad.entries()) {
+        const item = targetHost.serviceLoad.get(key) || {label: sourceItem.label || key, cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+        item.label = sourceItem.label || item.label;
+        for (const prefix of ['cpu', 'rss']) {
+          const totalKey = `${prefix}Total${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
+          const samplesKey = `${prefix}Samples`;
+          const minKey = `${prefix}Min${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
+          const maxKey = `${prefix}Max${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
+          const sourceSamples = Number(sourceItem[samplesKey] || 0) * scale;
+          if (sourceSamples <= 0) continue;
+          const previousSamples = Number(item[samplesKey] || 0);
+          item[totalKey] += Number(sourceItem[totalKey] || 0) * scale;
+          item[samplesKey] += sourceSamples;
+          item[minKey] = previousSamples > 0 ? Math.min(item[minKey], Number(sourceItem[minKey] || 0)) : Number(sourceItem[minKey] || 0);
+          item[maxKey] = Math.max(item[maxKey], Number(sourceItem[maxKey] || 0));
+        }
+        targetHost.serviceLoad.set(key, item);
+      }
+    }
   }
   if (source.clients instanceof Map) {
     if (!(target.clients instanceof Map)) target.clients = new Map();
@@ -43400,6 +43422,25 @@ function debugGraphApplyHostMetrics(bucket, source) {
   debugGraphApplyHostMetricProcesses(target.memoryProcesses, source.memory_processes, 'totalBytes');
   debugGraphApplyHostMetricProcesses(target.gpuUtilProcesses, source.gpu_util_processes);
   debugGraphApplyHostMetricProcesses(target.gpuMemoryProcesses, source.gpu_memory_processes, 'totalBytes');
+  if (source.service_load && typeof source.service_load === 'object' && !Array.isArray(source.service_load)) {
+    for (const [key, record] of Object.entries(source.service_load)) {
+      if (!record || typeof record !== 'object') continue;
+      const item = target.serviceLoad.get(key) || {label: String(record.label || key), cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+      item.label = String(record.label || item.label || key);
+      for (const prefix of ['cpu', 'rss']) {
+        const unit = prefix === 'cpu' ? 'Percent' : 'Bytes';
+        const sourceUnit = prefix === 'cpu' ? 'percent' : 'bytes';
+        const samplesKey = `${prefix}Samples`;
+        const sourceSamples = Math.max(0, Number(record[`${prefix}_samples`] || 0));
+        if (sourceSamples < Number(item[samplesKey] || 0)) continue;
+        item[`${prefix}Total${unit}`] = Math.max(0, Number(record[`${prefix}_total_${sourceUnit}`] || 0));
+        item[samplesKey] = sourceSamples;
+        item[`${prefix}Min${unit}`] = Math.max(0, Number(record[`${prefix}_min_${sourceUnit}`] || 0));
+        item[`${prefix}Max${unit}`] = Math.max(0, Number(record[`${prefix}_max_${sourceUnit}`] || 0));
+      }
+      target.serviceLoad.set(key, item);
+    }
+  }
   if (!source.gpu_devices || typeof source.gpu_devices !== 'object' || Array.isArray(source.gpu_devices)) return;
   for (const [key, record] of Object.entries(source.gpu_devices)) {
     if (!record || typeof record !== 'object') continue;
@@ -44540,6 +44581,30 @@ function debugGraphHostMetricSeriesDefs(buckets) {
   ];
 }
 
+function debugGraphServiceLoadSeriesDefs(buckets) {
+  const services = new Map();
+  for (const bucket of buckets) {
+    for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
+      if (Number(item?.cpuSamples || 0) > 0) services.set(key, String(item.label || key));
+    }
+  }
+  const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
+  const visuals = debugGraphDisplayedTokenVisuals(items, ([key]) => key);
+  const linePatterns = ['solid', 'dash', 'dot'];
+  return items.map(([key, label], index) => ({
+    key: `serviceLoad:${key}`, label, unit: 'percent', serviceLoad: true,
+    color: visuals[index].color, linePattern: linePatterns[visuals[index].patternIndex % linePatterns.length],
+    value: bucket => {
+      const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
+      return Number(item?.cpuSamples || 0) > 0 ? Number(item.cpuTotalPercent || 0) / Number(item.cpuSamples) : 0;
+    },
+    hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
+    sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
+    familyHasData: bucket => [...(bucket?.hostMetrics?.serviceLoad?.values?.() || [])].some(item => Number(item?.cpuSamples || 0) > 0),
+    displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
+  }));
+}
+
 function debugGraphDisplayHoldOutage(bucket) {
   return Number(bucket?.disconnectedMs || 0) > 0;
 }
@@ -44594,7 +44659,7 @@ function debugGraphProjectSeriesSamples(def, buckets) {
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphServiceLoadSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
@@ -45344,6 +45409,7 @@ function debugGraphXAxisHtml(domain) {
 }
 
 function debugGraphGroupSeriesItems(group, seriesItems) {
+  if (group.serviceLoad === true) return seriesItems.filter(series => series.serviceLoad === true);
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
   if (group.hostMetric) {
@@ -45462,6 +45528,22 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   if (!data) return debugGraphValueText(0, chart?.dataset?.jsDebugChartUnit);
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return debugGraphValueText(0, data.group.unit);
+  if (data.group.key === 'serversLoad') {
+    const bucket = data.buckets[index];
+    const details = data.groupSeries.flatMap(series => {
+      const key = String(series.key || '').replace(/^serviceLoad:/, '');
+      const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
+      const samples = Number(item?.cpuSamples || 0);
+      if (samples <= 0) return [];
+      const avg = Number(item.cpuTotalPercent || 0) / samples;
+      return [`${series.label}: ${debugGraphValueText(avg, 'percent')} (${t('debug.graph.serviceLoad.range', {
+        minimum: debugGraphValueText(Number(item.cpuMinPercent || 0), 'percent'),
+        average: debugGraphValueText(avg, 'percent'),
+        maximum: debugGraphValueText(Number(item.cpuMaxPercent || 0), 'percent'),
+      })})`];
+    });
+    return details.join(' · ') || debugGraphValueText(0, data.group.unit);
+  }
   const series = data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
@@ -46956,7 +47038,7 @@ function debugSystemLocalServicesCardHtml() {
 
 function debugSystemLocalServicesTableHtml(serviceNames = []) {
   const minWidthRem = 10 + (Math.max(1, serviceNames.length) * 9);
-  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
+  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-fixed-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
     <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
     <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}">—</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>`;
@@ -47078,11 +47160,25 @@ function debugSystemSamplerFamilySeconds(family, secondsKeys, millisecondsKeys) 
   return debugSystemSamplerFamilyNumber(family, ...millisecondsKeys) / 1000;
 }
 
+function debugSystemSamplerHeaderHtml(shortKey, fullKey) {
+  const full = t(fullKey);
+  return `<th scope="col" title="${esc(full)}" aria-label="${esc(full)}"><span aria-hidden="true">${esc(t(shortKey))}</span></th>`;
+}
+
 function debugSystemSamplerFamiliesHtml(value, nowSeconds = Date.now() / 1000) {
   const families = debugSystemSamplerFamilyEntries(value);
   if (!families.length) return '';
-  return `<div class="js-debug-system-table-wrap" data-js-debug-sampler-families><table class="js-debug-system-table">
-    <thead><tr><th>Family</th><th>Cadence</th><th>Alive / running</th><th>Attempts / successes / failures</th><th>Late / missed</th><th>Last runtime</th><th>Last success</th><th>Last failure</th></tr></thead>
+  return `<div class="js-debug-system-table-wrap" data-js-debug-sampler-families><table class="js-debug-system-table js-debug-system-fixed-table js-debug-system-sampler-table">
+    <thead><tr>${[
+      ['debug.system.sampler.header.family.short', 'debug.system.sampler.header.family.short'],
+      ['debug.system.sampler.header.cadence.short', 'debug.system.sampler.header.cadence.full'],
+      ['debug.system.sampler.header.aliveRun.short', 'debug.system.sampler.header.aliveRun.full'],
+      ['debug.system.sampler.header.attSuccFails.short', 'debug.system.sampler.header.attSuccFails.full'],
+      ['debug.system.sampler.header.lateMiss.short', 'debug.system.sampler.header.lateMiss.full'],
+      ['debug.system.sampler.header.runtime.short', 'debug.system.sampler.header.runtime.full'],
+      ['debug.system.sampler.header.lastOk.short', 'debug.system.sampler.header.lastOk.full'],
+      ['debug.system.sampler.header.lastFail.short', 'debug.system.localServices.field.lastFailure'],
+    ].map(([shortKey, fullKey]) => debugSystemSamplerHeaderHtml(shortKey, fullKey)).join('')}</tr></thead>
     <tbody>${families.map(([name, family]) => {
       const cadence = debugSystemSamplerFamilySeconds(family, ['cadence_seconds', 'interval_seconds'], ['cadence_ms', 'interval_ms']);
       const runtime = debugSystemSamplerFamilySeconds(family, ['last_runtime_seconds', 'runtime_seconds', 'last_runtime'], ['last_runtime_ms', 'runtime_ms']);
@@ -47112,13 +47208,16 @@ function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() 
   const requests = Math.max(0, Number(statsd.history_requests) || 0);
   const hits = Math.min(requests, Math.max(0, Number(statsd.history_cache_hits) || 0));
   const hitRate = requests > 0 ? `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})` : '—';
+  const historyQuery = profile.returned_records == null || profile.source_records == null
+    ? '—'
+    : `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`;
   const aggregate = debugSystemRowsHtml([
     ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
     ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
     ['Late / missed deadlines', `${debugSystemNumber(statsd.sampler_late_cycles)} / ${debugSystemNumber(statsd.sampler_missed_cycles)}`],
     ['History cache hit rate', hitRate],
     ['Last history latency', debugGraphTerseTimeText(Number(profile.assemble_ms || 0))],
-    ['Last history query', `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`],
+    ['Last history query', historyQuery],
   ]);
   return debugSystemCardHtml(
     'YO!stats sampler',

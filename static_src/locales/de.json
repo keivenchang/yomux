@@ -2524,5 +2524,22 @@
   "yolo.status.watching": "wird überwacht",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} für {session}",
-  "yolo.titleReadonly": "YOLO {state} für {session}; Lesezugriff"
+  "yolo.titleReadonly": "YOLO {state} für {session}; Lesezugriff",
+  "debug.graph.chart.serversLoad": "Serverauslastung",
+  "debug.graph.chart.serversLoad.desc": "CPU-Prozentsatz für jeden lokalen YOLOmux-Dienst, alle 10 Sekunden abgetastet.",
+  "debug.graph.serviceLoad.range": "min {minimum} · Durchschnitt {average} · max {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "Lebendig / laufend",
+  "debug.system.sampler.header.aliveRun.short": "lebendig/rennen",
+  "debug.system.sampler.header.attSuccFails.full": "Versuche / Erfolge / Misserfolge",
+  "debug.system.sampler.header.attSuccFails.short": "Vers/Erf/Fehl",
+  "debug.system.sampler.header.cadence.full": "Trittfrequenz",
+  "debug.system.sampler.header.cadence.short": "jeder",
+  "debug.system.sampler.header.family.short": "Familie",
+  "debug.system.sampler.header.lastFail.short": "letzter Fehlschlag",
+  "debug.system.sampler.header.lastOk.full": "Letzter Erfolg",
+  "debug.system.sampler.header.lastOk.short": "zuletzt ok",
+  "debug.system.sampler.header.lateMiss.full": "Verspätet / verpasst",
+  "debug.system.sampler.header.lateMiss.short": "verspätet/verpasst",
+  "debug.system.sampler.header.runtime.full": "Letzte Laufzeit",
+  "debug.system.sampler.header.runtime.short": "Laufzeit"
 }

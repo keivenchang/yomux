@@ -431,6 +431,7 @@ STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
 STATS_AGENT_STATUS_SAMPLE_SECONDS = 10.0
+STATS_SERVICE_LOAD_SAMPLE_SECONDS = 10.0
 STATS_GPU_SAMPLE_SECONDS = 10.0
 STATS_SYSTEM_MEMORY_SAMPLE_SECONDS = 60.0
 # Per-server CPU history shares one durable 24-hour snapshot with every browser client. Coalesce
@@ -2423,6 +2424,7 @@ class TmuxWebtermApp:
 
         return {
             "cpu": (self.record_stats_cpu_sample, lambda: STATS_HISTORY_SAMPLER_SECONDS),
+            "service_load": (self.record_stats_service_load_sample, lambda: STATS_SERVICE_LOAD_SAMPLE_SECONDS),
             "agent_status": (self.record_stats_agent_status_sample, lambda: STATS_AGENT_STATUS_SAMPLE_SECONDS),
             "gpu": (self.record_stats_gpu_sample, lambda: STATS_GPU_SAMPLE_SECONDS),
             "system_memory": (self.record_stats_system_memory_sample, lambda: STATS_SYSTEM_MEMORY_SAMPLE_SECONDS),
@@ -2717,6 +2719,38 @@ class TmuxWebtermApp:
         record.pop("_agent_token_records", None)
         record.pop("_usage_atom_migration_rows", None)
         self.merge_stats_family_record("agent_status", record, self.latest_stats_sample())
+
+    def record_stats_service_load_sample(self) -> None:
+        """Persist one already-exposed local-service resource snapshot."""
+
+        sample = self.latest_stats_sample()
+        rows = list(self.runtime_local_services().get("services") or [])
+        rows.append({
+            "service": "web", "pid": int(sample.get("pid") or os.getpid()),
+            "resources": {"cpu_percent": sample.get("cpu_percent"), "rss_bytes": sample.get("rss_bytes")},
+        })
+        services: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict) or int(row.get("pid") or 0) <= 0:
+                continue
+            key = str(row.get("service") or "").strip()[:128]
+            resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
+            cpu_percent = resources.get("cpu_percent")
+            rss_bytes = resources.get("rss_bytes")
+            item: dict[str, Any] = {"label": key}
+            if isinstance(cpu_percent, (int, float)):
+                cpu = max(0.0, float(cpu_percent))
+                item.update({"cpu_total_percent": cpu, "cpu_min_percent": cpu, "cpu_max_percent": cpu, "cpu_samples": 1})
+            if isinstance(rss_bytes, (int, float)):
+                rss = max(0.0, float(rss_bytes))
+                item.update({"rss_total_bytes": rss, "rss_min_bytes": rss, "rss_max_bytes": rss, "rss_samples": 1})
+            if len(item) > 1:
+                services[key] = item
+        self.merge_stats_family_record(
+            "service_load",
+            {"time": self.stats_metric_scheduled_time(), "host_metrics": {"service_load": services}},
+            sample,
+        )
 
     def record_stats_gpu_sample(self) -> None:
         sample_time = self.stats_metric_scheduled_time()

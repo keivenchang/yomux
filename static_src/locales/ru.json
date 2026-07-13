@@ -2616,5 +2616,22 @@
   "yolo.status.watching": "наблюдение",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} для {session}",
-  "yolo.titleReadonly": "YOLO {state} для {session}; доступ только для чтения"
+  "yolo.titleReadonly": "YOLO {state} для {session}; доступ только для чтения",
+  "debug.graph.chart.serversLoad": "Загрузка серверов",
+  "debug.graph.chart.serversLoad.desc": "Процент ЦП для каждой локальной службы YOLOmux, выборка каждые 10 секунд.",
+  "debug.graph.serviceLoad.range": "мин {minimum} · среднее {average} · макс {maximum}",
+  "debug.system.sampler.header.aliveRun.full": "Жив / работает",
+  "debug.system.sampler.header.aliveRun.short": "жив/бегу",
+  "debug.system.sampler.header.attSuccFails.full": "Попытки/успехи/неудачи",
+  "debug.system.sampler.header.attSuccFails.short": "ответ/успешно/не удалось",
+  "debug.system.sampler.header.cadence.full": "Каденс",
+  "debug.system.sampler.header.cadence.short": "каждый",
+  "debug.system.sampler.header.family.short": "Семья",
+  "debug.system.sampler.header.lastFail.short": "последняя неудача",
+  "debug.system.sampler.header.lastOk.full": "Последний успех",
+  "debug.system.sampler.header.lastOk.short": "последний раз ок",
+  "debug.system.sampler.header.lateMiss.full": "Опоздал/пропустил",
+  "debug.system.sampler.header.lateMiss.short": "опоздать/пропустить",
+  "debug.system.sampler.header.runtime.full": "Последнее время выполнения",
+  "debug.system.sampler.header.runtime.short": "время выполнения"
 }
