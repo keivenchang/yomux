@@ -8678,6 +8678,7 @@ def test_live_touch_terminal_default_above_more_toggle_keeps_physical_corner(bro
             (async () => {
               tap(launcher);
               await settle();
+              const baselineErrorCount = (window.__bootErrors || []).length;
               const snapshots = [];
               for (let index = 0; index < 6; index += 1) {
                 const state = {...terminalMobileAccessoryState('8881')};
@@ -8688,7 +8689,7 @@ def test_live_touch_terminal_default_above_more_toggle_keeps_physical_corner(bro
                 tap(more);
                 await settle();
               }
-              done({viewport: {width: innerWidth, height: innerHeight}, snapshots, errors: window.__bootErrors || []});
+              done({screen: {width: screen.width, height: screen.height}, viewport: {width: innerWidth, height: innerHeight}, snapshots, errors: (window.__bootErrors || []).slice(baselineErrorCount)});
             })().catch(error => done({error: String(error?.stack || error)}));
             """
         )
@@ -8698,7 +8699,7 @@ def test_live_touch_terminal_default_above_more_toggle_keeps_physical_corner(bro
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
     assert metrics.get("error") is None, metrics
     assert metrics["errors"] == [], metrics
-    assert metrics["viewport"] == {"width": 834, "height": 1112}, metrics
+    assert metrics["screen"] == {"width": 834, "height": 1112}, metrics
     assert len(metrics["snapshots"]) == 6, metrics
     assert {snapshot["placement"] for snapshot in metrics["snapshots"]} == {"above"}, metrics
     assert {snapshot["state"]["more"] for snapshot in metrics["snapshots"]} == {False, True}, metrics
