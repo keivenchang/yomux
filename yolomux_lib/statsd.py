@@ -85,6 +85,7 @@ STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENT
 STATS_COST_SUMMARY_MAX_BYTES = stats_store.STATS_COST_SUMMARY_MAX_BYTES
 STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
 STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 16
+STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 64
 
 
 def _scan_agent_token_rows_in_worker(
@@ -558,6 +559,7 @@ class PersistentStatsService:
         self.agent_token_scan_sequence = 0
         self.agent_token_scan_id = ""
         self.agent_token_scan_completion: dict[str, Any] | None = None
+        self.agent_token_scan_persistence: dict[str, Any] | None = None
         # Catalog ownership stays outside statsd.  Tests and the application
         # may inject its public resolve_rate surface; absent catalog means
         # usage remains visible but explicitly unpriced/lower-bound.
@@ -636,7 +638,7 @@ class PersistentStatsService:
         self._drain_agent_token_scan_result()
         maintenance = self._maybe_reproject_cost_summaries()
         with self.agent_token_scan_lock:
-            scan_active = self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None
+            scan_active = self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None or self.agent_token_scan_persistence is not None
         # An elected sampler is active work even while no browser reads YO!stats.
         return not scan_active and not maintenance.get("pending") and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
@@ -1437,7 +1439,7 @@ class PersistentStatsService:
         return self._persist_agent_token_scan(measurements, atom_records, seen_keys, sample_time, previous_state)
 
     def _drain_agent_token_scan_result(self) -> bool:
-        """Persist one completed filesystem scan on the RPC/SQLite owner thread."""
+        """Advance a completed scan in bounded, retryable SQLite-owner pages."""
 
         with self.agent_token_scan_lock:
             result = self.agent_token_scan_result
@@ -1458,31 +1460,74 @@ class PersistentStatsService:
                         except OSError:
                             pass
                 self.agent_token_scan_result = result
-            if result is None:
+            persistence = self.agent_token_scan_persistence
+            if result is not None and persistence is None:
+                self.agent_token_scan_result = None
+                self.agent_token_scan_worker = None
+                self.agent_token_scan_result_path = None
+                scan_id = str(result.get("scan_id") or self.agent_token_scan_id)
+            elif persistence is not None:
+                scan_id = str(persistence["scan_id"])
+            else:
                 return False
-            self.agent_token_scan_result = None
-            self.agent_token_scan_worker = None
-            self.agent_token_scan_result_path = None
-            scan_id = str(result.get("scan_id") or self.agent_token_scan_id)
-        error = result.get("error")
-        if error:
-            self.last_sampler_failure = redact_local_service_text(error)
-            with self.agent_token_scan_lock:
-                self.agent_token_scan_completion = {"scan_id": scan_id, "response": {"ok": False, "error": str(error)}}
-            return True
-        try:
-            response = self._persist_agent_token_scan(
-                result["measurements"],
-                result["atom_records"],
-                result["seen_keys"],
-                result["sample_time"],
-                result["previous_state"],
-            )
-        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
-            self.last_sampler_failure = redact_local_service_text(exc)
-            response = {"ok": False, "error": str(exc)}
+        if result is not None and persistence is None:
+            error = result.get("error")
+            if error:
+                self.last_sampler_failure = redact_local_service_text(error)
+                with self.agent_token_scan_lock:
+                    self.agent_token_scan_completion = {"scan_id": scan_id, "response": {"ok": False, "error": str(error)}}
+                return True
+            try:
+                claimed = self.claim_agent_token_deltas(
+                    result["measurements"], result["seen_keys"], result["sample_time"],
+                    fallback_state=result["previous_state"], persist_state=False,
+                )
+                records = [*claimed.get("records", []), *result["atom_records"]]
+                with self.agent_token_scan_lock:
+                    self.agent_token_scan_persistence = {
+                        "scan_id": scan_id, "records": records, "offset": 0,
+                        "state": claimed["state"], "sample_time": result["sample_time"],
+                        "changed": 0,
+                    }
+                # Installing the pending result must itself stay cheap. The
+                # next listener turn persists one page, leaving health/history
+                # immediately serviceable when a large parser result arrives.
+                return True
+            except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+                self.last_sampler_failure = redact_local_service_text(exc)
+                with self.agent_token_scan_lock:
+                    self.agent_token_scan_completion = {"scan_id": scan_id, "response": {"ok": False, "error": str(exc)}}
+                return True
+
         with self.agent_token_scan_lock:
+            persistence = self.agent_token_scan_persistence
+            assert persistence is not None
+            offset = int(persistence["offset"])
+            records = persistence["records"]
+            page = records[offset:offset + STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS]
+        try:
+            merged = self.merge_server_records(page, now=persistence["sample_time"]) if page else {"ok": True, "changed": 0}
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+            # Keep the exact pending cursor and uncommitted baseline. A later
+            # listener turn retries the idempotent atom page instead of
+            # skipping token history or advancing its counter baseline.
+            self.last_sampler_failure = redact_local_service_text(exc)
+            return True
+        with self.agent_token_scan_lock:
+            persistence = self.agent_token_scan_persistence
+            if persistence is None:
+                return True
+            persistence["offset"] = offset + len(page)
+            persistence["changed"] = int(persistence["changed"]) + int(merged.get("changed") or 0)
+            if persistence["offset"] < len(persistence["records"]):
+                return True
+            self._set_agent_token_state(persistence["state"])
+            response = {
+                "ok": True, "records": [], "persisted_records": len(persistence["records"]),
+                "state": persistence["state"], "merge": {"ok": True, "changed": persistence["changed"]},
+            }
             self.agent_token_scan_completion = {"scan_id": scan_id, "response": response}
+            self.agent_token_scan_persistence = None
         return True
 
     def start_agent_token_scan_from_rows(
@@ -1497,7 +1542,7 @@ class PersistentStatsService:
         self._drain_agent_token_scan_result()
         previous_state = self._agent_token_state(fallback_state)
         with self.agent_token_scan_lock:
-            if self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None:
+            if self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None or self.agent_token_scan_persistence is not None:
                 return {"ok": True, "accepted": False, "busy": True, "records": [], "state": previous_state}
             self.agent_token_scan_sequence += 1
             scan_id = f"scan-{self.agent_token_scan_sequence}"
@@ -1544,7 +1589,7 @@ class PersistentStatsService:
                 self.agent_token_scan_completion = None
                 response = completion.get("response")
                 return {"done": True, **(response if isinstance(response, dict) else {"ok": False, "error": "invalid scan response"})}
-            active = self.agent_token_scan_id == scan_id and self.agent_token_scan_worker is not None
+            active = self.agent_token_scan_id == scan_id and (self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None or self.agent_token_scan_persistence is not None)
         return {"ok": True, "done": False, "pending": active}
 
     @staticmethod
@@ -2437,6 +2482,7 @@ class PersistentStatsService:
         with self.agent_token_scan_lock:
             scan_worker = self.agent_token_scan_worker
             scan_result_pending = self.agent_token_scan_result is not None
+            scan_persisting = self.agent_token_scan_persistence is not None
         scan_running = bool(scan_worker and scan_worker.is_alive())
         try:
             cache = self.store.diagnostics()
@@ -2455,8 +2501,8 @@ class PersistentStatsService:
             "started_at": self.started_at,
             "socket": str(self.socket_path),
             "clients": len(self.leases),
-            "queues": {"interactive": 0, "normal": 0, "maintenance": int(scan_result_pending) + int(self.pricing_reprojection is not None)},
-            "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending else ("pricing-reprojection" if self.pricing_reprojection is not None else "")),
+            "queues": {"interactive": 0, "normal": 0, "maintenance": int(scan_result_pending or scan_persisting) + int(self.pricing_reprojection is not None)},
+            "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending or scan_persisting else ("pricing-reprojection" if self.pricing_reprojection is not None else "")),
             "cache": cache,
             "history_profile": dict(self.last_history_profile),
             "last_success": self.last_client_at,

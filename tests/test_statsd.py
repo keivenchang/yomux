@@ -1245,26 +1245,36 @@ def test_statsd_agent_token_scan_does_not_advance_state_when_record_merge_fails(
     service.store.close()
 
 
-def test_statsd_agent_token_scan_batches_recovery_atoms_without_advancing_state_early(monkeypatch, tmp_path):
+def test_statsd_completed_agent_scan_persists_in_bounded_pages_without_blocking_history(monkeypatch, tmp_path):
+    """A large completed child result is installed, then drained between RPC turns."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    batches = []
-    compactions = []
+    service.store.upsert_bucket(_bucket(sequence=1))
+    records = [{"time": 1000 + index, "usage_atoms": []} for index in range(130)]
+    service.agent_token_scan_id = "scan-1"
+    service.agent_token_scan_result = {
+        "scan_id": "scan-1", "measurements": [], "atom_records": records,
+        "seen_keys": [], "sample_time": 1200, "previous_state": {},
+    }
+    pages = []
+    monkeypatch.setattr(service, "merge_server_records", lambda page, **_kwargs: pages.append(len(page)) or {"ok": True, "changed": len(page)})
 
-    def merge(records, *, now, compact):
-        batches.append((len(records), now, compact))
-        return {"ok": True, "changed": len(records), "sequence": len(batches)}
+    # The completion handoff does no SQLite merge, so a history request is not
+    # queued behind all 130 records (the former synchronous behavior).
+    assert service._drain_agent_token_scan_result() is True
+    assert pages == []
+    started = time.perf_counter()
+    history, _binary = service.handle_with_binary({"action": "history", "start": 0, "end": 0})
+    assert history["ok"] is True
+    assert time.perf_counter() - started < 0.1
+    assert service.common_status()["active_task"] == "agent-token-persist"
 
-    monkeypatch.setattr(service, "merge_server_records", merge)
-    monkeypatch.setattr(service, "_compact_history", lambda now: compactions.append(now))
-    atoms = [{"time": 1060, "usage_atoms": []} for _ in range(statsd.STATS_HISTORY_POST_MAX_RECORDS + 1)]
-
-    result = service._persist_agent_token_scan([], atoms, set(), 1060, {})
-
-    assert batches == [(statsd.STATS_HISTORY_POST_MAX_RECORDS, 1060, False), (1, 1060, False)]
-    assert compactions == [1060]
-    assert result["persisted_records"] == statsd.STATS_HISTORY_POST_MAX_RECORDS + 1
-    assert result["merge"] == {"ok": True, "changed": statsd.STATS_HISTORY_POST_MAX_RECORDS + 1, "sequence": 2, "batches": 2}
+    while service.agent_token_scan_persistence is not None:
+        service._drain_agent_token_scan_result()
+    assert pages == [64, 64, 2]
     assert service._agent_token_state() == {}
+    done = service.finish_agent_token_scan("scan-1")
+    assert done["done"] is True
+    assert done["persisted_records"] == 130
     service.store.close()
 
 
