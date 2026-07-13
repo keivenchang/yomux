@@ -1432,6 +1432,46 @@ def test_statsd_persists_and_serves_coarse_rollups_for_bounded_range(tmp_path):
     service.store.close()
 
 
+def test_statsd_twenty_four_hour_range_uses_bounded_persisted_rollups(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    start = 86_400
+    total_cpu = 0.0
+    for index in range(144):
+        bucket = stats_store.empty_bucket(start + index * 600, 600)
+        bucket.update({"sequence": index + 1, "server_sequence": index + 1, "cpu_total_percent": 10.0, "cpu_count": 1.0})
+        service.store.upsert_rollup(bucket)
+        total_cpu += 10.0
+    # Raw coverage remains authoritative, while the range itself reads the
+    # persisted 600-second tier instead of materializing raw samples.
+    service.store.upsert_bucket(stats_store.empty_bucket(start, 1))
+    service.store.upsert_bucket(stats_store.empty_bucket(start + 24 * 60 * 60 - 1, 1))
+
+    history = service.handle({"action": "history", "start": start, "end": start + 24 * 60 * 60, "max_points": 200})
+
+    assert history["coverage"]["resolution_seconds"] == 600
+    assert len(history["records"]) == 144
+    assert sum(record["cpu_total_percent"] for record in history["records"]) == total_cpu
+    assert history["coverage"]["source_records"] == 2
+    service.store.close()
+
+
+def test_statsd_rollup_backfill_advances_one_raw_bucket_per_turn(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.store.upsert_bucket(_bucket(start=100, duration=1, sequence=1))
+    service.store.upsert_bucket(_bucket(start=101, duration=1, sequence=2))
+    service.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
+
+    first = service._rollup_backfill_step()
+    second = service._rollup_backfill_step()
+    done = service._rollup_backfill_step()
+
+    assert first == {"ok": True, "pending": True, "processed": 1}
+    assert second == {"ok": True, "pending": True, "processed": 2}
+    assert done == {"ok": True, "pending": False, "processed": 2}
+    assert service.store.rollup_bucket(100, 10)["cpu_total_percent"] == 25.0
+    service.store.close()
+
+
 def test_statsd_history_uses_cached_cursor_delta_and_point_budget(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     for sequence in range(1, 7):

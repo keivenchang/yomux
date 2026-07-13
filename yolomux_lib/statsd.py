@@ -576,6 +576,7 @@ class PersistentStatsService:
         # SQLite owner. This state makes it cooperative instead of blocking
         # startup until the full retained history has been rewritten.
         self.pricing_reprojection: dict[str, Any] | None = None
+        self.rollup_backfill: dict[str, int] | None = None
 
     def _pricing_catalog_metadata(self) -> tuple[str, int]:
         """Read local catalog status for a projection without fetching providers."""
@@ -645,10 +646,11 @@ class PersistentStatsService:
     def _idle_shutdown_ready(self) -> bool:
         self._drain_agent_token_scan_result()
         maintenance = self._maybe_reproject_cost_summaries()
+        rollup_maintenance = self._rollup_backfill_step()
         with self.agent_token_scan_lock:
             scan_active = self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None or self.agent_token_scan_persistence is not None
         # An elected sampler is active work even while no browser reads YO!stats.
-        return not scan_active and not maintenance.get("pending") and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
+        return not scan_active and not maintenance.get("pending") and not rollup_maintenance.get("pending") and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     def _sampler_delay_seconds(self) -> float:
         if self.sampler_failure_count <= 0:
@@ -1031,6 +1033,27 @@ class PersistentStatsService:
             for source in sources:
                 self._merge_bucket(aggregate, source)
             self.store.upsert_rollup(aggregate)
+
+    def _rollup_backfill_step(self) -> dict[str, Any]:
+        """Backfill one existing raw bucket between listener turns."""
+
+        pending = self.rollup_backfill
+        if pending is None:
+            return {"ok": True, "pending": False}
+        rows = self.store.maintenance_buckets_after(
+            after_start=int(pending["after_start"]),
+            after_duration=int(pending["after_duration"]),
+            limit=1,
+        )
+        if not rows:
+            self.rollup_backfill = None
+            return {"ok": True, "pending": False, "processed": int(pending["processed"])}
+        source = rows[0]
+        self._refresh_persisted_rollups(float(source["start"]))
+        pending["after_start"] = int(source["start"])
+        pending["after_duration"] = int(source["duration"])
+        pending["processed"] = int(pending["processed"]) + 1
+        return {"ok": True, "pending": True, "processed": int(pending["processed"])}
 
     def _merge_usage_components(self, bucket: dict[str, Any], atoms: Any) -> bool:
         """Persist a bounded, idempotent component projection in one bucket."""
@@ -2815,6 +2838,7 @@ class PersistentStatsService:
         self.import_legacy_history_once()
         # Socket publication must mean it can answer immediately. The full
         # retained-history pass advances in bounded listener idle turns.
+        self.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
         self._schedule_cost_reprojection()
         self.sampler_thread = threading.Thread(target=self._sampler_loop, name="statsd-sampler", daemon=True)
         self.sampler_thread.start()
