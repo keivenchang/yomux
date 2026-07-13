@@ -1136,6 +1136,25 @@ def test_statsd_encoded_sample_can_omit_history_payload(tmp_path):
     service.store.close()
 
 
+def test_stats_client_runtime_status_exposes_sampler_and_history_diagnostics(monkeypatch, tmp_path):
+    client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    monkeypatch.setattr(client.registry, "status", lambda: {"healthy": True, "status": {
+        "pid": 123, "sampler_alive": True, "sampler_last_cycle_seconds": 1.25,
+        "sampler_late_cycles": 2, "sampler_missed_cycles": 3,
+        "history_requests": 8, "history_cache_hits": 6,
+        "history_profile": {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2},
+    }})
+    monkeypatch.setattr(client.registry, "resources", lambda _pid: {"cpu_percent": 1.0})
+
+    status = client.runtime_status()
+
+    assert status["sampler_alive"] is True
+    assert status["sampler_last_cycle_seconds"] == 1.25
+    assert (status["sampler_late_cycles"], status["sampler_missed_cycles"]) == (2, 3)
+    assert (status["history_requests"], status["history_cache_hits"]) == (8, 6)
+    assert status["history_profile"] == {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2}
+
+
 def test_statsd_history_listener_stays_responsive_while_sampler_owner_is_slow(monkeypatch, tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     service.store.upsert_bucket(_bucket(sequence=1))
@@ -1493,6 +1512,11 @@ def test_statsd_history_profile_separates_sqlite_query_and_assembly(tmp_path):
     assert profile["query_ms"] >= 0
     assert profile["assemble_ms"] >= profile["coverage_ms"] + profile["query_ms"]
     assert service.common_status()["history_profile"] == profile
+    assert service.common_status()["history_requests"] == 1
+    assert service.common_status()["history_cache_hits"] == 0
+    service._encoded_history({"start": 1, "end": 10_000, "max_points": 100})
+    assert service.common_status()["history_requests"] == 2
+    assert service.common_status()["history_cache_hits"] == 1
     service.store.close()
 
 

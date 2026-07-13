@@ -529,7 +529,7 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
   const phase = retry ? 'retrying' : (Number(state.loadedStartSeconds) > 0 ? 'loading-older' : 'loading-initial');
-  return setJsDebugHistoryReadiness(phase, {
+  const snapshot = setJsDebugHistoryReadiness(phase, {
     requestedRangeSeconds: jsDebugGraphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
@@ -542,6 +542,8 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
     loadingStartedAtMs: performanceNow(),
     nextAutoRetryAtMs: 0,
   });
+  if (retry) recordJsDebugStatsDiagnostic('warning', `retry entered (attempt ${snapshot.attemptCount}) for unavailable history coverage`);
+  return snapshot;
 }
 
 function jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds) {
@@ -815,10 +817,15 @@ function debugEventDetailText(event) {
 }
 
 function debugClientLogLevel(event) {
+  if (event?.type === 'stats_history' && jsDebugLogLevels.includes(String(event?.level || ''))) return String(event.level);
   if (event?.type === 'error' || event?.type === 'unhandledrejection' || event?.error || Number(event?.status || 0) >= 500) return 'error';
   if (Number(event?.status || 0) >= 400 || event?.ok === false) return 'warning';
   if (event?.type === 'sse') return 'debug';
   return 'info';
+}
+
+function recordJsDebugStatsDiagnostic(level, message) {
+  recordJsDebugEvent('stats_history', {level, message: `YO!stats: ${message}`});
 }
 
 function debugClientLogRecord(event, index = 0) {
@@ -1580,7 +1587,10 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     (Number.isFinite(nextPid) && Number.isFinite(jsDebugStatsServerPid) && nextPid !== jsDebugStatsServerPid)
     || (Number.isFinite(nextStartedAt) && Number.isFinite(jsDebugStatsServerStartedAt) && nextStartedAt !== jsDebugStatsServerStartedAt)
   );
-  if (serverChanged) clearJsDebugGraphData();
+  if (serverChanged) {
+    recordJsDebugStatsDiagnostic('warning', `owner changed from PID ${jsDebugStatsServerPid || 'unknown'} to PID ${nextPid || 'unknown'}; refreshing durable history`);
+    clearJsDebugGraphData();
+  }
   if (Number.isFinite(Number(payload.uptime_seconds))) jsDebugStatsServerUptimeSeconds = Math.max(0, Number(payload.uptime_seconds));
   if (Number.isFinite(nextPid)) jsDebugStatsServerPid = nextPid;
   if (Number.isFinite(nextStartedAt)) jsDebugStatsServerStartedAt = nextStartedAt;
@@ -4541,12 +4551,14 @@ async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, re
   await nextAnimationFrame();
   recordClientPerfCounter('statsHistoryPaint', performanceNow() - paintStartedAt);
   if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
+  const recoveredRetry = jsDebugHistoryReadiness.phase === 'retrying';
   setJsDebugHistoryReadiness('ready', {
     requestedRangeSeconds,
     requestedStartSeconds,
     error: '',
     nextAutoRetryAtMs: 0,
   });
+  if (recoveredRetry) recordJsDebugStatsDiagnostic('info', 'retry exited after durable history coverage recovered');
   return true;
 }
 
@@ -4617,10 +4629,20 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     });
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
-    if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
+    if (readinessRequest && !coverage) {
+      recordJsDebugStatsDiagnostic('error', 'coverage rejected: response omitted the required coverage envelope');
+      throw new Error('stats history response omitted coverage');
+    }
     const satisfiedCoverage = readinessRequest ? jsDebugHistorySatisfiedCoverage(coverage, readinessRequest) : coverage;
     if (readinessRequest && !coverage.complete && !satisfiedCoverage && !coverage.hasMoreOlder) {
+      recordJsDebugStatsDiagnostic('warning', 'coverage rejected: partial response has no usable retained interval');
       throw new Error('stats history response provided unusable partial coverage');
+    }
+    if (readinessRequest && coverage && !coverage.complete && satisfiedCoverage) {
+      recordJsDebugStatsDiagnostic('warning', 'terminal partial coverage accepted; older retained history is unavailable');
+    }
+    if (coverage?.mode === 'older' && Number(coverage.sourceResolutionSeconds || 0) >= 60) {
+      recordJsDebugStatsDiagnostic('info', `history range served from ${coverage.sourceResolutionSeconds}s retained rollup`);
     }
     const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
       ? payload.history.coverage
@@ -4644,6 +4666,12 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     }
   } catch (error) {
     if (readinessRequest && jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) {
+      const elapsedMs = Math.max(0, performanceNow() - Number(readinessRequest.loadingStartedAtMs || performanceNow()));
+      const level = error?.name === 'TimeoutError' ? 'error' : 'warning';
+      const reason = error?.name === 'TimeoutError'
+        ? `history request timed out after ${Math.round(elapsedMs)}ms`
+        : `history request failed: ${jsDebugErrorText(error)}`;
+      recordJsDebugStatsDiagnostic(level, reason);
       setJsDebugHistoryReadiness('error', {
         error: jsDebugErrorText(error),
         nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryDelayMs(readinessRequest.attemptCount),
@@ -5111,6 +5139,22 @@ function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
   </table></div>`;
 }
 
+function debugSystemStatsSamplerCardHtml(services = []) {
+  const statsd = (services || []).find(service => String(service?.service || '') === 'statsd') || {};
+  const profile = statsd.history_profile && typeof statsd.history_profile === 'object' ? statsd.history_profile : {};
+  const requests = Math.max(0, Number(statsd.history_requests) || 0);
+  const hits = Math.min(requests, Math.max(0, Number(statsd.history_cache_hits) || 0));
+  const hitRate = requests > 0 ? `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})` : '—';
+  return debugSystemCardHtml('YO!stats sampler', debugSystemRowsHtml([
+    ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
+    ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
+    ['Late / missed deadlines', `${debugSystemNumber(statsd.sampler_late_cycles)} / ${debugSystemNumber(statsd.sampler_missed_cycles)}`],
+    ['History cache hit rate', hitRate],
+    ['Last history latency', debugGraphTerseTimeText(Number(profile.assemble_ms || 0))],
+    ['Last history query', `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`],
+  ]));
+}
+
 function debugSystemInnerHtml() {
   const payload = jsDebugSystemState.payload;
   if (!payload) {
@@ -5128,6 +5172,7 @@ function debugSystemInnerHtml() {
   const clientEvents = payload.client_events || {};
   const chat = payload.chat || {};
   const totals = payload.local_services?.totals || {};
+  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
   const generatedAgo = payload.generated_at ? relativeTimeFormat(Math.max(0, Date.now() / 1000 - Number(payload.generated_at))) : t('common.notAvailable');
   const cards = [
     debugSystemCardHtml('Server', debugSystemRowsHtml([
@@ -5159,6 +5204,7 @@ function debugSystemInnerHtml() {
       ['Delivered events', clientEvents.delivered_events],
       ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
     ])),
+    debugSystemStatsSamplerCardHtml(services),
     debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
     debugSystemLocalServicesCardHtml(),
     debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),

@@ -688,6 +688,8 @@ class PersistentStatsService:
         self._encoded_query_cache: dict[tuple[Any, ...], tuple[dict[str, Any], float]] = {}
         self._query_cache_ttl_seconds = 1.0
         self.last_history_profile: dict[str, Any] = {}
+        self.history_request_count = 0
+        self.history_cache_hit_count = 0
         self.sampler_owner: dict[str, Any] = {}
         self.sampler_owner_path = Path(sampler_owner_path) if sampler_owner_path is not None else None
         self.agent_token_consumer_until = 0.0
@@ -2784,6 +2786,9 @@ class PersistentStatsService:
 
     def _encoded_history(self, request: dict[str, Any]) -> dict[str, Any]:
         history_started = time.perf_counter()
+        public_request = request.get("_internal_history") is not True
+        if public_request:
+            self.history_request_count += 1
         after_sequence = max(0, int(request.get("after_sequence", request.get("since", 0)) or 0))
         if request.get("include_history") is False:
             generation = self.store.latest_sequence()
@@ -2830,6 +2835,8 @@ class PersistentStatsService:
         )
         cached = self._encoded_query_cache.get(cache_key)
         if cached is not None and time.monotonic() - cached[1] <= self._query_cache_ttl_seconds:
+            if public_request:
+                self.history_cache_hit_count += 1
             self.last_history_profile = {
                 "cache_hit": True,
                 "coverage_ms": 0.0,
@@ -2933,6 +2940,7 @@ class PersistentStatsService:
         }
         if token_resolution:
             token_request = {
+                "_internal_history": True,
                 "after_sequence": token_since,
                 "start": token_history_start,
                 "end": token_history_end,
@@ -3018,6 +3026,8 @@ class PersistentStatsService:
             "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending or scan_persisting else ("agent-token-atom-scan" if atom_scan_running else ("agent-token-atom-backfill" if atom_persisting else ("pricing-reprojection" if self.pricing_reprojection is not None else "")))),
             "cache": cache,
             "history_profile": dict(self.last_history_profile),
+            "history_requests": self.history_request_count,
+            "history_cache_hits": self.history_cache_hit_count,
             "last_success": self.last_client_at,
             "last_failure": last_failure,
             "last_sampler_success_at": self.last_sampler_success_at,
@@ -3360,6 +3370,12 @@ class StatsClient(LocalServiceClient):
             "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""),
             "last_sampler_success_at": float(payload.get("last_sampler_success_at") or 0.0),
             "last_sampler_attempt_at": float(payload.get("last_sampler_attempt_at") or 0.0),
+            "sampler_missed_cycles": int(payload.get("sampler_missed_cycles") or 0),
+            "sampler_late_cycles": int(payload.get("sampler_late_cycles") or 0),
+            "sampler_last_cycle_seconds": float(payload.get("sampler_last_cycle_seconds") or 0.0),
+            "history_profile": payload.get("history_profile") if isinstance(payload.get("history_profile"), dict) else {},
+            "history_requests": int(payload.get("history_requests") or 0),
+            "history_cache_hits": int(payload.get("history_cache_hits") or 0),
             "sampler_alive": payload.get("sampler_alive") is True,
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - monotonic_clock()),
             "generation": int(payload.get("generation") or 0), "record": status.get("record") if isinstance(status.get("record"), dict) else {},
