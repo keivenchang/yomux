@@ -2013,6 +2013,98 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
     assert result["finishedAt"] - result["startedAt"] < 3000, result
 
 
+def test_debug_graph_terminal_partial_history_renders_agent_and_model_tokens(browser, tmp_path):
+    """A known-unavailable prefix must not discard the valid token payload."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof resetJsDebugHistoryReadiness === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        resetJsDebugHistoryReadiness();
+        setDebugGraphChartVisible('modelTokens', true);
+        window.__partialStatsOriginalFetch = window.fetch;
+        window.__partialStatsRequests = 0;
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname !== '/api/stats-sample') return window.__partialStatsOriginalFetch(input, options);
+          window.__partialStatsRequests += 1;
+          const requestedStart = Number(url.searchParams.get('history_start'));
+          const coveredStart = requestedStart + 60;
+          const coveredEnd = Math.floor(Date.now() / 1000);
+          return jsonResponse({
+            pid: 4242,
+            uptime_seconds: 120,
+            history: {
+              sequence: 8,
+              latest_sequence: 8,
+              agent_token_schema_version: 4,
+              records: [{
+                start: coveredEnd - 60,
+                duration: 60,
+                sequence: 8,
+                tokens_per_agent_total: 120,
+                agent_token_samples: 1,
+                agent_token_rates: [{
+                  key: '8881|0|codex', label: '8881:0:codex', total: 120,
+                  tokens: 120, seconds: 60, samples: 1,
+                  model_rates: {'gpt-5.6-terra': {total: 120, tokens: 120, seconds: 60, samples: 1}},
+                }],
+              }],
+              coverage: {
+                mode: 'live', requested_start: requestedStart, requested_end: 0,
+                available_start: coveredStart, available_end: coveredEnd,
+                covered_start: coveredStart, covered_end: coveredEnd,
+                complete: false, has_more_older: false, next_older_end: 0,
+                resolution_seconds: 1, source_resolution_seconds: 1,
+                source_records: 1, returned_records: 1,
+              },
+            },
+          });
+        };
+        void pollJsDebugStatsSample({forceGraphRefresh: true});
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return jsDebugHistoryReadinessSnapshot().phase === 'ready'"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        renderDebugPanels({force: true});
+        const chart = key => document.querySelector(`[data-js-debug-chart="${key}"]`);
+        const agent = chart('agentTokens');
+        const model = chart('modelTokens');
+        const result = {
+          requests: window.__partialStatsRequests,
+          phase: jsDebugHistoryReadinessSnapshot().phase,
+          overlay: document.querySelector('[data-js-debug-history-overlay]')?.textContent || '',
+          agentText: agent?.textContent || '',
+          modelText: model?.textContent || '',
+          agentVisuals: agent?.querySelectorAll('rect,path').length || 0,
+          modelVisuals: model?.querySelectorAll('rect,path').length || 0,
+        };
+        window.fetch = window.__partialStatsOriginalFetch;
+        return result;
+        """
+    )
+    assert metrics["requests"] == 1, metrics
+    assert metrics["phase"] == "ready" and metrics["overlay"] == "", metrics
+    assert "Agent tokens/min" in metrics["agentText"] and "120" in metrics["agentText"], metrics
+    assert "Model tokens/min" in metrics["modelText"] and "120" in metrics["modelText"], metrics
+    assert "8881:0:codex" in metrics["agentText"] and "gpt-5.6-terra" in metrics["modelText"], metrics
+    assert metrics["agentVisuals"] > 0 and metrics["modelVisuals"] > 0, metrics
+
+
 def test_debug_graph_stats_sse_push_advances_live_tail_without_poll(browser, tmp_path):
     """A durable SSE sample paints the live tail without waiting for polling."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
