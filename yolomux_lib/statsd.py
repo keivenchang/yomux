@@ -2412,7 +2412,11 @@ class PersistentStatsService:
             effective_resolution = max(effective_resolution, math.ceil(span / max_points))
         # Live cursor deltas must remain raw so their sequence semantics are
         # exact. Persisted rollups serve bounded range/zoom reads only.
-        persisted_rollup = next((duration for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS if duration >= effective_resolution), 0) if end else 0
+        persisted_rollup = (
+            next((duration for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS if duration >= effective_resolution), 0)
+            if end and effective_resolution >= STATS_HISTORY_PERSISTED_ROLLUP_SECONDS[1]
+            else 0
+        )
         query_started = time.perf_counter()
         source_buckets = (
             self.store.query_rollups(duration=persisted_rollup, start=start, end=end)
