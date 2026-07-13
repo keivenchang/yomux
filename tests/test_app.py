@@ -164,13 +164,14 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
     try:
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {"service": "stats-reader", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()
     finally:
         webapp.control_server.stop()
 
-    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "jobd", "approvald"]
+    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "stats-reader", "jobd", "approvald"]
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
@@ -453,8 +454,12 @@ def test_system_cpu_percent_from_times_clamps_to_single_100_percent_scale():
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (100.0, 21.0)) == 0.0
 
 
-def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatch):
+def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatch, tmp_path):
+    # This test owns only browser-upload fields; an asynchronously elected
+    # sampler would add legitimate server CPU rows while time.time is frozen.
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "start_stats_metric_scheduler", lambda self: False)
     webapp = app_module.TmuxWebtermApp([])
+    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     now = 200000.0
     monkeypatch.setattr(app_module.time, "time", lambda: now)
     records = [{
@@ -478,6 +483,8 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
         payload, status = webapp.record_stats_history_payload({"records": records})
         incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
     finally:
+        webapp.stats_client.reader.request({"action": "shutdown"})
+        webapp.stats_client.request({"action": "shutdown"})
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
@@ -1402,6 +1409,9 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
         })
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {
             "service": "statsd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
+        })
+        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {
+            "service": "stats-reader", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
         })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
             "service": "jobd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},

@@ -8691,9 +8691,10 @@ class TmuxWebtermApp:
         """Return bounded worker diagnostics without exposing service payloads."""
         indexd = self.search_indexer.runtime_status()
         statsd = self.stats_client.runtime_status()
+        stats_reader = self.stats_client.reader.runtime_status()
         jobd = self.job_client.runtime_status()
         approvald = self.approval_client.runtime_status()
-        rows = [indexd, statsd, jobd, approvald]
+        rows = [indexd, statsd, stats_reader, jobd, approvald]
         totals = {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
         for row in rows:
             if int(row.get("pid") or 0) > 0:

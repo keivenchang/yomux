@@ -158,11 +158,16 @@ class StatsStore:
     are committed or rolled back together.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
         self.path = Path(path)
+        self.read_only = bool(read_only)
         self.connection: sqlite3.Connection | None = None
 
     def open(self) -> None:
+        if self.read_only:
+            self.connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=2.0)
+            self.connection.execute("PRAGMA query_only=ON")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=2.0)
         connection.execute("PRAGMA journal_mode=WAL")

@@ -44,10 +44,11 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 18
+STATSD_PROTOCOL_VERSION = 19
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
+STATS_READER_SOCKET_NAME = "stats-reader.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
 STATSD_LEGACY_IMPORT_VERSION = 1
 STATSD_LEGACY_IMPORT_MARKER = "legacy_import_version"
@@ -647,6 +648,10 @@ def _tmux_usage_fields_from_row(row: dict[str, Any], *, key: str = "", label: st
 
 def default_socket_path() -> Path:
     return safe_socket_path(STATE_DIR / "services" / STATSD_SOCKET_NAME, prefix="yolomux-statsd")
+
+
+def default_reader_socket_path() -> Path:
+    return safe_socket_path(STATE_DIR / "services" / STATS_READER_SOCKET_NAME, prefix="yolomux-stats-reader")
 
 
 def default_database_path() -> Path:
@@ -3382,19 +3387,144 @@ class PersistentStatsService:
         self.store.close()
 
 
+class StatsReaderService:
+    """Read-only WAL peer for aggregation and JSON encoding."""
+
+    READ_ACTIONS = {"history", "write_encoded_history", "write_encoded_sample"}
+
+    def __init__(self, socket_path: Path, database_path: Path, *, idle_seconds: float = STATSD_DEFAULT_IDLE_SECONDS):
+        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-stats-reader")
+        self.lock_path = self.socket_path.with_suffix(".lock")
+        self.stop_event = threading.Event()
+        self.idle_seconds = max(1.0, float(idle_seconds))
+        self.started_at = time.time()
+        self.last_client_at = monotonic_clock()
+        self.last_failure = ""
+        self.engine = PersistentStatsService(self.socket_path, database_path, pricing_catalog=None)
+        self.engine.store = StatsStore(database_path, read_only=True)
+
+    def handle_with_binary(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+        action = str(request.get("action") or "")
+        if action == "ping":
+            return {
+                "ok": True, "version": STATSD_PROTOCOL_VERSION,
+                "pid": os.getpid(), "started_at": self.started_at,
+            }, b""
+        if action == "status":
+            try:
+                cache = self.engine.store.diagnostics()
+            except sqlite3.Error as exc:
+                cache = {"error": str(exc)}
+                self.last_failure = str(exc)
+            return {
+                "ok": True, "version": STATSD_PROTOCOL_VERSION, "pid": os.getpid(),
+                "started_at": self.started_at, "socket": str(self.socket_path),
+                "cache": cache, "last_failure": self.last_failure,
+                "queues": {"interactive": 0, "normal": 0, "maintenance": 0},
+                "history_requests": self.engine.history_request_count,
+                "history_cache_hits": self.engine.history_cache_hit_count,
+            }, b""
+        if action == "shutdown":
+            self.stop_event.set()
+            return {"ok": True}, b""
+        if action not in self.READ_ACTIONS:
+            return {"ok": False, "error": f"stats reader rejects action: {action}"}, b""
+        return self.engine.handle_with_binary(request)
+
+    def _idle_shutdown_ready(self) -> bool:
+        return monotonic_clock() - self.last_client_at >= self.idle_seconds
+
+    def run(self) -> int:
+        return run_local_rpc_service(
+            socket_path=self.socket_path,
+            lock_path=self.lock_path,
+            service_name="stats-reader",
+            stop_event=self.stop_event,
+            handle=self.handle_with_binary,
+            on_idle=self._idle_shutdown_ready,
+            on_client=lambda: setattr(self, "last_client_at", monotonic_clock()),
+            on_start=self.engine.store.open,
+            on_shutdown=self.engine.store.close,
+        )
+
+
+class StatsReaderClient(LocalServiceClient):
+    def __init__(self, socket_path: Path, database_path: Path):
+        self.database_path = Path(database_path)
+        super().__init__(
+            "stats-reader", "yolomux_lib.statsd", socket_path, STATSD_PROTOCOL_VERSION,
+            idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
+            extra_args=("--reader", "--database", str(self.database_path)),
+        )
+
+    def history(self, **request: Any) -> dict[str, Any]:
+        if not self.ensure_started():
+            return {"ok": False, "error": "stats reader unavailable"}
+        return self.request({"action": "history", **request}, timeout=10.0)
+
+    def runtime_status(self) -> dict[str, Any]:
+        status = self.registry.status()
+        payload = status.get("status") if isinstance(status.get("status"), dict) else {}
+        pid = int(payload.get("pid") or 0)
+        return {
+            "service": "stats-reader", "pid": pid,
+            "started_at": float(payload.get("started_at") or 0.0),
+            "version": int(payload.get("version") or 0),
+            "socket": str(payload.get("socket") or self.socket_path),
+            "healthy": bool(status.get("healthy")),
+            "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
+            "last_failure": str(payload.get("last_failure") or ""),
+            "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
+            "history_requests": int(payload.get("history_requests") or 0),
+            "history_cache_hits": int(payload.get("history_cache_hits") or 0),
+            "resources": self.registry.resources(pid),
+            "record": status.get("record") if isinstance(status.get("record"), dict) else {},
+        }
+
+    def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
+        if not self.ensure_started():
+            return {"ok": False, "error": "stats reader unavailable"}, b""
+        return self.request_with_binary({"action": "write_encoded_history", **request}, timeout=10.0)
+
+    def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], query: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+        if not self.ensure_started():
+            return {"ok": False, "error": "stats reader unavailable"}, b""
+        return self.request_with_binary(
+            {"action": "write_encoded_sample", "sample": sample, "shared_stats": shared_stats, "query": query},
+            timeout=10.0,
+        )
+
+
 class StatsClient(LocalServiceClient):
     """Thin cross-port client for the ``statsd`` durable owner."""
 
-    def __init__(self, socket_path: Path | None = None, database_path: Path | None = None):
+    def __init__(
+        self, socket_path: Path | None = None, database_path: Path | None = None,
+        reader_socket_path: Path | None = None,
+    ):
         self.database_path = Path(database_path or default_database_path())
+        writer_socket = Path(socket_path or default_socket_path())
         super().__init__(
             "statsd",
             "yolomux_lib.statsd",
-            socket_path or default_socket_path(),
+            writer_socket,
             STATSD_PROTOCOL_VERSION,
             idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
             extra_args=("--database", str(self.database_path), "--sampler-owner", str(default_sampler_owner_path(self.database_path.parent))),
         )
+        reader_socket = reader_socket_path or (
+            default_reader_socket_path()
+            if socket_path is None
+            else writer_socket.with_name(f"{writer_socket.stem}-reader{writer_socket.suffix}")
+        )
+        self.reader = StatsReaderClient(reader_socket, self.database_path)
+
+    def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:
+        # A deliberate writer shutdown owns cleanup of its read peer too;
+        # crashes remain independently recoverable through each registry.
+        if str(payload.get("action") or "") == "shutdown":
+            self.reader.request({"action": "shutdown"}, timeout=min(timeout, 0.5))
+        return super().request(payload, timeout=timeout)
 
     def healthy(self) -> bool:
         response = self.request({"action": "ping", "protocol_version": STATSD_PROTOCOL_VERSION}, timeout=0.15)
@@ -3429,12 +3559,7 @@ class StatsClient(LocalServiceClient):
     def history(self, **request: Any) -> dict[str, Any]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
-        response = self.request({"action": "history", **request}, timeout=1.0)
-        if response.get("ok") is not False:
-            return response
-        if not self.ensure_started():
-            return response
-        return self.request({"action": "history", **request}, timeout=1.0)
+        return self.reader.history(**request)
 
     def merge_records(self, records: list[dict[str, Any]], *, client_id: str, now: float | None = None, clear: bool = False) -> dict[str, Any]:
         return self._request_live_or_start(
@@ -3446,13 +3571,13 @@ class StatsClient(LocalServiceClient):
         )
 
     def merge_and_history(self, records: list[dict[str, Any]], *, client_id: str, query: dict[str, Any], now: float | None = None, clear: bool = False) -> dict[str, Any]:
-        return self._request_live_or_start(
-            {
-                "action": "merge_and_history", "records": records, "client_id": client_id,
-                "query": query, "now": now, "clear": clear, "compact": False,
-            },
-            timeout=3.0,
-        )
+        merged = self.merge_records(records, client_id=client_id, now=now, clear=clear)
+        if not merged.get("ok"):
+            return merged
+        history = self.reader.history(**query)
+        if not history.get("ok"):
+            return history
+        return {"ok": True, "merged": merged, "history": history, "version": STATSD_PROTOCOL_VERSION}
 
     @staticmethod
     def _transport_requires_start(response: dict[str, Any]) -> bool:
@@ -3586,24 +3711,26 @@ class StatsClient(LocalServiceClient):
     def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}, b""
-        return self.request_with_binary({"action": "write_encoded_history", **request})
+        return self.reader.encoded_history(**request)
 
     def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], *, query: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}, b""
-        return self.request_with_binary(
-            {"action": "write_encoded_sample", "sample": sample, "shared_stats": shared_stats, "query": query}, timeout=3.0
-        )
+        return self.reader.encoded_sample(sample, shared_stats, query)
 
     def replace_and_encoded_history(self, buckets: list[dict[str, Any]], **query: Any) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}, b""
-        return self.request_with_binary({"action": "replace_and_write_encoded_history", "buckets": buckets, "query": query}, timeout=3.0)
+        replaced = self.request({"action": "replace_buckets", "buckets": buckets}, timeout=3.0)
+        if not replaced.get("ok"):
+            return replaced, b""
+        return self.reader.encoded_history(**query)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="YOLOmux persistent stats service")
     parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--reader", action="store_true")
     parser.add_argument("--socket", default=str(default_socket_path()))
     parser.add_argument("--database", default=str(default_database_path()))
     parser.add_argument("--sampler-owner", default=str(default_sampler_owner_path()))
@@ -3612,6 +3739,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.serve:
         parser.error("--serve is required")
     apply_service_process_priority()
+    if args.reader:
+        return StatsReaderService(
+            Path(args.socket), Path(args.database), idle_seconds=args.idle_seconds,
+        ).run()
     # The daemon, rather than an individual web process, owns projection onto
     # the shared catalog.  Direct unit-service construction can still inject a
     # fake catalog or leave it absent without touching a developer's cache.
