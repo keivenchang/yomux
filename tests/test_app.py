@@ -248,7 +248,7 @@ def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch, tmp_path
 
 def test_stats_host_resource_metrics_uses_only_aggregate_host_data(monkeypatch):
     monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1024 * 1024, 512 * 1024))
-    monkeypatch.setattr(app_module, "stats_GPU_gpu_metrics", lambda: {"devices": {"gpu:0": {"label": "GPU 0", "util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1024}}})
+    monkeypatch.setattr(app_module, "stats_cached_gpu_metrics", lambda *_args: {"devices": {"gpu:0": {"label": "GPU 0", "util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1024}}})
 
     metrics = app_module.stats_host_resource_metrics()
 
@@ -258,6 +258,62 @@ def test_stats_host_resource_metrics_uses_only_aggregate_host_data(monkeypatch):
     assert metrics["memory_processes"] == {}
     assert metrics["gpu_util_processes"] == {}
     assert metrics["gpu_memory_processes"] == {}
+
+
+def test_stats_host_resource_metrics_common_path_uses_cached_gpu_and_native_memory_without_subprocess(monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "stats_host_hardware_metadata", lambda: {"gpu_label": "Apple M4 Pro"})
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (16 * 1024, 8 * 1024))
+    monkeypatch.setattr(app_module, "stats_cached_gpu_metrics", lambda label: calls.append(label) or {"devices": {"gpu:0": {}}})
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("host sampler must not fork on its common path"))
+
+    metrics = app_module.stats_host_resource_metrics()
+
+    assert calls == ["Apple M4 Pro"]
+    assert metrics["system_memory_capacity_bytes"] == 16 * 1024
+    assert metrics["gpu_devices"] == {"gpu:0": {}}
+
+
+def test_stats_cached_gpu_metrics_starts_only_one_cadence_limited_background_refresh(monkeypatch):
+    starts = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            starts.append((self.target, self.args))
+
+    monkeypatch.setattr(app_module.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(app_module.time, "perf_counter", lambda: 100.0)
+    monkeypatch.setattr(app_module, "_stats_gpu_metrics_cache", {"devices": {"gpu:0": {"util_percent": 21}}})
+    monkeypatch.setattr(app_module, "_stats_gpu_metrics_refreshed_monotonic", 90.0)
+    monkeypatch.setattr(app_module, "_stats_gpu_metrics_refreshing", False)
+
+    first = app_module.stats_cached_gpu_metrics("GPU")
+    second = app_module.stats_cached_gpu_metrics("GPU")
+
+    assert first == second == {"devices": {"gpu:0": {"util_percent": 21}}}
+    assert len(starts) == 1
+    assert starts[0][1] == ("GPU",)
+
+
+def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
+    class MissingProcStat:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def read_text(self, **_kwargs):
+            raise OSError("no procfs")
+
+    monkeypatch.setattr(app_module, "Path", MissingProcStat)
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_darwin_system_cpu_times", lambda: (200.0, 80.0))
+    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: pytest.fail("ps fallback must not run when Mach ticks are available"))
+
+    assert app_module.current_system_cpu_times() == (200.0, 80.0)
 
 
 def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monkeypatch):

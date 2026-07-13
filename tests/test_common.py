@@ -107,6 +107,7 @@ def test_main_process_cpu_work_has_named_allowlist():
         "start_update_check_thread",
         "warm_metadata_cache_async",
         "request_session_files_disk_cache_prune",
+        "stats_cached_gpu_metrics",
     }
 
     retired_patterns = (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import copy
+import ctypes
 import hashlib
 import hmac
 import json
@@ -434,6 +435,10 @@ TMUX_AI_STATUS_VERSION = 1
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_CLIENT_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 STATS_HOST_RESOURCE_TIMEOUT_SECONDS = 0.75
+# GPU driver CLIs and IORegistry queries are materially slower than the one-second
+# sampler.  Keep their last aggregate value between asynchronous refreshes.
+STATS_GPU_REFRESH_SECONDS = 5.0
+_stats_host_fallback_warning_emitted = False
 STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted"})
 STATS_AGENT_RUN_STATES = frozenset({"working"})
 STATS_AGENT_TRANSITION_STATES = frozenset({"cooldown", "transition"})
@@ -471,7 +476,7 @@ def current_system_cpu_times() -> tuple[float, float] | None:
     try:
         fields = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0].split()
     except (OSError, IndexError):
-        return None
+        return current_darwin_system_cpu_times()
     if not fields or fields[0] != "cpu":
         return None
     try:
@@ -486,6 +491,55 @@ def current_system_cpu_times() -> tuple[float, float] | None:
     return total, busy
 
 
+def darwin_sysctl_value(name: str, value_type: type[ctypes._SimpleCData]) -> int | None:
+    """Read a scalar sysctl without spawning macOS's `sysctl` program."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        sysctlbyname = libc.sysctlbyname
+        sysctlbyname.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+        sysctlbyname.restype = ctypes.c_int
+        value = value_type()
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        if sysctlbyname(name.encode("utf-8"), ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+            return None
+        return int(value.value)
+    except (AttributeError, OSError):
+        return None
+
+
+def current_darwin_system_cpu_times() -> tuple[float, float] | None:
+    """Read aggregate CPU ticks through Mach, avoiding `ps -A`."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        libsystem.mach_host_self.restype = ctypes.c_uint32
+        libsystem.mach_task_self.restype = ctypes.c_uint32
+        libsystem.host_processor_info.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.POINTER(ctypes.c_int)), ctypes.POINTER(ctypes.c_uint32)]
+        libsystem.host_processor_info.restype = ctypes.c_int
+        libsystem.vm_deallocate.argtypes = [ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64]
+        libsystem.vm_deallocate.restype = ctypes.c_int
+        processor_count = ctypes.c_uint32()
+        info = ctypes.POINTER(ctypes.c_int)()
+        info_count = ctypes.c_uint32()
+        if libsystem.host_processor_info(libsystem.mach_host_self(), 2, ctypes.byref(processor_count), ctypes.byref(info), ctypes.byref(info_count)) != 0:
+            return None
+        try:
+            values = [int(info[index]) for index in range(int(info_count.value))]
+            total = float(sum(values))
+            # processor_cpu_load_info: user, system, idle, nice.
+            idle = float(sum(values[index] for index in range(2, len(values), 4)))
+            return (total, total - idle) if total > 0 else None
+        finally:
+            address = ctypes.cast(info, ctypes.c_void_p).value
+            if address:
+                libsystem.vm_deallocate(libsystem.mach_task_self(), address, ctypes.sizeof(ctypes.c_int) * int(info_count.value))
+    except (AttributeError, OSError):
+        return None
+
+
 def system_cpu_percent_from_times(previous: tuple[float, float] | None, current: tuple[float, float] | None) -> float:
     if previous is None or current is None:
         return 0.0
@@ -497,6 +551,10 @@ def system_cpu_percent_from_times(previous: tuple[float, float] | None, current:
 
 
 def current_system_cpu_percent_from_ps() -> float | None:
+    global _stats_host_fallback_warning_emitted
+    if not _stats_host_fallback_warning_emitted:
+        logger.warning("Stats host CPU fallback uses ps subprocess; native host counters were unavailable")
+        _stats_host_fallback_warning_emitted = True
     try:
         result = subprocess.run(["ps", "-A", "-o", "%cpu="], capture_output=True, text=True, timeout=0.75, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -531,24 +589,56 @@ def current_system_memory_bytes() -> tuple[int, int] | None:
             return total, total - available
     except (OSError, ValueError):
         pass
+    return current_darwin_system_memory_bytes()
+
+
+class DarwinVmStatistics64(ctypes.Structure):
+    """Prefix of macOS vm_statistics64_t needed for available-memory accounting."""
+
+    _fields_ = [
+        ("free_count", ctypes.c_uint32),
+        ("active_count", ctypes.c_uint32),
+        ("inactive_count", ctypes.c_uint32),
+        ("wire_count", ctypes.c_uint32),
+        ("_lifetime_counters", ctypes.c_uint64 * 9),
+        ("purgeable_count", ctypes.c_uint32),
+        ("speculative_count", ctypes.c_uint32),
+        ("_revision1_lifetime_counters", ctypes.c_uint64 * 4),
+        ("compressor_page_count", ctypes.c_uint32),
+        ("throttled_count", ctypes.c_uint32),
+        ("external_page_count", ctypes.c_uint32),
+        ("internal_page_count", ctypes.c_uint32),
+        ("_revision2_and_3_counters", ctypes.c_uint64 * 13),
+    ]
+
+
+def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
+    """Read macOS VM counters through Mach APIs, with no fork/exec on the sampler path."""
     if sys.platform != "darwin":
         return None
+    total = darwin_sysctl_value("hw.memsize", ctypes.c_uint64)
+    if total is None or total <= 0:
+        return None
     try:
-        total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS, check=False).stdout.strip())
-        vm_stat = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS, check=False).stdout
-    except (OSError, subprocess.SubprocessError, ValueError):
+        libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        libsystem.mach_host_self.restype = ctypes.c_uint32
+        libsystem.host_page_size.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+        libsystem.host_page_size.restype = ctypes.c_int
+        libsystem.host_statistics64.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint32)]
+        libsystem.host_statistics64.restype = ctypes.c_int
+        host = libsystem.mach_host_self()
+        page_size = ctypes.c_uint32()
+        if libsystem.host_page_size(host, ctypes.byref(page_size)) != 0 or page_size.value <= 0:
+            return None
+        counters = DarwinVmStatistics64()
+        count = ctypes.c_uint32(ctypes.sizeof(counters) // ctypes.sizeof(ctypes.c_int))
+        if libsystem.host_statistics64(host, 4, ctypes.cast(ctypes.byref(counters), ctypes.POINTER(ctypes.c_int)), ctypes.byref(count)) != 0:
+            return None
+        # Darwin's speculative pages are already included in free_count.
+        available = int(counters.free_count) * int(page_size.value)
+        return total, max(0, total - min(total, available))
+    except (AttributeError, OSError):
         return None
-    page_size_match = re.search(r"page size of (\d+) bytes", vm_stat)
-    if total <= 0 or page_size_match is None:
-        return None
-    page_size = int(page_size_match.group(1))
-    pages: dict[str, int] = {}
-    for line in vm_stat.splitlines():
-        match = re.match(r"Pages ([^:]+):\s+(\d+)\.", line)
-        if match:
-            pages[match.group(1)] = int(match.group(2))
-    available = (pages.get("free", 0) + pages.get("speculative", 0)) * page_size
-    return total, max(0, total - min(total, available))
 
 
 def current_system_memory_percent() -> float | None:
@@ -640,6 +730,10 @@ def stats_macos_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
 _stats_hardware_metadata_lock = threading.RLock()
 _stats_hardware_metadata_cache: dict[str, str] = {}
 _stats_hardware_metadata_initialized = False
+_stats_gpu_metrics_lock = threading.RLock()
+_stats_gpu_metrics_cache: dict[str, Any] = {}
+_stats_gpu_metrics_refreshed_monotonic: float | None = None
+_stats_gpu_metrics_refreshing = False
 
 
 def stats_macos_hardware_metadata() -> dict[str, str]:
@@ -686,9 +780,42 @@ def stats_host_hardware_metadata() -> dict[str, str]:
         return dict(_stats_hardware_metadata_cache)
 
 
+def _refresh_stats_gpu_metrics(gpu_name: str) -> None:
+    global _stats_gpu_metrics_refreshing, _stats_gpu_metrics_refreshed_monotonic
+    try:
+        metrics = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics(gpu_name)
+        with _stats_gpu_metrics_lock:
+            _stats_gpu_metrics_cache.clear()
+            _stats_gpu_metrics_cache.update(metrics if isinstance(metrics, dict) else {})
+        _stats_gpu_metrics_refreshed_monotonic = time.perf_counter()
+    finally:
+        with _stats_gpu_metrics_lock:
+            _stats_gpu_metrics_refreshing = False
+
+
+def stats_cached_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
+    """Return the last aggregate GPU reading and refresh it off the sampler turn."""
+    global _stats_gpu_metrics_refreshing
+    now = time.perf_counter()
+    with _stats_gpu_metrics_lock:
+        stale = _stats_gpu_metrics_refreshed_monotonic is None or now - _stats_gpu_metrics_refreshed_monotonic >= STATS_GPU_REFRESH_SECONDS
+        cached = copy.deepcopy(_stats_gpu_metrics_cache)
+        if stale and not _stats_gpu_metrics_refreshing:
+            _stats_gpu_metrics_refreshing = True
+            worker = threading.Thread(target=_refresh_stats_gpu_metrics, args=(gpu_name,), name="stats-gpu-refresh", daemon=True)
+            common.start_thread_with_rollback(worker, lambda: _set_stats_gpu_refreshing(False))
+    return cached
+
+
+def _set_stats_gpu_refreshing(value: bool) -> None:
+    global _stats_gpu_metrics_refreshing
+    with _stats_gpu_metrics_lock:
+        _stats_gpu_metrics_refreshing = value
+
+
 def stats_host_resource_metrics() -> dict[str, Any]:
     hardware = stats_host_hardware_metadata()
-    gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics(hardware.get("gpu_label", ""))
+    gpu = stats_cached_gpu_metrics(hardware.get("gpu_label", ""))
     memory = current_system_memory_bytes()
     return {
         "system_memory_used_bytes": memory[1] if memory is not None else None,
