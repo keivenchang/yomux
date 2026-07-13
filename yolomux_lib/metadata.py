@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 import threading
@@ -49,6 +50,13 @@ _METADATA_BUILD_LOCAL = threading.local()
 INDEXED_REPO_ROOTS_CACHE_SECONDS = 30.0
 _INDEXED_REPO_ROOTS_CACHE_LOCK = threading.Lock()
 _INDEXED_REPO_ROOTS_CACHE: dict[tuple[str, ...], tuple[float, list[str]]] = {}
+# A full metadata snapshot launches several Git commands.  Keep that work behind
+# one process-wide, source-keyed owner so unrelated API/background readers do not
+# rebuild the same unchanged repository independently.
+_GIT_METADATA_CACHE_LOCK = threading.Lock()
+GIT_METADATA_BURST_COALESCE_SECONDS = 0.25
+_GIT_METADATA_CACHE: dict[tuple[str, int | None], tuple[tuple[Any, ...], dict[str, Any] | None, float]] = {}
+_GIT_METADATA_INFLIGHT: dict[tuple[str, int | None], threading.Event] = {}
 # Worktree branch history is deliberately small, process-local metadata. Git describes the current
 # checkout, while this preserves a branch a visible worktree used earlier in the same server lifetime
 # (including a branch later deleted or renamed) without inventing a second branch inventory owner.
@@ -97,6 +105,12 @@ def git_root_for_cwd(cwd: str | None) -> str | None:
     cwd_text = resolved_path_text(cwd)
 
     def compute() -> str | None:
+        candidate = Path(cwd_text)
+        if candidate.is_file():
+            candidate = candidate.parent
+        for parent in (candidate, *candidate.parents):
+            if (parent / ".git").exists():
+                return str(parent)
         root = git(["rev-parse", "--show-toplevel"], cwd_text)
         return root.stdout.strip() if root.returncode == 0 else None
 
@@ -221,7 +235,25 @@ def git_metadata_base(
     root_text: str,
     branch_limit: int | None = OTHER_BRANCH_LIMIT,
 ) -> dict[str, Any] | None:
-    def compute() -> dict[str, Any] | None:
+    cache_key = (root_text, branch_limit)
+    with _GIT_METADATA_CACHE_LOCK:
+        cached = _GIT_METADATA_CACHE.get(cache_key)
+        if cached is not None and time.monotonic() - cached[2] <= GIT_METADATA_BURST_COALESCE_SECONDS:
+            return copy.deepcopy(cached[1])
+        inflight = _GIT_METADATA_INFLIGHT.get(cache_key)
+        if inflight is None:
+            inflight = threading.Event()
+            _GIT_METADATA_INFLIGHT[cache_key] = inflight
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        inflight.wait()
+        with _GIT_METADATA_CACHE_LOCK:
+            cached = _GIT_METADATA_CACHE.get(cache_key)
+        return copy.deepcopy(cached[1]) if cached is not None else None
+
+    def compute(status: Any) -> dict[str, Any] | None:
         branch = git(["rev-parse", "--abbrev-ref", "HEAD"], root_text)
         head_sha = git(["rev-parse", "HEAD"], root_text)
         # An unborn repository has a symbolic initial branch (normally `main`) but no HEAD commit.
@@ -235,7 +267,6 @@ def git_metadata_base(
                 branch_name = symbolic_head.stdout.strip()
         head = git(["log", "-1", "--pretty=%h %s"], root_text)
         upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root_text)
-        status = git(["status", "--short"], root_text)
         upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
         ahead, behind = git_ahead_behind(root_text, upstream_name)
         status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
@@ -260,8 +291,67 @@ def git_metadata_base(
             "local_repository": local_repository,
         }
 
-    cache_key = f"{root_text}\0{branch_limit if branch_limit is not None else 'all'}"
-    return cached_build_value("git_metadata_by_root", cache_key, compute, copy_value=True)
+    try:
+        status = git(["status", "--short", "--untracked-files=all"], root_text, timeout=10.0)
+        status_text = status.stdout if status.returncode == 0 else f"error:{status.returncode}:{status.stderr}"
+        source_signature = (
+            hashlib.sha256(status_text.encode("utf-8", errors="replace")).hexdigest(),
+            git_control_files_signature(root_text),
+        )
+        with _GIT_METADATA_CACHE_LOCK:
+            cached = _GIT_METADATA_CACHE.get(cache_key)
+        if cached is not None and cached[0] == source_signature:
+            value = cached[1]
+        else:
+            value = compute(status)
+        with _GIT_METADATA_CACHE_LOCK:
+            _GIT_METADATA_CACHE[cache_key] = (source_signature, copy.deepcopy(value), time.monotonic())
+            if len(_GIT_METADATA_CACHE) > 256:
+                _GIT_METADATA_CACHE.pop(next(iter(_GIT_METADATA_CACHE)))
+        return copy.deepcopy(value)
+    finally:
+        with _GIT_METADATA_CACHE_LOCK:
+            _GIT_METADATA_INFLIGHT.pop(cache_key, None)
+            inflight.set()
+
+
+def git_control_files_signature(root_text: str) -> tuple[Any, ...]:
+    """Cheaply identify ref/index/config changes without launching Git."""
+    marker = Path(root_text) / ".git"
+    git_dir = marker
+    if marker.is_file():
+        try:
+            first_line = marker.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        except (OSError, IndexError):
+            first_line = ""
+        if first_line.lower().startswith("gitdir:"):
+            git_dir = Path(first_line.split(":", 1)[1].strip())
+            if not git_dir.is_absolute():
+                git_dir = marker.parent / git_dir
+    common_dir = git_dir
+    try:
+        common_text = (git_dir / "commondir").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        common_text = ""
+    if common_text:
+        common_dir = Path(common_text)
+        if not common_dir.is_absolute():
+            common_dir = git_dir / common_dir
+
+    paths = [git_dir / "HEAD", git_dir / "index", common_dir / "packed-refs", common_dir / "config"]
+    refs_dir = common_dir / "refs"
+    if refs_dir.is_dir():
+        for current, dirs, files in os.walk(refs_dir, topdown=True, followlinks=False):
+            dirs[:] = sorted(dirs)
+            paths.extend(Path(current) / name for name in sorted(files))
+    rows: list[tuple[str, int, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            rows.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            rows.append((str(path), 0, 0))
+    return tuple(rows)
 
 
 def git_inventory(cwd: str | None, branch_limit: int | None = OTHER_BRANCH_LIMIT) -> dict[str, Any] | None:
@@ -1552,7 +1642,7 @@ def _discover_indexed_repo_roots(raw_dirs: list[str]) -> list[str]:
     seen: set[str] = set()
 
     def add_repo(path: Path) -> bool:
-        root = git_root_for_cwd(str(path))
+        root = str(path.resolve()) if (path / ".git").exists() else git_root_for_cwd(str(path))
         if not root or root in seen:
             return False
         seen.add(root)

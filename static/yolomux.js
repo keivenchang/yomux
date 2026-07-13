@@ -15190,7 +15190,10 @@ async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   return requestFileExplorerFsResource('list', root, options, async () => {
       hydrateFileExplorerRepoInfoCache();
-      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: options.fresh !== true});
+      // `fresh` bypasses the completed-value TTL; it must not multiply an
+      // identical in-flight list request when several UI refresh owners fire
+      // in the same batch window.
+      const payload = await fetchFilesystemBatchItem('list', root);
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),
@@ -47014,6 +47017,21 @@ function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() 
   );
 }
 
+function debugSystemCpuBudgetCardHtml(budget = {}) {
+  const status = ['ok', 'watching', 'warning'].includes(budget.status) ? budget.status : 'ok';
+  const consumers = Array.isArray(budget.top_consumers) ? budget.top_consumers : [];
+  const consumerText = consumers.map(row => {
+    const owner = [row?.role, row?.surface].filter(Boolean).join(':');
+    return `${owner || t('common.notAvailable')} ${debugSystemNumber(row?.compute_ms_total, 1)}ms`;
+  }).join(' · ') || 'None';
+  return debugSystemCardHtml('CPU budget', `<div data-js-debug-cpu-budget="${esc(status)}">${debugSystemRowsHtml([
+    ['Status', status],
+    ['Current / budget', `${debugSystemNumber(budget.current_percent, 1)}% / ${debugSystemNumber(budget.budget_percent, 1)}%`],
+    ['Sustained', `${debugSystemNumber(budget.sustained_seconds, 0)}s / ${debugSystemNumber(budget.sustained_budget_seconds, 0)}s`],
+    ['Top compute owners', consumerText],
+  ])}</div>`);
+}
+
 function debugSystemInnerHtml() {
   const payload = jsDebugSystemState.payload;
   if (!payload) {
@@ -47031,6 +47049,7 @@ function debugSystemInnerHtml() {
   const clientEvents = payload.client_events || {};
   const chat = payload.chat || {};
   const totals = payload.local_services?.totals || {};
+  const cpuBudget = payload.cpu_budget || {};
   const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
   const generatedAgo = payload.generated_at ? relativeTimeFormat(Math.max(0, Date.now() / 1000 - Number(payload.generated_at))) : t('common.notAvailable');
   const cards = [
@@ -47040,6 +47059,7 @@ function debugSystemInnerHtml() {
       ['Process CPU', `${debugSystemNumber(server.cpu_percent, 1)}%`], ['System CPU', `${debugSystemNumber(server.system_cpu_percent, 1)}%`],
       ['Memory', debugGraphTerseBytesText(server.rss_bytes)], ['State directory', payload.state_dir],
     ])),
+    debugSystemCpuBudgetCardHtml(cpuBudget),
     debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
       ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
       ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],

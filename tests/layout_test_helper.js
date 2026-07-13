@@ -1277,6 +1277,7 @@ globalThis.__layoutTestApi = {
   debugGraphCostModelUsageChartHtmlForTest: debugGraphCostModelUsageChartHtml,
   debugGraphCostSourceTreeHtmlForTest: debugGraphCostSourceTreeHtml,
   debugSystemStatsSamplerCardHtmlForTest: debugSystemStatsSamplerCardHtml,
+  debugSystemCpuBudgetCardHtmlForTest: debugSystemCpuBudgetCardHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {

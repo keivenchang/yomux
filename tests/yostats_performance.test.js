@@ -151,6 +151,23 @@ function runYostatsPerformanceSuite() {
     assert.match(source, /function refreshDebugSystemViews[\s\S]*const scrollLeft = view\.scrollLeft[\s\S]*restoreElementScrollPosition\(view, scrollTop, scrollLeft\)/, 'System refresh preserves horizontal scroll while sampler telemetry updates');
   });
 
+  test('System exposes the sustained server CPU budget and bounded compute owners', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const html = api.debugSystemCpuBudgetCardHtmlForTest({
+      status: 'warning',
+      current_percent: 42.4,
+      budget_percent: 30,
+      sustained_seconds: 360,
+      sustained_budget_seconds: 300,
+      top_consumers: [{role: 'metadata', surface: 'refresh', compute_ms_total: 1234.56}],
+    });
+    assert.match(html, /CPU budget/);
+    assert.match(html, /data-js-debug-cpu-budget="warning"/);
+    assert.match(html, /42\.4% \/ 30%/);
+    assert.match(html, /360s \/ 300s/);
+    assert.match(html, /metadata:refresh 1,234\.6ms/);
+  });
+
   test('YO!cost reuses the selected big-range cost aggregate instead of recomputing every render', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const makeComponent = (bucketIndex, rowIndex) => ({

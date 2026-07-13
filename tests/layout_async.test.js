@@ -193,27 +193,36 @@ async function runLayoutAsyncSuite() {
       assert.equal(batches.length, 1);
       const newer = resource.fetch(api, resource.path, {fresh: true});
       const newerFlush = api.flushFileExplorerFsBatchForTest();
-      assert.equal(batches.length, 2, `${resource.type}: independent fresh reads stay independently batched`);
-      resolveBatch(1, 'new');
-      await newerFlush;
-      assert.equal(resource.marker(await newer), 'new');
-      resolveBatch(0, 'old');
-      await olderFlush;
-      assert.equal(resource.marker(await older), 'old', `${resource.type}: the original caller still receives its own response`);
+      const coalescedList = resource.type === 'list';
+      assert.equal(batches.length, coalescedList ? 1 : 2, `${resource.type}: list fan-out is coalesced while independent info reads retain stale-generation coverage`);
+      if (coalescedList) {
+        resolveBatch(0, 'new');
+        await Promise.all([olderFlush, newerFlush]);
+        assert.equal(resource.marker(await older), 'new');
+        assert.equal(resource.marker(await newer), 'new');
+      } else {
+        resolveBatch(1, 'new');
+        await newerFlush;
+        assert.equal(resource.marker(await newer), 'new');
+        resolveBatch(0, 'old');
+        await olderFlush;
+        assert.equal(resource.marker(await older), 'old', `${resource.type}: the original caller still receives its own response`);
+      }
       assert.equal(resource.marker(await resource.fetch(api, resource.path, {})), 'new', `${resource.type}: the slower older response cannot overwrite the newer cache generation`);
 
       const invalidated = resource.fetch(api, resource.path, {fresh: true});
       const invalidatedFlush = api.flushFileExplorerFsBatchForTest();
-      assert.equal(batches.length, 3);
+      const invalidatedIndex = coalescedList ? 1 : 2;
+      assert.equal(batches.length, invalidatedIndex + 1);
       api.invalidateFileExplorerFsCachesForTest();
-      resolveBatch(2, 'retired');
+      resolveBatch(invalidatedIndex, 'retired');
       await invalidatedFlush;
       assert.equal(resource.marker(await invalidated), 'retired');
       assert.equal(api.fileExplorerFsResourceRecordsForTest().length, 0, `${resource.type}: invalidated completion cannot recreate its retired resource record`);
 
       const current = resource.fetch(api, resource.path, {fresh: true});
       const currentFlush = api.flushFileExplorerFsBatchForTest();
-      resolveBatch(3, 'current');
+      resolveBatch(invalidatedIndex + 1, 'current');
       await currentFlush;
       assert.equal(resource.marker(await current), 'current');
       const records = api.fileExplorerFsResourceRecordsForTest();
@@ -2886,15 +2895,12 @@ async function runLayoutAsyncSuite() {
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [
-          {id: 1, path: '/home/test', type: 'list'},
-          {id: 2, path: '/home/test', type: 'list'},
-        ],
+        requests: [{id: 1, path: '/home/test', type: 'list'}],
         url: '/api/fs/batch',
-      }], 'explicit fresh directory listings stay distinct inside one batch');
+      }], 'concurrent fresh directory listings bypass stale values but share one in-flight backend request');
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
       assert.equal(firstEntries[0].name, 'a.txt');
-      assert.equal(secondEntries[0].name, 'b.txt');
+      assert.strictEqual(secondEntries, firstEntries, 'fresh coalesced callers share the same response object');
     }
 
     {
