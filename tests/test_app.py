@@ -823,6 +823,50 @@ def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypat
     assert {"sample_ms", "agent_activity_ms", "history_merge_ms"} <= set(samples[-1]["details"])
 
 
+def test_statsd_sample_pushes_its_durable_one_second_delta_to_stats_sse(monkeypatch, tmp_path):
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    webapp.background_owner = StatsRoleOwner(owner=True, port=9991)
+    sample = {
+        "time": 1_000.25,
+        "pid": 123,
+        "started_at": 900.0,
+        "uptime_seconds": 100.25,
+        "cpu_percent": 12.5,
+        "system_cpu_percent": 33.0,
+        "rss_bytes": 456,
+    }
+    monkeypatch.setattr(webapp, "current_stats_sample", lambda: (dict(sample), True))
+    monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {"cpu_label": "host"})
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
+    monkeypatch.setattr(webapp, "stats_agent_activity_record_from_rows", lambda *_args, **_kwargs: {
+        "ask_agent_total": 1,
+        "run_agent_total": 2,
+        "transition_agent_total": 0,
+        "idle_agent_total": 3,
+        "agent_activity_samples": 1,
+    })
+    subscriber_id, subscriber_queue = webapp.client_events.subscribe(channels={"stats"})
+    try:
+        webapp.record_stats_global_sample(trigger="statsd")
+        event = subscriber_queue.get_nowait()
+    finally:
+        webapp.client_events.unsubscribe(subscriber_id)
+        webapp.stats_client.request({"action": "shutdown"})
+        webapp.control_server.stop()
+
+    assert event["type"] == "stats_sample"
+    payload = event["payload"]
+    assert payload["sample"] == sample
+    assert payload["record"]["start"] == 1_000
+    assert payload["record"]["duration"] == 1
+    assert payload["record"]["cpu_total_percent"] == 12.5
+    assert payload["record"]["system_cpu_total_percent"] == 33.0
+    assert payload["record"]["ask_agent_total"] == 1
+    assert payload["record"]["host_metrics"]["cpu_label"] == "host"
+    assert payload["record"]["sequence"] == payload["sequence"] > 0
+
+
 def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monkeypatch, tmp_path):
     stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     owner = app_module.TmuxWebtermApp(["1"])

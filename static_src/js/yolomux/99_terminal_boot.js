@@ -6672,6 +6672,10 @@ function handleClientPushEventNow(type, payload = {}) {
     }
     return;
   }
+  if (type === 'stats_sample') {
+    if (typeof applyJsDebugStatsSamplePush === 'function') applyJsDebugStatsSamplePush(payload);
+    return;
+  }
   if (type === 'auto_approve_changed') {
     if (payload.refresh) {
       refreshAutoStatuses().catch(() => {});
@@ -6800,6 +6804,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
+    if (activeItems.includes(debugPaneItemId)) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
       channels.add('transcripts');
@@ -6876,7 +6881,7 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
+  for (const type of ['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;

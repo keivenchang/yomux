@@ -1242,6 +1242,30 @@ def test_statsd_history_profile_separates_sqlite_query_and_assembly(tmp_path):
     service.store.close()
 
 
+def test_statsd_compaction_preserves_the_full_large_legacy_history_not_just_query_cap(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    now = 1_100_000
+    # Deliberately cross STATS_STORE_MAX_ROWS_PER_QUERY.  Compaction replaces
+    # the store, so using the public query cap here used to erase every row
+    # after the first 20k before a 24h JSONL/legacy rebuild could serve it.
+    count = stats_store.STATS_STORE_MAX_ROWS_PER_QUERY + 5
+    buckets = []
+    for start in range(now - count, now):
+        bucket = stats_store.empty_bucket(start, 1)
+        bucket.update({"sequence": start, "server_sequence": start, "cpu_total_percent": 1.0, "cpu_count": 1.0})
+        buckets.append(bucket)
+    service.store.replace_buckets(buckets)
+
+    service._compact_history(now)
+    history = service.handle({"action": "history", "start": now - count, "end": now, "max_points": 1000})
+
+    assert sum(record["cpu_count"] for record in history["records"]) == count
+    assert history["coverage"]["covered_start"] == now - count
+    assert history["coverage"]["covered_end"] == now
+    assert history["coverage"]["source_records"] < count
+    service.store.close()
+
+
 def test_statsd_sampler_failure_delay_backs_off(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
 

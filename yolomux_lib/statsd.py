@@ -959,7 +959,7 @@ class PersistentStatsService:
         next_sequence = int(self.store.diagnostics().get("sequence") or 0)
         connection = self.store._connection()
         with connection:
-            for bucket in self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY):
+            for bucket in self.store.all_buckets():
                 summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
                 components = summary.get("components") if isinstance(summary.get("components"), list) else []
                 projected = [projected_usage_component(component, self.pricing_catalog) for component in components]
@@ -1523,7 +1523,7 @@ class PersistentStatsService:
                     self._recalculate_agent_token_totals(existing)
                     self.store._upsert_bucket(connection, existing)
                     changed = True
-            for existing in self.store.query_buckets():
+            for existing in self.store.all_buckets():
                 before = json.dumps(existing.get("agent_token_rates") or {}, sort_keys=True, separators=(",", ":"))
                 self._recalculate_agent_token_totals(existing)
                 after = json.dumps(existing.get("agent_token_rates") or {}, sort_keys=True, separators=(",", ":"))
@@ -1611,7 +1611,7 @@ class PersistentStatsService:
         next_sequence = int(self.store.diagnostics().get("sequence") or 0)
         connection = self.store._connection()
         with connection:
-            existing = {(int(bucket["start"]), int(bucket["duration"])): bucket for bucket in self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY)}
+            existing = {(int(bucket["start"]), int(bucket["duration"])): bucket for bucket in self.store.all_buckets()}
             for key in set(existing) | set(staged):
                 bucket = existing.get(key) or stats_store.empty_bucket(*key)
                 summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
@@ -1792,7 +1792,7 @@ class PersistentStatsService:
         next_sequence = int(self.store.diagnostics().get("sequence") or 0)
         connection = self.store._connection()
         with connection:
-            for bucket in self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY):
+            for bucket in self.store.all_buckets():
                 if float(bucket.get("start") or 0) < cutoff:
                     continue
                 summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
@@ -1815,7 +1815,7 @@ class PersistentStatsService:
 
     def _compact_history(self, now: float) -> None:
         """Apply the bounded legacy retention tiers inside the durable owner."""
-        sources = self.store.query_buckets(limit=stats_store.STATS_STORE_MAX_ROWS_PER_QUERY)
+        sources = self.store.all_buckets()
         compacted: dict[tuple[int, int], dict[str, Any]] = {}
         cutoff = now - STATS_HISTORY_RETENTION_SECONDS
         changed = False

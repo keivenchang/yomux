@@ -326,6 +326,19 @@ class StatsStore:
         ).fetchall()
         return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
+    def all_buckets(self) -> list[dict[str, Any]]:
+        """Return every retained bucket for single-writer maintenance.
+
+        Public/history reads remain capped by ``query_buckets``.  Maintenance
+        paths which replace or reproject the durable store must never use that
+        response cap, otherwise they can silently discard the tail of a large
+        legacy import when writing their replacement snapshot.
+        """
+        rows = self._connection().execute(
+            "SELECT bucket_json FROM stats_buckets ORDER BY start,duration"
+        ).fetchall()
+        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
+
     def latest_sequence(self) -> int:
         row = self._connection().execute("SELECT COALESCE(MAX(sequence), 0) FROM stats_buckets").fetchone()
         return int(row[0] or 0)

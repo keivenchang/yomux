@@ -1587,6 +1587,24 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
   if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
 }
 
+// `stats_sample` arrives on the shared client-events EventSource.  Its record
+// is the durable one-second owner delta, so the visible graph advances without
+// waiting for the 30-second history-backfill poll.  Polling remains the
+// range/zoom and reconnect fallback, not the live-tail transport.
+function applyJsDebugStatsSamplePush(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const sample = payload.sample && typeof payload.sample === 'object' ? payload.sample : {};
+  const record = payload.record && typeof payload.record === 'object' ? payload.record : null;
+  if (!record) return false;
+  const sequence = Number(payload.sequence);
+  const cursor = Number.isFinite(sequence) ? sequence : Number(record.sequence || 0);
+  recordJsDebugStatsSample({
+    ...sample,
+    history: {sequence: cursor, latest_sequence: cursor, records: [record]},
+  }, {forceGraphRefresh: true, advanceHistoryCursor: true});
+  return true;
+}
+
 function clearJsDebugGraphData() {
   jsDebugGraphRawBuckets.clear();
   jsDebugGraphRollupBuckets.clear();

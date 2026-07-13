@@ -2301,6 +2301,8 @@ class TmuxWebtermApp:
         now = float(sample.get("time") or time.time())
         phase_started = time.perf_counter()
         shared_written = False
+        live_record: dict[str, Any] | None = None
+        live_sequence = 0
         if record_cpu_sample:
             process_id, label, port = self.stats_history_process_identity()
             record = {
@@ -2327,6 +2329,16 @@ class TmuxWebtermApp:
             if not merged.get("ok"):
                 raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
             shared_written = True
+            # Push the already-durable one-second delta; do not add a second
+            # history read or put token-recovery detail on the live SSE path.
+            live_sequence = max(0, int(merged.get("sequence") or 0))
+            live_record = {
+                **record,
+                "start": int(now),
+                "duration": 1,
+                "sequence": live_sequence,
+                "server_sequence": live_sequence,
+            }
         if usage_atom_migration_rows:
             self.statsd_migrate_usage_atom_history(usage_atom_migration_rows, now)
         token_async_started = bool(include_token_rates and deferred_token_rows and self.start_stats_agent_token_work(deferred_token_rows, now))
@@ -2341,6 +2353,13 @@ class TmuxWebtermApp:
             record_time=sample["time"],
             details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates), "token_deferred": bool(defer_token_scan or (include_token_rates and trigger == "statsd")), "token_async_started": token_async_started, "shared_written": shared_written, **phase_ms},
         )
+        if trigger == "statsd" and live_record is not None and self.client_events.has_demand("stats"):
+            self.publish_client_event(
+                "stats_sample",
+                {"sample": dict(sample), "record": live_record, "sequence": live_sequence},
+                trigger="statsd-sampler",
+                cache="ready",
+            )
         return sample
 
     def stats_sample_context(

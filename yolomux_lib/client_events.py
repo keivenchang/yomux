@@ -30,6 +30,7 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "roots_changed",
     "session_files_ready",
     "settings_changed",
+    "stats_sample",
     "transcripts_changed",
     "tmux_signals_changed",
     "update_available",
@@ -47,6 +48,7 @@ CLIENT_EVENT_CHANNELS: frozenset[str] = frozenset({
     "core",
     "files",
     "status",
+    "stats",
     "transcripts",
     "yoagent",
 })
@@ -67,6 +69,10 @@ CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
     "roots_changed": frozenset({"files"}),
     "session_files_ready": frozenset({"files"}),
     "settings_changed": frozenset({"core"}),
+    # One compact durable owner sample for a visible YO!stats graph.  This
+    # separate demand channel avoids sending a one-per-second metrics stream
+    # to pages which are not displaying YO!stats.
+    "stats_sample": frozenset({"stats"}),
     "transcripts_changed": frozenset({"transcripts"}),
     "tmux_signals_changed": frozenset({"status", "attention"}),
     "update_available": frozenset({"core"}),
