@@ -4093,13 +4093,13 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
             requests.push(url.toString());
             const nowSeconds = Math.floor(Date.now() / 1000);
             if (requests.length === 1) {
-              return response({history: {sequence: 100, records: [{
-                start: nowSeconds - 60,
+              return response({history: {sequence: 100, records: [60, 50, 40, 30].map((offset, index) => ({
+                start: nowSeconds - offset,
                 duration: 1,
-                sequence: 100,
-                system_cpu_total_percent: 20,
+                sequence: 100 - index,
+                system_cpu_total_percent: 20 + index,
                 system_cpu_count: 1,
-              }], coverage: coverageFor(url)}});
+              })), coverage: coverageFor(url)}});
             }
             if (requests.length === 2) {
               return new Promise(resolve => {
@@ -4168,6 +4168,10 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
               finalBusy: finalGraph?.getAttribute('aria-busy'),
               finalPhase: finalGraph?.dataset.jsDebugHistoryState,
               finalOverlayHidden: finalGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+              durableCpuStarts: [...jsDebugGraphRawBuckets.values()]
+                .filter(bucket => Number(bucket.systemCpuCount) > 0)
+                .map(bucket => Math.floor(Number(bucket.startMs) / 1000))
+                .sort((left, right) => left - right),
             };
           } finally {
             window.fetch = originalFetch;
@@ -4186,6 +4190,7 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
     assert metrics["minX"] is not None and metrics["minX"] < 200, metrics
     assert metrics["maxX"] is not None and metrics["maxX"] > 500, metrics
     assert metrics["retainedChartCount"] > 0, metrics
+    assert len(metrics["durableCpuStarts"]) >= 5, metrics
     assert metrics["beforeDelay"] == {
         "chartCount": metrics["retainedChartCount"],
         "busy": "true",

@@ -5347,6 +5347,24 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     );
   });
 
+  test('YO!stats CPU keeps genuine sampling gaps while preserving zero-valued samples', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 5) * 5;
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({sequence: 3, records: [
+      {start: now - 50, duration: 5, sequence: 1, system_cpu_total_percent: 0, system_cpu_count: 1},
+      {start: now - 45, duration: 5, sequence: 2, system_cpu_total_percent: 20, system_cpu_count: 1},
+      // 40s..25s are genuinely unsampled: do not carry the 20% value forward.
+      {start: now - 25, duration: 5, sequence: 3, system_cpu_total_percent: 40, system_cpu_count: 1},
+    ]});
+    const cpu = api.debugPanelHtmlForTest().match(/<section[^>]*data-js-debug-chart="cpu"[\s\S]*?<\/section>/)?.[0] || '';
+    assert.equal((cpu.match(/data-js-debug-series="systemCpu"/g) || []).length, 2, 'a true CPU sampling gap splits the line instead of interpolating it');
+    assert.equal(cpu.includes('data-js-debug-agent-status-no-data-range='), false, 'CPU gaps never reuse the Agent-status red sampler overlay');
+    const systemCpu = api.debugGraphSeriesDataForTest(now * 1000).find(series => series.key === 'systemCpu');
+    assert.ok(systemCpu.hasDataValues.includes(true) && systemCpu.values.includes(0), 'a sampled zero remains data, distinct from an unsampled gap');
+  });
+
   test('YO!stats Cost summary is a compact non-chart card with full accounting in its popover', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
