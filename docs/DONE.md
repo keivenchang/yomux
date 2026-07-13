@@ -1612,3 +1612,24 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 - Completed `DOIT.pinned-is-tab-scoped-not-pane-minimize.md`. Pinning now protects only tab-level user movement and LRU/cap eviction: pinned tabs cannot be user-dragged across panes or evicted, but they no longer hide, refuse, or alter pane minimize.
 - Generic minimize transfers every source tab (pinned included) through the existing capacity owner; one-column and Vertical Side Pane minimize retain their normal pane-action behavior. Full target capacity still protects pinned target residents through the shared capacity rules.
 - Verification: focused Node layout and three Dockview browser cases passed; `python3 tools/static_build.py --check` passed; final `python3 tools/check.py` passed all eight lanes in 419.84s. Restarted only 8881; its single fresh listener returned expected `/api/ping` 401.
+
+### Finder Sync session cursor memory
+
+- Completed `DOIT.finder-sync-remember-cursor-per-session.md`. Finder Sync now stores each `(session, root)` target's expanded/collapsed state, selected paths, keyboard lead cursor, and selection anchor together. Returning to that session restores the visible cursor through the existing active-descendant/scroll helper without taking terminal or browser focus; collapsed or missing rows fall back to a visible ancestor.
+- Same-root sessions remain independent, and restore uses the cache-first sync path without a blocking filesystem request. The behavior is covered by the committed Node/browser regressions in `d311d528` and `cffa2070`; this completion adds the explicit GUI contract and archive record.
+
+### YO!stats history latency and timeout honesty
+
+- Completed `DOIT.fix-yostats-history-slow-sporadic-abort.md`. Stats history reads remain independent of slow sampler/control work, use bounded indexed range reads and byte-bounded browser uploads, and no longer replay a timed-out current RPC through the legacy transport.
+- Browser requests use an 8-second short-range timeout scaled to a 30-second 24-hour cap. A genuine timeout reports its named duration and enters the existing exponential retry/backoff path; empty complete history and real server errors remain distinct states.
+- Measured production/copy-DB reads were well below the timeout budget (24-hour full history median about 351ms); existing statsd, Node, and browser regressions cover slow-owner responsiveness, coverage, and timeout/readiness behavior.
+
+### Cost Summary detail report tables
+
+- Completed `DOIT.cost-details-agent-model-tables.md`. Cost `More Info` uses a responsive wide report with semantic By Agent and Model Usages tables: each class pairs token quantity with cost, each row has accessible detail, and each table ends in a reconciling grand total.
+- Agent/source attribution carries only safe canonical transcript metadata; absolute `.jsonl`/`.ndjson` sources open through the shared Preview action, while missing or unsafe paths remain plain text. The GUI contract and focused Node/browser tests cover modal containment, exact arithmetic, table columns, and Preview navigation.
+
+### Finder Sync cache-first switching
+
+- Completed `DOIT.finder-sync-switch-instant-cache.md`. A warm Finder Sync target reconciles its remembered tree synchronously from the bounded shared listing LRU, preserving mounted rows and session-specific disclosure state. The next frame revalidates visible directories in the background; a cold path uses bounded parallel workers.
+- `tests/layout_async.test.js` covers zero blocking warm requests, changed/unchanged revalidation behavior, mounted-node preservation, bounded cold batches, and LRU eviction.
