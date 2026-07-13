@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import tracemalloc
 from http import HTTPStatus
 from pathlib import Path
 from typing import get_args
@@ -408,6 +409,39 @@ def test_normalized_codex_usage_atoms_subtract_cached_input_and_keep_effort_with
     assert {atom.effort for atom in by_time[2.0].values()} == {"low"}
     assert {atom.effort for atom in by_time[4.0].values()} == {"high"}
     assert sum(atom.quantity for atom in atoms if atom.direction == "output") == 25.0
+
+
+def test_codex_usage_atom_iterator_yields_before_reading_the_rest_of_one_large_file(monkeypatch, tmp_path):
+    def records(*_args, **_kwargs):
+        yield {"timestamp": 1, "type": "turn_context", "payload": {"model": "gpt-5.6", "effort": "high"}}
+        yield {"timestamp": 2, "payload": {"info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}}
+        raise AssertionError("iterator materialized the rest of the transcript before yielding")
+
+    monkeypatch.setattr(session_files, "transcript_json_records", records)
+    atoms = session_files.iter_codex_transcript_usage_atoms(tmp_path / "large.jsonl")
+
+    first = next(atoms)
+    assert first.timestamp == 2
+    assert first.model == "gpt-5.6"
+
+
+def test_codex_usage_atom_iterator_keeps_one_large_real_file_memory_bounded(tmp_path):
+    transcript = tmp_path / "large-rollout.jsonl"
+    records = [{"timestamp": 1, "type": "turn_context", "payload": {"model": "gpt-5.6"}}]
+    records.extend(
+        {"timestamp": index + 2, "payload": {"info": {"total_token_usage": {"input_tokens": index + 1, "output_tokens": index + 1}}}}
+        for index in range(20_000)
+    )
+    transcript.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+    del records
+
+    tracemalloc.start()
+    count = sum(1 for _atom in session_files.iter_codex_transcript_usage_atoms(transcript))
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert count == 40_000
+    assert peak < 8 * 1024 * 1024
 
 
 def test_codex_usage_atoms_keep_explicit_pricing_profile_and_service_tier(tmp_path):

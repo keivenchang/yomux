@@ -1302,6 +1302,134 @@ def test_statsd_completed_agent_scan_persists_in_bounded_pages_without_blocking_
     service.store.close()
 
 
+def _spool_test_atom(index, timestamp):
+    return SimpleNamespace(
+        event_id=f"spool-event-{index}", timestamp=timestamp, provider="openai", model="gpt-5.6",
+        model_evidence="turn_context.payload.model", effort="high", direction="output", modality="text",
+        cache_role="none", unit="tokens", quantity=1, root_thread_id="root", agent_thread_id="agent",
+        parent_thread_id="", depth=0, endpoint="responses", tool_name="", call_id="",
+        pricing_profile="default", service_tier="default", telemetry_complete=True, source="transcript.jsonl",
+    )
+
+
+def test_statsd_large_agent_scan_streams_atoms_to_bounded_spool(monkeypatch, tmp_path):
+    """The worker result stays O(agents), not O(all historical usage atoms)."""
+    monkeypatch.setattr(statsd.session_files, "transcript_generated_tokens", lambda *_args: 50_010)
+    monkeypatch.setattr(statsd.session_files, "transcript_generated_tokens_by_model", lambda *_args: {"gpt-5.6": 50_010})
+    monkeypatch.setattr(statsd.session_files, "transcript_usage_identity", lambda *_args: "stable")
+
+    def atoms(*_args):
+        for index in range(50_000):
+            yield _spool_test_atom(index, 1001 + (index % 50))
+
+    monkeypatch.setattr(statsd.session_files, "iter_transcript_usage_atoms", atoms)
+    spool = tmp_path / "atoms.sqlite3"
+    measurements, target_state, count = statsd._scan_agent_token_rows_to_spool(
+        [{"key": "s|0|codex", "transcript": str(tmp_path / "transcript.jsonl"), "kind": "codex"}],
+        1060, {}, {"s|0|codex": 1000}, spool, include_atoms=True,
+    )
+
+    assert len(measurements) == 1
+    assert target_state == {"s|0|codex": 1060}
+    assert count == 50_000
+    with sqlite3.connect(spool) as connection:
+        assert connection.execute("SELECT COUNT(DISTINCT bucket_start || ':' || duration) FROM atoms").fetchone()[0] == 50
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.agent_token_atom_persistence = {
+        "path": str(spool), "cursor_start": -1, "cursor_duration": -1, "cursor_event": "",
+        "target_state": target_state, "sample_time": 1060, "count": count, "changed": 0,
+    }
+    pages = []
+    monkeypatch.setattr(
+        service, "merge_server_records",
+        lambda records, **_kwargs: pages.append(sum(len(record["usage_atoms"]) for record in records)) or {"ok": True, "changed": len(records)},
+    )
+    assert service._drain_agent_token_atom_spool() is True
+    assert pages == [statsd.STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS]
+    assert service.agent_token_atom_persistence is not None
+    service.agent_token_atom_persistence = None
+    service.store.close()
+
+
+def test_statsd_live_token_rates_advance_while_historical_atom_spool_is_pending(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    previous_state = {
+        "s|0|codex": {"tokens": 10, "time": 1000, "label": "s:0", "source": "transcript", "identity": "stable", "models": {"gpt-5.6": 10}},
+    }
+    service._set_agent_token_state(previous_state)
+    spool = service.socket_path.parent / f"{tmp_path.name}-scan.atoms.sqlite3"
+    spool.unlink(missing_ok=True)
+    with sqlite3.connect(spool) as connection:
+        connection.execute("CREATE TABLE atoms (bucket_start INTEGER NOT NULL, duration INTEGER NOT NULL, event_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket_start, duration, event_key))")
+        for index in range(3):
+            normalized = statsd.normalized_usage_atom(_spool_test_atom(index, 1050.0))
+            connection.execute(
+                "INSERT INTO atoms VALUES(?, ?, ?, ?)",
+                (1050, 1, statsd._agent_token_spool_identity(normalized), json.dumps(normalized)),
+            )
+    service.agent_token_scan_id = "scan-live"
+    service.agent_token_scan_result = {
+        "scan_id": "scan-live",
+        "measurements": [{"key": "s|0|codex", "label": "s:0", "tokens": 20, "source": "transcript", "identity": "stable", "models": {"gpt-5.6": 20}}],
+        "atom_spool": str(spool), "atom_count": 3, "atom_state": {"s|0|codex": 1060},
+        "seen_keys": ["s|0|codex"], "sample_time": 1060, "previous_state": previous_state,
+    }
+
+    assert service._drain_agent_token_scan_result() is True
+    assert service.agent_token_atom_persistence is not None
+    while service.agent_token_scan_persistence is not None:
+        service._drain_agent_token_scan_result()
+
+    # The chart-producing rate and model split are durable before backfill is
+    # complete; this is the regression that left both live GUI series blank.
+    history = service.handle({"action": "history"})
+    assert sum(record["tokens_per_agent_total"] for record in history["records"]) == pytest.approx(10)
+    live_rates = [rate for record in history["records"] for rate in record["agent_token_rates"]]
+    assert sum(rate["tokens"] for rate in live_rates) == pytest.approx(10)
+    assert sum(rate["model_rates"]["gpt-5.6"]["tokens"] for rate in live_rates) == pytest.approx(10)
+    assert service._agent_token_state()["s|0|codex"]["time"] == 1060
+    assert service._agent_token_atom_state()["s|0|codex"] == 1000
+
+    service.store.close()
+    restarted = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    restarted.agent_token_atom_persistence = restarted._load_agent_token_atom_spool()
+    assert restarted.agent_token_atom_persistence is not None
+    while restarted.agent_token_atom_persistence is not None:
+        restarted._drain_agent_token_scan_result()
+    assert restarted._agent_token_atom_state()["s|0|codex"] == 1060
+    assert len(restarted.store.bucket(1050, 1)["cost_summary"]["components"]) == 3
+    restarted.store.close()
+
+
+def test_statsd_early_counter_result_detaches_historical_worker_slot(tmp_path):
+    class AliveWorker:
+        def is_alive(self):
+            return True
+
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    worker = AliveWorker()
+    result_path = service.socket_path.parent / f"{tmp_path.name}-worker.json"
+    service.agent_token_scan_id = "scan-early"
+    service.agent_token_scan_worker = worker
+    service.agent_token_scan_result_path = result_path
+    service.agent_token_scan_includes_atoms = True
+    service.agent_token_scan_result = {
+        "partial": True, "scan_id": "scan-early", "measurements": [], "seen_keys": [],
+        "sample_time": 1060, "previous_state": {},
+    }
+
+    assert service._drain_agent_token_scan_result() is True
+    assert service.agent_token_scan_worker is None
+    assert service.agent_token_atom_worker is worker
+    assert service.agent_token_atom_result_path == result_path
+    assert service.agent_token_scan_persistence is not None
+    service.agent_token_atom_worker = None
+    service.agent_token_atom_result_path = None
+    while service.agent_token_scan_persistence is not None:
+        service._drain_agent_token_scan_result()
+    service.store.close()
+
+
 def test_statsd_agent_token_recovery_coalesces_rollups_without_inline_refresh(monkeypatch, tmp_path):
     """Historical token pages queue four tiers, then converge between requests."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")

@@ -53,6 +53,8 @@ STATSD_DATABASE_NAME = "stats-history.sqlite3"
 STATSD_LEGACY_IMPORT_VERSION = 1
 STATSD_LEGACY_IMPORT_MARKER = "legacy_import_version"
 STATSD_AGENT_TOKEN_STATE_KEY = "agent_token_state"
+STATSD_AGENT_TOKEN_ATOM_STATE_KEY = "agent_token_atom_state"
+STATSD_AGENT_TOKEN_ATOM_SPOOL_KEY = "agent_token_atom_spool"
 STATSD_AGENT_TOKEN_RECOVERY_MARKER = "agent_token_history_recovery_version"
 STATSD_AGENT_TOKEN_RECOVERY_VERSION = 6
 STATSD_USAGE_ATOM_MIGRATION_MARKER = "usage_atom_migration_version"
@@ -96,6 +98,7 @@ STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
 # simple record count suggests on a memory-constrained host.
 STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 1
 STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 1
+STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS = 128
 
 
 def _scan_agent_token_rows_in_worker(
@@ -152,6 +155,99 @@ def _scan_agent_token_rows_in_worker(
     return measurements, atom_records
 
 
+def _agent_token_spool_identity(atom: dict[str, Any]) -> str:
+    """Return the same stable identity used by the durable bucket merger."""
+
+    return json.dumps([
+        str(atom.get("event_id") or ""),
+        str(atom.get("direction") or ""),
+        str(atom.get("modality") or ""),
+        str(atom.get("cache_role") or ""),
+        str(atom.get("unit") or ""),
+    ], separators=(",", ":"))
+
+
+def _history_bucket_coordinates(sample_time: float, now: float) -> tuple[int, int]:
+    age = max(0.0, now - sample_time)
+    duration = STATS_HISTORY_TIERS[-1][1]
+    for max_age_seconds, bucket_seconds in STATS_HISTORY_TIERS:
+        if age <= max_age_seconds:
+            duration = bucket_seconds
+            break
+    return int(math.floor(sample_time / duration) * duration), duration
+
+
+def _scan_agent_token_rows_to_spool(
+    rows: list[dict[str, Any]],
+    sample_time: float,
+    previous_state: dict[str, dict[str, Any]],
+    atom_state: dict[str, float],
+    spool_path: Path,
+    *,
+    include_atoms: bool,
+    measurements_override: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, float], int]:
+    """Scan counters and stream stable usage atoms into a bounded SQLite spool."""
+
+    measurements: list[dict[str, Any]] = list(measurements_override or [])
+    measured_keys = {str(item.get("key") or "") for item in measurements}
+    target_atom_state = dict(atom_state)
+    connection = sqlite3.connect(spool_path)
+    try:
+        connection.execute("PRAGMA journal_mode=OFF")
+        connection.execute("PRAGMA synchronous=OFF")
+        connection.execute(
+            "CREATE TABLE atoms (bucket_start INTEGER NOT NULL, duration INTEGER NOT NULL, "
+            "event_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket_start, duration, event_key))"
+        )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            transcript = str(row.get("transcript") or "").strip()
+            kind = str(row.get("kind") or "").strip().lower()
+            key = str(row.get("key") or "").strip()
+            if not transcript or not key:
+                continue
+            transcript_path = Path(transcript)
+            if measurements_override is None:
+                generated_tokens = session_files.transcript_generated_tokens(transcript_path, kind)
+                if generated_tokens is None:
+                    continue
+                measurements.append({
+                    "key": key,
+                    "label": str(row.get("label") or key),
+                    "tokens": generated_tokens,
+                    "source": "transcript",
+                    "identity": session_files.transcript_usage_identity(transcript_path, kind),
+                    "models": session_files.transcript_generated_tokens_by_model(transcript_path, kind),
+                })
+                measured_keys.add(key)
+            elif key not in measured_keys:
+                continue
+            if not include_atoms:
+                continue
+            previous_time = max(0.0, float(atom_state.get(key) or 0.0))
+            tmux_fields = _tmux_usage_fields_from_row(row, key=key, label=str(row.get("label") or key), kind=kind)
+            for atom in session_files.iter_transcript_usage_atoms(transcript_path, kind):
+                if not (previous_time < atom.timestamp <= sample_time):
+                    continue
+                normalized = normalized_usage_atom(atom)
+                if normalized is None:
+                    continue
+                normalized.update(tmux_fields)
+                bucket_start, duration = _history_bucket_coordinates(atom.timestamp, sample_time)
+                connection.execute(
+                    "INSERT OR IGNORE INTO atoms(bucket_start, duration, event_key, payload) VALUES(?, ?, ?, ?)",
+                    (bucket_start, duration, _agent_token_spool_identity(normalized), json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))),
+                )
+            target_atom_state[key] = sample_time
+        connection.commit()
+        count = int(connection.execute("SELECT COUNT(*) FROM atoms").fetchone()[0])
+    finally:
+        connection.close()
+    return measurements, target_atom_state, count
+
+
 def _run_agent_token_scan_process(
     rows: list[dict[str, Any]],
     sample_time: float,
@@ -159,15 +255,50 @@ def _run_agent_token_scan_process(
     seen_keys: set[str],
     scan_id: str,
     result_path_text: str,
+    atom_state: dict[str, float] | None = None,
+    include_atoms: bool = True,
 ) -> None:
     """Filesystem-only child entry point; it never opens the stats SQLite DB."""
 
     result_path = Path(result_path_text)
+    partial_path = result_path.with_suffix(".partial.json")
+    spool_path = result_path.with_suffix(".atoms.sqlite3")
+    temporary_spool = spool_path.with_suffix(spool_path.suffix + ".tmp")
+    temporary = result_path.with_suffix(result_path.suffix + ".tmp")
+
+    def publish(payload: dict[str, Any], destination: Path = result_path) -> None:
+        destination_temporary = destination.with_suffix(destination.suffix + ".tmp")
+        destination_temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(destination_temporary, destination)
+
     try:
-        measurements, atom_records = _scan_agent_token_rows_in_worker(rows, sample_time, previous_state)
-        result: dict[str, Any] = {
+        temporary_spool.unlink(missing_ok=True)
+        measurements, _unused_atom_state, _unused_atom_count = _scan_agent_token_rows_to_spool(
+            rows, sample_time, previous_state, atom_state or {}, temporary_spool, include_atoms=False,
+        )
+        publish({
+            "partial": True,
             "measurements": measurements,
-            "atom_records": atom_records,
+            "seen_keys": sorted(seen_keys),
+            "sample_time": sample_time,
+            "previous_state": previous_state,
+            "scan_id": scan_id,
+        }, partial_path)
+        temporary_spool.unlink(missing_ok=True)
+        measurements, target_atom_state, atom_count = _scan_agent_token_rows_to_spool(
+            rows, sample_time, previous_state, atom_state or {}, temporary_spool,
+            include_atoms=include_atoms, measurements_override=measurements,
+        )
+        if include_atoms:
+            os.replace(temporary_spool, spool_path)
+        else:
+            temporary_spool.unlink(missing_ok=True)
+        result: dict[str, Any] = {
+            "atoms_only": True,
+            "measurements": [],
+            "atom_spool": str(spool_path) if include_atoms else "",
+            "atom_count": atom_count,
+            "atom_state": target_atom_state,
             "seen_keys": sorted(seen_keys),
             "sample_time": sample_time,
             "previous_state": previous_state,
@@ -175,13 +306,15 @@ def _run_agent_token_scan_process(
         }
     except BaseException as exc:  # always leave a terminal result for the owner
         result = {"error": str(exc), "scan_id": scan_id}
-    temporary = result_path.with_suffix(result_path.suffix + ".tmp")
     try:
-        temporary.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.replace(temporary, result_path)
+        publish(result)
     finally:
         try:
             temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            temporary_spool.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -573,11 +706,18 @@ class PersistentStatsService:
         # compact, local result file for this SQLite owner to persist.
         self.agent_token_scan_worker: multiprocessing.Process | None = None
         self.agent_token_scan_result_path: Path | None = None
+        self.agent_token_scan_includes_atoms = False
+        self.agent_token_atom_worker: multiprocessing.Process | None = None
+        self.agent_token_atom_result_path: Path | None = None
         self.agent_token_scan_result: dict[str, Any] | None = None
         self.agent_token_scan_sequence = 0
         self.agent_token_scan_id = ""
         self.agent_token_scan_completion: dict[str, Any] | None = None
         self.agent_token_scan_persistence: dict[str, Any] | None = None
+        # Load durable spool state only after the listener thread owns SQLite;
+        # constructing a service must not eagerly bind the lazy connection to
+        # the caller thread used by lifecycle tests and embedders.
+        self.agent_token_atom_persistence: dict[str, Any] | None = None
         # Catalog ownership stays outside statsd.  Tests and the application
         # may inject its public resolve_rate surface; absent catalog means
         # usage remains visible but explicitly unpriced/lower-bound.
@@ -659,11 +799,18 @@ class PersistentStatsService:
         return dict(self.sampler_owner)
 
     def _idle_shutdown_ready(self) -> bool:
+        self._drain_agent_token_atom_worker()
         self._drain_agent_token_scan_result()
         maintenance = self._maybe_reproject_cost_summaries()
         rollup_maintenance = self._rollup_maintenance_step()
         with self.agent_token_scan_lock:
-            scan_active = self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None or self.agent_token_scan_persistence is not None
+            scan_active = (
+                self.agent_token_scan_worker is not None
+                or self.agent_token_scan_result is not None
+                or self.agent_token_scan_persistence is not None
+                or self.agent_token_atom_worker is not None
+                or self.agent_token_atom_persistence is not None
+            )
         # An elected sampler is active work even while no browser reads YO!stats.
         return not scan_active and not maintenance.get("pending") and not rollup_maintenance.get("pending") and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
@@ -858,7 +1005,12 @@ class PersistentStatsService:
                 sample_time = sample_now
             if not math.isfinite(sample_time) or sample_time < sample_now - STATS_HISTORY_RETENTION_SECONDS:
                 continue
-            duration = self._bucket_seconds(sample_time, sample_now)
+            try:
+                requested_duration = int(record.get("_statsd_duration") or 0)
+            except (TypeError, ValueError):
+                requested_duration = 0
+            valid_durations = {bucket_seconds for _max_age, bucket_seconds in STATS_HISTORY_TIERS}
+            duration = requested_duration if requested_duration in valid_durations else self._bucket_seconds(sample_time, sample_now)
             start = int(math.floor(sample_time / duration) * duration)
             bucket = self.store.bucket(start, duration) or stats_store.empty_bucket(start, duration)
             clients = bucket.setdefault("clients", {})
@@ -1332,6 +1484,182 @@ class PersistentStatsService:
     def _set_agent_token_state(self, state: dict[str, dict[str, Any]]) -> None:
         self.store.set_metadata_value(STATSD_AGENT_TOKEN_STATE_KEY, json.dumps(state, sort_keys=True, separators=(",", ":")))
 
+    def _agent_token_atom_state(self) -> dict[str, float]:
+        raw = self.store.metadata_value(STATSD_AGENT_TOKEN_ATOM_STATE_KEY)
+        try:
+            decoded = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            decoded = {}
+        state: dict[str, float] = {}
+        if isinstance(decoded, dict):
+            for raw_key, raw_time in decoded.items():
+                try:
+                    timestamp = max(0.0, float(raw_time or 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if raw_key and timestamp:
+                    state[str(raw_key)] = timestamp
+        if state:
+            return state
+        # Upgrade compatibility: before atom and counter watermarks were
+        # separated, the counter state advanced only after every atom write.
+        return {
+            key: float(item.get("time") or 0.0)
+            for key, item in self._agent_token_state().items()
+            if float(item.get("time") or 0.0) > 0
+        }
+
+    def _set_agent_token_atom_state(self, state: dict[str, float]) -> None:
+        self.store.set_metadata_value(
+            STATSD_AGENT_TOKEN_ATOM_STATE_KEY,
+            json.dumps(state, sort_keys=True, separators=(",", ":")),
+        )
+
+    def _load_agent_token_atom_spool(self) -> dict[str, Any] | None:
+        raw = self.store.metadata_value(STATSD_AGENT_TOKEN_ATOM_SPOOL_KEY)
+        try:
+            payload = json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            payload = None
+        path = Path(str(payload.get("path") or "")) if isinstance(payload, dict) else Path()
+        # Once this process owns the statsd lock, no unreferenced scan spool
+        # can still have a live producer. Remove crash leftovers so a failed
+        # handoff cannot leak hundreds of MiB indefinitely.
+        for candidate in self.socket_path.parent.glob("statsd-agent-token-scan-*.atoms.sqlite3*"):
+            if candidate != path:
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if not isinstance(payload, dict):
+            return None
+        try:
+            valid_path = path.parent.resolve() == self.socket_path.parent.resolve() and path.is_file()
+        except OSError:
+            valid_path = False
+        if not valid_path:
+            # Keep the old atom watermark: the next scan safely rebuilds a
+            # missing/corrupt spool instead of silently skipping its atoms.
+            self.store.set_metadata_value(STATSD_AGENT_TOKEN_ATOM_SPOOL_KEY, "")
+            return None
+        payload["path"] = str(path)
+        payload["cursor_start"] = int(payload.get("cursor_start", -1))
+        payload["cursor_duration"] = int(payload.get("cursor_duration", -1))
+        payload["cursor_event"] = str(payload.get("cursor_event") or "")
+        payload["changed"] = int(payload.get("changed") or 0)
+        return payload
+
+    def _store_agent_token_atom_spool(self, persistence: dict[str, Any] | None) -> None:
+        self.agent_token_atom_persistence = persistence
+        self.store.set_metadata_value(
+            STATSD_AGENT_TOKEN_ATOM_SPOOL_KEY,
+            json.dumps(persistence, sort_keys=True, separators=(",", ":")) if persistence is not None else "",
+        )
+
+    def _install_agent_token_atom_spool(self, result: dict[str, Any]) -> None:
+        path = Path(str(result.get("atom_spool") or ""))
+        if not path.is_file():
+            return
+        if not self.store.metadata_value(STATSD_AGENT_TOKEN_ATOM_STATE_KEY):
+            # Freeze the upgrade fallback before the independent counter state
+            # advances. Otherwise a restart could mistake the new live
+            # baseline for proof that the still-pending atoms were durable.
+            self._set_agent_token_atom_state(self._agent_token_atom_state())
+        persistence = {
+            "path": str(path),
+            "cursor_start": -1,
+            "cursor_duration": -1,
+            "cursor_event": "",
+            "target_state": result.get("atom_state") if isinstance(result.get("atom_state"), dict) else {},
+            "sample_time": float(result.get("sample_time") or time.time()),
+            "count": max(0, int(result.get("atom_count") or 0)),
+            "changed": 0,
+        }
+        # The durable pointer is committed before the independent live counter
+        # baseline can advance. A crash therefore resumes atoms from the old
+        # watermark; replay is safe because event identities are stable.
+        self._store_agent_token_atom_spool(persistence)
+
+    def _drain_agent_token_atom_spool(self) -> bool:
+        persistence = self.agent_token_atom_persistence
+        if persistence is None:
+            return False
+        path = Path(str(persistence.get("path") or ""))
+        try:
+            connection = sqlite3.connect(path)
+            cursor_start = int(persistence.get("cursor_start", -1))
+            cursor_duration = int(persistence.get("cursor_duration", -1))
+            cursor_event = str(persistence.get("cursor_event") or "")
+            rows = connection.execute(
+                "SELECT bucket_start, duration, event_key, payload FROM atoms "
+                "WHERE bucket_start > ? "
+                "OR (bucket_start = ? AND duration > ?) "
+                "OR (bucket_start = ? AND duration = ? AND event_key > ?) "
+                "ORDER BY bucket_start, duration, event_key LIMIT ?",
+                (
+                    cursor_start, cursor_start, cursor_duration,
+                    cursor_start, cursor_duration, cursor_event,
+                    STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS,
+                ),
+            ).fetchall()
+            if not rows:
+                connection.close()
+                target_state = persistence.get("target_state")
+                if isinstance(target_state, dict):
+                    self._set_agent_token_atom_state({
+                        str(key): max(0.0, float(value or 0.0))
+                        for key, value in target_state.items()
+                    })
+                self._store_agent_token_atom_spool(None)
+                path.unlink(missing_ok=True)
+                return True
+            connection.close()
+            records: list[dict[str, Any]] = []
+            for raw_start, raw_duration, _event_key, raw_payload in rows:
+                bucket_start, duration = int(raw_start), int(raw_duration)
+                if not records or records[-1]["_statsd_duration"] != duration or records[-1]["time"] != bucket_start:
+                    records.append({"time": bucket_start, "_statsd_duration": duration, "usage_atoms": []})
+                records[-1]["usage_atoms"].append(json.loads(str(raw_payload)))
+            merged = self.merge_server_records(
+                records,
+                now=float(persistence.get("sample_time") or time.time()),
+                compact=False,
+                refresh_rollups=False,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+            self.last_sampler_failure = redact_local_service_text(exc)
+            return True
+        persistence["cursor_start"] = int(rows[-1][0])
+        persistence["cursor_duration"] = int(rows[-1][1])
+        persistence["cursor_event"] = str(rows[-1][2])
+        persistence["changed"] = int(persistence.get("changed") or 0) + int(merged.get("changed") or 0)
+        self._store_agent_token_atom_spool(persistence)
+        return True
+
+    def _drain_agent_token_atom_worker(self) -> bool:
+        worker = self.agent_token_atom_worker
+        result_path = self.agent_token_atom_result_path
+        if worker is None or result_path is None or (worker.is_alive() and not result_path.is_file()):
+            return False
+        if not worker.is_alive():
+            worker.join(timeout=0)
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if result.get("error"):
+                self.last_sampler_failure = redact_local_service_text(result["error"])
+            else:
+                self._install_agent_token_atom_spool(result)
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+            self.last_sampler_failure = redact_local_service_text(exc)
+        finally:
+            try:
+                result_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.agent_token_atom_worker = None
+            self.agent_token_atom_result_path = None
+        return True
+
     @staticmethod
     def _agent_token_delta_records(
         key: str,
@@ -1550,35 +1878,58 @@ class PersistentStatsService:
     def _drain_agent_token_scan_result(self) -> bool:
         """Advance a completed scan in bounded, retryable SQLite-owner pages."""
 
+        self._drain_agent_token_atom_worker()
         with self.agent_token_scan_lock:
             result = self.agent_token_scan_result
             worker = self.agent_token_scan_worker
             result_path = self.agent_token_scan_result_path
-            if result is None and worker is not None and not worker.is_alive():
-                worker.join(timeout=0)
-                self.agent_token_scan_worker = None
-                self.agent_token_scan_result_path = None
+            partial_path = result_path.with_suffix(".partial.json") if result_path is not None else None
+            readable_path = (
+                partial_path if partial_path is not None and partial_path.is_file()
+                else result_path if result_path is not None and result_path.is_file()
+                else None
+            )
+            if result is None and worker is not None and (readable_path is not None or not worker.is_alive()):
+                worker_finished = not worker.is_alive()
+                if worker_finished:
+                    worker.join(timeout=0)
                 try:
-                    result = json.loads(result_path.read_text(encoding="utf-8")) if result_path is not None else None
+                    result = json.loads(readable_path.read_text(encoding="utf-8")) if readable_path is not None else None
                 except (OSError, TypeError, ValueError) as exc:
-                    result = {"error": f"agent token scan worker exited without a readable result: {exc}", "scan_id": self.agent_token_scan_id}
+                    if worker_finished:
+                        result = {"error": f"agent token scan worker exited without a readable result: {exc}", "scan_id": self.agent_token_scan_id}
                 finally:
-                    if result_path is not None:
+                    if readable_path is not None:
                         try:
-                            result_path.unlink(missing_ok=True)
+                            readable_path.unlink(missing_ok=True)
                         except OSError:
                             pass
+                if worker_finished and not (isinstance(result, dict) and result.get("partial")):
+                    self.agent_token_scan_worker = None
+                    self.agent_token_scan_result_path = None
                 self.agent_token_scan_result = result
             persistence = self.agent_token_scan_persistence
             if result is not None and persistence is None:
                 self.agent_token_scan_result = None
-                self.agent_token_scan_worker = None
-                self.agent_token_scan_result_path = None
+                if result.get("partial") and self.agent_token_scan_includes_atoms:
+                    # Counters are ready; let later counter-only scans proceed
+                    # while this process finishes the historical atom spool.
+                    self.agent_token_atom_worker = self.agent_token_scan_worker
+                    self.agent_token_atom_result_path = self.agent_token_scan_result_path
+                    self.agent_token_scan_worker = None
+                    self.agent_token_scan_result_path = None
+                    self.agent_token_scan_includes_atoms = False
+                elif not result.get("partial"):
+                    self.agent_token_scan_worker = None
+                    self.agent_token_scan_result_path = None
+                    self.agent_token_scan_includes_atoms = False
                 scan_id = str(result.get("scan_id") or self.agent_token_scan_id)
             elif persistence is not None:
                 scan_id = str(persistence["scan_id"])
             else:
-                return False
+                scan_id = ""
+        if result is None and persistence is None:
+            return self._drain_agent_token_atom_spool()
         if result is not None and persistence is None:
             error = result.get("error")
             if error:
@@ -1586,17 +1937,28 @@ class PersistentStatsService:
                 with self.agent_token_scan_lock:
                     self.agent_token_scan_completion = {"scan_id": scan_id, "response": {"ok": False, "error": str(error)}}
                 return True
+            if result.get("atoms_only"):
+                try:
+                    self._install_agent_token_atom_spool(result)
+                except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+                    self.last_sampler_failure = redact_local_service_text(exc)
+                return True
             try:
                 claimed = self.claim_agent_token_deltas(
                     result["measurements"], result["seen_keys"], result["sample_time"],
                     fallback_state=result["previous_state"], persist_state=False,
                 )
-                records = [*claimed.get("records", []), *result["atom_records"]]
+                self._install_agent_token_atom_spool(result)
+                legacy_atom_records = result.get("atom_records")
+                records = [
+                    *claimed.get("records", []),
+                    *(legacy_atom_records if isinstance(legacy_atom_records, list) else []),
+                ]
                 with self.agent_token_scan_lock:
                     self.agent_token_scan_persistence = {
                         "scan_id": scan_id, "records": records, "offset": 0,
                         "state": claimed["state"], "sample_time": result["sample_time"],
-                        "changed": 0,
+                        "changed": 0, "atom_count": int(result.get("atom_count") or 0),
                     }
                 # Installing the pending result must itself stay cheap. The
                 # next listener turn persists one page, leaving health/history
@@ -1640,6 +2002,7 @@ class PersistentStatsService:
             self._set_agent_token_state(persistence["state"])
             response = {
                 "ok": True, "records": [], "persisted_records": len(persistence["records"]),
+                "spooled_atom_records": int(persistence.get("atom_count") or 0),
                 "state": persistence["state"], "merge": {"ok": True, "changed": persistence["changed"]},
             }
             self.agent_token_scan_completion = {"scan_id": scan_id, "response": response}
@@ -1657,6 +2020,7 @@ class PersistentStatsService:
 
         self._drain_agent_token_scan_result()
         previous_state = self._agent_token_state(fallback_state)
+        atom_state = self._agent_token_atom_state()
         with self.agent_token_scan_lock:
             if self.agent_token_scan_worker is not None or self.agent_token_scan_result is not None or self.agent_token_scan_persistence is not None:
                 return {"ok": True, "accepted": False, "busy": True, "records": [], "state": previous_state}
@@ -1673,14 +2037,19 @@ class PersistentStatsService:
             # child is distinguishable from a valid empty scan.
             result_path.unlink(missing_ok=True)
             context = multiprocessing.get_context("spawn")
+            include_atoms = self.agent_token_atom_worker is None and self.agent_token_atom_persistence is None
             worker = context.Process(
                 target=_run_agent_token_scan_process,
-                args=(rows, sample_time, previous_state, seen_keys, scan_id, str(result_path)),
+                args=(
+                    rows, sample_time, previous_state, seen_keys, scan_id, str(result_path),
+                    atom_state, include_atoms,
+                ),
                 name="statsd-agent-token-scan",
                 daemon=True,
             )
             self.agent_token_scan_worker = worker
             self.agent_token_scan_result_path = result_path
+            self.agent_token_scan_includes_atoms = include_atoms
         try:
             worker.start()
         except RuntimeError:
@@ -1688,6 +2057,7 @@ class PersistentStatsService:
                 if self.agent_token_scan_worker is worker:
                     self.agent_token_scan_worker = None
                     self.agent_token_scan_result_path = None
+                    self.agent_token_scan_includes_atoms = False
             try:
                 result_path.unlink(missing_ok=True)
             except OSError:
@@ -2623,7 +2993,10 @@ class PersistentStatsService:
             scan_worker = self.agent_token_scan_worker
             scan_result_pending = self.agent_token_scan_result is not None
             scan_persisting = self.agent_token_scan_persistence is not None
+            atom_worker = self.agent_token_atom_worker
+            atom_persisting = self.agent_token_atom_persistence is not None
         scan_running = bool(scan_worker and scan_worker.is_alive())
+        atom_scan_running = bool(atom_worker and atom_worker.is_alive())
         try:
             cache = self.store.diagnostics()
             status = {"database": str(self.store.path)}
@@ -2641,8 +3014,8 @@ class PersistentStatsService:
             "started_at": self.started_at,
             "socket": str(self.socket_path),
             "clients": len(self.leases),
-            "queues": {"interactive": 0, "normal": 0, "maintenance": int(scan_result_pending or scan_persisting) + int(self.pricing_reprojection is not None)},
-            "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending or scan_persisting else ("pricing-reprojection" if self.pricing_reprojection is not None else "")),
+            "queues": {"interactive": 0, "normal": 0, "maintenance": int(scan_result_pending or scan_persisting or atom_scan_running or atom_persisting) + int(self.pricing_reprojection is not None)},
+            "active_task": "agent-token-scan" if scan_running else ("agent-token-persist" if scan_result_pending or scan_persisting else ("agent-token-atom-scan" if atom_scan_running else ("agent-token-atom-backfill" if atom_persisting else ("pricing-reprojection" if self.pricing_reprojection is not None else "")))),
             "cache": cache,
             "history_profile": dict(self.last_history_profile),
             "last_success": self.last_client_at,
@@ -2912,6 +3285,7 @@ class PersistentStatsService:
     def _start_after_listener(self) -> None:
         """Open/migrate the durable store only after this daemon owns the lock."""
         self.import_legacy_history_once()
+        self.agent_token_atom_persistence = self._load_agent_token_atom_spool()
         # Socket publication must mean it can answer immediately. The full
         # retained-history pass advances in bounded listener idle turns.
         self.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
@@ -2927,15 +3301,30 @@ class PersistentStatsService:
         with self.agent_token_scan_lock:
             scan_worker = self.agent_token_scan_worker
             scan_result_path = self.agent_token_scan_result_path
+            atom_worker = self.agent_token_atom_worker
+            atom_result_path = self.agent_token_atom_result_path
         if scan_worker is not None and scan_worker.is_alive():
             scan_worker.join(timeout=1.0)
         if scan_worker is not None and scan_worker.is_alive():
             scan_worker.terminate()
             scan_worker.join(timeout=1.0)
         self._drain_agent_token_scan_result()
+        if atom_worker is not None and atom_worker.is_alive():
+            atom_worker.join(timeout=1.0)
+        if atom_worker is not None and atom_worker.is_alive():
+            atom_worker.terminate()
+            atom_worker.join(timeout=1.0)
+        if atom_worker is not None and not atom_worker.is_alive() and atom_result_path is not None and atom_result_path.is_file():
+            self._drain_agent_token_atom_worker()
         if scan_result_path is not None:
             try:
                 scan_result_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if self.agent_token_atom_result_path is not None:
+            try:
+                self.agent_token_atom_result_path.unlink(missing_ok=True)
+                self.agent_token_atom_result_path.with_suffix(".partial.json").unlink(missing_ok=True)
             except OSError:
                 pass
         self.store.close()

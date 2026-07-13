@@ -1108,8 +1108,16 @@ def transcript_json_records(path: Path, *, max_bytes: int | None = None) -> Iter
     """
     try:
         with path.open("rb") as handle:
-            payload = handle.read(max(0, int(max_bytes))) if max_bytes is not None else handle.read()
-            for raw_line in payload.splitlines():
+            remaining = max(0, int(max_bytes)) if max_bytes is not None else None
+            while remaining is None or remaining > 0:
+                raw_line = handle.readline() if remaining is None else handle.readline(remaining)
+                if not raw_line:
+                    break
+                if remaining is not None:
+                    remaining -= len(raw_line)
+                raw_line = raw_line.rstrip(b"\r\n")
+                if not raw_line:
+                    continue
                 try:
                     record = json.loads(raw_line)
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -1270,10 +1278,9 @@ def claude_record_usage(usage: Any) -> dict[tuple[str, str, str, str], float | N
     return {key: value for key, value in totals.items()}
 
 
-def claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None) -> list[TranscriptUsageAtom]:
+def iter_claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None):
     source = str(path.expanduser().resolve(strict=False))
     previous_by_message: dict[str, dict[tuple[str, str, str, str], float]] = {}
-    atoms: list[TranscriptUsageAtom] = []
     for sequence, record in enumerate(transcript_json_records(path, max_bytes=max_bytes)):
         if record.get("type") != "assistant":
             continue
@@ -1290,7 +1297,7 @@ def claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent
         previous_by_message[message_id] = {key: float(value) for key, value in components.items() if value is not None}
         model = transcript_model_name(message.get("model"))
         effort = message.get("effort") or record.get("effort")
-        atoms.extend(usage_component_atoms(
+        yield from usage_component_atoms(
             source=source,
             timestamp=timestamp,
             event_id=f"claude:{agent_thread_id or source}:{message_id}",
@@ -1307,18 +1314,23 @@ def claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent
             pricing_profile=message.get("pricing_profile") or message.get("profile") or record.get("pricing_profile") or record.get("profile"),
             service_tier=message.get("service_tier") or message.get("serviceTier") or record.get("service_tier") or record.get("serviceTier"),
             telemetry_complete=usage_telemetry_complete(components),
-        ))
-    return atoms
+        )
 
 
-def codex_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None) -> list[TranscriptUsageAtom]:
+def claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None) -> list[TranscriptUsageAtom]:
+    return list(iter_claude_transcript_usage_atoms(
+        path, root_thread_id=root_thread_id, agent_thread_id=agent_thread_id,
+        parent_thread_id=parent_thread_id, depth=depth, max_bytes=max_bytes,
+    ))
+
+
+def iter_codex_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None):
     source = str(path.expanduser().resolve(strict=False))
     totals: dict[tuple[str, str, str, str], float] = {}
     current_model = ""
     current_effort = "unknown"
     current_pricing_profile = "default"
     current_service_tier = "default"
-    atoms: list[TranscriptUsageAtom] = []
     for sequence, record in enumerate(transcript_json_records(path, max_bytes=max_bytes)):
         if record.get("type") == "turn_context":
             payload = record.get("payload")
@@ -1343,7 +1355,7 @@ def codex_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_
         delta = usage_component_delta(components, totals) if is_cumulative else components
         if is_cumulative:
             totals = {key: float(value) for key, value in components.items() if value is not None}
-        atoms.extend(usage_component_atoms(
+        yield from usage_component_atoms(
             source=source,
             timestamp=timestamp,
             event_id=f"codex:{agent_thread_id or source}:{sequence}",
@@ -1360,26 +1372,42 @@ def codex_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_
             pricing_profile=current_pricing_profile,
             service_tier=current_service_tier,
             telemetry_complete=usage_telemetry_complete(components),
-        ))
-    return atoms
+        )
 
 
-def transcript_usage_atoms(path: Path, kind: str, *, family_paths: list[Path] | None = None, max_bytes_by_path: dict[str, int] | None = None) -> list[TranscriptUsageAtom]:
-    """Return normalized atoms for a root transcript and its discovered family."""
+def codex_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None) -> list[TranscriptUsageAtom]:
+    return list(iter_codex_transcript_usage_atoms(
+        path, root_thread_id=root_thread_id, agent_thread_id=agent_thread_id,
+        parent_thread_id=parent_thread_id, depth=depth, max_bytes=max_bytes,
+    ))
+
+
+def iter_transcript_usage_atoms(path: Path, kind: str, *, family_paths: list[Path] | None = None, max_bytes_by_path: dict[str, int] | None = None):
+    """Yield one transcript family's normalized atoms without retaining the family."""
 
     agent_kind = str(kind or "").strip().lower()
     paths = family_paths if family_paths is not None else (claude_transcript_family_paths(path) if agent_kind == "claude" else codex_transcript_family_paths(path) if agent_kind == "codex" else [])
     context = transcript_family_context(paths, agent_kind)
-    atoms: list[TranscriptUsageAtom] = []
     for transcript_path in paths:
         source = str(transcript_path.expanduser().resolve(strict=False))
         root, agent, parent, depth = context.get(source, (source, source, "", 0))
         max_bytes = (max_bytes_by_path or {}).get(source)
         if agent_kind == "claude":
-            atoms.extend(claude_transcript_usage_atoms(transcript_path, root_thread_id=root, agent_thread_id=agent, parent_thread_id=parent, depth=depth, max_bytes=max_bytes))
+            atoms = iter_claude_transcript_usage_atoms(transcript_path, root_thread_id=root, agent_thread_id=agent, parent_thread_id=parent, depth=depth, max_bytes=max_bytes)
         elif agent_kind == "codex":
-            atoms.extend(codex_transcript_usage_atoms(transcript_path, root_thread_id=root, agent_thread_id=agent, parent_thread_id=parent, depth=depth, max_bytes=max_bytes))
-    return sorted(atoms, key=lambda atom: (atom.timestamp, atom.source, atom.event_id, atom.direction, atom.cache_role))
+            atoms = iter_codex_transcript_usage_atoms(transcript_path, root_thread_id=root, agent_thread_id=agent, parent_thread_id=parent, depth=depth, max_bytes=max_bytes)
+        else:
+            atoms = []
+        yield from atoms
+
+
+def transcript_usage_atoms(path: Path, kind: str, *, family_paths: list[Path] | None = None, max_bytes_by_path: dict[str, int] | None = None) -> list[TranscriptUsageAtom]:
+    """Return normalized atoms for a root transcript and its discovered family."""
+
+    return sorted(
+        iter_transcript_usage_atoms(path, kind, family_paths=family_paths, max_bytes_by_path=max_bytes_by_path),
+        key=lambda atom: (atom.timestamp, atom.source, atom.event_id, atom.direction, atom.cache_role),
+    )
 
 
 def direct_image_usage_atoms(*, request: dict[str, Any], response: dict[str, Any], timestamp: float, source: str, request_id: str = "", root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0) -> list[TranscriptUsageAtom]:
