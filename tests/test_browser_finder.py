@@ -416,6 +416,14 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         assert "file-tree-row--changed-ancestor" in rows_by_path[path]["classes"], metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
         assert rows_by_path[path]["nameWeight"] >= 700, metrics
+    hover_detail = browser.execute_script(
+        """
+        const row = document.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]');
+        row.__yolomuxRepoHoverController.openNow();
+        return document.getElementById('fileTreeRepoPopover')?.textContent || '';
+        """
+    )
+    assert "★" in hover_detail and "Modified by 1" in hover_detail, hover_detail
     assert metrics["fetchedPaths"] >= 1, metrics
     manual_collapse = browser.execute_async_script(
         """
