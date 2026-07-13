@@ -2049,10 +2049,11 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
             cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 120}]},
           });
           debugGraphApplyServerHistory({sequence: 1, records: [record(1)]});
-          setJsDebugHistoryReadiness('ready', {
-            loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
-            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
-          });
+              setJsDebugHistoryReadiness('ready', {
+                loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+                coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+                requestCoverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+              });
           setDebugGraphChartVisible('modelTokens', true);
           setDebugGraphRange(300);
           renderDebugPanels({force: true});
@@ -3186,8 +3187,11 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
           });
           const yocostSlider = yocostPanel?.querySelector('[data-js-debug-range-slider]');
+          const targetRangeSeconds = 15 * 60;
+          const targetRangeIndex = debugGraphAvailableRangeOptions()
+            .findIndex(option => option.seconds === targetRangeSeconds);
           if (yocostSlider) {
-            yocostSlider.value = '2';
+            yocostSlider.value = String(targetRangeIndex);
             yocostSlider.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
           }
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -3245,6 +3249,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             rangeSeconds: (Number(yocostRangeGrid?.dataset.jsDebugDomainEnd) - Number(yocostRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
             statsRangeSeconds: (Number(statsRangeGrid?.dataset.jsDebugDomainEnd) - Number(statsRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
             rangeSliderValue: yocostAfterRange?.querySelector('[data-js-debug-range-slider]')?.value || '',
+            targetRangeIndex,
             resolutionChoice: yocostResolutionChoice?.value || '',
             resolutionValue: yocostAfterResolution?.querySelector('[data-js-debug-resolution-override]')?.value || '',
             providerAscending,
@@ -3350,7 +3355,8 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["popover"]["tokenChartKeys"] == ["agentTokens", "modelTokens"], metrics
     assert metrics["popover"]["chartsAboveReport"] is True and metrics["popover"]["rangeControl"] is True and metrics["popover"]["resolutionControl"] is True, metrics
     assert metrics["popover"]["statsVisible"] is True and "Last refreshed" in metrics["popover"]["dataAge"] and metrics["popover"]["refreshButton"] == "Refresh", metrics
-    assert 895 <= metrics["yocostControls"]["rangeSeconds"] <= 905 and metrics["yocostControls"]["rangeSliderValue"] == "2", metrics
+    assert 895 <= metrics["yocostControls"]["rangeSeconds"] <= 905, metrics
+    assert metrics["yocostControls"]["rangeSliderValue"] == str(metrics["yocostControls"]["targetRangeIndex"]), metrics
     assert 895 <= metrics["yocostControls"]["statsRangeSeconds"] <= 905, metrics
     assert metrics["yocostControls"]["resolutionChoice"] and metrics["yocostControls"]["resolutionValue"] == metrics["yocostControls"]["resolutionChoice"], metrics
     assert metrics["yocostControls"]["providerSort"] == "descending" and metrics["yocostControls"]["providerAscending"] == sorted(metrics["yocostControls"]["providerAscending"]), metrics
@@ -4832,13 +4838,22 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
           const coverageFor = (url, overrides = {}) => {
             const requestedStart = Number(url.searchParams.get('history_start'));
             const requestedEnd = Number(url.searchParams.get('history_end'));
+            const coveredEnd = requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd;
+            const resolutionSeconds = Number(url.searchParams.get('history_resolution'));
+            const interval = {
+              start: requestedStart,
+              end: coveredEnd,
+              resolution_seconds: resolutionSeconds,
+            };
             return {
               mode: requestedEnd === 0 ? 'live' : 'older',
               requested_start: requestedStart,
               requested_end: requestedEnd,
               covered_start: requestedStart,
-              covered_end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd,
-              resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              covered_end: coveredEnd,
+              resolution_seconds: resolutionSeconds,
+              intervals: [interval],
+              store_intervals: {server: [interval], agent_tokens: [interval]},
               complete: true,
               has_more_older: false,
               next_older_end: 0,
@@ -4962,7 +4977,7 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
     assert metrics["finalOverlayHidden"] is True, metrics
 
 
-def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browser, tmp_path):
+def test_debug_graph_history_error_retains_chart_and_explicit_range_retries(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -5052,10 +5067,10 @@ def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browse
               text: errorGraph?.querySelector('[data-js-debug-history-overlay]')?.textContent?.trim() || '',
               retry: Boolean(errorGraph?.querySelector('[data-js-debug-history-retry]')),
             };
-            retryJsDebugHistory();
+            setDebugGraphRange(4 * 60 * 60);
             await window.__yolomuxTestWaitFor(
               () => requestCount >= 2 && !jsDebugStatsPollState.inFlight && jsDebugHistoryReadiness.phase === 'ready',
-              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats history retry readiness'}
+              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats explicit range retry readiness'}
             );
             const readyGraph = document.querySelector('[data-js-debug-graph]');
             return {

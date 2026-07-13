@@ -432,7 +432,10 @@ function setDebugGraphChartVisible(key, visible) {
     jsDebugGraphVisibleCharts.delete(chartKey);
   }
   saveJsDebugStatsUiPreferences();
-  refreshDebugGraphSurfaces();
+  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
+  // while a graph control is focused, but deferring the user's own activation
+  // leaves aria-pressed and the chart body visibly stale until focus moves.
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
 }
 
 function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
@@ -5754,7 +5757,9 @@ function handleYoCostTableSort(event, panel) {
   const nextDirection = jsDebugCostComponentSortState.key === key && jsDebugCostComponentSortState.direction === 'asc' ? 'desc' : 'asc';
   jsDebugCostComponentSortState.key = key;
   jsDebugCostComponentSortState.direction = nextDirection;
-  renderYoCostPanels();
+  // Age-label cadence throttles passive panel repainting; a user sort is an
+  // explicit content mutation and must repaint immediately.
+  renderYoCostPanels({force: true});
   return true;
 }
 
@@ -5831,8 +5836,10 @@ function renderYoCostPanels({force = false} = {}) {
   return true;
 }
 
-function refreshDebugGraphSurfaces({force = true} = {}) {
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force});
+function refreshDebugGraphSurfaces({force = true, deferFocusedControl = true} = {}) {
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    refreshDebugGraphElement(graph, {force, deferFocusedControl});
+  }
   renderYoCostPanels({force});
 }
 
@@ -6073,9 +6080,9 @@ function flushDeferredDebugGraphRefresh(graph) {
   return refreshDebugGraphElement(graph, {force: true});
 }
 
-function refreshDebugGraphElement(graph, {force = false} = {}) {
+function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = true} = {}) {
   if (!graph || jsDebugGraphRangeSliderDragging) return false;
-  if (debugGraphFocusedControl(graph)) {
+  if (deferFocusedControl && debugGraphFocusedControl(graph)) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
@@ -6185,7 +6192,10 @@ function setDebugGraphRange(value, {render = true} = {}) {
   syncDebugGraphAgentTokenResolution();
   if (!render) return;
   const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
-  const requestedHistory = requestJsDebugHistoryForCurrentDomain();
+  // An explicit range action is also an explicit retry. Do not let an old
+  // automatic-retry backoff make a newly requested domain appear ready while
+  // no request is queued.
+  const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
   if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
     setJsDebugHistoryReadiness('ready', {
       requestedRangeSeconds: jsDebugGraphRangeSeconds,
@@ -6452,8 +6462,8 @@ function handleDebugGraphControlEvent(event, panel) {
   const chartToggle = event.target.closest('[data-js-debug-chart-toggle]');
   if (event.type === 'click' && chartToggle && panel.contains(chartToggle)) {
     event.preventDefault();
-    const visible = chartToggle.getAttribute('aria-pressed') !== 'true';
-    setDebugGraphChartVisible(chartToggle.dataset.jsDebugChartToggle, visible);
+    const chartKey = chartToggle.dataset.jsDebugChartToggle;
+    setDebugGraphChartVisible(chartKey, !debugGraphChartVisible(chartKey));
     return true;
   }
   const retry = event.target.closest('[data-js-debug-history-retry]');
