@@ -94,6 +94,7 @@ let jsDebugGraphSelectionState = null;
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveFrame = 0;
 let jsDebugGraphLiveFrameLastMs = 0;
+let jsDebugCostAgeNextRefreshAtMs = 0;
 let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
@@ -5761,7 +5762,16 @@ function createYoCostPanel() {
   return panel;
 }
 
-function renderYoCostPanels() {
+function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
+  return 3000 + Math.floor(Math.max(0, Math.min(1, Number(randomValue) || 0)) * 7000);
+}
+
+function renderYoCostPanels({force = false} = {}) {
+  const nowMs = Date.now();
+  const visible = typeof document !== 'undefined'
+    && document.visibilityState !== 'hidden'
+    && itemIsActivePaneTab(yocostItemId);
+  if (!force && (!visible || nowMs < jsDebugCostAgeNextRefreshAtMs)) return false;
   for (const panel of document.querySelectorAll('.js-yocost-panel')) {
     const body = panel.querySelector('.js-yocost-body');
     const scroll = body?.querySelector('.js-yocost-scroll');
@@ -5773,11 +5783,13 @@ function renderYoCostPanels() {
     }
     bindYoCostPanel(panel);
   }
+  jsDebugCostAgeNextRefreshAtMs = nowMs + debugCostAgeRefreshDelayMs();
+  return true;
 }
 
 function refreshDebugGraphSurfaces({force = true} = {}) {
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force});
-  renderYoCostPanels();
+  renderYoCostPanels({force});
 }
 
 function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(yocostItemId))) {
@@ -5819,7 +5831,7 @@ function renderDebugPanels(options = {}) {
     }
     bindDebugPanel(panel);
   }
-  renderYoCostPanels();
+  renderYoCostPanels(options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -5827,7 +5839,7 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  renderYoCostPanels();
+  renderYoCostPanels(options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 

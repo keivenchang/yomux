@@ -2241,6 +2241,59 @@ def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):
     assert "stats" not in metrics["neitherChannels"], metrics
 
 
+def test_yocost_last_refreshed_uses_visibility_aware_randomized_cadence(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof renderYoCostPanels === 'function' && typeof debugCostAgeRefreshDelayMs === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        selectSession(yocostItemId, {userInitiated: true});
+        const panel = document.getElementById(panelDomId(yocostItemId));
+        const body = panel?.querySelector('.js-yocost-body');
+        const originalRandom = Math.random;
+        const originalNow = Date.now;
+        let now = 100000;
+        Date.now = () => now;
+        try {
+          Math.random = () => 0;
+          jsDebugCostAgeNextRefreshAtMs = 0;
+          const first = renderYoCostPanels();
+          const firstHtml = body?.innerHTML || '';
+          const firstDeadline = jsDebugCostAgeNextRefreshAtMs;
+          now = firstDeadline - 1;
+          const early = renderYoCostPanels();
+          const earlySame = (body?.innerHTML || '') === firstHtml;
+          now = firstDeadline;
+          Math.random = () => 1;
+          const atThreeSeconds = renderYoCostPanels();
+          const secondDeadline = jsDebugCostAgeNextRefreshAtMs;
+          Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
+          now = secondDeadline + 1;
+          const hidden = renderYoCostPanels();
+          Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
+          const visibleAgain = renderYoCostPanels();
+          return {
+            first, early, earlySame, atThreeSeconds, hidden, visibleAgain,
+            firstDelay: firstDeadline - 100000,
+            secondDelay: secondDeadline - firstDeadline,
+            ageText: body?.querySelector('[data-js-yocost-data-age]')?.textContent || '',
+          };
+        } finally {
+          Math.random = originalRandom;
+          Date.now = originalNow;
+        }
+        """
+    )
+    assert metrics["first"] is True and metrics["firstDelay"] == 3000, metrics
+    assert metrics["early"] is False and metrics["earlySame"] is True, metrics
+    assert metrics["atThreeSeconds"] is True and metrics["secondDelay"] == 10000, metrics
+    assert metrics["hidden"] is False and metrics["visibleAgain"] is True, metrics
+    assert "Last refreshed" in metrics["ageText"], metrics
+
+
 def test_debug_graph_terminal_partial_history_renders_agent_and_model_tokens(browser, tmp_path):
     """A known-unavailable prefix must not discard the valid token payload."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")

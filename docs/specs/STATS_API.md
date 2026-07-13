@@ -15,13 +15,32 @@ failure is HTTP 503 with `stats.error.unavailable`; there is no in-process
 history fallback.
 
 Successful history has `sequence`, `latest_sequence`, `records`, `coverage`,
-and `agent_token_schema_version`. Coverage is required when history is enabled:
-it includes requested/available/covered bounds, `complete`, older-page facts,
-resolution, source/returned counts, and cursor facts. Empty + complete means
-the requested interval is fully covered, but may have no records after its
-cursor; incomplete means partial data and is never a full-range success.
-Missing/malformed coverage is a contract violation, not empty history. Ranges
-are inclusive `start`, exclusive `end`.
+and `agent_token_schema_version`. Coverage is required when history is enabled.
+Its authoritative shape is a bounded `intervals` list (at most 256 entries),
+where each entry has inclusive `start`, exclusive `end`, resolution, source,
+epoch, and owner-generation facts. Empty is a valid list and means that none of
+the requested range is known to be covered. Prefix, suffix, middle, and multiple
+gaps are ordinary data shapes; clients render returned records and paint every
+uncovered span as no data. They are never classified as unusable partial
+responses and never cause an automatic refetch loop.
+
+`coverage.stores` and its compact `store_intervals` projection report the same
+bounded facts independently for raw/server/rollup data and the CPU, memory, GPU,
+Agent Status, Agent tokens, and cost families. A chart may claim data only in
+its own family's intervals. A checked token sample with no delta records covered
+zero usage; an absent sample remains an uncovered gap and must not become a
+silent zero. Agent Status carry-forward ends at an epoch boundary, so sleep,
+restart, owner change, or a wall-clock discontinuity cannot paint a stale roster
+through the outage. `epochs` describes those bounded sampler segments and
+`epochs_truncated` reports list truncation.
+
+The requested/available/covered bounds, `complete`, older-page facts,
+resolution, source/returned counts, and cursor facts remain as a compatibility
+envelope during migration, but they do not replace the interval list or prove
+that a middle span is covered. Missing or malformed `intervals` is a contract
+violation; transport failure is the other bounded Retry state. Ranges are
+inclusive `start`, exclusive `end`. A legacy schema-2 read-only database derives
+intervals and epochs from retained bucket gaps without mutating the database.
 
 Range reads may use persisted rollups, but one instant has one durable source;
 consumers must not sum overlapping raw and rollup records. A lower-bound or
