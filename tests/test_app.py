@@ -1718,6 +1718,11 @@ def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch, 
 
     monkeypatch.setattr(webapp.stats_client, "claim_agent_token_deltas_from_rows", slow_claim)
     try:
+        # Process launch has its own statsd coverage and is highly sensitive to
+        # concurrent browser/compiler lanes. Warm this isolated daemon so this
+        # timer measures only the request-path contract named by the test.
+        assert webapp.stats_client.ensure_started() is True
+        assert webapp.stats_client.healthy() is True
         started = time.monotonic()
         payload = webapp.stats_sample_payload(token_consumer=True)
         response_elapsed = time.monotonic() - started
@@ -1730,11 +1735,8 @@ def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch, 
 
     assert payload["pid"] == os.getpid()
     assert payload["uptime_seconds"] >= 0
-    # The request must defer the token scan; a cold, isolated statsd daemon
-    # may still need a bounded local-service startup window under xdist load.
-    # macOS CI/dev hosts with fewer cores and active browser lanes have measured
-    # just under one second here while still preserving the real contract below:
-    # the slow token claim must not run until the sampler path.
+    # The warmed request must defer the slow token claim until the sampler path.
+    # Cold daemon startup is intentionally outside this latency assertion.
     assert response_elapsed < 1.25
     assert calls_before_sampler == 0
     assert len(calls) == 1

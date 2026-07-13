@@ -720,7 +720,7 @@ def test_yostats_history_browser_tests_use_shared_observable_waits():
     tree = ast.parse(source)
     names = {
         "test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll",
-        "test_debug_graph_history_error_retains_chart_and_retry_clears_overlay",
+        "test_debug_graph_history_error_retains_chart_and_explicit_range_retries",
         "test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediately",
     }
     function_sources = {
