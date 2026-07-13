@@ -2848,12 +2848,14 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
           }),
           modelLegends: [...modelChart.querySelectorAll('[data-js-debug-legend^="modelToken:"]')].map(item => {
             const key = item.dataset.jsDebugLegend;
-            const swatch = item.querySelector('.js-debug-legend-swatch');
+            const swatch = item.querySelector('.js-debug-legend-token-swatch');
+            const pattern = swatch?.querySelector('[data-js-debug-token-legend-pattern-def]');
             const bar = modelBars.get(key);
             return {
               key,
-              background: getComputedStyle(swatch).backgroundColor,
-              barFill: getComputedStyle(bar).fill,
+              pattern: item.dataset.jsDebugTokenPattern,
+              barPattern: bar?.dataset.jsDebugTokenPattern,
+              swatchFill: getComputedStyle(pattern?.querySelector('rect')).fill,
               swatchSeriesColor: getComputedStyle(swatch).getPropertyValue('--js-debug-series-color').trim(),
               barSeriesColor: getComputedStyle(bar).getPropertyValue('--js-debug-series-color').trim(),
             };
@@ -2893,14 +2895,92 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
     assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
     assert [item["key"].endswith(model) for item, model in zip(metrics["modelLegends"], ["gpt-5.6-sol", "gpt-5.6-terra"])] == [True, True], metrics
     assert all(item["key"].startswith("modelToken:legacy�") for item in metrics["modelLegends"]), metrics
-    assert len({item["background"] for item in metrics["modelLegends"]}) == 2, metrics
-    assert all(item["background"] == item["barFill"] for item in metrics["modelLegends"]), metrics
+    assert len({item["swatchFill"] for item in metrics["modelLegends"]}) == 2, metrics
+    assert all(item["pattern"] == item["barPattern"] for item in metrics["modelLegends"]), metrics
     assert all(item["swatchSeriesColor"] == item["barSeriesColor"] for item in metrics["modelLegends"]), metrics
     assert [item["owner"] for item in metrics["tokenAxes"]] == ["shared", "shared"], metrics
     assert len({(item["max"], item["scale"], item["midpoint"]) for item in metrics["tokenAxes"]}) == 1, metrics
     assert all(item["hovered"] for item in metrics["hover"]["dark"]), metrics
     assert all(item["color"] == "rgb(228, 232, 238)" for item in metrics["hover"]["dark"]), metrics
     assert all(color == "rgb(23, 32, 44)" for color in metrics["hover"]["light"]), metrics
+
+
+def test_debug_token_series_visuals_are_distinct_and_match_across_stats_cost_and_themes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof recordJsDebugStatsSample === 'function' && typeof renderYoCostPanels === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        const models = ['claude-fable-5', 'claude-opus-4-8', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-image-2'];
+        const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+        recordJsDebugStatsSample({history: {sequence: 5, records: [{
+          start: nowSeconds - 60, duration: 60, sequence: 5,
+          tokens_per_agent_total: 150, agent_token_samples: 5,
+          agent_token_rates: models.map((model, index) => ({
+            key: `series-${index}|0|codex`, label: `agent-${index + 1}`, total: (index + 1) * 10,
+            samples: 1, tokens: (index + 1) * 10, seconds: 60, source: 'transcript',
+            model_rates: {[model]: {total: (index + 1) * 10, samples: 1, tokens: (index + 1) * 10, seconds: 60}},
+          })),
+        }]}}, {forceGraphRefresh: true});
+        setDebugGraphChartVisible('modelTokens', true);
+        renderDebugPanels({force: true});
+
+        const visualFor = (chart, seriesKey) => {
+          const bar = chart.querySelector(`[data-js-debug-bar-series="${CSS.escape(seriesKey)}"]`);
+          const legend = chart.querySelector(`[data-js-debug-legend="${CSS.escape(seriesKey)}"]`);
+          const barPattern = bar?.dataset.jsDebugTokenPattern || '';
+          const legendPattern = legend?.dataset.jsDebugTokenPattern || '';
+          const barDefinition = [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')]
+            .find(node => node.id && (bar?.style.fill || '').includes(`#${node.id}`));
+          const legendDefinition = legend?.querySelector('[data-js-debug-token-legend-pattern-def]');
+          return {
+            label: legend?.textContent.trim() || '',
+            pattern: barPattern,
+            legendPattern,
+            color: getComputedStyle(barDefinition?.querySelector('rect')).fill,
+            legendColor: getComputedStyle(legendDefinition?.querySelector('rect')).fill,
+          };
+        };
+        const collect = root => Object.fromEntries(['agentTokens', 'modelTokens'].map(chartKey => {
+          const chart = root.querySelector(`[data-js-debug-chart="${chartKey}"]`);
+          const keys = [...chart.querySelectorAll('[data-js-debug-legend][data-js-debug-token-pattern]')]
+            .map(item => item.dataset.jsDebugLegend);
+          return [chartKey, Object.fromEntries(keys.map(key => [key, visualFor(chart, key)]))];
+        }));
+        const snapshots = {};
+        for (const theme of ['dark', 'light']) {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          selectSession(debugPaneItemId, {userInitiated: true});
+          renderDebugPanels({force: true});
+          const stats = collect(document.querySelector('[data-js-debug-graph]'));
+          selectSession(yocostItemId, {userInitiated: true});
+          renderYoCostPanels({force: true});
+          const cost = collect(document.getElementById(panelDomId(yocostItemId)).querySelector('[data-js-yocost-graphs]'));
+          snapshots[theme] = {stats, cost};
+        }
+        document.body.classList.remove('theme-light');
+        return {models, snapshots};
+        """
+    )
+    for theme in ("dark", "light"):
+        for chart_key in ("agentTokens", "modelTokens"):
+            stats = metrics["snapshots"][theme]["stats"][chart_key]
+            cost = metrics["snapshots"][theme]["cost"][chart_key]
+            assert len(stats) == 5, metrics
+            assert stats == cost, metrics
+            assert len({item["color"] for item in stats.values()}) == 5, metrics
+            assert len({item["pattern"] for item in stats.values()}) == 5, metrics
+            assert len({(item["color"], item["pattern"]) for item in stats.values()}) == 5, metrics
+            assert all(item["pattern"] == item["legendPattern"] for item in stats.values()), metrics
+            assert all(item["color"] == item["legendColor"] for item in stats.values()), metrics
+        model_labels = {item["label"] for item in metrics["snapshots"][theme]["stats"]["modelTokens"].values()}
+        assert {"claude-fable-5", "claude-opus-4-8"} <= model_labels, metrics
 
 
 def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_path):

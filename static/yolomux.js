@@ -44142,21 +44142,23 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
     }
   }
   const prefix = dimension === 'agent' ? jsDebugGraphAgentTokenSeriesPrefix : jsDebugGraphModelTokenSeriesPrefix;
-  return [...tokenItems.entries()]
+  const displayedItems = [...tokenItems.entries()]
     .filter(([, item]) => item.samples > 0)
-    .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
-    .map(([key, item], index) => ({
+    .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]));
+  const visuals = debugGraphDisplayedTokenVisuals(displayedItems, ([key]) => key);
+  return displayedItems.map(([key, item], index) => ({
       key: `${prefix}${key}`,
       label: item.label,
       descKey: dimension === 'agent' ? 'debug.graph.series.agentToken.desc' : 'debug.graph.series.modelToken.desc',
       descParams: dimension === 'agent' ? {agent: item.label} : {model: item.label},
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
+      tokenPatternSeries: true,
       agentTokenSeries: dimension === 'agent',
       agentTokenKey: key,
       tokenDimension: dimension,
-      agentTokenPatternIndex: index % jsDebugGraphAgentTokenPatternCount,
-      color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
+      agentTokenPatternIndex: visuals[index].patternIndex,
+      color: visuals[index].color,
       value: bucket => {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
@@ -44195,6 +44197,28 @@ function debugGraphStablePaletteIndex(identity, count) {
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   return hash % size;
+}
+
+function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+  const colorCount = Math.max(1, jsDebugGraphAgentTokenColors.length);
+  const patternCount = Math.max(1, jsDebugGraphAgentTokenPatternCount);
+  const combinations = [];
+  const pairedCount = Math.min(colorCount, patternCount);
+  for (let index = 0; index < pairedCount; index += 1) combinations.push([index, index]);
+  for (let colorIndex = 0; colorIndex < colorCount; colorIndex += 1) {
+    for (let patternIndex = 0; patternIndex < patternCount; patternIndex += 1) {
+      if (colorIndex === patternIndex && colorIndex < pairedCount) continue;
+      combinations.push([colorIndex, patternIndex]);
+    }
+  }
+  return (items || []).map((item, index) => {
+    const identity = identityForItem(item);
+    const combinationIndex = index < combinations.length
+      ? index
+      : debugGraphStablePaletteIndex(identity, combinations.length);
+    const [colorIndex, patternIndex] = combinations[combinationIndex];
+    return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
+  });
 }
 
 function debugGraphModelTokenDimensionLabel(dimension = jsDebugGraphModelTokenDimension) {
@@ -44274,23 +44298,22 @@ function debugGraphModelTokenSeriesDefs(buckets) {
       }
     }
   }
-  return [...tokenItems.values()]
+  const displayedItems = [...tokenItems.values()]
     .filter(item => item.samples > 0)
-    .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key))
-    .map((item, index) => ({
+    .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key));
+  const visuals = debugGraphDisplayedTokenVisuals(displayedItems, item => item.key);
+  return displayedItems.map((item, index) => ({
       key: `${jsDebugGraphModelTokenSeriesPrefix}${item.key}`,
       label: item.label,
       descKey: 'debug.graph.series.modelToken.desc',
       descParams: {model: item.label},
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
+      tokenPatternSeries: true,
       agentTokenKey: item.key,
       tokenDimension: 'model',
-      // Model color is keyed by the exact model alone so adding/changing an
-      // effort variant cannot repaint that model. Pattern keys retain the
-      // model+effort distinction for accessible stacked-series separation.
-      agentTokenPatternIndex: debugGraphStablePaletteIndex(item.key, jsDebugGraphAgentTokenPatternCount),
-      color: jsDebugGraphAgentTokenColors[debugGraphStablePaletteIndex(item.model, jsDebugGraphAgentTokenColors.length)],
+      agentTokenPatternIndex: visuals[index].patternIndex,
+      color: visuals[index].color,
       value: bucket => {
         const components = debugGraphModelTokenComponentRecords(bucket);
         if (components.length) {
@@ -44939,7 +44962,7 @@ function debugGraphSeriesClassKey(series) {
 }
 
 function debugGraphAgentTokenPatternIndex(series) {
-  if (series?.agentTokenSeries !== true) return -1;
+  if (series?.tokenPatternSeries !== true) return -1;
   const index = Math.floor(Number(series.agentTokenPatternIndex));
   return Number.isFinite(index) && index >= 0 ? index % jsDebugGraphAgentTokenPatternCount : 0;
 }
@@ -45016,7 +45039,7 @@ function debugGraphSeriesLineClassName(series, extraClass = '') {
 }
 
 function debugGraphSeriesTokenAgentAttrs(series) {
-  if (series?.agentTokenSeries !== true) return '';
+  if (series?.tokenPatternSeries !== true) return '';
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
@@ -45126,7 +45149,7 @@ function debugGraphLegendHtml(seriesItems) {
 }
 
 function debugGraphLegendSwatchHtml(series) {
-  if (series?.agentTokenSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
+  if (series?.tokenPatternSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }

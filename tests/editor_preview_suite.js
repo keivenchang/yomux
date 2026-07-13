@@ -4153,7 +4153,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(debugPaneCss.includes('.js-debug-scale-button'), false, 'YO!stats has no selectable aggregation-control styling');
     assert.ok(/function debugGraphChartToggleControlsHtml\(\)[\s\S]*data-js-debug-chart-toggle[\s\S]*aria-pressed/.test(debugPaneSource) && /\.js-debug-chart-toggle-control button\[aria-pressed="true"\]/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'YO!stats chart buttons use one persistent pressed-state control family');
     assert.equal(debugPaneCss.includes('.js-debug-range-button'), false, 'YO!stats has no dead range-button CSS after migrating to the slider');
-    assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats API/SSE uses separated chart-local series colors');
+    assert.ok(/\.js-debug-graph-view,\s*\.js-yocost-graphs\s*\{[\s\S]*--js-debug-api-series:\s*var\(--link-soft\)[\s\S]*--js-debug-sse-series:\s*var\(--accent-gold\)/.test(debugPaneCss), 'YO!stats and YO!cost share separated chart-local series colors');
     assert.ok(/\.js-debug-line--api\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--js-debug-api-series\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--api\s*\{[\s\S]*color:\s*var\(--js-debug-api-series\)/.test(debugPaneCss), 'YO!stats API lines accept a shared comparison color while their default legend color stays API blue');
     assert.ok(/\.js-debug-line--sse\s*\{[\s\S]*stroke:\s*var\(--js-debug-series-color, var\(--js-debug-sse-series\)\)/.test(debugPaneCss) && /\.js-debug-legend-swatch--sse\s*\{[\s\S]*color:\s*var\(--js-debug-sse-series\)/.test(debugPaneCss), 'YO!stats SSE lines accept a shared comparison color while their default legend color stays distinct');
     assert.equal(debugPaneCss.includes('.js-debug-line--apiSseTotal'), false, 'YO!stats has no obsolete combined-total series after API and SSE each aggregate all clients');
@@ -4175,7 +4175,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.js-debug-y-axis span\s*\{[\s\S]*position:\s*absolute[\s\S]*top:\s*var\(--js-debug-axis-y/.test(debugPaneCss), 'YO!stats Y-axis labels use chart-coordinate positioning');
     assert.ok(/\.js-debug-grid-line\s*\{[\s\S]*stroke-width:\s*0\.4/.test(debugPaneCss), 'YO!stats default grid guide lines stay very thin');
     assert.ok(/\.js-debug-grid-line--integer\s*\{[\s\S]*stroke:\s*color-mix\(in srgb, var\(--text\) 55%, var\(--line\)\)[\s\S]*stroke-width:\s*0\.3/.test(debugPaneCss), 'YO!stats integer guides reuse theme tokens with a subtle stroke');
-    assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*--js-debug-idle-agent-status:\s*var\(--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1\)/.test(debugPaneCss), 'YO!stats idle agent status uses its shared dark gray token');
+    assert.ok(/\.js-debug-graph-view,\s*\.js-yocost-graphs\s*\{[\s\S]*--js-debug-idle-agent-status:\s*var\(--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1\)/.test(debugPaneCss), 'YO!stats and YO!cost share the chart palette scope');
     assert.ok(/--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1:\s*var\(--editor-line-number\)/.test(debugPaneCss), 'YO!stats idle agent status uses a brighter light-mode gray token');
     assert.ok(/\.js-debug-bar--idleAgents\s*\{[\s\S]*fill:\s*var\(--js-debug-idle-agent-status\)/.test(debugPaneCss), 'YO!stats idle stacked bars use the darker idle status fill');
     assert.ok(/\.js-debug-bar--idleAgents\s*\{[\s\S]*opacity:\s*var\(--js-debug-agent-idle-bar-opacity\)/.test(debugPaneCss), 'YO!stats idle bars use the separate faint opacity');
@@ -11269,8 +11269,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(hostLabelsFor('cacheWrite'), [['claude-opus · xhigh', 30]], 'Cache writes retain their model and effort');
     assert.deepStrictEqual(hostLabelsFor('all'), [['claude-opus · xhigh', 30], ['gpt-5.6 · high', 7], ['gpt-5.6 · low', 130]], 'All billable combines only billable token components, not image units');
     const effortVariants = api.debugGraphTokenSeriesDataForTest(now).filter(series => series.label.startsWith('gpt-5.6 ·'));
-    assert.equal(effortVariants[0].color, effortVariants[1].color, 'exact-model color stays stable across effort variants');
-    assert.notEqual(effortVariants[0].agentTokenPatternIndex, effortVariants[1].agentTokenPatternIndex, 'effort variants retain a distinct stable pattern when available');
+    assert.notEqual(effortVariants[0].color, effortVariants[1].color, 'displayed effort variants receive collision-free colors when available');
+    assert.notEqual(effortVariants[0].agentTokenPatternIndex, effortVariants[1].agentTokenPatternIndex, 'displayed effort variants receive collision-free patterns when available');
     api.setDebugGraphModelTokenDimensionForTest('input');
     const descriptor = api.debugGraphTokenAxisDescriptorForTest(now);
     assert.ok(descriptor.axisMax >= 90, 'the shared token axis grows for selected model input instead of clipping it');

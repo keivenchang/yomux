@@ -365,7 +365,8 @@
   color: var(--disclosure-triangle-expanded-color);
   transform: rotate(90deg);
 }
-.js-debug-graph-view {
+.js-debug-graph-view,
+.js-yocost-graphs {
   --js-debug-idle-agent-status: var(--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1);
   --js-debug-agent-attention: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2);
   --js-debug-agent-working: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3);
@@ -385,6 +386,8 @@
   --js-debug-agent-token-violet: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11);
   --js-debug-agent-token-pattern-ink: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12);
   --js-debug-agent-token-pattern-ink-rgb: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13);
+}
+.js-debug-graph-view {
   display: flex;
   flex-direction: column;
   min-height: 0;
