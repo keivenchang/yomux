@@ -238,7 +238,15 @@ def git_metadata_base(
     cache_key = (root_text, branch_limit)
     with _GIT_METADATA_CACHE_LOCK:
         cached = _GIT_METADATA_CACHE.get(cache_key)
-        if cached is not None and time.monotonic() - cached[2] <= GIT_METADATA_BURST_COALESCE_SECONDS:
+        # Burst reuse must still observe a checkout/ref/index change. Those
+        # signatures are filesystem-only and cheap; returning solely by age
+        # made an immediate branch switch look like the previous branch.
+        control_signature = git_control_files_signature(root_text) if cached is not None else ()
+        if (
+            cached is not None
+            and time.monotonic() - cached[2] <= GIT_METADATA_BURST_COALESCE_SECONDS
+            and cached[0][1] == control_signature
+        ):
             return copy.deepcopy(cached[1])
         inflight = _GIT_METADATA_INFLIGHT.get(cache_key)
         if inflight is None:

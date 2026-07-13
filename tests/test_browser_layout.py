@@ -2098,7 +2098,10 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
           for (let sequence = 2; sequence <= 6; sequence += 1) {
             applyJsDebugStatsSamplePush({sequence, record: record(sequence), sample: {time: Date.now() / 1000}});
           }
-          await new Promise(resolve => setTimeout(resolve, 120));
+          const throttleDeadline = performance.now() + 120;
+          await window.__yolomuxTestWaitFor(() => performance.now() >= throttleDeadline, {
+            timeoutMs: 500, intervalMs: 10, description: 'ordinary graph tick throttle observation',
+          });
           const renderedAfterTicks = Number(graph.dataset.jsDebugGraphRenderedAt);
           const controlIdentityAfterTicks = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
           setDebugGraphRange(900);
@@ -2116,7 +2119,10 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
           setDebugGraphRange(4 * 60 * 60);
           const longRangeLiveCount = graph.querySelectorAll('[data-js-debug-live-tail]').length;
           const longRangeBody = graph.querySelector('[data-js-debug-graph-body]').innerHTML;
-          await new Promise(resolve => setTimeout(resolve, 120));
+          const staticDeadline = performance.now() + 120;
+          await window.__yolomuxTestWaitFor(() => performance.now() >= staticDeadline, {
+            timeoutMs: 500, intervalMs: 10, description: 'long-range static graph observation',
+          });
           const longRangeStatic = graph.querySelector('[data-js-debug-graph-body]').innerHTML === longRangeBody;
 
           setDebugGraphRange(300);
