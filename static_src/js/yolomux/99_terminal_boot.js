@@ -20,7 +20,8 @@ function paneFrameControlsHtml(session, options = {}) {
   }));
   const includeActions = controlOptions.actions ?? isTmuxSession(session);
   const includeDetails = controlOptions.details === true;
-  const includeMinimize = controlOptions.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
+  const includeMinimize = controlOptions.minimize !== false
+    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = controlOptions.expand !== false;
   const includePopout = controlOptions.popout === true;
   if (includeActions) {
@@ -144,6 +145,8 @@ const tmuxStatusModes = new Map();
 const terminalMobileAccessoryStates = new Map();
 const terminalMobileAccessoryKeyPresses = new Map();
 const terminalMobileAccessorySuppressedClicks = new Map();
+const terminalMobileAccessoryPaneObservers = new Map();
+const terminalMobileAccessoryModifierTapTimes = new Map();
 let terminalMobileAccessoryDismissalInstalled = false;
 let terminalMobileAccessoryResizeInstalled = false;
 // Clipboard reads must start while a touch still has browser user activation.  The shared
@@ -190,6 +193,8 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
   {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
   {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'shift', label: 'Shift', ariaLabel: 'Shift', modifier: 'shift'},
+  {action: 'cmd', label: 'Cmd', ariaLabel: 'Command / Meta', modifier: 'cmd'},
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
@@ -218,7 +223,12 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'more']);
+const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
+const terminalMobileAccessoryModifierDoubleTapMs = 450;
+// Keep one visible definition for every first-page key. The primary row stays compact while
+// Backspace uses its existing terminal-byte definition; the utility column ends in Alt/Cmd.
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -228,7 +238,23 @@ function terminalMobileAccessoryState(session, options = {}) {
   if (!key) return null;
   let state = terminalMobileAccessoryStates.get(key) || null;
   if (!state && options.create === true) {
-    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false};
+    state = {
+      ctrl: false,
+      alt: false,
+      shift: false,
+      cmd: false,
+      ctrlLocked: false,
+      altLocked: false,
+      shiftLocked: false,
+      cmdLocked: false,
+      more: false,
+      open: false,
+      x: null,
+      y: null,
+      palettePress: null,
+      launcherPress: null,
+      suppressLauncherClick: false,
+    };
     terminalMobileAccessoryStates.set(key, state);
   }
   return state;
@@ -254,27 +280,217 @@ function terminalMobileAccessoryData(session, action) {
 
 function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
   const active = definition.modifier ? state?.[definition.modifier] === true : false;
+  const locked = definition.modifier ? state?.[terminalMobileAccessoryModifierLockedKey(definition.modifier)] === true : false;
   // Copy reads local terminal selection only, so it stays available to read-only share viewers;
   // every other palette key can change the terminal and keeps the existing write gate.
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const label = definition.labelKey ? t(definition.labelKey) : definition.label;
   const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
-  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
+  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
 function terminalMobileAccessoryDefinition(action) {
   return [...terminalMobileAccessoryKeyDefs, ...terminalMobileAccessoryMoreKeyDefs].find(item => item.action === action) || null;
 }
 
-function terminalMobileAccessoryPositionStyle(state) {
+function terminalMobileAccessoryLauncherPosition(state) {
   const x = Number.isFinite(state?.x) ? Math.max(0, Math.round(state.x)) : null;
   const y = Number.isFinite(state?.y) ? Math.max(0, Math.round(state.y)) : null;
-  if (x === null && y === null) return '';
-  // A moved absolute overlay must release its original end edges. Leaving `bottom` set alongside
-  // the drag-set `top` makes CSS stretch the palette to the terminal bottom, producing a giant
-  // empty box and preventing a useful upward move.
-  return ` style="${x === null ? '' : `inset-inline-start:${x}px;inset-inline-end:auto;`}${y === null ? '' : `inset-block-start:${y}px;inset-block-end:auto;transform:none;`}"`;
+  return {
+    positionedInline: x !== null,
+    positionedBlock: y !== null,
+    insetInlineStart: x === null ? '' : `${x}px`,
+    insetInlineEnd: x === null ? '' : 'auto',
+    insetBlockStart: y === null ? '' : `${y}px`,
+    insetBlockEnd: y === null ? '' : 'auto',
+    transform: y === null ? '' : 'none',
+  };
+}
+
+function terminalMobileAccessoryPositionStyle(state) {
+  const position = terminalMobileAccessoryLauncherPosition(state);
+  if (!position.positionedInline && !position.positionedBlock) return '';
+  return ` style="${position.positionedInline ? `inset-inline-start:${position.insetInlineStart};inset-inline-end:${position.insetInlineEnd};` : ''}${position.positionedBlock ? `inset-block-start:${position.insetBlockStart};inset-block-end:${position.insetBlockEnd};transform:${position.transform};` : ''}"`;
+}
+
+function terminalMobileAccessoryClamp(value, min, max) {
+  return Math.max(min, Math.min(Math.max(min, max), value));
+}
+
+function terminalMobileAccessoryClampStateToPane(state, launcher, pane) {
+  if (!state || !launcher || !pane || (!Number.isFinite(state.x) && !Number.isFinite(state.y))) return false;
+  const paneRect = pane.getBoundingClientRect?.();
+  const paneWidth = Math.max(0, Number(paneRect?.width) || pane.clientWidth || 0);
+  const paneHeight = Math.max(0, Number(paneRect?.height) || pane.clientHeight || 0);
+  const launcherRect = launcher.getBoundingClientRect?.();
+  const launcherWidth = Math.max(0, Number(launcherRect?.width) || launcher.offsetWidth || 0);
+  const launcherHeight = Math.max(0, Number(launcherRect?.height) || launcher.offsetHeight || 0);
+  // Hidden/transitioning Dockview panes can briefly report zero size. Preserve the last good
+  // offset instead of collapsing a deliberately moved launcher to 0,0 during that transient.
+  if (paneWidth <= 0 || paneHeight <= 0 || launcherWidth <= 0 || launcherHeight <= 0) return false;
+  let changed = false;
+  if (Number.isFinite(state.x)) {
+    const x = terminalMobileAccessoryClamp(state.x, 0, paneWidth - launcherWidth);
+    if (x !== state.x) {
+      state.x = x;
+      changed = true;
+    }
+  }
+  if (Number.isFinite(state.y)) {
+    const y = terminalMobileAccessoryClamp(state.y, 0, paneHeight - launcherHeight);
+    if (y !== state.y) {
+      state.y = y;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function terminalMobileAccessoryObservePane(session, pane) {
+  const key = String(session || '');
+  if (!key) return;
+  const existing = terminalMobileAccessoryPaneObservers.get(key);
+  if (existing?.pane === pane) return;
+  existing?.observer?.disconnect?.();
+  terminalMobileAccessoryPaneObservers.delete(key);
+  if (!pane || typeof ResizeObserver !== 'function') return;
+  const observer = new ResizeObserver(() => {
+    if (!terminalMobileAccessoryState(key)) return;
+    syncTerminalMobileAccessoryState(key);
+  });
+  observer.observe(pane);
+  terminalMobileAccessoryPaneObservers.set(key, {pane, observer});
+}
+
+function terminalMobileAccessoryMoved(state) {
+  return Number.isFinite(state?.x) || Number.isFinite(state?.y);
+}
+
+function terminalMobileAccessoryModifierLockedKey(modifier) {
+  return `${modifier}Locked`;
+}
+
+function terminalMobileAccessoryModifierTapKey(session, modifier) {
+  return `${String(session || '')}:${modifier}`;
+}
+
+function terminalMobileAccessoryModifierActive(state) {
+  return terminalMobileAccessoryModifierActions.some(modifier => state?.[modifier] === true);
+}
+
+function terminalMobileAccessoryClearModifiers(state, options = {}) {
+  if (!state) return false;
+  const includeLocked = options.includeLocked === true;
+  const session = String(options.session || '');
+  let changed = false;
+  for (const modifier of terminalMobileAccessoryModifierActions) {
+    const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+    if ((includeLocked || state[lockedKey] !== true) && state[modifier] === true) {
+      state[modifier] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+    if (includeLocked && state[lockedKey] === true) {
+      state[lockedKey] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function toggleTerminalMobileAccessoryModifier(session, modifier) {
+  const key = String(session || '');
+  const state = terminalMobileAccessoryState(key, {create: true});
+  if (!state || !terminalMobileAccessoryModifierActions.includes(modifier)) return false;
+  const tapKey = terminalMobileAccessoryModifierTapKey(key, modifier);
+  const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+  const now = Date.now();
+  const lastTap = Number(terminalMobileAccessoryModifierTapTimes.get(tapKey)) || 0;
+  if (state[lockedKey] === true) {
+    state[modifier] = false;
+    state[lockedKey] = false;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else if (state[modifier] === true && now - lastTap <= terminalMobileAccessoryModifierDoubleTapMs) {
+    state[modifier] = true;
+    state[lockedKey] = true;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else {
+    state[modifier] = !state[modifier];
+    if (state[modifier] === true) terminalMobileAccessoryModifierTapTimes.set(tapKey, now);
+    else terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  }
+  syncTerminalMobileAccessoryState(key);
+  return state[modifier] === true;
+}
+
+function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, barSize) {
+  const gap = 8;
+  const paneLeft = Number.isFinite(paneRect?.left) ? paneRect.left : 0;
+  const paneTop = Number.isFinite(paneRect?.top) ? paneRect.top : 0;
+  const paneWidth = Math.max(0, Number(paneRect?.width) || 0);
+  const paneHeight = Math.max(0, Number(paneRect?.height) || 0);
+  const width = Math.min(Math.max(0, Number(barSize?.width) || 0), paneWidth);
+  const height = Math.min(Math.max(0, Number(barSize?.height) || 0), paneHeight);
+  const left = (Number.isFinite(launcherRect?.left) ? launcherRect.left : 0) - paneLeft;
+  const top = (Number.isFinite(launcherRect?.top) ? launcherRect.top : 0) - paneTop;
+  const launcherWidth = Math.max(0, Number(launcherRect?.width) || 0);
+  const launcherHeight = Math.max(0, Number(launcherRect?.height) || 0);
+  const right = left + launcherWidth;
+  const bottom = top + launcherHeight;
+  const above = top;
+  const below = paneHeight - bottom;
+  const leftRoom = left;
+  const rightRoom = paneWidth - right;
+  const moved = terminalMobileAccessoryMoved(state);
+  let side = 'above';
+  if (!moved && above >= height + gap) {
+    side = 'above';
+  } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
+    side = 'below';
+  } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
+    side = 'left';
+  } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
+    side = 'right';
+  } else if (below <= gap * 2 && above >= height + gap) {
+    side = 'above';
+  } else {
+    const candidates = [
+      {side: 'above', room: above, fits: above >= height + gap},
+      {side: 'below', room: below, fits: below >= height + gap},
+      {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
+      {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
+    ];
+    const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
+    side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+  }
+  let x = right - width;
+  let y = top - height - gap;
+  if (side === 'below') {
+    x = left;
+    y = bottom + gap;
+  } else if (side === 'left') {
+    x = left - width - gap;
+    y = top;
+  } else if (side === 'right') {
+    x = right + gap;
+    y = top;
+  }
+  return {
+    side,
+    x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
+    y: Math.round(terminalMobileAccessoryClamp(y, 0, paneHeight - height)),
+  };
+}
+
+function terminalMobileAccessoryLauncherDragPosition(press, event) {
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  return {
+    x: terminalMobileAccessoryClamp(press.startX + dx, 0, press.paneWidth - press.launcherWidth),
+    y: terminalMobileAccessoryClamp(press.startY + dy, 0, press.paneHeight - press.launcherHeight),
+  };
 }
 
 function terminalMobileAccessoryHtml(session) {
@@ -282,12 +498,16 @@ function terminalMobileAccessoryHtml(session) {
   const state = terminalMobileAccessoryState(session, {create: true});
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
   const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
   // The overflow button remains the rightmost control in both palette states. Keeping the return
   // target in one physical corner avoids a touch user hunting for it after the content switches.
   const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
-  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
-    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
-      <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
+  const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
+  return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
+    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
+      <div class="mobile-terminal-key-side">
+        ${sideKeys}
+      </div>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
       <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
       <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
@@ -299,25 +519,57 @@ function syncTerminalMobileAccessoryState(session) {
   const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
   const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
   if (!state || !bar) return false;
-  for (const modifier of ['ctrl', 'alt']) {
+  const pane = launcher?.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
+  terminalMobileAccessoryObservePane(session, pane);
+  if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
+  for (const modifier of terminalMobileAccessoryModifierActions) {
     const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
     if (!button) continue;
     const active = state[modifier] === true;
+    const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
     button.classList.toggle(CLS.active, active);
+    button.classList.toggle('locked', locked);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
   const more = bar.querySelector('.mobile-terminal-keyrow--more');
   const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
   bar.hidden = state.open !== true;
   bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
-  if (launcher) launcher.setAttribute('aria-expanded', state.open === true ? 'true' : 'false');
+  if (launcher) {
+    const open = state.open === true;
+    launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
+    launcher.setAttribute('aria-label', open ? t('shortcuts.close') : t('common.keyboardShortcuts'));
+    launcher.textContent = open ? '×' : '⌨';
+    launcher.classList.toggle('mobile-terminal-key-launcher--open', open);
+    const position = terminalMobileAccessoryLauncherPosition(state);
+    launcher.style.insetInlineStart = position.insetInlineStart;
+    launcher.style.insetInlineEnd = position.insetInlineEnd;
+    launcher.style.insetBlockStart = position.insetBlockStart;
+    launcher.style.insetBlockEnd = position.insetBlockEnd;
+    launcher.style.transform = position.transform;
+  }
   const positionedInline = Number.isFinite(state.x);
   const positionedBlock = Number.isFinite(state.y);
-  bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
-  bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
-  bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
-  bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
-  bar.style.transform = positionedBlock ? 'none' : '';
+  if (state.open === true && launcher) {
+    const paneRect = pane?.getBoundingClientRect?.();
+    const launcherRect = launcher.getBoundingClientRect();
+    if (paneRect) {
+      const placement = terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, {width: bar.offsetWidth, height: bar.offsetHeight});
+      bar.style.insetInlineStart = `${placement.x}px`;
+      bar.style.insetInlineEnd = 'auto';
+      bar.style.insetBlockStart = `${placement.y}px`;
+      bar.style.insetBlockEnd = 'auto';
+      bar.style.transform = 'none';
+      bar.dataset.terminalMobilePlacement = placement.side;
+    }
+  } else {
+    bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+    bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+    bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+    bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+    bar.style.transform = positionedBlock ? 'none' : '';
+    delete bar.dataset.terminalMobilePlacement;
+  }
   if (more) more.hidden = state.more !== true;
   for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
@@ -326,7 +578,8 @@ function syncTerminalMobileAccessoryState(session) {
 
 function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  if (!state || !['ctrl', 'alt', 'more', 'open'].includes(key)) return false;
+  if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
+  if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
   if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
   state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
@@ -338,9 +591,8 @@ function dismissTerminalMobileAccessory(session) {
   if (!state || state.open !== true) return false;
   state.open = false;
   state.more = false;
-  state.ctrl = false;
-  state.alt = false;
-  state.drag = null;
+  terminalMobileAccessoryClearModifiers(state, {includeLocked: true, session});
+  state.launcherPress = null;
   syncTerminalMobileAccessoryState(session);
   return true;
 }
@@ -370,19 +622,14 @@ function installTerminalMobileAccessoryResizeSync() {
   if (terminalMobileAccessoryResizeInstalled) return;
   terminalMobileAccessoryResizeInstalled = true;
   window.addEventListener('resize', () => {
-    for (const [session, state] of terminalMobileAccessoryStates) {
-      if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
-      const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
-      const pane = bar?.closest?.('.tab-pane');
-      if (!bar || !pane) continue;
-      state.x = Math.max(0, Math.min(pane.clientWidth - bar.offsetWidth, state.x));
-      state.y = Math.max(0, Math.min(pane.clientHeight - bar.offsetHeight, state.y));
+    for (const session of terminalMobileAccessoryStates.keys()) {
       syncTerminalMobileAccessoryState(session);
     }
   }, {passive: true});
 }
 
 const terminalMobileAccessoryLongPressMs = 450;
+const terminalMobileAccessoryDragThresholdPx = 6;
 const terminalMobileAccessoryRepeatDelayMs = mobileTerminalKeyRepeatDelayMs;
 const terminalMobileAccessoryRepeatIntervalMs = mobileTerminalKeyRepeatIntervalMs;
 
@@ -436,12 +683,35 @@ function consumeTerminalMobileAccessoryKeyClick(session, action) {
   return true;
 }
 
-function beginTerminalMobileAccessoryLauncherPress(session, event) {
+function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  if (!state || event.button > 0 || event.pointerType === 'mouse') return false;
+  const pane = button?.closest?.('.tab-pane');
+  if (!state || event.button > 0 || !button || !pane) return false;
+  // A real drag commonly produces no synthetic click. In that case the previous drag's click
+  // suppression must not eat this new intentional tap; suppression is only for the immediate
+  // click following the drag release that set it.
+  state.suppressLauncherClick = false;
   dismissTerminalMobileAccessories(session);
-  const press = {pointerId: event.pointerId, longPressed: false, timer: null};
+  const paneRect = pane.getBoundingClientRect();
+  const launcherRect = button.getBoundingClientRect();
+  const startX = Number.isFinite(state.x) ? state.x : launcherRect.left - paneRect.left;
+  const startY = Number.isFinite(state.y) ? state.y : launcherRect.top - paneRect.top;
+  const press = {
+    pointerId: event.pointerId,
+    longPressed: false,
+    dragging: false,
+    timer: null,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX,
+    startY,
+    paneWidth: pane.clientWidth,
+    paneHeight: pane.clientHeight,
+    launcherWidth: button.offsetWidth,
+    launcherHeight: button.offsetHeight,
+  };
   state.launcherPress = press;
+  button.setPointerCapture?.(event.pointerId);
   press.timer = window.setTimeout(() => {
     if (terminalMobileAccessoryState(session)?.launcherPress !== press) return;
     press.longPressed = true;
@@ -452,13 +722,34 @@ function beginTerminalMobileAccessoryLauncherPress(session, event) {
   return true;
 }
 
-function endTerminalMobileAccessoryLauncherPress(session, event) {
+function moveTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.launcherPress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  if (!press.dragging && Math.hypot(dx, dy) < terminalMobileAccessoryDragThresholdPx) return false;
+  if (!press.dragging) {
+    press.dragging = true;
+    window.clearTimeout(press.timer);
+  }
+  const position = terminalMobileAccessoryLauncherDragPosition(press, event);
+  state.x = position.x;
+  state.y = position.y;
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session);
   const press = state?.launcherPress;
   if (!state || !press || press.pointerId !== event.pointerId) return false;
   window.clearTimeout(press.timer);
   state.launcherPress = null;
-  if (!press.longPressed) return false;
+  button?.releasePointerCapture?.(event.pointerId);
+  if (!press.longPressed && !press.dragging) return false;
   state.suppressLauncherClick = true;
   event.preventDefault();
   event.stopPropagation();
@@ -472,59 +763,119 @@ function consumeTerminalMobileAccessoryLauncherClick(session) {
   return true;
 }
 
-function beginTerminalMobileAccessoryDrag(session, event, handle) {
+function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
-  if (!state || !bar || event.button > 0) return false;
-  const rect = bar.getBoundingClientRect();
-  state.drag = {pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top};
-  handle.setPointerCapture?.(event.pointerId);
+  const pane = bar?.closest?.('.tab-pane');
+  if (!state || event.button > 0 || !bar || !pane || state.open !== true) return false;
+  if (event.target?.closest?.('[data-terminal-mobile-key]')) return false;
+  const paneRect = pane.getBoundingClientRect();
+  const launcher = pane.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+  if (!launcher) return false;
+  const launcherRect = launcher?.getBoundingClientRect?.();
+  const startX = Number.isFinite(state.x) ? state.x : (Number(launcherRect?.left) || 0) - paneRect.left;
+  const startY = Number.isFinite(state.y) ? state.y : (Number(launcherRect?.top) || 0) - paneRect.top;
+  const press = {
+    pointerId: event.pointerId,
+    dragging: false,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX,
+    startY,
+    paneWidth: pane.clientWidth,
+    paneHeight: pane.clientHeight,
+    launcherWidth: launcher?.offsetWidth || 0,
+    launcherHeight: launcher?.offsetHeight || 0,
+  };
+  state.palettePress = press;
+  bar.setPointerCapture?.(event.pointerId);
   event.preventDefault();
   event.stopPropagation();
   return true;
 }
 
-function moveTerminalMobileAccessoryDrag(session, event, handle) {
+function moveTerminalMobileAccessoryPalettePress(session, event) {
   const state = terminalMobileAccessoryState(session);
-  const drag = state?.drag;
-  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
-  const pane = bar?.closest?.('.tab-pane');
-  if (!drag || drag.pointerId !== event.pointerId || !bar || !pane) return false;
-  const paneRect = pane.getBoundingClientRect();
-  state.x = Math.max(0, Math.min(paneRect.width - bar.offsetWidth, event.clientX - paneRect.left - drag.offsetX));
-  state.y = Math.max(0, Math.min(paneRect.height - bar.offsetHeight, event.clientY - paneRect.top - drag.offsetY));
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  if (!press.dragging && Math.hypot(dx, dy) < terminalMobileAccessoryDragThresholdPx) return false;
+  press.dragging = true;
+  const position = terminalMobileAccessoryLauncherDragPosition(press, event);
+  state.x = position.x;
+  state.y = position.y;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
+  event.stopPropagation();
   return true;
 }
 
-function endTerminalMobileAccessoryDrag(session, event, handle) {
+function endTerminalMobileAccessoryPalettePress(session, event, bar) {
   const state = terminalMobileAccessoryState(session);
-  if (!state?.drag || state.drag.pointerId !== event.pointerId) return false;
-  handle.releasePointerCapture?.(event.pointerId);
-  state.drag = null;
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  state.palettePress = null;
+  bar?.releasePointerCapture?.(event.pointerId);
+  if (!press.dragging) return false;
   event.preventDefault();
+  event.stopPropagation();
   return true;
+}
+
+const terminalMobileAccessoryShiftMap = Object.freeze({
+  '`': '~',
+  '1': '!',
+  '2': '@',
+  '3': '#',
+  '4': '$',
+  '5': '%',
+  '6': '^',
+  '7': '&',
+  '8': '*',
+  '9': '(',
+  '0': ')',
+  '-': '_',
+  '=': '+',
+  '[': '{',
+  ']': '}',
+  '\\': '|',
+  ';': ':',
+  "'": '"',
+  ',': '<',
+  '.': '>',
+  '/': '?',
+});
+
+function terminalMobileAccessoryShiftText(text) {
+  if (text === '\t') return '\x1b[Z';
+  if (text.length !== 1) return text;
+  if (text >= 'a' && text <= 'z') return text.toUpperCase();
+  return terminalMobileAccessoryShiftMap[text] || text;
+}
+
+function terminalMobileAccessoryControlText(text) {
+  if (text.length !== 1) return text;
+  const code = text.charCodeAt(0);
+  if (code === 32) return '\x00';
+  if (code === 63) return '\x7f';
+  if (code >= 64 && code <= 95) return String.fromCharCode(code & 0x1f);
+  if (code >= 97 && code <= 122) return String.fromCharCode(code - 96);
+  return text;
 }
 
 function terminalDataWithMobileAccessoryModifiers(session, data) {
   const state = terminalMobileAccessoryState(session);
   const text = String(data || '');
-  if (!state || (!state.ctrl && !state.alt) || !text) return text;
+  if (!state || !text || !terminalMobileAccessoryModifierActive(state)) return text;
   const ctrl = state.ctrl === true;
-  const alt = state.alt === true;
-  state.ctrl = false;
-  state.alt = false;
+  const shift = state.shift === true;
+  const meta = state.alt === true || state.cmd === true;
+  terminalMobileAccessoryClearModifiers(state, {session});
   syncTerminalMobileAccessoryState(session);
   let value = text;
-  if (ctrl && text.length === 1) {
-    const code = text.charCodeAt(0);
-    if (code === 32) value = '\x00';
-    else if (code === 63) value = '\x7f';
-    else if (code >= 64 && code <= 95) value = String.fromCharCode(code & 0x1f);
-    else if (code >= 97 && code <= 122) value = String.fromCharCode(code - 96);
-  }
-  return alt ? `\x1b${value}` : value;
+  if (shift) value = terminalMobileAccessoryShiftText(value);
+  if (ctrl) value = terminalMobileAccessoryControlText(value);
+  return meta ? `\x1b${value}` : value;
 }
 
 async function pasteTerminalMobileAccessoryClipboard(session) {
@@ -600,14 +951,14 @@ function sendTerminalMobileAccessoryInput(session, action) {
     statusErr(terminalNotConnectedHtml(session));
     return false;
   }
-  if (action === 'ctrl' || action === 'alt' || action === 'more' || action === 'open') {
+  if (terminalMobileAccessoryModifierActions.includes(action) || action === 'more' || action === 'open') {
     toggleTerminalMobileAccessoryState(session, action);
     return true;
   }
   const data = terminalMobileAccessoryData(session, action);
   if (!data) return false;
   noteTerminalExplicitInput(session);
-  const sent = handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+  const sent = handleTerminalData(session, data, {mobileAccessory: true});
   if (!sent) statusErr(terminalNotConnectedHtml(session));
   return sent;
 }
@@ -1123,20 +1474,25 @@ const infoSortDefs = Object.freeze([
   {key: 'date', dir: 'asc', value: 'date:asc', labelKey: 'finder.sort.oldest'},
 ]);
 const infoDimensionDefs = Object.freeze([
-  {key: 'tab', labelKey: 'info.dimension.tab'},
-  {key: 'tmux-window', labelKey: 'info.field.tmuxSubWindow'},
-  {key: 'ai', labelKey: 'info.dimension.ai'},
-  {key: 'path', labelKey: 'common.pathLabel'},
-  {key: 'branch', labelKey: 'common.branchLabel'},
-  {key: 'linear', labelKey: 'info.field.linear'},
-  {key: 'pr', labelKey: 'common.pullRequestShort'},
+  {key: 'tab', labelKey: 'info.dimension.tab', legacyKeys: ['tab']},
+  {key: 'tmux-session', labelKey: 'info.field.tabTmuxSession', legacyKeys: [], userSelectable: false},
+  {key: 'tmux-window', labelKey: 'info.field.tmuxWindow', legacyKeys: ['tmux-window']},
+  {key: 'tmux-pane', labelKey: 'info.field.tmuxWindow', legacyKeys: [], userSelectable: false},
+  {key: 'ai', labelKey: 'info.dimension.ai', legacyKeys: ['ai']},
+  {key: 'path', labelKey: 'common.pathLabel', legacyKeys: ['path']},
+  {key: 'git-worktree', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'local-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'hosted-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'branch', labelKey: 'common.branchLabel', legacyKeys: ['branch']},
+  {key: 'pr', labelKey: 'common.pullRequestShort', legacyKeys: ['pr']},
+  {key: 'linear', labelKey: 'info.field.linear', legacyKeys: ['linear']},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window', 'path']},
   {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
-  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['path', 'branch']},
+  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['git-worktree', 'local-repository', 'branch']},
   {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
-  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['pr', 'branch']},
+  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['hosted-repository', 'pr', 'branch']},
 ]);
 let infoGrouping = readStoredInfoGrouping();
 let infoSort = readStoredInfoSort();
@@ -1158,22 +1514,33 @@ function infoGroupDimensions() {
 function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
   const dimension = String(key || '').trim();
   const index = Number(level);
-  if (!dimension || !Number.isInteger(index) || index < 0 || index > 3) return false;
+  if (!dimension || !Number.isInteger(index) || index < 0 || index > 5) return false;
   if (dimension === 'ai' && index === 0) return false;
-  if (dimension === 'tmux-window') {
+  if (dimension === 'tmux-window' || dimension === 'tmux-pane') {
     const parent = Array.isArray(grouping) ? String(grouping[0] || '') : '';
-    return index >= 1 && parent === 'tab';
+    return index >= 1 && ['tab', 'tmux-session'].includes(parent);
   }
   return true;
 }
 
 function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const index = Number(level);
-  const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(3, index)) : 0;
+  const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(5, index)) : 0;
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
-  return infoDimensionDefs
+  const selectedKey = String(activeGrouping[normalizedIndex] || '');
+  const dimensions = infoDimensionDefs
+    .filter(dimension => dimension.userSelectable !== false || dimension.key === selectedKey)
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
     .map(localizedInfoDefinition);
+  const selected = dimensions.find(dimension => dimension.key === selectedKey);
+  const ordered = selected ? [selected, ...dimensions.filter(dimension => dimension !== selected)] : dimensions;
+  const labels = new Set();
+  return ordered.filter(dimension => {
+    const label = String(dimension.label || dimension.key);
+    if (labels.has(label)) return false;
+    labels.add(label);
+    return true;
+  });
 }
 
 function infoSortFields() {
@@ -1181,7 +1548,14 @@ function infoSortFields() {
 }
 
 function infoGroupingPresets() {
-  return infoPresetDefs.map(preset => ({...localizedInfoDefinition(preset), grouping: preset.grouping.slice()}));
+  return infoPresetDefs.map(preset => {
+    const localized = localizedInfoDefinition(preset);
+    if (preset.key === 'tab-tmux-window') {
+      localized.label = `${localized.label} > ${t('common.pathLabel')}`;
+      localized.title = localized.label;
+    }
+    return {...localized, grouping: preset.grouping.slice()};
+  });
 }
 
 function normalizeInfoGrouping(value, options = {}) {
@@ -1198,13 +1572,14 @@ function normalizeInfoGrouping(value, options = {}) {
   for (const key of Array.isArray(migrated) ? migrated : []) {
     if (!infoGroupDimensionAllowedAtLevel(key, result.length, result)) continue;
     result.push(key);
-    if (result.length >= 4) break;
+    if (result.length >= 6) break;
   }
   return (result.length ? result : infoDefaultGrouping).slice();
 }
 
 function normalizeInfoLegacyPresetGrouping(grouping) {
   const key = (Array.isArray(grouping) ? grouping : []).join('|');
+  if (key === 'tab|tmux-window') return ['tab', 'tmux-window', 'path'];
   if (key === 'tab|ai|path|branch') return ['tab', 'path', 'tmux-window'];
   if (key === 'path|branch|tab|ai') return ['path', 'branch'];
   if (key === 'branch|path|tab|ai') return ['path', 'branch'];
@@ -1317,10 +1692,11 @@ function refreshInfoGroupingControls() {
 
 function setInfoGrouping(value) {
   const previous = infoGrouping.join(',');
-  writeInfoGrouping(value);
+  const next = writeInfoGrouping(value);
   refreshInfoGroupingControls();
   renderInfoPanel();
   if (infoGrouping.join(',') !== previous) scheduleShareUiStatePublish();
+  return next;
 }
 
 function setInfoSort(value, options = {}) {
@@ -1352,7 +1728,7 @@ function setInfoGroupingPreset(key) {
 
 function setInfoGroupingLevel(level, value) {
   const index = Number(level);
-  if (!Number.isInteger(index) || index < 0 || index > 3) return;
+  if (!Number.isInteger(index) || index < 0 || index > 5) return;
   const next = infoGrouping.slice();
   const key = String(value || '').trim();
   next[index] = key;
@@ -1377,8 +1753,8 @@ function infoRecordTmuxWindowIndex(record = {}) {
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
-  if (!infoRecordHasAi(record)) return t('info.missing.tmuxSubWindow');
-  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxSubWindow');
+  if (!infoRecordHasAi(record)) return t('info.missing.tmuxWindow');
+  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxWindow');
 }
 
 function infoRecordTmuxWindowKey(record = {}) {
@@ -1393,9 +1769,14 @@ function infoDimensionValue(record, dimension) {
   const fallback = {key: 'none', label: t('info.group.none'), title: ''};
   if (!record || !dimension) return fallback;
   if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
+  if (dimension === 'tmux-session') return {key: record.tmuxSessionKey, label: record.tmuxSessionLabel, title: record.tmuxSessionTitle, sortValue: infoRecordNumericSortValue(record, 'tmux-session')};
   if (dimension === 'tmux-window') return {key: infoRecordTmuxWindowKey(record), label: infoRecordTmuxWindowLabel(record), title: record.tmuxWindowTitle || record.aiTitle || infoRecordTmuxWindowLabel(record), sortValue: infoRecordNumericSortValue(record, 'tmux-window')};
+  if (dimension === 'tmux-pane') return {key: record.tmuxPaneKey, label: record.tmuxPaneLabel, title: record.tmuxPaneTitle, sortValue: infoRecordNumericSortValue(record, 'tmux-pane')};
   if (dimension === 'ai') return {key: infoRecordAiKind(record) || '__no_ai__', label: infoRecordAiAgentLabel(record), title: record.aiAgentTitle || infoRecordAiAgentLabel(record)};
   if (dimension === 'path') return {key: record.pathKey, label: record.pathTitle || record.pathLabel, title: record.pathTitle};
+  if (dimension === 'git-worktree') return {key: record.gitWorktreeKey, label: record.gitWorktreeLabel, title: record.gitWorktreeTitle};
+  if (dimension === 'local-repository') return {key: record.localRepositoryKey, label: record.localRepositoryLabel, title: record.localRepositoryTitle};
+  if (dimension === 'hosted-repository') return {key: record.hostedRepositoryKey, label: record.hostedRepositoryLabel, title: record.hostedRepositoryTitle};
   if (dimension === 'branch') return {key: record.branchKey, label: record.branchLabel, title: record.branchTitle};
   if (dimension === 'pr') return {key: record.prKey, label: record.prTitle || record.prLabel, title: record.prTitle, sortValue: infoRecordNumericSortValue(record, 'pr')};
   if (dimension === 'linear') return {key: record.linearKey, label: record.linearTitle || record.linearLabel, title: record.linearTitle, sortValue: infoRecordNumericSortValue(record, 'linear')};
@@ -1449,7 +1830,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const tmuxWindowKey = tmuxWindowIndex
         ? `${session || 'no-tab'}:${tmuxWindowIndex}:${aiLabel}`
         : '__no_tmux_window__';
-      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxSubWindow') : aiLabel;
+      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxWindow') : aiLabel;
       const path = String(row?.path || '');
       const branch = String(row?.branch || '');
       const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
@@ -1459,12 +1840,29 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const prDisplayLabel = String(row?.prDescriptionTitle || row?.prTitle || row?.prSort || row?.prLabel || '').trim();
       const prNumber = infoRowPrNumber(row);
       const prCompactLabel = Number.isFinite(prNumber) ? `#${prNumber}` : prKeyLabel;
+      const tmuxSessionKey = String(agent?.tmux_session_id || session || '__no_tmux_session__');
+      const tmuxSessionLabel = String(agent?.tmux_session_name || session || t('info.group.none'));
+      const tmuxPaneKey = String(agent?.tmux_pane_id || agent?.pane_target || (session && agent?.pane !== undefined ? `${session}:${agent?.window || '0'}.${agent.pane}` : '__no_tmux_pane__'));
+      const tmuxPaneLabel = String(agent?.tmux_pane_label || (agent?.pane !== undefined && agent?.pane !== '' ? `${agent?.window || '0'}.${agent.pane}` : t('info.group.none')));
+      const tmuxPaneTarget = String(agent?.tmux_pane_target || agent?.pane_target || '');
+      const gitWorktreeKey = String(row?.gitWorktreeId || row?.git_worktree_id || row?.pathKey || '__no_git_worktree__');
+      const gitWorktreeLabel = String(row?.gitWorktreeLabel || row?.git_worktree_label || row?.pathLabel || t('info.missing.path'));
+      const gitWorktreeTitle = String(row?.gitWorktreeTitle || row?.git_worktree_title || row?.pathTitle || gitWorktreeLabel);
+      const localRepositoryKey = String(row?.localRepositoryId || row?.local_repository_id || gitWorktreeKey || '__no_local_repository__');
+      const localRepositoryLabel = String(row?.localRepositoryLabel || row?.local_repository_label || gitWorktreeLabel);
+      const localRepositoryTitle = String(row?.localRepositoryTitle || row?.local_repository_title || localRepositoryLabel);
+      const hostedRepositoryKey = String(row?.hostedRepositoryId || row?.hosted_repository_id || '__no_hosted_repository__');
+      const hostedRepositoryLabel = String(row?.hostedRepositoryLabel || row?.hosted_repository_label || t('info.group.none'));
+      const hostedRepositoryTitle = String(row?.hostedRepositoryTitle || row?.hosted_repository_title || hostedRepositoryLabel);
       records.push({
         id: [path, branch, session || 'no-tab', aiKind || 'no-ai', tmuxWindowIndex, prCompactLabel || prKeyLabel, linearLabel].join('\n'),
         tabKey: session || '__no_tab__',
         tabSession: session,
         tabLabel,
         tabTitle: String(agent?.title || tabLabel),
+        tmuxSessionKey,
+        tmuxSessionLabel,
+        tmuxSessionTitle: tmuxSessionLabel,
         aiKey: `${agent?.kind || 'no-ai'}:${agent?.window || ''}:${aiLabel}`,
         aiKind,
         aiAgentKey: aiKind || '__no_ai__',
@@ -1475,6 +1873,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         aiState: String(agent?.state || ''),
         aiPane: String(agent?.pane || ''),
         aiPaneTarget: String(agent?.pane_target || ''),
+        tmuxPaneTarget,
         aiCurrent: agent?.current === true,
         aiWindowActive: agent?.window_active === true,
         aiPid: tmuxWindowProcessPid(agent),
@@ -1486,15 +1885,29 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tmuxWindowKey,
         tmuxWindowLabel,
         tmuxWindowTitle: String(agent?.title || tmuxWindowLabel),
+        tmuxPaneKey,
+        tmuxPaneLabel,
+        tmuxPaneTitle: tmuxPaneTarget || tmuxPaneLabel,
         pathKey: infoNormalizedPath(path) || '__no_path__',
         pathLabel: String(row?.pathLabel || compactHomePath(path) || t('info.missing.path')),
         pathTitle: String(row?.pathTitle || path || t('info.missing.path')),
         pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
         pathActivitySource: String(row?.pathActivitySource || ''),
+        pathObservations: Array.isArray(row?.pathObservations) ? row.pathObservations.slice(0, 100) : [],
+        gitWorktreeKey,
+        gitWorktreeLabel,
+        gitWorktreeTitle,
+        localRepositoryKey,
+        localRepositoryLabel,
+        localRepositoryTitle,
+        hostedRepositoryKey,
+        hostedRepositoryLabel,
+        hostedRepositoryTitle,
         branchKey: branch || '__no_branch__',
         branchLabel: branch || t('info.missing.branch'),
         branchTitle: branch || t('info.missing.branch'),
         branchHtml: row?.branchHtml || esc(branch || t('info.missing.branch')),
+        branchState: normalizeInfoBranchState(row?.branchState),
         prKey: prCompactLabel || prKeyLabel || '__no_pr__',
         prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || t('info.missing.pr'),
         prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
@@ -1568,7 +1981,9 @@ function infoRecordNumericSortValue(record = {}, dimension = '') {
   if (dimension === 'pr') return infoRecordPrNumber(record);
   if (dimension === 'linear') return infoRecordLinearNumber(record);
   if (dimension === 'tab') return infoFirstRecordNumber(record, [record.tabKey, record.tabLabel, record.tabTitle, record.tabSession]);
+  if (dimension === 'tmux-session') return infoFirstRecordNumber(record, [record.tmuxSessionLabel, record.tmuxSessionKey]);
   if (dimension === 'tmux-window') return infoFirstRecordNumber(record, [infoRecordTmuxWindowIndex(record), infoRecordTmuxWindowLabel(record), record.aiLabel, record.aiKey, record.aiTitle]);
+  if (dimension === 'tmux-pane') return infoFirstRecordNumber(record, [record.tmuxPaneLabel, record.tmuxPaneKey]);
   return NaN;
 }
 
@@ -1595,11 +2010,16 @@ function infoCompareRecordNumberThenLabel(left = {}, right = {}, dimension = '',
 
 function infoRecordLabel(record = {}, dimension = '') {
   if (dimension === 'tab') return record.tabLabel;
+  if (dimension === 'tmux-session') return record.tmuxSessionLabel;
   if (dimension === 'tmux-window') return infoRecordTmuxWindowLabel(record);
+  if (dimension === 'tmux-pane') return record.tmuxPaneLabel;
   if (dimension === 'ai') return infoRecordAiAgentLabel(record);
   if (dimension === 'linear') return record.linearLabel || record.linearTitle;
   if (dimension === 'pr') return record.prLabel || record.prTitle;
   if (dimension === 'path') return record.pathLabel;
+  if (dimension === 'git-worktree') return record.gitWorktreeLabel;
+  if (dimension === 'local-repository') return record.localRepositoryLabel;
+  if (dimension === 'hosted-repository') return record.hostedRepositoryLabel;
   if (dimension === 'branch') return record.branchLabel;
   return '';
 }
@@ -1651,25 +2071,38 @@ function infoLinearSearchFields(record = {}) {
 }
 
 function infoRecordSearchFields(record = {}) {
+  const observations = Array.isArray(record?.pathObservations) ? record.pathObservations : [];
+  const observationFields = observations.flatMap(observation => [
+    infoSearchField('path', observation?.path),
+    infoSearchField('ai', observation?.actorKind),
+    infoSearchField('observation-source', observation?.source),
+  ]).filter(Boolean);
   return [
-    ...(infoRecordHasTab(record) ? infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession) : []),
-    ...(infoRecordHasAi(record) ? infoSearchFields('tmux-window', infoRecordTmuxWindowLabel(record)) : []),
+    ...infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession),
+    infoSearchField('tmux-session', record.tmuxSessionLabel, record.tmuxSessionKey, record.tabSession),
+    ...infoSearchFields('tmux-window', infoRecordTmuxWindowLabel(record), record.aiWindowIndex, record.aiPaneTarget),
+    infoSearchField('tmux-pane', record.tmuxPaneLabel, record.tmuxPaneKey, record.tmuxPaneTarget, record.aiPaneTarget, record.aiPane),
     ...(infoRecordHasAi(record) ? infoSearchFields('ai', infoRecordAiAgentLabel(record), infoRecordAiKind(record)) : []),
     !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__'
       ? infoSearchField('path', record.pathTitle || record.pathLabel)
       : null,
+    infoSearchField('git-worktree', record.gitWorktreeLabel, record.gitWorktreeTitle),
+    infoSearchField('local-repository', record.localRepositoryLabel, record.localRepositoryTitle),
+    infoSearchField('hosted-repository', record.hostedRepositoryLabel, record.hostedRepositoryTitle),
     !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__'
       ? infoSearchField('branch', record.branchTitle || record.branchLabel)
       : null,
     infoSearchField('pr', infoPrSearchText(record)),
     ...infoLinearSearchFields(record),
+    ...observationFields,
     !infoRecordMissingValue(record?.updated) ? infoSearchField('updated', record.updated) : null,
   ].filter(Boolean);
 }
 
 function infoSearchFieldMatches(field = {}, query = infoSearch) {
   const text = String(query || '').trim();
-  return Boolean(text && Number.isFinite(fuzzySearchScore(text, [field.text])));
+  const value = String(field?.text || '');
+  return Boolean(text && (value.toLocaleLowerCase().includes(text.toLocaleLowerCase()) || Number.isFinite(fuzzySearchScore(text, [value]))));
 }
 
 function infoRecordSearchKindMatches(record = {}, kind = '', query = infoSearch) {
@@ -1681,7 +2114,10 @@ function infoRecordSearchKindMatches(record = {}, kind = '', query = infoSearch)
 function infoRecordMatchesSearch(record = {}, query = infoSearch) {
   const text = String(query || '').trim();
   if (!text) return true;
-  return infoRecordSearchFields(record).some(field => infoSearchFieldMatches(field, text));
+  // The fuzzy scorer ranks a query inside one field. Relationship search instead allows terms
+  // to traverse canonical edges: e.g. a worktree path plus its RuntimeActor or Tmux target.
+  const fields = infoRecordSearchFields(record);
+  return String(text).split(/\s+/).filter(Boolean).every(token => fields.some(field => infoSearchFieldMatches(field, token)));
 }
 
 function infoFilteredRecords(records = [], query = infoSearch) {
@@ -1858,10 +2294,41 @@ function infoRecordPrStatusHtml(record) {
   return parts.filter(Boolean).join(' ');
 }
 
+function infoRecordPrLookupStateHtml(record) {
+  const state = String(record?.prLookupState || '').trim();
+  if (!['loading', 'none', 'stale', 'error', 'not-requested'].includes(state)) return '';
+  const labels = {
+    loading: t('common.loading'),
+    none: t('info.group.none'),
+    stale: t('dialog.staleStatus'),
+    error: t('common.unknown'),
+    'not-requested': t('notify.permission.default'),
+  };
+  return `<span class="info-tree-pr-lookup-state info-tree-pr-lookup-state-${esc(state)}">${esc(labels[state])}</span>`;
+}
+
 function infoRecordPrDescHtml(record) {
-  if (String(record?.prKey || '') === '__no_pr__') return '';
+  const values = Array.isArray(record?.prValues) ? record.prValues.filter(Boolean) : [];
+  if (values.length) {
+    const highlight = infoRecordSearchKindMatches(record, 'pr');
+    return values.map(value => {
+      const number = Number(value?.number);
+      const numberText = Number.isFinite(number) ? `#${number}` : String(value?.title || '').trim();
+      const title = String(value?.title || value?.description || '').trim();
+      const href = String(value?.url || '').trim();
+      const lifecycle = pullRequestLifecycleStatus(value);
+      const ci = pullRequestCiStatus(value);
+      return [
+        infoHighlightedLinkHtml(href, numberText, href || title || numberText, pullRequestStatusClass(value), highlight),
+        title ? (highlight ? infoSearchHighlightHtml(title) : esc(title)) : '',
+        lifecycle?.text ? infoStatusBadgeHtml(record, lifecycle.text, lifecycle.className, {highlight}) : '',
+        ci?.text ? infoStatusBadgeHtml(record, ci.text, ci.className, {highlight}) : '',
+      ].filter(Boolean).join(' ');
+    }).join('<br>');
+  }
+  if (String(record?.prKey || '') === '__no_pr__') return infoRecordPrLookupStateHtml(record);
   const text = String(record?.prTitle || record?.prLabel || '').trim();
-  if (infoRecordMissingValue(text)) return '';
+  if (infoRecordMissingValue(text)) return infoRecordPrLookupStateHtml(record);
   const label = String(record?.prLabel || '').trim();
   const numberText = Number.isFinite(record?.prNumber)
     ? `#${record.prNumber}`
@@ -1876,6 +2343,16 @@ function infoRecordPrDescHtml(record) {
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+function infoRecordPrCount(record = {}) {
+  return Array.isArray(record?.prValues) ? new Set(record.prValues.map(value => String(value?.id || value?.url || value?.number || '')).filter(Boolean)).size : 0;
+}
+
+function infoRecordPrCountHtml(record = {}) {
+  const count = infoRecordPrCount(record);
+  if (count <= 1) return '';
+  return `<span class="info-tree-pr-count">${esc(tPlural('info.count.pr', count))}</span>`;
 }
 
 function infoLinearItemDescHtml(item = {}, options = {}) {
@@ -1923,12 +2400,16 @@ function infoRecordLinearDescHtml(record) {
 function infoFieldLabel(kind) {
   const labels = {
     path: 'common.field.path',
+    'git-worktree': 'common.pathLabel',
+    'local-repository': 'common.pathLabel',
+    'hosted-repository': 'common.pathLabel',
     branch: 'info.field.gitBranch',
     pr: 'info.field.githubPr',
     linear: 'info.field.linear',
     tab: 'info.field.tabTmuxSession',
-    ai: 'info.field.tmuxSubWindow',
-    'tmux-window': 'info.field.tmuxSubWindow',
+    ai: 'info.dimension.ai',
+    'tmux-window': 'info.field.tmuxWindow',
+    'tmux-pane': 'info.field.tmuxWindow',
     updated: 'common.updated',
   };
   return t(labels[kind] || kind);
@@ -2109,7 +2590,7 @@ function infoRecordMainChipsHtml(record, options = {}) {
   const linearDesc = infoRecordLinearDescHtml(record);
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   const prDesc = infoRecordPrDescHtml(record);
-  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
+  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', `${prDesc}${infoRecordPrCountHtml(record)}`, record.prTitle));
   if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
     fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
   }
@@ -2118,13 +2599,21 @@ function infoRecordMainChipsHtml(record, options = {}) {
   }
   if (pathVisible) {
     const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
-    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}`, record.pathTitle));
+    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}${infoPathObservationEvidenceHtml(record)}`, record.pathTitle));
   }
   if (branchVisible) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
+    const state = normalizeInfoBranchState(record?.branchState);
+    const stateLabel = state === 'current' ? t('branch.current') : state;
+    const stateHtml = `<span class="info-tree-branch-state info-tree-branch-state-${esc(state)}">${esc(stateLabel)}</span>`;
+    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${stateHtml}${updatedMeta}`, record.branchTitle));
   }
   return fields.join('');
+}
+
+function normalizeInfoBranchState(value) {
+  const state = String(value || '').trim().toLowerCase();
+  return ['current', 'worked', 'missing'].includes(state) ? state : 'available';
 }
 
 function infoRecordHtml(record, options = {}) {
@@ -2139,9 +2628,14 @@ function infoTreeHiddenDimensions(ancestors, dimension) {
 
 const infoDimensionCountKeys = Object.freeze({
   tab: 'common.tabs',
+  'tmux-session': 'common.tabs',
   'tmux-window': 'info.count.tmuxWindow',
+  'tmux-pane': 'info.count.tmuxWindow',
   ai: 'info.count.ai',
   path: 'common.pathCount',
+  'git-worktree': 'common.pathCount',
+  'local-repository': 'common.pathCount',
+  'hosted-repository': 'common.pathCount',
   branch: 'info.count.branch',
   pr: 'info.count.pr',
   linear: 'info.count.linear',
@@ -2232,7 +2726,10 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
   const tree = infoGroupTree(records, grouping, normalizedSort);
   const activeGroupKeys = new Set();
   const childrenHtml = infoTreeChildrenHtml(tree.children || [], 0, [], [], activeGroupKeys);
-  pruneInfoTreeCollapsedGroups(activeGroupKeys);
+  // Host-owned YO!share state can legitimately carry a collapsed group that is currently
+  // filtered out. Preserve it until the host changes the snapshot; pruning it during a readonly
+  // render loses that state before the user clears the host search.
+  if (!shareViewMode) pruneInfoTreeCollapsedGroups(activeGroupKeys);
   return `<div class="info-tree" data-info-grouping="${esc(normalizeInfoGrouping(grouping).join(','))}" data-info-sort="${esc(`${normalizedSort.key}:${normalizedSort.dir}`)}" data-info-search="${esc(infoSearch.trim())}">${childrenHtml}</div>`;
 }
 
@@ -2366,43 +2863,134 @@ function infoPathIsWithin(path, root) {
   return Boolean(normalizedPath && normalizedRoot && (normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`)));
 }
 
+function infoHasWorkGraph(info = {}) {
+  const graph = info?.work_graph;
+  // A schema-valid graph is the source of truth even while it is empty. Falling back to the
+  // compatibility projection here would resurrect stale paths from a prior metadata generation.
+  return graph?.version === 1
+    && ['git_worktrees', 'local_repositories', 'local_branches', 'hosted_repositories', 'pull_requests', 'linear_issues', 'path_observations', 'runtime_actors', 'tmux_sessions', 'tmux_windows', 'tmux_panes', 'worktree_branch_activity']
+      .every(key => graph[key] && typeof graph[key] === 'object');
+}
+
+function infoSourceRoot(source = {}) {
+  return source?.workGraph ? String(source?.worktree?.root || '') : infoGitRoot(source?.git);
+}
+
+function infoSourcePathLabel(source = {}) {
+  if (!source?.workGraph) return infoPathLabel(source?.git);
+  const root = infoSourceRoot(source);
+  const parent = String(source?.worktree?.parent_root || '');
+  return parent
+    ? worktreeDisplayText({name: compactHomePath(root) || root, parent_root: compactHomePath(parent) || parent})
+    : (compactHomePath(root) || root);
+}
+
+function infoSourcePathTitle(source = {}) {
+  if (!source?.workGraph) return infoPathTitle(source?.git);
+  const root = infoSourceRoot(source);
+  const parent = String(source?.worktree?.parent_root || '');
+  return parent ? worktreeDisplayText({name: root, parent_root: parent}) : root;
+}
+
+function infoSourceBranches(source = {}) {
+  if (!source?.workGraph) return Array.isArray(source?.git?.other_branches?.branches) ? source.git.other_branches.branches : [];
+  const graph = source.workGraph;
+  return (source?.localRepository?.local_branch_ids || []).map(branchId => {
+    const branch = graph.local_branches?.[branchId];
+    if (!branch) return null;
+    const pullRequests = (branch.pull_request_ids || []).map(prId => graph.pull_requests?.[prId]).filter(Boolean);
+    const linear = (branch.linear_issue_ids || []).map(issueId => graph.linear_issues?.[issueId]).filter(Boolean);
+    return {...branch, current: branch.id === source?.worktree?.current_branch_id, pull_requests: pullRequests, linear};
+  }).filter(Boolean);
+}
+
+function infoSourceOwnsBranch(source = {}, branch = {}) {
+  if (source?.workGraph) return String(branch?.id || '') === String(source?.worktree?.current_branch_id || '');
+  return infoBranchOwnedBySource(source?.git, branch);
+}
+
+function infoSourceRepositoryUrl(source = {}) {
+  return source?.workGraph
+    ? String(source?.hostedRepository?.url || '')
+    : String(source?.git?.github_repo?.url || '');
+}
+
 function infoBranchSourcesForSession(session, info) {
-  const project = info?.project || {};
-  const primaryGit = project.git;
-  const primaryKey = infoGitPathKey(primaryGit);
+  const workGraph = info?.work_graph;
+  if (!infoHasWorkGraph(info)) return [];
   const sources = [];
-  const seenSources = new Set();
-  const addSource = (git, primary) => {
-    const sourceKey = infoGitPathKey(git);
-    const branches = git?.other_branches?.branches;
-    if (!sourceKey || !Array.isArray(branches) || !branches.length || seenSources.has(sourceKey)) return;
-    seenSources.add(sourceKey);
-    sources.push({session, info, project, git, primary: primary === true});
-  };
-  addSource(primaryGit, true);
-  for (const repo of Array.isArray(project.repos) ? project.repos : []) {
-    addSource(repo, Boolean(primaryKey && infoGitPathKey(repo) === primaryKey));
-  }
-  for (const row of Array.isArray(info?.window_metadata) ? info.window_metadata : []) {
-    addSource(row?.git, Boolean(primaryKey && infoGitPathKey(row?.git) === primaryKey));
-  }
-  const agents = typeof sessionAgentWindowStatusPayloads === 'function'
-    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
-    : [];
-  for (const agent of agents) {
-    addSource(agent?.git, Boolean(primaryKey && infoGitPathKey(agent?.git) === primaryKey));
-    for (const entry of typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : []) {
-      addSource(entry?.git, Boolean(primaryKey && infoGitPathKey(entry?.git) === primaryKey));
-    }
+  for (const worktree of Object.values(workGraph.git_worktrees)) {
+    const localRepository = workGraph.local_repositories?.[worktree?.local_repository_id];
+    if (!localRepository) continue;
+    const hostedRepositoryId = String(worktree.hosted_repository_id || localRepository.hosted_repository_id || '');
+    const hostedRepository = workGraph.hosted_repositories?.[hostedRepositoryId] || null;
+    sources.push({
+      session,
+      info,
+      workGraph,
+      sourceKey: String(worktree.id || ''),
+      worktree,
+      localRepository,
+      hostedRepository,
+      worktreeId: String(worktree.id || ''),
+      localRepositoryId: String(localRepository.id || ''),
+      hostedRepositoryId,
+        gitWorktreeLabel: worktree.parent_root ? worktreeDisplayText({name: worktree.root, parent_root: worktree.parent_root}) : (compactHomePath(worktree.root) || worktree.root),
+        gitWorktreeTitle: worktree.parent_root ? worktreeDisplayText({name: worktree.root, parent_root: worktree.parent_root}) : String(worktree.root || ''),
+      localRepositoryLabel: compactHomePath(worktree.root) || worktree.root,
+      localRepositoryTitle: String(localRepository.common_git_dir || worktree.root || ''),
+      hostedRepositoryLabel: String(hostedRepository?.url || ''),
+      hostedRepositoryTitle: String(hostedRepository?.url || ''),
+      primary: worktree.id === Object.keys(workGraph.git_worktrees)[0],
+    });
   }
   return sources;
+}
+
+function infoGraphTabAgentsForSource(source = {}) {
+  const workGraph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (!workGraph || !worktreeId) return [];
+  const actors = Object.values(workGraph.runtime_actors || {});
+  const result = [];
+  for (const actor of actors) {
+    if (!String(actor?.kind || '').trim()) continue;
+    const observationIds = Array.isArray(actor?.path_observation_ids) ? actor.path_observation_ids : [];
+    if (!observationIds.some(id => workGraph.path_observations?.[id]?.git_worktree_id === worktreeId)) continue;
+    const pane = workGraph.tmux_panes?.[actor.tmux_pane_id] || {};
+    const window = workGraph.tmux_windows?.[pane.tmux_window_id] || {};
+    const displayPane = Array.isArray(source.info?.panes)
+      ? source.info.panes.find(candidate => String(candidate?.target || '') === String(pane?.target || ''))
+      : null;
+    result.push({
+      id: String(actor?.id || ''),
+      tmux_session_id: String(window?.tmux_session_id || ''),
+      tmux_session_name: String(workGraph.tmux_sessions?.[window?.tmux_session_id]?.name || ''),
+      tmux_pane_id: String(pane?.id || ''),
+      tmux_pane_label: String(pane?.index === undefined ? '' : `${window?.index || '0'}.${pane.index}`),
+      tmux_pane_target: String(pane?.target || ''),
+      kind: String(actor?.kind || ''),
+      state: String(actor?.status || ''),
+      window: String(window?.index || ''),
+      window_index: String(window?.index || ''),
+      window_label: String(window?.name || ''),
+      pane: String(pane?.index || ''),
+      pane_target: String(pane?.target || ''),
+      path: String(actor?.cwd || pane?.current_path || ''),
+      path_observation_ids: Array.isArray(actor?.path_observation_ids) ? [...actor.path_observation_ids] : [],
+      current: displayPane?.active === true || (!displayPane && pane?.active === true),
+      window_active: displayPane?.window_active === true || (!displayPane && pane?.window_active === true),
+      pid: actor?.pid,
+    });
+  }
+  return result;
 }
 
 function infoBranchSourcesForIndexedRepos() {
   const repos = Array.isArray(transcriptMetadataState.payload?.indexed_repos) ? transcriptMetadataState.payload.indexed_repos : [];
   return repos
     .filter(git => infoGitPathKey(git) && Array.isArray(git?.other_branches?.branches) && git.other_branches.branches.length)
-    .map(git => ({session: '', info: {}, project: {}, git, primary: false, indexed: true}));
+    .map(git => ({session: '', info: {}, git, primary: false, indexed: true}));
 }
 
 function infoBranchOwnedBySource(git, branch) {
@@ -2454,18 +3042,6 @@ function infoAgentWindowMatchesPathRoot(agent, sourceRoot) {
   return paths.some(path => infoPathIsWithin(path, sourceRoot));
 }
 
-function infoSourceWindowRowsForBranch(source, branch, options = {}) {
-  if (!source.session) return [];
-  const root = infoGitPathKey(source.git);
-  const branchName = String(branch?.name || source.git?.branch || '');
-  return (Array.isArray(source.info?.window_metadata) ? source.info.window_metadata : [])
-    .filter(row => {
-      const git = row?.git || {};
-      return infoGitPathKey(git) === root
-        && infoBranchGitMatches(git, branchName, options);
-    });
-}
-
 function infoTabAgentLabel(session, agent = null) {
   const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
   if (!agent) return t('info.tabAgent.withoutAi', {tab: tabLabel});
@@ -2494,9 +3070,11 @@ function infoTabAgentEntry(session, agent = null) {
   const label = infoTabAgentLabel(session, agent);
   const title = agent
     ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
-    : `${label} · ${t('info.missing.tmuxSubWindow')}`;
+    : `${label} · ${t('info.missing.tmuxWindow')}`;
   return {
     session: String(session || ''),
+    tmux_session_id: String(agent?.tmux_session_id || ''),
+    tmux_session_name: String(agent?.tmux_session_name || ''),
     label,
     title,
     tabLabel,
@@ -2508,6 +3086,9 @@ function infoTabAgentEntry(session, agent = null) {
     state: String(agent?.state || ''),
     pane: String(agent?.pane || ''),
     pane_target: String(agent?.pane_target || ''),
+    tmux_pane_id: String(agent?.tmux_pane_id || ''),
+    tmux_pane_label: String(agent?.tmux_pane_label || ''),
+    tmux_pane_target: String(agent?.tmux_pane_target || ''),
     current: agentWindowPayloadCurrent(agent) === true,
     window_active: agent?.window_active === true,
     pid: tmuxWindowProcessPid(agent),
@@ -2519,6 +3100,29 @@ function infoTabAgentEntry(session, agent = null) {
 
 function infoBranchTabAgentsForSource(source, branch) {
   if (!source.session) return [];
+  const graphAgents = infoGraphTabAgentsForSource(source);
+  if (source.workGraph) {
+    const ownsBranch = infoSourceOwnsBranch(source, branch);
+    const branchName = String(branch?.name || '');
+    const branchOwners = graphAgents.filter(agent => {
+      const worktree = source.workGraph?.git_worktrees?.[source.worktreeId] || {};
+      const branchId = String(worktree.current_branch_id || '');
+      // The canonical graph has no mutable actor-level Git projection. An actor can own the
+      // checked-out branch directly; non-current branch ownership is represented by a durable
+      // branch-activity edge, not by assigning every actor observing the worktree to every branch.
+      if (ownsBranch) return true;
+      return Object.values(source.workGraph?.worktree_branch_activity || {}).some(activity => {
+        if (!(activity?.git_worktree_id === source.worktreeId
+          && (activity?.local_branch_id === branch?.id || activity?.branch_name_snapshot === branchName))) return false;
+        const observationIds = new Set(activity?.path_observation_ids || []);
+        return (agent?.path_observation_ids || []).some(id => observationIds.has(id));
+      });
+    });
+    if (branchOwners.length) return branchOwners.map(agent => infoTabAgentEntry(source.session, agent));
+    // A session which observes a secondary worktree has no inferred owner for that worktree's
+    // current branch. Keep the branch available in YO!info without fabricating a "No AI" row.
+    return ownsBranch && source.primary === true ? [infoTabAgentEntry(source.session, null)] : [];
+  }
   const owned = infoBranchOwnedBySource(source.git, branch);
   const root = infoGitRoot(source.git);
   const branchName = String(branch?.name || source.git?.branch || '');
@@ -2527,18 +3131,18 @@ function infoBranchTabAgentsForSource(source, branch) {
     : [];
   const matchingAgents = agents.filter(agent => infoAgentWindowMatchesBranchGit(agent, root, branchName, {requireBranch: !owned}));
   if (matchingAgents.length) return matchingAgents.map(agent => infoTabAgentEntry(source.session, agent));
-  const matchingWindows = infoSourceWindowRowsForBranch(source, branch, {requireBranch: !owned});
   if (!owned) {
-    if (matchingWindows.length) return [infoTabAgentEntry(source.session, null)];
     return [];
   }
   if (source.primary === true && agents.length) return agents.map(agent => infoTabAgentEntry(source.session, agent));
-  if (matchingWindows.length || source.primary === true || !agents.length) return [infoTabAgentEntry(source.session, null)];
+  if (source.primary === true || !agents.length) return [infoTabAgentEntry(source.session, null)];
   return [];
 }
 
 function infoPathTabAgentsForSource(source) {
   if (!source.session) return [];
+  const graphAgents = infoGraphTabAgentsForSource(source);
+  if (source.workGraph) return graphAgents.map(agent => infoTabAgentEntry(source.session, agent));
   const root = infoGitRoot(source.git);
   if (!root) return [];
   const agents = typeof sessionAgentWindowStatusPayloads === 'function'
@@ -2561,6 +3165,8 @@ function mergedInfoTabAgents(...groups) {
       seen.add(key);
       result.push({
         session,
+        tmux_session_id: String(item?.tmux_session_id || ''),
+        tmux_session_name: String(item?.tmux_session_name || ''),
         label,
         title: String(item?.title || label),
         tabLabel: String(item?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || ''),
@@ -2571,6 +3177,9 @@ function mergedInfoTabAgents(...groups) {
         state: String(item?.state || ''),
         pane: String(item?.pane || ''),
         pane_target: String(item?.pane_target || ''),
+        tmux_pane_id: String(item?.tmux_pane_id || ''),
+        tmux_pane_label: String(item?.tmux_pane_label || ''),
+        tmux_pane_target: String(item?.tmux_pane_target || ''),
         current: item?.current === true,
         window_active: item?.window_active === true,
         working_stopped_ts: Number.isFinite(Number(item?.working_stopped_ts)) ? Number(item.working_stopped_ts) : 0,
@@ -2602,24 +3211,64 @@ function rowWithInfoTabAgents(row, tabAgents) {
 }
 
 function infoPathActivityForSource(source = {}) {
-  const root = infoGitRoot(source.git);
-  const repos = Array.isArray(source?.project?.repos) ? source.project.repos : [];
-  const repo = repos.find(item => infoNormalizedPath(item?.root) === infoNormalizedPath(root));
-  const timestamp = Number(repo?.activity_ts ?? source?.git?.activity_ts ?? 0);
-  return {
-    timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
-    source: String(repo?.activity_source || source?.git?.activity_source || ''),
-  };
+  const graph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (graph && worktreeId) {
+    const observations = Object.values(graph.path_observations || {})
+      .filter(observation => observation?.git_worktree_id === worktreeId);
+    const timestamp = Math.max(0, ...observations.map(observation => Number(observation?.last_observed_at || 0)));
+    return {timestamp, source: String(observations.find(observation => Number(observation?.last_observed_at || 0) === timestamp)?.source || '')};
+  }
+  return {timestamp: 0, source: ''};
+}
+
+function infoPathObservationsForSource(source = {}) {
+  const graph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (!graph || !worktreeId) return [];
+  const actors = graph.runtime_actors || {};
+  return Object.values(graph.path_observations || {})
+    .filter(observation => observation?.git_worktree_id === worktreeId)
+    .map(observation => {
+      const actor = actors[observation.runtime_actor_id] || null;
+      return {
+        id: String(observation?.id || ''),
+        path: String(observation?.path || observation?.path_snapshot || ''),
+        source: String(observation?.source || ''),
+        lastObservedAt: Number(observation?.last_observed_at || 0),
+        actorId: String(actor?.id || ''),
+        actorKind: String(actor?.kind || ''),
+      };
+    })
+    .sort((left, right) => right.lastObservedAt - left.lastObservedAt || left.path.localeCompare(right.path) || left.id.localeCompare(right.id));
+}
+
+function infoPathObservationEvidenceHtml(record = {}) {
+  const observations = Array.isArray(record?.pathObservations) ? record.pathObservations : [];
+  if (observations.length <= 1) return '';
+  const summary = observations.map(observation => {
+    const path = compactHomePath(observation.path) || observation.path;
+    const actor = observation.actorKind || t('info.missing.ai');
+    const source = observation.source || t('info.group.none');
+    const recency = Number.isFinite(observation.lastObservedAt) && observation.lastObservedAt > 0
+      ? relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - observation.lastObservedAt))
+      : '';
+    return `<li><code>${esc(path)}</code> · ${esc(actor)} · ${esc(source)}${recency ? ` · ${esc(recency)}` : ''}</li>`;
+  }).join('');
+  return `<details class="info-tree-path-observations"><summary>${esc(tPlural('common.pathCount', observations.length))}</summary><ul>${summary}</ul></details>`;
 }
 
 function infoBranchRowForSource(source, branch, ownsSession) {
-  const {session, info, project, git, primary} = source;
-  const useCurrentProjectMetadata = ownsSession && primary;
-  const currentPr = useCurrentProjectMetadata ? displayPullRequest(info) : null;
-  const currentLinear = useCurrentProjectMetadata ? project.linear || [] : [];
+  const {session, info, git, primary} = source;
+  const useCurrentWorkMetadata = ownsSession && primary && Boolean(source.workGraph);
+  const currentPr = useCurrentWorkMetadata ? displayPullRequest(info) : null;
+  const currentLinear = useCurrentWorkMetadata ? sessionWorkSummary(session, info).linearIssues || [] : [];
   const branchLinear = Array.isArray(branch.linear) ? branch.linear : [];
   const branchLinearIds = Array.isArray(branch.linear_ids) ? branch.linear_ids : [];
-  const prLinearIds = Array.isArray(branch.pull_request?.linear_ids) ? branch.pull_request.linear_ids : [];
+  const branchPullRequests = Array.isArray(branch.pull_requests)
+    ? branch.pull_requests.filter(Boolean)
+    : (branch.pull_request ? [branch.pull_request] : []);
+  const prLinearIds = branchPullRequests.flatMap(pullRequest => Array.isArray(pullRequest?.linear_ids) ? pullRequest.linear_ids : []);
   const linearSourceItems = currentLinear.length ? currentLinear : branchLinear;
   const fallbackLinearIds = Array.from(new Set([...branchLinearIds, ...prLinearIds].map(item => String(item || '').trim()).filter(Boolean)));
   const linearIds = linearSourceItems.length
@@ -2628,14 +3277,15 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const linearHtml = linearSourceItems.length
     ? linearSourceItems.map(issue => linearIssueHtml(issue)).join(' ')
     : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-  const prHtml = currentPr?.number ? pullRequestLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
-  const prValue = currentPr?.number ? currentPr : branch.pull_request;
+  const prValues = currentPr?.number ? [currentPr] : branchPullRequests;
+  const prValue = prValues[0] || null;
+  const prHtml = prValues.map(pullRequestLinkHtml).filter(Boolean).join(' ');
   const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
   const prNumber = infoPrNumberFromValue(prValue?.number);
-  const prDescriptionTitle = prValue?.number
-    ? [`#${prValue.number}`, prValue.title || prValue.description || branch.subject || ''].filter(Boolean).join(' ')
-    : '';
-  const repoUrl = git?.github_repo?.url || '';
+  const prDescriptionTitle = prValues.map(value => value?.number
+    ? [`#${value.number}`, value.title || value.description || branch.subject || ''].filter(Boolean).join(' ')
+    : '').filter(Boolean).join(' · ');
+  const repoUrl = infoSourceRepositoryUrl(source);
   const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
   const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
@@ -2665,15 +3315,44 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     180,
   );
   const pathActivity = infoPathActivityForSource(source);
+  const pathObservations = infoPathObservationsForSource(source);
+  const workGraph = source?.workGraph;
+  const branchId = String(branch?.id || '');
+  const worktreeId = String(source?.worktreeId || '');
+  const branchActivities = Object.values(workGraph?.worktree_branch_activity || {}).filter(activity => (
+    activity?.git_worktree_id === worktreeId
+      && (activity?.local_branch_id === branchId || activity?.branch_name_snapshot === branch?.name)
+  ));
+  const current = branch?.current === true;
+  const missing = branch?.missing === true;
+  const worked = !current && branchActivities.length > 0;
+  const branchState = current ? 'current' : (missing ? 'missing' : (worked ? 'worked' : 'available'));
+  const branchStateLabel = branchState === 'current'
+    ? t('branch.current')
+    : branchState;
   return {
     session: '',
-    path: infoGitRoot(git),
-    pathLabel: infoPathLabel(git),
-    pathTitle: infoPathTitle(git),
+    path: infoSourceRoot(source),
+    pathLabel: infoSourcePathLabel(source),
+    pathTitle: infoSourcePathTitle(source),
     pathActivityTs: pathActivity.timestamp,
     pathActivitySource: pathActivity.source,
+    pathObservations,
+    gitWorktreeId: String(source?.worktreeId || ''),
+    gitWorktreeLabel: String(source?.gitWorktreeLabel || infoSourcePathLabel(source)),
+    gitWorktreeTitle: String(source?.gitWorktreeTitle || infoSourcePathTitle(source)),
+    localRepositoryId: String(source?.localRepositoryId || git?.local_repository?.id || ''),
+    localRepositoryLabel: String(source?.localRepositoryLabel || infoSourcePathLabel(source)),
+    localRepositoryTitle: String(source?.localRepositoryTitle || infoSourcePathTitle(source)),
+    hostedRepositoryId: String(source?.hostedRepositoryId || ''),
+    hostedRepositoryLabel: String(source?.hostedRepositoryLabel || git?.github_repo?.url || ''),
+    hostedRepositoryTitle: String(source?.hostedRepositoryTitle || git?.github_repo?.url || ''),
     branch: branch.name || '',
-    branchHtml: branchLinkHtml(git, branch.name),
+    branchId,
+    branchState,
+    branchStateLabel,
+    branchActivityIds: branchActivities.map(activity => String(activity?.id || '')).filter(Boolean),
+    branchHtml: branchLinkHtml(git || {}, branch.name),
     desc,
     updated: branch.updated || '',
     updatedText: branchUpdatedText(branch),
@@ -2685,6 +3364,8 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     prDescriptionTitle,
     prUrl,
     prLabel,
+    prValues,
+    prLookupState: String(branch.pull_request_lookup_state || 'not-requested'),
     prNumber: Number.isFinite(prNumber) ? prNumber : null,
     prClass,
     prLifecycleText,
@@ -2695,7 +3376,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     linearHtml,
     linearItems,
     linearTitle,
-    current: false,
+    current,
     sourcePrimary: primary,
     tabAgents: infoBranchTabAgentsForSource(source, branch),
     pathTabAgents: infoPathTabAgentsForSource(source),
@@ -2714,7 +3395,12 @@ function mergeInfoBranchRow(existing, next) {
   const preferred = preferInfoBranchMetadataRow(existing, next);
   const mergedAgents = mergedInfoTabAgents(existing.tabAgents, next.tabAgents);
   const mergedPathAgents = mergedInfoTabAgents(existing.pathTabAgents, next.pathTabAgents);
-  return rowWithInfoTabAgents({...preferred, pathTabAgents: mergedPathAgents}, mergedAgents);
+  const branchState = preferred.branchState === 'current' || next.branchState === 'current'
+    ? 'current'
+    : (preferred.branchState === 'worked' || next.branchState === 'worked'
+      ? 'worked'
+      : (preferred.branchState === 'missing' || next.branchState === 'missing' ? 'missing' : 'available'));
+  return rowWithInfoTabAgents({...preferred, pathTabAgents: mergedPathAgents, branchState}, mergedAgents);
 }
 
 function rawInfoBranchRows() {
@@ -2723,9 +3409,11 @@ function rawInfoBranchRows() {
   for (const session of infoSessions) {
     const info = transcriptMetadataState.payload.sessions?.[session];
     for (const source of infoBranchSourcesForSession(session, info)) {
-      for (const branch of source.git?.other_branches?.branches || []) {
-        const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
-        const row = infoBranchRowForSource(source, branch, infoBranchOwnedBySource(source.git, branch));
+      for (const branch of infoSourceBranches(source)) {
+        const key = source.workGraph
+          ? `${source.localRepositoryId}\n${branch.id || branch.name || ''}`
+          : `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
+        const row = infoBranchRowForSource(source, branch, infoSourceOwnsBranch(source, branch));
         rowsByKey.set(key, mergeInfoBranchRow(rowsByKey.get(key), row));
       }
     }
@@ -2774,6 +3462,7 @@ function shareInfoRowSnapshot(row = {}) {
     pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
     pathActivitySource: shareInfoString(row.pathActivitySource, 100),
     branch: shareInfoString(row.branch, 500),
+    branchState: normalizeInfoBranchState(row.branchState),
     desc: shareInfoString(row.desc, 1000),
     updated: shareInfoString(row.updated, 200),
     updatedText: shareInfoString(row.updatedText, 200),
@@ -2809,6 +3498,7 @@ function shareInfoStateSnapshot(options = {}) {
     grouping: currentInfoGrouping(),
     sort: currentInfoSort(),
     search: currentInfoSearch(),
+    collapsedGroupKeys: [...infoCollapsedGroupKeys].slice(0, 1000),
   };
   if (options.includeRows !== false) snapshot.branchRows = infoBranchRows().map(shareInfoRowSnapshot);
   return snapshot;
@@ -2825,6 +3515,13 @@ function applyShareInfoState(info = {}) {
   if ('search' in info || 'infoSearch' in info || 'info2Search' in info) {
     setInfoSearch(info.search ?? info.infoSearch ?? info.info2Search, {publish: false, render: false});
   }
+  if (Array.isArray(info.collapsedGroupKeys)) {
+    infoCollapsedGroupKeys.clear();
+    info.collapsedGroupKeys.slice(0, 1000).forEach(key => {
+      const value = String(key || '');
+      if (value) infoCollapsedGroupKeys.add(value);
+    });
+  }
   if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
   refreshInfoGroupingControls();
   renderInfoPanel({force: true});
@@ -2833,28 +3530,19 @@ function applyShareInfoState(info = {}) {
 
 function bindPanelControls(panel, session) {
   delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
-    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-toggle]', (event, button) => {
+    moveTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'pointerup', '[data-terminal-mobile-toggle]', (event, button) => {
-    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'pointercancel', '[data-terminal-mobile-toggle]', (event, button) => {
-    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'contextmenu', '[data-terminal-mobile-toggle]', event => {
     event.preventDefault();
-  });
-  delegate(panel, 'pointerdown', '[data-terminal-mobile-drag]', (event, handle) => {
-    beginTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointermove', '[data-terminal-mobile-drag]', (event, handle) => {
-    moveTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointerup', '[data-terminal-mobile-drag]', (event, handle) => {
-    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointercancel', '[data-terminal-mobile-drag]', (event, handle) => {
-    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
   });
   delegate(panel, 'click', '[data-terminal-mobile-toggle]', (event, button) => {
     event.preventDefault();
@@ -2862,6 +3550,18 @@ function bindPanelControls(panel, session) {
     const targetSession = button.dataset.terminalMobileToggle || session;
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
+    beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-keybar]', (event, bar) => {
+    moveTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
   });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
     // Do not blur xterm/close the software keyboard before the click sends its byte.
@@ -3267,7 +3967,6 @@ async function uploadFiles(session, fileList, options = {}) {
     }
     refreshTerminalAfterUpload(session);
     refreshOpenEventLogs();
-    refreshTranscripts({force: true});
   } catch (error) {
     showFileTransferError(error, {session, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
@@ -4891,6 +5590,13 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
   if (!requestIsCurrent()) return false;
+  const nextPayload = transcriptPayloadWithTmuxWindowOverrides(payload);
+  const currentSessions = transcriptMetadataState.payload?.sessions || {};
+  for (const [session, nextInfo] of Object.entries(nextPayload?.sessions || {})) {
+    const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
+    const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
+    if (nextGeneration > 0 && currentGeneration > nextGeneration) return false;
+  }
   setTranscriptMetadataPayload(transcriptPayloadWithTmuxWindowOverrides(payload), {invalidateRequest: options.source !== 'request'});
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
@@ -4912,6 +5618,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return false;
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
+  // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The
+  // topbar renderer intentionally defers all full rebuilds during an open menu so pointer/click
+  // targets cannot disappear; this shared owner updates just the cache-backed menu rows instead.
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   renderSessionButtons();
   renderInfoPanel();
   renderYoagentPanel();
@@ -5306,6 +6016,13 @@ function relocalizeTranscriptPanelStatus(session) {
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
     const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    if (payload?.pending === true) {
+      preview.textContent = t('transcript.loadingRecentContext');
+      setTimeout(() => {
+        if (transcriptPreviewPaneIsActive(session)) refreshTranscriptPreview(session, preview, options);
+      }, 200);
+      return;
+    }
     if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
@@ -5956,6 +6673,10 @@ function handleClientPushEventNow(type, payload = {}) {
     }
     return;
   }
+  if (type === 'stats_sample') {
+    if (typeof applyJsDebugStatsSamplePush === 'function') applyJsDebugStatsSamplePush(payload);
+    return;
+  }
   if (type === 'auto_approve_changed') {
     if (payload.refresh) {
       refreshAutoStatuses().catch(() => {});
@@ -6084,6 +6805,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
+    if (activeItems.includes(debugPaneItemId)) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
       channels.add('transcripts');
@@ -6160,7 +6882,7 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
+  for (const type of ['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;

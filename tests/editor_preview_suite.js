@@ -27,6 +27,7 @@ const {
   nestedSlots,
   parseUrl,
   canonical,
+  sourceBetween,
   makeFileTree,
   test: registerTest,
   testAsync: registerTestAsync,
@@ -35,6 +36,372 @@ const {
 
 const DEBUG_AGENT_STATUS_SERIES = ['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents'];
 const DEBUG_AGENT_STATUS_LEGEND_SERIES = ['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents'];
+
+registerTest('YO!info prefers the normalized work graph without duplicating a shared worktree branch inventory', () => {
+  const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  assert.ok(source.includes('function infoHasWorkGraph(info = {})'), 'YO!info recognizes a schema-valid canonical graph explicitly');
+  assert.ok(source.includes('if (!infoHasWorkGraph(info)) return [];'), 'YO!info returns no Git sources without a normalized graph');
+  assert.equal(source.includes('info?.project'), false, 'YO!info has no legacy project projection fallback');
+  assert.ok(source.includes('function infoSourceBranches(source = {})'), 'graph branches use a shared graph-native selector');
+  assert.ok(source.includes('source.workGraph\n          ? `${source.localRepositoryId}'), 'graph rows deduplicate using canonical local repository and branch IDs');
+  assert.ok(source.includes('function infoGraphTabAgentsForSource(source = {})'), 'YO!info derives tab/actor attribution from graph associations');
+  assert.ok(source.includes('workGraph.path_observations?.[id]?.git_worktree_id === worktreeId'), 'actor attribution uses canonical observation-to-worktree edges');
+});
+
+registerTest('YO!info canonical relationship records ignore conflicting legacy projections and keep an empty graph empty', () => {
+  const api = loadYolomux('', ['graph-session']);
+  const graph = {
+    version: 1,
+    generation: 7,
+    tmux_sessions: {'tmux-session:graph-session': {id: 'tmux-session:graph-session', name: 'graph-session'}},
+    tmux_windows: {'tmux-window:graph-session:0': {id: 'tmux-window:graph-session:0', tmux_session_id: 'tmux-session:graph-session', index: '0', name: 'claude'}},
+    tmux_panes: {'tmux-pane:graph-session:0.0': {id: 'tmux-pane:graph-session:0.0', tmux_window_id: 'tmux-window:graph-session:0', index: '0', target: '%graph', active: true, window_active: true}},
+    runtime_actors: {'actor:graph': {id: 'actor:graph', tmux_pane_id: 'tmux-pane:graph-session:0.0', kind: 'claude', cwd: '/canonical/right', status: 'working', path_observation_ids: ['observation:graph']}},
+    path_observations: {'observation:graph': {id: 'observation:graph', runtime_actor_id: 'actor:graph', git_worktree_id: 'worktree:graph', path: '/canonical/right', source: 'transcript', last_observed_at: 42}},
+    git_worktrees: {'worktree:graph': {id: 'worktree:graph', root: '/canonical/right', git_dir: '/canonical/right/.git', local_repository_id: 'local:graph', hosted_repository_id: 'hosted:graph', current_branch_id: 'branch:graph'}},
+    local_repositories: {'local:graph': {id: 'local:graph', common_git_dir: '/canonical/.git', local_branch_ids: ['branch:graph']}},
+    hosted_repositories: {'hosted:graph': {id: 'hosted:graph', url: 'https://github.test/canonical/right'}},
+    local_branches: {'branch:graph': {id: 'branch:graph', local_repository_id: 'local:graph', name: 'canonical-branch', subject: 'canonical subject', pull_request_ids: ['pr:80'], linear_issue_ids: ['linear:CAN-1'], pull_request_lookup_state: 'ready'}},
+    pull_requests: {'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:graph', number: 80, title: 'canonical PR', state: 'open', url: 'https://github.test/canonical/right/pull/80', linear_ids: ['CAN-1'], local_branch_ids: ['branch:graph']}},
+    linear_issues: {'linear:CAN-1': {id: 'linear:CAN-1', identifier: 'CAN-1', title: 'canonical issue', url: 'https://linear.test/CAN-1'}},
+    worktree_branch_activity: {},
+  };
+  const legacyProject = {
+    git: {root: '/legacy/wrong', branch: 'legacy-branch', other_branches: {branches: [{name: 'legacy-branch', current: true, pull_request: {number: 999, url: 'https://legacy.test/pull/999'}}]}},
+    repos: [],
+  };
+  api.setTranscriptInfoForTest('graph-session', {work_graph: graph, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
+  api.setTranscriptSessionOrderForTest(['graph-session']);
+  const records = api.infoRelationshipRecords();
+  assert.equal(records.length, 1, 'one canonical graph branch creates one relationship record');
+  const [record] = records;
+  assert.equal(record.pathKey, '/canonical/right');
+  assert.equal(record.branchKey, 'canonical-branch');
+  assert.equal(record.prNumber, 80);
+  assert.equal(record.gitWorktreeKey, 'worktree:graph');
+  assert.equal(record.localRepositoryKey, 'local:graph');
+  assert.equal(record.hostedRepositoryKey, 'hosted:graph');
+  assert.equal(JSON.stringify(records).includes('/legacy/wrong'), false, 'legacy path projection cannot leak into a graph-backed result');
+  assert.equal(JSON.stringify(records).includes('legacy-branch'), false, 'legacy branch projection cannot leak into a graph-backed result');
+  assert.equal(JSON.stringify(records).includes('#999'), false, 'legacy PR projection cannot leak into a graph-backed result');
+
+  const empty = {...graph, git_worktrees: {}, local_repositories: {}, local_branches: {}, hosted_repositories: {}, pull_requests: {}, linear_issues: {}, path_observations: {}, runtime_actors: {}, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, worktree_branch_activity: {}};
+  api.setTranscriptInfoForTest('graph-session', {work_graph: empty, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
+  assert.deepStrictEqual(canonical(api.infoRelationshipRecords()), [], 'a schema-valid empty graph does not revive stale legacy rows');
+});
+
+registerTestAsync('metadata refresh retains a complete graph during lightweight payloads and rejects an older graph generation', async () => {
+  const api = loadYolomux('', ['graph-refresh']);
+  const completeGraph = {version: 1, generation: 20, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {'worktree:complete': {id: 'worktree:complete', root: '/complete', local_repository_id: 'repo:complete'}}, local_repositories: {'repo:complete': {id: 'repo:complete', local_branch_ids: []}}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}};
+  await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: completeGraph, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+  await api.applySessionMetadataPayloadForTest({metadata_loading: true, session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {version: 1, generation: 0, loading: true}, metadata_loading: true}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'a lightweight refresh retains the last complete canonical graph instead of reviving a legacy projection');
+  const accepted = await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {...completeGraph, generation: 19}, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+  assert.equal(accepted, false, 'a late older graph generation cannot overwrite the newer canonical session graph');
+  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'the newer graph remains active after stale delivery');
+});
+
+registerTest('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
+  const api = loadYolomux('', ['focus-graph']);
+  const graph = {
+    version: 1,
+    generation: 21,
+    tmux_sessions: {'tmux-session:focus-graph': {id: 'tmux-session:focus-graph', name: 'focus-graph'}},
+    tmux_windows: {
+      'tmux-window:focus-graph:0': {id: 'tmux-window:focus-graph:0', tmux_session_id: 'tmux-session:focus-graph', index: '0', name: 'claude'},
+      'tmux-window:focus-graph:1': {id: 'tmux-window:focus-graph:1', tmux_session_id: 'tmux-session:focus-graph', index: '1', name: 'bash'},
+    },
+    tmux_panes: {
+      'tmux-pane:focus-graph:0.0': {id: 'tmux-pane:focus-graph:0.0', tmux_window_id: 'tmux-window:focus-graph:0', index: '0', target: '%focus-a', active: true, window_active: true, runtime_actor_ids: ['actor:a'], path_observation_ids: ['observation:a']},
+      'tmux-pane:focus-graph:1.0': {id: 'tmux-pane:focus-graph:1.0', tmux_window_id: 'tmux-window:focus-graph:1', index: '0', target: '%focus-b', active: true, window_active: false, runtime_actor_ids: ['actor:b'], path_observation_ids: ['observation:b']},
+    },
+    runtime_actors: {'actor:a': {id: 'actor:a', tmux_pane_id: 'tmux-pane:focus-graph:0.0', kind: 'claude', path_observation_ids: ['observation:a']}, 'actor:b': {id: 'actor:b', tmux_pane_id: 'tmux-pane:focus-graph:1.0', kind: 'shell', path_observation_ids: ['observation:b']}},
+    path_observations: {'observation:a': {id: 'observation:a', tmux_pane_id: 'tmux-pane:focus-graph:0.0', runtime_actor_id: 'actor:a', git_worktree_id: 'worktree:a', path: '/repo/a', source: 'cwd', last_observed_at: 1}, 'observation:b': {id: 'observation:b', tmux_pane_id: 'tmux-pane:focus-graph:1.0', runtime_actor_id: 'actor:b', git_worktree_id: 'worktree:b', path: '/repo/b', source: 'cwd', last_observed_at: 2}},
+    git_worktrees: {'worktree:a': {id: 'worktree:a', root: '/repo/a', local_repository_id: 'local:a', current_branch_id: 'branch:a'}, 'worktree:b': {id: 'worktree:b', root: '/repo/b', local_repository_id: 'local:b', current_branch_id: 'branch:b'}},
+    local_repositories: {'local:a': {id: 'local:a', local_branch_ids: ['branch:a']}, 'local:b': {id: 'local:b', local_branch_ids: ['branch:b']}},
+    hosted_repositories: {},
+    local_branches: {'branch:a': {id: 'branch:a', local_repository_id: 'local:a', name: 'feature/a', pull_request_ids: ['pr:a'], linear_issue_ids: []}, 'branch:b': {id: 'branch:b', local_repository_id: 'local:b', name: 'feature/b', pull_request_ids: ['pr:b'], linear_issue_ids: []}},
+    pull_requests: {'pr:a': {id: 'pr:a', number: 80}, 'pr:b': {id: 'pr:b', number: 81}}, linear_issues: {}, worktree_branch_activity: {},
+  };
+  const info = {work_graph: graph, selected_pane: {target: '%focus-a'}, panes: [{target: '%focus-a', window: '0', pane: '0', active: true, window_active: true}, {target: '%focus-b', window: '1', pane: '0', active: true, window_active: false}]};
+  api.setTranscriptInfoForTest('focus-graph', info);
+  api.setTranscriptSessionOrderForTest(['focus-graph']);
+  const beforeGraph = JSON.stringify(graph);
+  assert.equal(api.sessionWorkSummaryForTest('focus-graph', info).selectedRepo.root, '/repo/a');
+  const switched = api.applyTmuxWindowActiveIndexToTranscriptInfoForTest('focus-graph', '1', {render: false});
+  assert.equal(switched, true);
+  const nextInfo = api.transcriptMetadataStateForTest().payload.sessions['focus-graph'];
+  assert.equal(api.sessionWorkSummaryForTest('focus-graph', nextInfo).selectedRepo.root, '/repo/b', 'focus follows the other TmuxWindow/TmuxPane observation edge');
+  assert.equal(JSON.stringify(nextInfo.work_graph), beforeGraph, 'focus changes browser selection only; it does not alter canonical graph entities, PRs, or branches');
+});
+
+registerTest('shared work-graph selectors keep tabs, popovers, and metadata on the focused canonical PR', () => {
+  const api = loadYolomux('', ['graph-session']);
+  const graph = {
+    version: 1,
+    generation: 9,
+    tmux_sessions: {'tmux-session:graph-session': {id: 'tmux-session:graph-session', name: 'graph-session'}},
+    tmux_windows: {'tmux-window:graph-session:0': {id: 'tmux-window:graph-session:0', tmux_session_id: 'tmux-session:graph-session', index: '0', name: 'claude', tmux_pane_ids: ['tmux-pane:graph-session:0.0']}},
+    tmux_panes: {'tmux-pane:graph-session:0.0': {id: 'tmux-pane:graph-session:0.0', tmux_window_id: 'tmux-window:graph-session:0', index: '0', target: '%focused', active: true, window_active: true, runtime_actor_ids: ['actor:focused'], path_observation_ids: ['observation:focused']}},
+    runtime_actors: {'actor:focused': {id: 'actor:focused', tmux_pane_id: 'tmux-pane:graph-session:0.0', kind: 'claude', path_observation_ids: ['observation:focused']}},
+    path_observations: {'observation:focused': {id: 'observation:focused', tmux_pane_id: 'tmux-pane:graph-session:0.0', runtime_actor_id: 'actor:focused', git_worktree_id: 'worktree:focused', path: '/canonical/focused/src', source: 'cwd', last_observed_at: 100}},
+    git_worktrees: {'worktree:focused': {id: 'worktree:focused', root: '/canonical/focused', local_repository_id: 'local:focused', hosted_repository_id: 'hosted:focused', current_branch_id: 'branch:focused'}},
+    local_repositories: {'local:focused': {id: 'local:focused', common_git_dir: '/canonical/focused/.git', local_branch_ids: ['branch:focused', 'branch:other']}},
+    hosted_repositories: {'hosted:focused': {id: 'hosted:focused', url: 'https://github.test/canonical/focused'}},
+    local_branches: {
+      'branch:focused': {id: 'branch:focused', local_repository_id: 'local:focused', name: 'feature/canonical', subject: 'canonical branch subject', pull_request_ids: ['pr:80'], linear_issue_ids: ['linear:CAN-80']},
+      'branch:other': {id: 'branch:other', local_repository_id: 'local:focused', name: 'other', pull_request_ids: [], linear_issue_ids: []},
+    },
+    pull_requests: {'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:focused', number: 80, title: 'Canonical graph PR', url: 'https://github.test/canonical/focused/pull/80', state: 'open'}},
+    linear_issues: {'linear:CAN-80': {id: 'linear:CAN-80', identifier: 'CAN-80', title: 'Canonical graph issue', url: 'https://linear.test/CAN-80'}},
+    worktree_branch_activity: {},
+  };
+  api.setTranscriptInfoForTest('graph-session', {
+    work_graph: graph,
+    selected_pane: {target: '%focused', current_path: '/legacy/stale'},
+    panes: [{target: '%focused', window: '0', pane: '0', active: true, window_active: true, current_path: '/canonical/focused/src'}],
+    project: {git: {root: '/legacy/stale', branch: 'legacy', other_branches: {branches: [{name: 'legacy', current: true, pull_request: {number: 999, title: 'Wrong legacy PR'}}]}}, pull_request: {number: 999, title: 'Wrong legacy PR'}, linear: [{identifier: 'LEG-999', title: 'Wrong legacy issue'}], repos: []},
+  });
+  api.setTranscriptSessionOrderForTest(['graph-session']);
+  assert.deepStrictEqual(canonical(api.focusedRepositoryIdsForTmuxTargetForTest(graph && {work_graph: graph, selected_pane: {target: '%focused'}}, '%focused')), ['local:focused'], 'focused repository selector follows TmuxPane -> observation -> worktree edges');
+  assert.deepStrictEqual(canonical(api.branchIdsForGitWorktreeForTest({work_graph: graph}, 'worktree:focused')), ['branch:focused', 'branch:other'], 'worktree branch selector exposes the LocalGitRepository inventory once');
+  assert.deepStrictEqual(canonical(api.pullRequestIdsForTmuxTargetForTest({work_graph: graph, selected_pane: {target: '%focused'}}, '%focused')), ['pr:80'], 'focused PR selector never uses a singular legacy session PR');
+  const summary = canonical(api.sessionWorkSummaryForTest('graph-session', {work_graph: graph, selected_pane: {target: '%focused'}}));
+  assert.equal(summary.git.root, '/canonical/focused');
+  assert.equal(summary.pullRequests[0].number, 80);
+  assert.equal(api.displayPullRequestForTest({work_graph: graph, selected_pane: {target: '%focused'}}).number, 80);
+  assert.ok(api.sessionTabDescriptionForTest('graph-session', {work_graph: graph, selected_pane: {target: '%focused'}}).includes('Canonical graph PR'), 'tab description uses the graph PR rather than project.pull_request');
+  assert.ok(api.tabMenuDetailText('graph-session').includes('feature/canonical'), 'tab menu metadata uses the graph branch rather than the stale project branch');
+  assert.equal(api.tabMenuDetailText('graph-session').includes('LEG-999'), false, 'legacy Linear metadata cannot leak into graph-backed tab details');
+  const tabberTree = api.buildTabberTreeForTest();
+  assert.equal(JSON.stringify(tabberTree).includes('feature/canonical'), true, 'Tabber session metadata uses the canonical focused branch');
+  assert.equal(JSON.stringify(tabberTree).includes('legacy'), false, 'Tabber does not show a conflicting legacy project branch');
+});
+
+registerTest('graph-backed TmuxSession PR decoration aggregates ambiguous focused PRs', () => {
+  const api = loadYolomux('', ['aggregate-session']);
+  const graph = {
+    version: 1,
+    generation: 10,
+    tmux_sessions: {'tmux-session:aggregate-session': {id: 'tmux-session:aggregate-session', name: 'aggregate-session'}},
+    tmux_windows: {'tmux-window:aggregate-session:0': {id: 'tmux-window:aggregate-session:0', tmux_session_id: 'tmux-session:aggregate-session', index: '0', name: 'bash', tmux_pane_ids: ['tmux-pane:aggregate-session:0.0']}},
+    tmux_panes: {'tmux-pane:aggregate-session:0.0': {id: 'tmux-pane:aggregate-session:0.0', tmux_window_id: 'tmux-window:aggregate-session:0', index: '0', target: '%aggregate', active: true, window_active: true, runtime_actor_ids: ['actor:aggregate'], path_observation_ids: ['observation:one', 'observation:two']}},
+    runtime_actors: {'actor:aggregate': {id: 'actor:aggregate', tmux_pane_id: 'tmux-pane:aggregate-session:0.0', kind: 'bash', path_observation_ids: ['observation:one', 'observation:two']}},
+    path_observations: {
+      'observation:one': {id: 'observation:one', tmux_pane_id: 'tmux-pane:aggregate-session:0.0', runtime_actor_id: 'actor:aggregate', git_worktree_id: 'worktree:one', path: '/repo/one', source: 'cwd', last_observed_at: 10},
+      'observation:two': {id: 'observation:two', tmux_pane_id: 'tmux-pane:aggregate-session:0.0', runtime_actor_id: 'actor:aggregate', git_worktree_id: 'worktree:two', path: '/repo/two', source: 'cwd', last_observed_at: 11},
+    },
+    git_worktrees: {
+      'worktree:one': {id: 'worktree:one', root: '/repo/one', local_repository_id: 'local:one', hosted_repository_id: 'hosted:one', current_branch_id: 'branch:one'},
+      'worktree:two': {id: 'worktree:two', root: '/repo/two', local_repository_id: 'local:two', hosted_repository_id: 'hosted:two', current_branch_id: 'branch:two'},
+    },
+    local_repositories: {'local:one': {id: 'local:one', local_branch_ids: ['branch:one']}, 'local:two': {id: 'local:two', local_branch_ids: ['branch:two']}},
+    hosted_repositories: {'hosted:one': {id: 'hosted:one', url: 'https://github.test/one'}, 'hosted:two': {id: 'hosted:two', url: 'https://github.test/two'}},
+    local_branches: {'branch:one': {id: 'branch:one', local_repository_id: 'local:one', name: 'one', pull_request_ids: ['pr:1'], linear_issue_ids: []}, 'branch:two': {id: 'branch:two', local_repository_id: 'local:two', name: 'two', pull_request_ids: ['pr:2'], linear_issue_ids: []}},
+    pull_requests: {'pr:1': {id: 'pr:1', hosted_repository_id: 'hosted:one', number: 1, title: 'First PR'}, 'pr:2': {id: 'pr:2', hosted_repository_id: 'hosted:two', number: 2, title: 'Second PR'}},
+    linear_issues: {}, worktree_branch_activity: {},
+  };
+  const info = {work_graph: graph, selected_pane: {target: '%aggregate'}, panes: [{target: '%aggregate', window: '0', pane: '0', active: true, window_active: true}]};
+  api.setTranscriptInfoForTest('aggregate-session', info);
+  const summary = canonical(api.sessionWorkSummaryForTest('aggregate-session', info));
+  assert.deepStrictEqual(summary.pullRequests.map(pr => pr.number), [1, 2], 'both focused worktree PRs remain in the summary');
+  assert.equal(summary.focusedPullRequest, null, 'an ambiguous TmuxSession does not elect one PR as session-wide');
+  assert.equal(api.displayPullRequestForTest(info), null, 'singular PR rendering is disabled for an ambiguous graph target');
+  assert.equal(api.sessionTabDescriptionForTest('aggregate-session', info), '2 PRs', 'tab description reports an explicit aggregate');
+  assert.ok(api.tabMenuDetailText('aggregate-session', info).includes('2 PRs'), 'menu detail keeps the aggregate rather than a random PR number');
+});
+
+registerTestAsync('moving terminal and YO!info YOTabs changes only YOPane layout state, not the canonical work graph', async () => {
+  const api = loadYolomux('', ['1']);
+  const graph = {
+    version: 1,
+    generation: 22,
+    tmux_sessions: {'tmux-session:1': {id: 'tmux-session:1', name: '1', tmux_window_ids: ['tmux-window:1:0'], tmux_pane_ids: ['tmux-pane:1:0.0'], runtime_actor_ids: [], path_observation_ids: ['observation:1']}},
+    tmux_windows: {'tmux-window:1:0': {id: 'tmux-window:1:0', tmux_session_id: 'tmux-session:1', index: '0', name: 'bash', tmux_pane_ids: ['tmux-pane:1:0.0']}},
+    tmux_panes: {'tmux-pane:1:0.0': {id: 'tmux-pane:1:0.0', tmux_window_id: 'tmux-window:1:0', index: '0', target: '%one', active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: ['observation:1']}},
+    runtime_actors: {},
+    path_observations: {'observation:1': {id: 'observation:1', tmux_pane_id: 'tmux-pane:1:0.0', runtime_actor_id: null, git_worktree_id: 'worktree:1', path: '/repo/one', source: 'cwd', last_observed_at: 1}},
+    git_worktrees: {'worktree:1': {id: 'worktree:1', root: '/repo/one', local_repository_id: 'local:1', current_branch_id: 'branch:1'}},
+    local_repositories: {'local:1': {id: 'local:1', local_branch_ids: ['branch:1']}},
+    hosted_repositories: {'hosted:1': {id: 'hosted:1', url: 'https://github.test/one'}},
+    local_branches: {'branch:1': {id: 'branch:1', local_repository_id: 'local:1', name: 'feature/one', pull_request_ids: ['pr:1'], linear_issue_ids: []}},
+    pull_requests: {'pr:1': {id: 'pr:1', hosted_repository_id: 'hosted:1', number: 80, title: 'Canonical graph PR'}},
+    linear_issues: {},
+    worktree_branch_activity: {},
+  };
+  const info = {work_graph: graph, selected_pane: {target: '%one'}, panes: [{target: '%one', window: '0', pane: '0', active: true, window_active: true}]};
+  api.setTranscriptInfoForTest('1', info);
+  const beforeGraph = JSON.stringify(graph);
+  api.setLayoutSlotsForTest({
+    __tree: {dir: 'row', a: {slot: 'left'}, b: {slot: 'right'}, pct: 50},
+    left: {tabs: ['1', api.infoItemId], active: '1'},
+    right: {tabs: [], active: null},
+  });
+
+  assert.equal(await api.moveSessionToSlot('1', 'right', 'left', 0), true, 'terminal YOTab moves between YOPanes');
+  assert.equal(await api.moveSessionToSlot(api.infoItemId, 'right', 'left', 1), true, 'YO!info YOTab moves between YOPanes');
+  const layout = canonical(api.serialize(api.layoutSlotsForTest()));
+  assert.deepStrictEqual(layout, {
+    tree: {slot: 'right'},
+    panes: {
+      right: {tabs: ['1', api.infoItemId], active: api.infoItemId},
+    },
+  }, 'both browser tabs move between YOPanes, while layout compaction remains a browser-only YOPane concern');
+  assert.equal(JSON.stringify(info.work_graph), beforeGraph, 'YOPane/YOTab movement cannot mutate TmuxSession graph edges');
+  assert.equal(api.sessionWorkSummaryForTest('1', info).pullRequests[0].number, 80, 'canonical graph selectors remain intact after layout-only movement');
+});
+
+registerTest('YO!info deduplicates graph worktree rows but exposes observed-path evidence', () => {
+  const api = loadYolomux('', ['observation-session']);
+  const graph = {
+    version: 1,
+    generation: 8,
+    tmux_sessions: {'tmux-session:observation-session': {id: 'tmux-session:observation-session', name: 'observation-session'}},
+    tmux_windows: {'tmux-window:observation-session:0': {id: 'tmux-window:observation-session:0', tmux_session_id: 'tmux-session:observation-session', index: '0', name: 'codex'}},
+    tmux_panes: {'tmux-pane:observation-session:0.0': {id: 'tmux-pane:observation-session:0.0', tmux_window_id: 'tmux-window:observation-session:0', index: '0', target: '%observation', active: true, window_active: true}},
+    runtime_actors: {'actor:claude': {id: 'actor:claude', tmux_pane_id: 'tmux-pane:observation-session:0.0', kind: 'claude', path_observation_ids: ['observation:root', 'observation:src']}, 'actor:bash': {id: 'actor:bash', tmux_pane_id: 'tmux-pane:observation-session:0.0', kind: 'bash', path_observation_ids: ['observation:test']}},
+    path_observations: {
+      'observation:root': {id: 'observation:root', runtime_actor_id: 'actor:claude', git_worktree_id: 'worktree:shared', path: '/repo/shared', source: 'actor-cwd', last_observed_at: 101},
+      'observation:src': {id: 'observation:src', runtime_actor_id: 'actor:claude', git_worktree_id: 'worktree:shared', path: '/repo/shared/src/app.js', source: 'edit', last_observed_at: 103},
+      'observation:test': {id: 'observation:test', runtime_actor_id: 'actor:bash', git_worktree_id: 'worktree:shared', path: '/repo/shared/tests/app.test.js', source: 'pane-cwd', last_observed_at: 102},
+    },
+    git_worktrees: {'worktree:shared': {id: 'worktree:shared', root: '/repo/shared', local_repository_id: 'local:shared', current_branch_id: 'branch:shared'}},
+    local_repositories: {'local:shared': {id: 'local:shared', common_git_dir: '/repo/.git', local_branch_ids: ['branch:shared']}},
+    hosted_repositories: {},
+    local_branches: {'branch:shared': {id: 'branch:shared', local_repository_id: 'local:shared', name: 'shared-work', pull_request_ids: [], linear_issue_ids: [], pull_request_lookup_state: 'none'}},
+    pull_requests: {},
+    linear_issues: {},
+    worktree_branch_activity: {},
+  };
+  api.setTranscriptInfoForTest('observation-session', {work_graph: graph});
+  api.setTranscriptSessionOrderForTest(['observation-session']);
+  const rows = api.infoBranchRows();
+  assert.equal(rows.length, 1, 'three observed paths under one worktree still create one default branch row');
+  assert.deepStrictEqual(canonical(rows[0].pathObservations.map(item => [item.path, item.actorKind, item.source])), [
+    ['/repo/shared/src/app.js', 'claude', 'edit'],
+    ['/repo/shared/tests/app.test.js', 'bash', 'pane-cwd'],
+    ['/repo/shared', 'claude', 'actor-cwd'],
+  ], 'the row retains each canonical observation with actor and source evidence in recency order');
+  const html = api.infoRecordHtmlForTest(rows[0]);
+  assert.ok(html.includes('3 paths') && html.includes('/repo/shared/src/app.js') && html.includes('claude') && html.includes('edit'), 'the expandable path evidence exposes the observed path, actor, and source');
+  const records = api.infoRelationshipRecords(rows);
+  assert.equal(records[0].branchState, 'current', 'the relationship projection preserves the GitWorktree current-branch edge');
+  assert.ok(api.infoRecordHtmlForTest(records[0]).includes('info-tree-branch-state-current'), 'the projected current branch renders its distinct state badge');
+  assert.equal(records.length, 2, 'two RuntimeActors produce two relationship records for the same deduplicated branch row');
+  assert.ok(records.every(record => record.branchLabel === 'shared-work'), 'the graph branch survives every relationship-record projection');
+  const searchFields = records.flatMap(record => api.infoRecordSearchFieldsForTest(record));
+  assert.ok(searchFields.some(field => field.kind === 'path' && field.text === '/repo/shared/src/app.js'), 'relationship search indexes each canonical observed subpath');
+  assert.ok(searchFields.some(field => field.kind === 'ai' && field.text === 'claude'), 'relationship search indexes the RuntimeActor kind');
+  assert.ok(searchFields.some(field => field.kind === 'tmux-pane' && field.text.includes('%observation')), 'relationship search indexes the canonical TmuxPane target');
+  for (const query of ['shared', 'app.js', 'claude', 'bash', 'observation-session']) {
+    api.setInfoSearchForTest(query, {publish: false, render: false});
+    assert.ok(api.infoFilteredRecordsForTest(records).length >= 1, `canonical relationship search resolves ${query}`);
+  }
+});
+
+registerTest('YO!info graph rows preserve collapse, search, keyboard controls, and narrow Side Pane CSS contracts', () => {
+  const api = loadYolomux('', ['graph-ui']);
+  const rows = [{
+    id: 'graph-ui-row',
+    path: '/repo/graph-ui', pathKey: '/repo/graph-ui', pathLabel: '/repo/graph-ui', pathTitle: '/repo/graph-ui',
+    gitWorktreeId: 'worktree:graph-ui', gitWorktreeLabel: '/repo/graph-ui', gitWorktreeTitle: '/repo/graph-ui',
+    localRepositoryId: 'local:graph-ui', localRepositoryLabel: '/repo/graph-ui', localRepositoryTitle: '/repo/.git',
+    hostedRepositoryId: 'hosted:graph-ui', hostedRepositoryLabel: 'https://github.test/graph-ui', hostedRepositoryTitle: 'https://github.test/graph-ui',
+    branch: 'feature/graph-ui', branchId: 'branch:graph-ui', branchState: 'current', branchStateLabel: 'Current',
+    tabAgents: [{session: 'graph-ui', label: 'graph-ui / 0:codex', tabLabel: 'graph-ui', aiLabel: '0:codex', kind: 'codex', window: '0', windowIndex: '0', pane: '0', tmux_pane_id: 'tmux-pane:graph-ui:0.0', tmux_pane_label: '0.0', tmux_pane_target: '%graph-ui'}],
+    pathTabAgents: [], pathObservations: [{id: 'observation:graph-ui', path: '/repo/graph-ui/src/main.py', source: 'edit', actorKind: 'codex', lastObservedAt: 1}],
+  }];
+  const records = api.infoRelationshipRecords(rows);
+  const tree = api.infoGroupTree(records, ['git-worktree', 'branch']);
+  const groupKey = api.infoTreeGroupCollapseKeyForTest(tree.children[0]);
+  api.setInfoTreeGroupCollapsedForTest(groupKey, true);
+  assert.ok(!api.infoTreeHtmlForTest(records, ['git-worktree', 'branch']).match(new RegExp(`data-info-group-key="${groupKey}"[^>]* open`)), 'a canonical GitWorktree group remains collapsed after its graph-backed tree rerenders');
+  api.setInfoSearchForTest('main.py', {publish: false, render: false});
+  assert.equal(api.infoFilteredRecordsForTest(records).length, 1, 'graph-backed observed path remains searchable after collapse state changes');
+  const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+  const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+  assert.ok(/delegate\(panel, 'keydown', '\[data-info-search\]'/.test(infoPanelSource) || /panel\.addEventListener\('keydown'/.test(infoPanelSource), 'YO!info keeps keyboard handling on the persistent panel owner');
+  assert.ok(/@container info-tree-record \(max-width: 48rem\)[\s\S]*\.info-tree-field\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(css), 'every graph row responds to its own narrow container with one readable field column');
+  assert.doesNotMatch(css, /\.dv-groupview\[data-pane-role="side"\] \.info-tree-field\s*\{/, 'Vertical Side Panes do not retain a divergent field-stacking copy');
+});
+
+registerTest('YO!info exposes canonical work-graph dimensions and migration-safe grouping depth', () => {
+  const api = loadYolomux('', ['1']);
+  const keys = api.infoGroupDimensions().map(dimension => dimension.key);
+  assert.deepStrictEqual(canonical(keys), [
+    'tab', 'tmux-session', 'tmux-window', 'tmux-pane', 'ai', 'path',
+    'git-worktree', 'local-repository', 'hosted-repository', 'branch', 'pr', 'linear',
+  ], 'each normalized graph entity has an explicit YO!info grouping dimension');
+  api.setInfoGroupingForTest([
+    'tmux-session', 'tmux-window', 'tmux-pane', 'ai', 'git-worktree', 'branch', 'pr',
+  ]);
+  assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), [
+    'tmux-session', 'tmux-window', 'tmux-pane', 'ai', 'git-worktree', 'branch',
+  ], 'saved grouping retains the canonical six-level chain and safely caps longer legacy state');
+});
+
+registerTest('YO!info makes normalized branch activity state visible without hiding the branch name', () => {
+  const api = loadYolomux('', ['1']);
+  for (const state of ['current', 'worked', 'available', 'missing']) {
+    const html = api.infoRecordHtmlForTest({
+      id: `branch-${state}`,
+      branchKey: `feature/${state}`,
+      branchLabel: `feature/${state}`,
+      branchTitle: `feature/${state}`,
+      branchState: state,
+      updated: '',
+    });
+    assert.ok(html.includes(`feature/${state}`), `${state} branch keeps its canonical name visible`);
+    assert.ok(html.includes(`info-tree-branch-state-${state}`), `${state} branch renders an explicit normalized state`);
+  }
+  const projected = api.infoRelationshipRecords([
+    {branch: 'feature/current', branchState: 'current', tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}]},
+    {branch: 'feature/other', branchState: 'available', tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}]},
+  ]);
+  assert.deepStrictEqual(canonical(projected.map(record => [record.branchLabel, record.branchState])), [
+    ['feature/current', 'current'], ['feature/other', 'available'],
+  ], 'relationship projection distinguishes the path worktree current branch from other available repository branches');
+});
+
+registerTest('YO!info retains every canonical branch PR and renders explicit unresolved lookup states', () => {
+  const api = loadYolomux('', ['1']);
+  const html = api.infoRecordHtmlForTest({
+    id: 'branch-multiple-prs',
+    prKey: '#91',
+    prValues: [
+      {number: 90, title: 'closed historical PR', state: 'closed', url: 'https://example.test/pull/90'},
+      {number: 91, title: 'open current PR', state: 'open', url: 'https://example.test/pull/91'},
+    ],
+  });
+  assert.ok(html.includes('pull/90') && html.includes('#90') && html.includes('closed historical PR'), 'YO!info keeps the historical PR instead of projecting only the first branch PR');
+  assert.ok(html.includes('pull/91') && html.includes('#91') && html.includes('open current PR'), 'YO!info keeps the current PR in the same canonical branch context');
+  const staleHtml = api.infoRecordHtmlForTest({id: 'branch-stale-pr', prKey: '__no_pr__', prLookupState: 'stale'});
+  const errorHtml = api.infoRecordHtmlForTest({id: 'branch-error-pr', prKey: '__no_pr__', prLookupState: 'error'});
+  assert.ok(staleHtml.includes('info-tree-pr-lookup-state-stale'), 'YO!info distinguishes retained stale PR evidence from no PR');
+  assert.ok(errorHtml.includes('info-tree-pr-lookup-state-error'), 'YO!info distinguishes a lookup failure from a successful no-PR result');
+});
+
+registerTest('YO!info aggregates canonical PR count without collapsing branch-context PRs', () => {
+  const api = loadYolomux('', ['1']);
+  const record = {
+    id: 'branch-two-prs',
+    prKey: '#91',
+    prTitle: '#91 current PR',
+    prValues: [
+      {id: 'pr:90', number: 90, title: 'closed historical PR', state: 'closed', url: 'https://example.test/pull/90'},
+      {id: 'pr:91', number: 91, title: 'open current PR', state: 'open', url: 'https://example.test/pull/91'},
+    ],
+  };
+  const html = api.infoRecordHtmlForTest(record);
+  assert.ok(html.includes('2 PRs'), 'a branch context visibly reports the number of distinct canonical PRs');
+  assert.ok(html.includes('pull/90') && html.includes('pull/91'), 'the aggregate leaves both canonical PR links visible rather than choosing one session PR');
+  const group = api.infoGroupTree([record, {...record, id: 'same-pr-again'}], ['pr']);
+  assert.equal(group.children.length, 1, 'higher-level grouping uses the focused canonical PR identity rather than multiplying identical PR rows');
+  for (const state of ['loading', 'none', 'stale', 'error']) {
+    const stateHtml = api.infoRecordHtmlForTest({id: `pr-${state}`, prKey: '__no_pr__', prLookupState: state});
+    assert.ok(stateHtml.includes(`info-tree-pr-lookup-state-${state}`), `${state} remains visibly distinct when no PR object is available`);
+  }
+});
 
 function statsHistoryCoverageForRequest(url, overrides = {}) {
   const requestUrl = new URL(String(url), 'http://localhost');
@@ -203,6 +570,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       coarsePointer: true,
       viewport: {width: 744, height: 1024},
     });
+    const roomyPortraitTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
+      coarsePointer: true,
+      viewport: {width: 1024, height: 1100},
+    });
     const roomyMenuTablet = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
       viewport: {width: 960, height: 768},
@@ -229,31 +600,29 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(tablet.tabletUsesDesktopLayoutForTest(), true, 'a wide landscape iPad adopts the desktop-layout policy');
     assert.equal(tablet.fileExplorerUsesNormalTabMovementForTest(), false, 'a wide landscape iPad keeps Finder as its own desktop-style pane');
     assert.equal(tablet.narrowSingleColumnModeForTest(), false, 'a wide landscape iPad retains its multi-pane layout');
+    assert.equal(roomyPortraitTablet.tabletUsesDesktopLayoutForTest(), true, 'a full-width portrait iPad uses measured width instead of orientation to enable desktop panes');
+    assert.equal(roomyPortraitTablet.narrowSingleColumnModeForTest(), false, 'a 1024px portrait iPad retains directional pane splits');
     assert.deepEqual(
       canonical(Object.values(tablet.layoutSlotsForTest()).find(pane => Array.isArray(pane?.tabs) && pane.tabs.includes(tablet.finderItemId))),
       {active: tablet.finderItemId, tabs: [tablet.finderItemId, tablet.differItemId, tablet.tabberItemId], paneRole: tablet.paneRoleSide, side: tablet.paneSideLeft},
       'the wide landscape iPad gives the independent file-surface triplet a dedicated pane instead of mixing it into terminal tabs',
     );
     assert.equal(narrowTablet.mobileSinglePaneModeForTest(), false, 'an iPad remains distinct from the phone-only recent-tab policy');
-    assert.equal(narrowTablet.tabletUsesDesktopLayoutForTest(), false, 'an iPad portrait does not claim laptop-style horizontal room');
-    assert.equal(narrowTablet.narrowSingleColumnModeForTest(), true, 'a 744px portrait iPad uses the one-column touch layout');
-    assert.equal(narrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), false, 'a portrait iPad cannot create a clipped two-column split');
-    assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder/Differ/Tabber remain ordinary tabs in the compact tablet layout');
+    assert.equal(narrowTablet.tabletUsesDesktopLayoutForTest(), false, 'a 744px iPad keeps Finder out of a dedicated one-third-width Side Pane');
+    assert.equal(narrowTablet.narrowSingleColumnModeForTest(), false, 'a 744px portrait iPad retains generic pane splits because two minimum-width panes fit');
+    assert.equal(narrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'Finder remains an ordinary tab while its dedicated Side Pane cannot fit');
     assert.equal(narrowTablet.dropItemCanBeDraggedForTest(narrowTablet.fileExplorerItemId), true, 'Finder can be moved through the normal tab drag pipeline on iPad');
-    assert.equal(narrowTablet.dropIntentAllowsSession(narrowTablet.fileExplorerItemId, {targetSlot: 'left', zone: 'right'}), false, 'Finder cannot recreate a split in compact tablet portrait');
-    assert.deepEqual(canonical(narrowTablet.layoutSlotsForTest()), {
-      __tree: {slot: 'left'},
-      left: {active: '1', tabs: [narrowTablet.finderItemId, '1', '2']},
-    }, 'a portrait iPad keeps Finder as a switchable tab beside all current terminals');
+    assert.equal(narrowTablet.layoutSlotKeys(narrowTablet.layoutSlotsForTest()).length, 2, 'a sub-900px portrait iPad converts the Side Pane without flattening Generic Pane splits');
+    assert.equal(narrowTablet.sidePaneSlots(narrowTablet.layoutSlotsForTest()).length, 0, 'the same iPad does not force a clipped dedicated Finder column');
     const tooNarrowTablet = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
-      viewport: {width: 640, height: 1024},
+      viewport: {width: 599, height: 1024},
     });
     assert.equal(tooNarrowTablet.narrowSingleColumnModeForTest(), true, 'a touch viewport below two shared minimum pane widths collapses to one column');
     assert.equal(tooNarrowTablet.fileExplorerUsesNormalTabMovementForTest(), true, 'a one-column touch viewport keeps Finder as an ordinary tab');
     assert.deepEqual(canonical(tooNarrowTablet.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '1', tabs: [tooNarrowTablet.finderItemId, '1', '2']},
+      left: {active: '1', tabs: ['1', '2', tooNarrowTablet.finderItemId]},
     }, 'a too-narrow iPad keeps Finder as an ordinary tab beside its terminal tabs instead of reserving a left column');
     assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'right'}), false, 'a too-narrow tablet edge drop cannot recreate a split');
     assert.equal(tooNarrowTablet.dropIntentAllowsSession('2', {targetSlot: 'left', zone: 'middle'}), true, 'a too-narrow tablet keeps ordinary middle tab moves');
@@ -262,9 +631,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {name: 'phone portrait', platform: 'Android Mobile', width: 390, height: 844, mobile: true, singleColumn: true},
       {name: 'phone landscape', platform: 'Android Mobile', width: 960, height: 520, mobile: true, singleColumn: true},
       {name: 'wide phone landscape', platform: 'Android Mobile', width: 961, height: 520, mobile: false, singleColumn: false},
-      {name: 'narrow iPad portrait', platform: 'iPad', width: 640, height: 1024, mobile: false, singleColumn: true},
-      {name: 'iPad single-column boundary', platform: 'iPad', width: 680, height: 1024, mobile: false, singleColumn: true},
-      {name: 'iPad portrait', platform: 'iPad', width: 681, height: 1024, mobile: false, singleColumn: true},
+      {name: 'narrow iPad portrait', platform: 'iPad', width: 599, height: 1024, mobile: false, singleColumn: true},
+      {name: 'iPad multi-pane boundary', platform: 'iPad', width: 600, height: 1024, mobile: false, singleColumn: false},
+      {name: 'iPad portrait', platform: 'iPad', width: 681, height: 1024, mobile: false, singleColumn: false},
+      {name: 'roomy iPad portrait', platform: 'iPad', width: 1024, height: 1100, mobile: false, singleColumn: false},
       {name: 'full-menu iPad landscape', platform: 'iPad', width: 980, height: 768, mobile: false, singleColumn: false},
       {name: 'wide iPad', platform: 'iPad', width: 981, height: 768, mobile: false, singleColumn: false},
     ]) {
@@ -284,7 +654,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     resizeSlots.left = resizeApi.paneStateWithTabs(['1'], '1');
     resizeSlots.slot1 = resizeApi.paneStateWithTabs(['2', '3'], '2');
     resizeApi.setLayoutSlotsForTest(resizeSlots);
-    resizeApi.setNativeViewportForTest({width: 640, height: 1024});
+    resizeApi.setNativeViewportForTest({width: 599, height: 1024});
     assert.equal(resizeApi.narrowSingleColumnModeForTest(), true, 'a live iPad rotation to portrait recomputes the one-column policy instead of keeping landscape split geometry');
     assert.equal(resizeApi.compactCurrentLayoutSlotsForTest(), true, 'a live iPad portrait rotation compacts the existing split through the shared layout normalizer');
     const compactedResize = resizeApi.serialize(resizeApi.layoutSlotsForTest());
@@ -349,15 +719,28 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('one-column pane frame controls remove the selected tab instead of the only pane', () => {
     const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
-      viewport: {width: 640, height: 1024},
+      viewport: {width: 599, height: 1024},
     });
     assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'a selected tab can be minimized while another tab remains in the one-column pane');
     assert.ok(api.panelControlsHtml('1').includes('data-pane-close="1"'), 'a terminal exposes the shared X when narrow mode can safely close its selected tab');
     api.minimizePaneFromLayout('1');
     assert.deepEqual(canonical(api.layoutSlotsForTest()), {
       __tree: {slot: 'left'},
-      left: {active: '2', tabs: [api.finderItemId, '2']},
+      left: {active: '2', tabs: ['2', api.finderItemId]},
     }, 'minus removes only the selected tab and keeps the remaining single-column view visible');
+    api.setLayoutSlotsForTest({
+      __tree: {slot: 'left'},
+      left: {active: '1', tabs: ['1', '2']},
+    });
+    api.setPinnedTabsForTest(['1']);
+    assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'one-column active pinned tab keeps the normal pane-frame minimize affordance');
+    api.minimizePaneFromLayout('1');
+    assert.deepEqual(canonical(api.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: '2', tabs: ['2']},
+    }, 'one-column minimize removes the selected pinned tab exactly like an unpinned tab');
+    assert.notEqual(api.statusKindForTest(), 'danger', 'one-column pinned minimize has no pin-specific danger status');
+    api.setPinnedTabsForTest([]);
     api.setLayoutSlotsForTest({
       __tree: {slot: 'left'},
       left: {active: '1', tabs: [api.finderItemId, '1', '2']},
@@ -446,25 +829,96 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {coarsePointer: true});
     const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
-    assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'interrupt'[\s\S]*action: 'tmux-prefix'[\s\S]*action: 'tab'[\s\S]*action: 'copy'[\s\S]*action: 'command-v'[\s\S]*action: 'tmux-scroll-up'[\s\S]*action: 'tmux-scroll-down'[\s\S]*action: 'arrow-up'[\s\S]*action: 'enter'/.test(source), 'touch terminal key definitions put Ctrl-B, Tab, Copy/Paste, and direct tmux scrolling on the first palette page');
+    assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\\x7f'/.test(source), 'touch terminal key definitions retain one Backspace definition that sends DEL');
+    assert.ok(/terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['tab', 'tmux-prefix', 'backspace', 'more'\]\)[\s\S]*terminalMobileAccessorySideActions = Object\.freeze\(\['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd'\]\)/.test(source), 'the smart-key utility column ends in Alt/Cmd below Ctrl-C while the top row keeps Tab/Ctrl-B/Backspace');
     assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'touch terminal overflow retains Cmd-P and secondary navigation while Paste stays visible in the primary grid');
-    assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*state\.ctrl = false[\s\S]*state\.alt = false/.test(source), 'Ctrl and Alt latches are one-shot and share terminal input handling');
-    assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*queueTmuxScroll\(item, signedLines\)[\s\S]*queueLocalTerminalScroll\(term, signedLines\)[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true, bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; direct scroll controls use the wheel-owned tmux protocol with a local read-only fallback; ordinary smart keys keep using terminal transport');
-    assert.ok(/function terminalMobileAccessoryHtml[\s\S]*primaryKeys[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*mobile-terminal-keybar[\s\S]*mobile-terminal-keyrow-shell[\s\S]*key\('more'\)[\s\S]*state\.open/.test(source) && /function syncTerminalMobileAccessoryState[\s\S]*mobile-terminal-keybar--more/.test(source) && /function beginTerminalMobileAccessoryDrag[\s\S]*function moveTerminalMobileAccessoryDrag/.test(source) && /function beginTerminalMobileAccessoryLauncherPress[\s\S]*state\.more = true/.test(source), 'the touch key palette opens on demand, keeps the More control outside the scrolling primary row, replaces its base keys with a bounded overflow grid, and has one movable per-pane state owner');
+    assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*terminalMobileAccessoryModifierActive\(state\)[\s\S]*terminalMobileAccessoryClearModifiers\(state, \{session\}\)[\s\S]*terminalMobileAccessoryShiftText\(value\)[\s\S]*terminalMobileAccessoryControlText\(value\)/.test(source) && /function toggleTerminalMobileAccessoryModifier[\s\S]*terminalMobileAccessoryModifierDoubleTapMs[\s\S]*state\[lockedKey\] = true/.test(source), 'Ctrl/Alt/Shift/Cmd latches share terminal input handling, and double-tap locks modifiers through the shared lock path');
+    assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*queueTmuxScroll\(item, signedLines\)[\s\S]*queueLocalTerminalScroll\(term, signedLines\)[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; direct scroll controls use the wheel-owned tmux protocol with a local read-only fallback; ordinary smart keys keep using terminal transport and modifier mapping');
+    assert.ok(/function terminalMobileAccessoryHtml[\s\S]*primaryKeys[\s\S]*moreKeys[\s\S]*mobile-terminal-key-launcher[\s\S]*state\.open \? '×' : '⌨'[\s\S]*mobile-terminal-keybar[\s\S]*mobile-terminal-keyrow-shell[\s\S]*key\('more'\)[\s\S]*state\.open/.test(source) && /function syncTerminalMobileAccessoryState[\s\S]*mobile-terminal-keybar--more[\s\S]*launcher\.textContent = open \? '×' : '⌨'/.test(source) && /function terminalMobileAccessoryPalettePlacement[\s\S]*side = 'below'[\s\S]*side = 'left'[\s\S]*side = 'right'/.test(source) && /function beginTerminalMobileAccessoryLauncherPress[\s\S]*setPointerCapture[\s\S]*function moveTerminalMobileAccessoryLauncherPress[\s\S]*terminalMobileAccessoryLauncherDragPosition\(press, event\)[\s\S]*function endTerminalMobileAccessoryLauncherPress/.test(source) && /function beginTerminalMobileAccessoryPalettePress[\s\S]*event\.target\?\.closest\?\.\('\[data-terminal-mobile-key\]'\)[\s\S]*function moveTerminalMobileAccessoryPalettePress[\s\S]*terminalMobileAccessoryLauncherDragPosition\(press, event\)[\s\S]*function endTerminalMobileAccessoryPalettePress/.test(source) && !source.includes('paletteX') && !source.includes('paletteY'), 'the touch key palette opens on demand, uses launcher position as the single close/drag owner, lets palette background drag the attached launcher without stealing key taps, keeps the More control outside the scrolling primary row, replaces its base keys with a bounded overflow grid, and derives palette placement from launcher geometry');
+    assert.ok(/delegate\(panel, 'click', '\[data-terminal-mobile-toggle\]'[\s\S]*sendTerminalMobileAccessoryInput\(targetSession, 'open'\)/.test(source) && /function sendTerminalMobileAccessoryInput[\s\S]*terminalMobileAccessoryModifierActions\.includes\(action\) \|\| action === 'more' \|\| action === 'open'[\s\S]*toggleTerminalMobileAccessoryState\(session, action\)/.test(source), 'the launcher X closes by reusing the existing open-toggle owner rather than a separate close path');
+    assert.ok(!source.includes('data-terminal-mobile-close') && !source.includes('mobile-terminal-key-close') && !source.includes('data-terminal-mobile-drag') && !source.includes('beginTerminalMobileAccessoryDrag'), 'the retired palette X and drag handle do not leave an alternate behavior path');
     assert.ok(/async function pasteTerminalMobileAccessoryClipboard[\s\S]*clipboard\.read[\s\S]*uploadFiles\(session, imageFiles, \{source: 'paste'\}\)[\s\S]*handleTerminalData\(session, text/.test(source), 'mobile Cmd-V reads clipboard text or images and routes both through the existing paste/terminal parents');
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     assert.ok(/function terminalClipboardPasteAvailable\(\)[\s\S]*function primeTerminalClipboardAvailability\(\)[\s\S]*clipboard\.read/.test(source) && /function showTerminalContextMenu[\s\S]*terminalClipboardPasteAvailable\(\)[\s\S]*pasteTerminalMobileAccessoryClipboard\(session\)[\s\S]*function installTerminalContextMenu[\s\S]*container\.addEventListener\('pointerdown',[\s\S]*event\.pointerType === 'touch'[\s\S]*primeTerminalClipboardAvailability\(\)/.test(coreSource), 'a touch begins one clipboard availability probe before the shared long-press context menu conditionally adds Paste through the existing terminal paste path');
-    assert.ok(/function terminalMobileAccessoryPositionStyle[\s\S]*inset-block-end:auto[\s\S]*function syncTerminalMobileAccessoryState[\s\S]*bar\.style\.insetBlockEnd = positionedBlock \? 'auto' : ''/.test(source), 'a dragged palette releases its bottom anchor instead of stretching down the terminal');
+    assert.ok(/function terminalMobileAccessoryLauncherPosition[\s\S]*insetBlockEnd: y === null \? '' : 'auto'[\s\S]*function terminalMobileAccessoryPositionStyle[\s\S]*terminalMobileAccessoryLauncherPosition\(state\)[\s\S]*function syncTerminalMobileAccessoryState[\s\S]*terminalMobileAccessoryLauncherPosition\(state\)[\s\S]*launcher\.style\.insetBlockEnd = position\.insetBlockEnd/.test(source), 'initial HTML and sync share the launcher inset helper so a dragged launcher releases its bottom anchor without stretching');
+    assert.equal(api.terminalMobileAccessoryPalettePlacementForTest(
+      {x: null, y: null},
+      {left: 0, top: 0, width: 320, height: 240},
+      {left: 272, top: 192, width: 40, height: 40},
+      {width: 288, height: 150},
+    ).side, 'above', 'the untouched lower-right launcher keeps the first-open palette above the button');
+    assert.equal(api.terminalMobileAccessoryPalettePlacementForTest(
+      {x: 12, y: 8},
+      {left: 0, top: 0, width: 320, height: 240},
+      {left: 12, top: 8, width: 40, height: 40},
+      {width: 260, height: 120},
+    ).side, 'below', 'a launcher near the pane top opens the palette below itself');
+    assert.equal(api.terminalMobileAccessoryPalettePlacementForTest(
+      {x: 276, y: 140},
+      {left: 0, top: 0, width: 320, height: 240},
+      {left: 276, top: 140, width: 40, height: 40},
+      {width: 220, height: 120},
+    ).side, 'left', 'a moved launcher pinned to the right edge opens the palette on the interior side');
+    const placementCases = [
+      ['top', {x: 140, y: 0}, {left: 140, top: 0, width: 40, height: 40}, 'below'],
+      ['bottom', {x: 140, y: 200}, {left: 140, top: 200, width: 40, height: 40}, 'above'],
+      ['left', {x: 0, y: 120}, {left: 0, top: 120, width: 40, height: 40}, 'right'],
+      ['right', {x: 280, y: 120}, {left: 280, top: 120, width: 40, height: 40}, 'left'],
+      ['top-left', {x: 0, y: 0}, {left: 0, top: 0, width: 40, height: 40}, 'below'],
+      ['top-right', {x: 280, y: 0}, {left: 280, top: 0, width: 40, height: 40}, 'below'],
+      ['bottom-left', {x: 0, y: 200}, {left: 0, top: 200, width: 40, height: 40}, 'right'],
+      ['bottom-right', {x: 280, y: 200}, {left: 280, top: 200, width: 40, height: 40}, 'left'],
+      ['center', {x: 140, y: 100}, {left: 140, top: 100, width: 40, height: 40}, 'left'],
+    ];
+    for (const [name, state, launcherRect, side] of placementCases) {
+      const placed = api.terminalMobileAccessoryPalettePlacementForTest(state, {left: 0, top: 0, width: 320, height: 240}, launcherRect, {width: 120, height: 80});
+      assert.equal(placed.side, side, `${name} launcher uses expected palette side`);
+      assert.ok(placed.x >= 0 && placed.y >= 0 && placed.x + 120 <= 320 && placed.y + 80 <= 240, `${name} palette remains clamped inside pane`);
+    }
+    assert.deepStrictEqual(canonical(api.terminalMobileAccessoryLauncherDragPositionForTest(
+      {startClientX: 292, startClientY: 212, startX: 272, startY: 192, paneWidth: 320, paneHeight: 240, launcherWidth: 40, launcherHeight: 40},
+      {clientX: 20, clientY: 20},
+    )), {x: 0, y: 0}, 'launcher drag position clamps to the pane top-left');
+    assert.deepStrictEqual(canonical(api.terminalMobileAccessoryLauncherDragPositionForTest(
+      {startClientX: 292, startClientY: 212, startX: 272, startY: 192, paneWidth: 320, paneHeight: 240, launcherWidth: 40, launcherHeight: 40},
+      {clientX: 500, clientY: 500},
+    )), {x: 280, y: 200}, 'launcher drag position clamps to the pane bottom-right');
+    const modifiedMobileInput = (mods, data) => {
+      for (const mod of mods) api.toggleTerminalMobileAccessoryStateForTest('mods', mod);
+      const value = api.terminalDataWithMobileAccessoryModifiersForTest('mods', data);
+      return {value, state: api.terminalMobileAccessoryStateForTest('mods')};
+    };
+    assert.deepStrictEqual(modifiedMobileInput(['ctrl'], 'c').value, '\x03', 'Ctrl maps the next printable key to its control byte');
+    assert.deepStrictEqual(modifiedMobileInput(['alt'], 'x').value, '\x1bx', 'Alt prefixes the next key with ESC');
+    assert.deepStrictEqual(modifiedMobileInput(['cmd'], 'x').value, '\x1bx', 'Cmd/Meta prefixes the next key with ESC');
+    assert.deepStrictEqual(modifiedMobileInput(['shift'], 'a').value, 'A', 'Shift uppercases the next letter');
+    assert.deepStrictEqual(modifiedMobileInput(['shift'], '2').value, '@', 'Shift applies the keyboard shifted symbol map');
+    assert.deepStrictEqual(modifiedMobileInput(['shift'], '\t').value, '\x1b[Z', 'Shift+Tab sends the standard reverse-tab escape sequence');
+    const shiftedCtrl = modifiedMobileInput(['shift', 'ctrl'], '2');
+    assert.deepStrictEqual(shiftedCtrl.value, '\x00', 'Shift applies before Ctrl, so Ctrl+Shift+2 produces Ctrl-@');
+    assert.equal(shiftedCtrl.state.ctrl || shiftedCtrl.state.alt || shiftedCtrl.state.shift || shiftedCtrl.state.cmd, false, 'mobile modifiers clear after one transformed key');
     api.toggleTerminalMobileAccessoryStateForTest('1', 'open');
     assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'the palette opens for its terminal');
+    const openKeyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
+    assert.ok(/mobile-terminal-key-launcher--open[\s\S]*aria-expanded="true"[\s\S]*>×<\/button>/.test(openKeyboardHtml), 'initial HTML renders the launcher as the close button while open');
+    assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"/.test(openKeyboardHtml), 'rendered mobile keyboard puts Ctrl-C above bottom Alt/Cmd in the left column and Backspace beside Tab/Ctrl-B');
     assert.equal(api.dismissTerminalMobileAccessoriesForTest(), true, 'one shared outside-action dismissal closes the open terminal palette');
     assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'outside interaction closes the palette');
     api.toggleTerminalMobileAccessoryStateForTest('1', 'open');
     api.toggleTerminalMobileAccessoryStateForTest('2', 'open');
     assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'opening another terminal palette closes the prior one');
     assert.equal(api.terminalMobileAccessoryStateForTest('2').open, true, 'the newly launched palette remains open');
+    const readOnlyTouchApi = loadYolomux('', ['1'], 'http:', 'iPad', 'viewer', {coarsePointer: true});
+    const readOnlyTouchHtml = readOnlyTouchApi.terminalMobileAccessoryHtmlForTest('1');
+    assert.ok(readOnlyTouchHtml.includes('data-terminal-mobile-toggle="1"'), 'read-only coarse-pointer terminals still expose the movable launcher');
+    assert.ok(/data-terminal-mobile-key="copy"[\s\S]*>Copy<\/button>/.test(readOnlyTouchHtml) && !/data-terminal-mobile-key="copy"[^>]* disabled/.test(readOnlyTouchHtml), 'read-only Copy remains enabled');
+    assert.ok(/data-terminal-mobile-key="escape"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="tab"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="interrupt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="alt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="shift"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="cmd"[^>]* disabled/.test(readOnlyTouchHtml), 'read-only mutating smart keys and modifiers remain disabled');
+    const readOnlyDesktopApi = loadYolomux('', ['1'], 'http:', 'MacIntel', 'viewer');
+    assert.equal(readOnlyDesktopApi.terminalMobileAccessoryHtmlForTest('1'), '', 'desktop-pointer read-only terminals do not render the touch launcher');
+    assert.ok(source.includes("const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);") && source.includes("const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd']);"), 'the touch palette source keeps Alt/Cmd as the bottom side keys and Backspace in the primary row without duplicates');
     assert.ok(/function installTerminalMobileAccessoryDismissal\(\)[\s\S]*pointerdown[\s\S]*data-terminal-mobile-keybar[\s\S]*data-terminal-mobile-toggle[\s\S]*dismissTerminalMobileAccessories\(\)[\s\S]*function bindTerminalContainerForSession[\s\S]*installTerminalMobileAccessoryDismissal\(\)[\s\S]*keydown[\s\S]*dismissTerminalMobileAccessory\(session\)/.test(source), 'the shared palette closes on outside app interaction and physical terminal input, while its own launcher and keys remain usable');
-    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*position:\s*absolute[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*position:\s*absolute[\s\S]*grid-auto-rows:\s*max-content[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-keybar--more \.mobile-terminal-keyrow--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--copy[\s\S]*grid-column:\s*1[\s\S]*mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up[\s\S]*grid-column:\s*5[\s\S]*mobile-terminal-key--arrow-up/.test(css), 'the touch key palette pins More to the top-right in both layouts, places Copy/Paste left of the D-pad and tmux scrolling right of it, and keeps Ctrl-B/Tab on the first page');
+    assert.ok(/\.mobile-terminal-key-side\s*\{[\s\S]*grid-template-rows:\s*repeat\(6, 36px\)[\s\S]*\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)/.test(css), 'the touch key palette retains six utility touch targets, a three-key primary row, and the five-column D-pad');
+    assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*inset-block-end:\s*calc\([\s\S]*padding:\s*var\(--space-2\)[\s\S]*user-select:\s*none[\s\S]*\.mobile-terminal-keyrow-shell > \.mobile-terminal-key--more\s*\{[\s\S]*align-self:\s*start/.test(css), 'the non-selectable touch palette opens above its launcher and keeps More in the shared top-right shell');
   });
 
   test('search history pane renders search results and compact runs', () => {
@@ -1090,6 +1544,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setFileTreeRecencyNowForTest(null);
   });
 
+  test('Finder row date text uses Finder mode when Differ mode is none', () => {
+    const api = loadYolomux('', ['1']);
+    const entry = {name: 'report.md', kind: 'file', mtime: 2_000};
+    const dateText = tree => tree.querySelector('.file-tree-row[data-path="/repo/report.md"]')?.querySelector('.file-tree-date')?.textContent || '';
+    const render = (options = {}) => {
+      const tree = new TestElement('finder-date-mode-tree');
+      tree.setAttribute('role', 'tree');
+      tree.classList.add('file-explorer-tree-panel');
+      api.renderTreeChildrenForTest(tree, '/repo', [entry], 0, [], options);
+      return tree;
+    };
+    api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'relative');
+    api.setFileExplorerViewSettingForTest('differ', 'treeDateMode', 'none');
+    assert.match(dateText(render()), /ago$/, 'Finder rows default to the Finder date mode instead of leaking Differ none');
+    assert.equal(dateText(render({differMode: true})), '', 'Differ rows keep their independent none mode');
+    api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'date');
+    assert.equal(dateText(render()), api.sessionFileTimeText(entry.mtime), 'Finder Date mode renders an absolute timestamp with Differ still none');
+    api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'none');
+    api.setFileExplorerViewSettingForTest('differ', 'treeDateMode', 'relative');
+    assert.equal(dateText(render()), '', 'Finder none remains independent from Differ Ago');
+    assert.match(dateText(render({differMode: true})), /ago$/, 'Differ Ago renders through the differMode-aware fallback');
+    const changesSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
+    const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    assert.ok(/fileExplorerTreeDateModeForView\(options\.view \|\| \(options\.differMode \? 'differ' : 'finder'\)\)/.test(changesSource), 'date text fallback mirrors the recency path instead of defaulting missing view to Differ');
+    assert.ok(/renderTreeChildren\(fileExplorerTree, fileExplorerRoot, entries, 0, \{view: 'finder'\}\)/.test(finderSource) && /renderTreeChildren\(container, root, entries, 0, \{view: 'finder'\}\)/.test(finderSource), 'Finder top-level renders thread their view into shared row rendering');
+  });
+
   test('pane tabs and YO!info share mixed agent-window status precedence', () => {
     const api = loadYolomux();
     const activitySource = fs.readFileSync('static_src/js/yolomux/45_agent_window_activity.js', 'utf8');
@@ -1520,7 +2001,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '__yocost__', '3']);
   });
 
   test('new file editors reuse the existing editor pane', () => {
@@ -2875,6 +3356,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('session tabs render shared metadata and status chips', () => {
     const api = loadYolomux();
     const info = {
+      selected_pane: {target: '%4', window: '0', pane: '0', current_path: '/home/test/project'},
+      panes: [{target: '%4', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/project'}],
       project: {
         git: {
           branch: 'main',
@@ -2891,6 +3374,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
                 current: true,
                 subject: 'ci: Update the dep for the whl publish to be automated (#9961)',
                 updated: '13 hours ago',
+                pull_request: {number: 9961, title: 'ci: Update the dep for the whl publish to be automated', description: 'ci: Update the dep for the whl publish to be automated', merged: true, source_only: true, url: 'https://github.com/ai-project/project/pull/9961'},
               },
               {
                 name: 'keivenc/ABC-2141__herondel-tool-parser-check',
@@ -2909,9 +3393,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         },
         pull_request: null,
       },
-      selected_pane: {current_path: '/home/test/project'},
     };
-    const html = api.tmuxPaneTabHtml('4', info, null, true);
+    api.setTranscriptInfoForTest('4', info);
+    const graphInfo = api.transcriptInfoForTest('4');
+    const html = api.tmuxPaneTabHtml('4', graphInfo, null, true);
     const tabBadgeSource = fs.readFileSync('static/yolomux.js', 'utf8');
     const tabActivityMarkerHtml = value => value.match(/<span class="session-agent-activity-marker[^"]*">[\s\S]*?<\/span><\/span>/)?.[0] || '';
     assert.ok(tabBadgeSource.includes('function pullRequestNumberIndicatorHtml'), 'tab renders the PR number chip helper');
@@ -2923,10 +3408,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.session-button-identifier\s*\{\s*font-weight:\s*700/.test(fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8')), 'shared session identifiers render bold across every tab surface');
     assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
     assertNoStandalonePrBadge(html, 'merged default-branch tab');
-    const noStatusBallHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
+    const noStatusBallHtml = api.tmuxPaneTabHtml('4', graphInfo, {key: 'idle'}, false);
     assert.ok(/session-agent-activity-marker--placeholder[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot/.test(noStatusBallHtml), 'a tab without a status keeps the invisible canonical ball column');
     assert.equal(noStatusBallHtml.includes('pane-tab-core--without-status-ball'), false, 'all session tabs use one shared status-ball layout path');
-    const statusBallHtml = api.tmuxPaneTabHtml('4', info, {key: 'working'}, true, {leadingHtml: '<span class="agent-window-status-dot"></span>'});
+    const statusBallHtml = api.tmuxPaneTabHtml('4', graphInfo, {key: 'working'}, true, {leadingHtml: '<span class="agent-window-status-dot"></span>'});
     assert.equal(statusBallHtml.includes('pane-tab-core--without-status-ball'), false, 'a tab with a status ball uses the shared status-ball layout path');
     // #42: a source-inferred PR with no explicit status_label still reports no status (we don't trust a
     // raw merged flag on an inferred PR)...
@@ -2951,7 +3436,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         },
       },
     });
-    const popover = api.sessionPopoverHtml('4', info, 'claude', true);
+    const popover = api.sessionPopoverHtml('4', graphInfo, 'claude', true);
     assert.ok(/popover-title">tmux session 4 ·/.test(popover), 'session popover title labels the header as a tmux session');
     assert.ok(/popover-subtitle[\s\S]*branch-indicator[^>]*>MAIN<[\s\S]*href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<[\s\S]*ci: Update the dep/.test(popover), 'merged PR popover header links the purple #number chip using the shared inferred GitHub URL');
     assert.equal(popover.includes('#9961:'), false, 'merged PR popover header omits the old #number text prefix');
@@ -2959,14 +3444,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/popover-label">PR<\/div><div class="popover-value"><a href="https:\/\/github\.com\/ai-project\/project\/pull\/9961"[\s\S]*<span class="ci-indicator tab-symbol pr-number-chip pr-status-merged[^"]*">#9961<\/span><\/a>/.test(popover), 'merged PR popover PR row links the same purple #number chip as the header');
     assert.equal(popover.includes('#9961 MERGED'), false, 'merged PR popover omits redundant MERGED text');
     assert.equal(popover.includes('PR #9961'), false, 'merged PR popover avoids repeating PR before the #number value');
-    const worktreePopover = api.sessionPopoverHtml('4', {
-      selected_pane: {current_path: '/home/test/yolomux.dev8001'},
+    const worktreeInfo = {
+      selected_pane: {target: '%wt', window: '0', pane: '0', current_path: '/home/test/yolomux.dev8001'},
+      panes: [{target: '%wt', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/yolomux.dev8001'}],
       project: {git: {
         root: '/home/test/yolomux.dev8001',
         branch: 'main',
         worktree: {name: 'yolomux.dev8001', path: '/home/test/yolomux.dev8001', parent_root: '/home/test/yolomux'},
       }},
-    }, '', false);
+    };
+    api.setTranscriptInfoForTest('worktree-popover', worktreeInfo);
+    const worktreePopover = api.sessionPopoverHtml('worktree-popover', api.transcriptInfoForTest('worktree-popover'), '', false);
     assert.ok(worktreePopover.includes(api.t('popover.worktreeOf', {name: 'yolomux.dev8001', root: '/home/test/yolomux'})), 'linked-worktree session popovers use the shared formatter without an Info Bar render error');
     assert.equal(popover.includes('popover-label">desc'), false, 'merged PR popover omits the desc row because the header already carries the PR title');
     assert.equal(popover.includes('Status check:'), false, 'merged PR popover removes the YO!agent status sentence when the dedicated git row is present');
@@ -3046,18 +3534,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(externalHtml.includes('YOLO on elsewhere'), 'external YO marker title explains ownership is elsewhere');
 
     api.applyServerMetadataPulsesForTest('4', {main: 20000, pr: 20000});
-    const metadataPulseHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
+    const metadataPulseHtml = api.tmuxPaneTabHtml('4', graphInfo, {key: 'idle'}, true);
     assert.ok(metadataPulseHtml.includes('branch-indicator metadata-pulse'), 'MAIN badge pulses after metadata change');
     assert.equal(metadataPulseHtml.includes('pr-number-chip metadata-pulse'), false, 'open PR number chip is not pulsed by PR metadata changes');
 
     const mergedInfo = {
-      project: {
-        git: {branch: 'feature'},
-        pull_request: {number: 12, merged: true, checks: {state: 'success'}},
-      },
+      selected_pane: {target: '%8', window: '0', pane: '0', current_path: '/repo/8'},
+      panes: [{target: '%8', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/8'}],
+      project: {git: {root: '/repo/8', branch: 'feature'}, pull_request: {number: 12, merged: true, checks: {state: 'success'}}},
     };
+    api.setTranscriptInfoForTest('8', mergedInfo);
     api.applyServerMetadataPulsesForTest('8', {status: 20000});
-    const mergedPulseHtml = api.tmuxPaneTabHtml('8', mergedInfo, {key: 'idle'}, true);
+    const mergedPulseHtml = api.tmuxPaneTabHtml('8', api.transcriptInfoForTest('8'), {key: 'idle'}, true);
     assert.ok(mergedPulseHtml.includes('pr-number-chip pr-status-merged metadata-pulse'), 'merged #number chip pulses after status change');
     const mergedComposite = {number: 120, merged: true, status_label: 'open · CI failing', checks: {state: 'failure'}};
     assert.equal(api.pullRequestCiState(mergedComposite), '', 'merged PR facts suppress stale composite CI labels');
@@ -3076,12 +3564,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {session: '12', number: 16, state: 'unknown', statusLabel: 'open', statusClass: '', pulse: false, label: 'unknown open PR'},
     ].forEach(({session, number, state, statusLabel, statusClass, pulse, label}) => {
       if (pulse) api.applyServerMetadataPulsesForTest(session, {ci: 20000});
-      const ciHtml = api.tmuxPaneTabHtml(session, {
+      const ciInfo = {
+        selected_pane: {target: `%${session}`, window: '0', pane: '0', current_path: `/repo/${session}`},
+        panes: [{target: `%${session}`, window: '0', pane: '0', active: true, window_active: true, current_path: `/repo/${session}`}],
         project: {
-          git: {branch: 'feature'},
+          git: {root: `/repo/${session}`, branch: 'feature'},
           pull_request: {number, status_label: statusLabel, checks: {state}},
         },
-      }, {key: 'idle'}, true);
+      };
+      api.setTranscriptInfoForTest(session, ciInfo);
+      const ciHtml = api.tmuxPaneTabHtml(session, api.transcriptInfoForTest(session), {key: 'idle'}, true);
       assertNoStandalonePrBadge(ciHtml, label);
       if (statusClass) assert.ok(ciHtml.includes(statusClass), `${label} renders ${statusClass}`);
       if (pulse) assert.ok(ciHtml.includes('metadata-pulse'), `${label} CI badge is marked after CI change`);
@@ -3114,9 +3606,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.pullRequestCiStatus(mergedCompositeCi), null, 'merged PRs expose no shared CI status');
     assert.equal(api.pullRequestStatusDisplay(mergedCompositeCi), api.t('pr.status.merged'), 'merged lifecycle facts win over stale composite status text');
     assert.equal(api.pullRequestChecksHtml(mergedCompositeCi), '', 'merged PR popovers omit stale CI checks');
-    const mergedCompositeHtml = api.tmuxPaneTabHtml('13', {
-      project: {git: {branch: 'feature'}, pull_request: mergedCompositeCi},
-    }, {key: 'idle'}, true);
+    const mergedCompositeInfo = {
+      selected_pane: {target: '%13', window: '0', pane: '0', current_path: '/repo/13'},
+      panes: [{target: '%13', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/13'}],
+      project: {git: {root: '/repo/13', branch: 'feature'}, pull_request: mergedCompositeCi},
+    };
+    api.setTranscriptInfoForTest('13', mergedCompositeInfo);
+    const mergedCompositeHtml = api.tmuxPaneTabHtml('13', api.transcriptInfoForTest('13'), {key: 'idle'}, true);
     assert.ok(mergedCompositeHtml.includes('pr-number-chip pr-status-merged'), 'merged PR number chips retain the merged class with stale composite status text');
     assert.equal(mergedCompositeHtml.includes('pr-status-failing'), false, 'merged PR tabs do not leak the stale failing CI class');
     for (const [state, key, className] of [
@@ -3320,7 +3816,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.debugModeExplicitUrlEnabledForTest(), true, 'debug=1 is tracked separately from menu-opened YO!stats');
     api.recordClientPerfCounterForTest('focusSet', 0.2, {nodes: 1});
     assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-client-perf'), 'explicit debug=1 graph shows raw client-work counters');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,yocost,image-viewer,file-editor');
     assert.equal(api.resolveLayoutItem('debug'), api.debugPaneItemId, 'debug URL item resolves to the virtual pane');
     assert.equal(api.itemParam(api.debugPaneItemId), 'debug', 'YO!stats pane serializes to the readable debug item');
     const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
@@ -3406,8 +3902,22 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     assert.ok(html.includes('data-js-debug-subtab="events"') && html.includes('API/SSE'), 'YO!stats renders an API/SSE sub-tab');
     assert.ok(html.includes('data-js-debug-subtab="graph"') && html.includes('Graph'), 'YO!stats renders a Graph sub-tab');
+    assert.ok(html.includes('data-js-debug-subtab="system"') && html.includes('System'), 'YO!stats renders a System sub-tab');
     assert.ok(html.indexOf('data-js-debug-subtab="graph"') < html.indexOf('data-js-debug-subtab="events"'), 'YO!stats puts the Graph button left of API/SSE');
+    assert.ok(html.indexOf('data-js-debug-subtab="events"') < html.indexOf('data-js-debug-subtab="system"'), 'YO!stats puts System immediately right of API/SSE');
     assert.ok(html.includes('data-js-debug-subview="graph"') && html.includes('data-js-debug-subview="events" hidden'), 'YO!stats defaults to the Graph sub-tab and keeps API/SSE separate');
+    assert.ok(html.includes('data-js-debug-subview="system" hidden') && html.includes('data-js-debug-system'), 'YO!stats keeps its System dashboard in a separate lazy subview');
+    const systemSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(systemSource.includes("apiFetchJsonQuiet('/api/system-status', {cache: 'no-store'})") && /jsDebugSubTab !== 'system' \|\| !jsDebugStatsPanelVisible\(\)/.test(systemSource), 'System status uses the bounded quiet endpoint and remains visibility-gated');
+    assert.equal(/function debugSystemServicesHtml/.test(systemSource), false, 'Local Services no longer has the obsolete per-service card renderer');
+    assert.ok(systemSource.includes('debugSystemLocalServicesState = {records: new Map()') && systemSource.includes('data-js-debug-local-services-card'), 'Local Services keeps client-side service state and a stable card host');
+    assert.ok(systemSource.includes('oldLocalServicesCard') && systemSource.includes('replaceWith(oldLocalServicesCard)'), 'System refresh preserves the Local Services card so the table updates in place');
+    assert.ok(systemSource.includes('updateDebugSystemLocalServiceCell') && systemSource.includes('if (cell.textContent !== value.display) cell.textContent = value.display'), 'Local Services mutates stable cells instead of rebuilding unchanged text nodes');
+    assert.ok(systemSource.includes('DEBUG_SYSTEM_SERVICE_FRESH_MS = 60_000') && systemSource.includes('js-debug-system-service-cell--fresh') && systemSource.includes('js-debug-system-service-cell--stale'), 'Local Services has the 60s fresh/stale recency classes');
+    assert.ok(systemSource.includes("key: 'started'") && systemSource.includes("key: 'lastRan'") && systemSource.indexOf("key: 'queues'") > systemSource.indexOf("key: 'lastFailure'"), 'Local Services table includes Started/Last ran and keeps Queues last');
+    assert.ok(systemSource.includes("t('debug.system.localServices.prevValue'") && systemSource.includes("t('debug.system.localServices.exitedAgo'"), 'Local Services prev/exited labels are localized');
+    const systemCss = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.ok(systemCss.includes('.js-debug-system-local-services-wrap') && systemCss.includes('.js-debug-system-service-cell--prev') && systemCss.includes('color: var(--muted)'), 'Local Services CSS covers narrow overflow and muted prev/stale cells');
     assert.ok(html.includes('data-js-debug-log'), 'debug panel renders one copyable text log');
     assert.ok(html.includes('data-js-debug-stat="api">2<'), 'debug panel surfaces the API call count');
     assert.ok(html.includes('data-js-debug-graph'), 'YO!stats graph sub-tab renders a graph container');
@@ -3458,12 +3968,120 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       bandwidth: 'Client bandwidth/sec',
     };
     assert.deepStrictEqual(chartKeys, Object.keys(chartLabels), 'YO!stats chart groups retain the documented host-first source-key order');
+    const chartGroups = api.jsDebugGraphChartGroupsForTest();
+    assert.deepStrictEqual(canonical(chartGroups.map(group => group.key)), chartKeys, 'YO!stats chart group test API exposes the rendered chart order');
+    const chartDescKeys = Object.fromEntries(chartGroups.map(group => [group.key, group.descKey || '']));
+    assert.deepStrictEqual(Object.keys(chartDescKeys), chartKeys, 'YO!stats chart descriptions cover every chart group');
+    for (const [key, descKey] of Object.entries(chartDescKeys)) {
+      assert.ok(descKey, `YO!stats chart ${key} has a description key`);
+      assert.ok(descKey.startsWith('debug.graph.chart.') && descKey.endsWith('.desc'), `YO!stats chart ${key} uses a graph chart desc key`);
+    }
+    const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
+    for (const file of localeFiles) {
+      const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
+      for (const [key, descKey] of Object.entries(chartDescKeys)) {
+        assert.ok(catalog[descKey] && catalog[descKey] !== descKey, `${file} localizes ${key} chart description ${descKey}`);
+      }
+    }
+    const escapeAttr = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const enCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
+    for (const key of chartKeys) api.setDebugGraphChartVisibleForTest(key, true);
+    const allChartTitleHtml = api.debugPanelHtmlForTest();
+    for (const [key, descKey] of Object.entries(chartDescKeys)) {
+      const desc = enCatalog[descKey];
+      const titlePattern = new RegExp(`<span class="js-debug-chart-title" title="${escapeRegExp(escapeAttr(desc))}" aria-label="[^"]*${escapeRegExp(escapeAttr(desc))}" data-js-debug-chart-desc="${escapeRegExp(escapeAttr(descKey))}">`);
+      assert.ok(titlePattern.test(allChartTitleHtml), `YO!stats ${key} chart title exposes localized hover and accessible description`);
+    }
+    assert.ok(allChartTitleHtml.includes('js-debug-hover-tooltip'), 'YO!stats keeps the data-point hover tooltip separate from chart title explanations');
+    const descriptionMap = api.jsDebugGraphDescriptionKeyByLabelKeyForTest();
+    const expectedDescriptionLabels = [
+      'debug.graph.metric.api',
+      'debug.graph.metric.sse',
+      'debug.graph.metric.bandwidth',
+      'debug.graph.meta.removal',
+      'debug.graph.meta.rss',
+      'debug.graph.meta.serverSequence',
+      'debug.graph.meta.totalTraffic',
+      'debug.graph.meta.uptime',
+      'debug.graph.status.attention',
+      'debug.graph.status.transition',
+      'debug.graph.series.allAgentsTotal',
+      'debug.graph.series.allClientsApiSseTotal',
+      'debug.graph.series.defaultProcessCpu',
+      'debug.graph.series.otherClientsAverage',
+      'debug.graph.series.processCpu',
+      'debug.graph.series.systemCpu',
+      'debug.graph.series.systemMemory',
+      'debug.graph.series.thisClient',
+      'debug.graph.series.tokensPerAgent',
+      'debug.graph.sumDisplayed',
+      'debug.graph.sumDisplayedClientRequests',
+      'debug.modelTokens.allBillable',
+      'debug.modelTokens.cacheRead',
+      'debug.modelTokens.cacheWrite',
+      'state.idle',
+      'state.working',
+    ];
+    assert.deepStrictEqual(Object.keys(descriptionMap), expectedDescriptionLabels, 'YO!stats cryptic sub-label descriptions have one shared label-key lookup');
+    for (const file of localeFiles) {
+      const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
+      for (const [labelKey, descKey] of Object.entries(descriptionMap)) {
+        assert.ok(catalog[labelKey] && catalog[labelKey] !== labelKey, `${file} localizes YO!stats label ${labelKey}`);
+        assert.ok(catalog[descKey] && catalog[descKey] !== descKey, `${file} localizes YO!stats explanation ${descKey}`);
+      }
+      for (const descKey of ['debug.graph.series.agentToken.desc', 'debug.graph.series.modelToken.desc', 'debug.graph.series.gpuDevice.desc']) {
+        assert.ok(catalog[descKey] && catalog[descKey] !== descKey, `${file} localizes direct YO!stats series explanation ${descKey}`);
+      }
+    }
+    assert.ok(allChartTitleHtml.includes('data-js-debug-summary-desc="debug.graph.sumDisplayed.desc"'), 'YO!stats displayed-value summaries expose a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-summary-desc="debug.graph.sumDisplayedClientRequests.desc"'), 'YO!stats displayed request summaries expose a localized explanation');
+    const graphLegendHtml = `${html}\n${allChartTitleHtml}`;
+    assert.ok(/data-js-debug-legend="api"[\s\S]*data-js-debug-legend-label-desc="debug\.graph\.series\.thisClient\.desc"[\s\S]*>API \(this client\)<\/span>/.test(graphLegendHtml), 'YO!stats API legend explains this-client API traffic');
+    assert.ok(/data-js-debug-legend="sse"[\s\S]*data-js-debug-legend-label-desc="debug\.graph\.series\.thisClient\.desc"[\s\S]*>SSE \(this client\)<\/span>/.test(graphLegendHtml), 'YO!stats SSE legend explains this-client SSE traffic');
+    assert.ok(/data-js-debug-legend="bandwidth"[\s\S]*data-js-debug-legend-label-desc="debug\.graph\.series\.thisClient\.desc"[\s\S]*>Bandwidth \(this client\)<\/span>/.test(graphLegendHtml), 'YO!stats bandwidth legend explains this-client bandwidth');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.attention.desc"'), 'YO!stats Attention status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.transition.desc"'), 'YO!stats Transition status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.working.desc"'), 'YO!stats Working status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-legend-label-desc="debug.graph.status.idle.desc"'), 'YO!stats Idle status label exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-model-token-dimension-desc="debug.modelTokens.allBillable.desc"'), 'YO!stats model-token all-billable selector exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-model-token-dimension-desc="debug.modelTokens.cacheRead.desc"'), 'YO!stats model-token cache-read selector exposes a localized explanation');
+    assert.ok(allChartTitleHtml.includes('data-js-debug-model-token-dimension-desc="debug.modelTokens.cacheWrite.desc"'), 'YO!stats model-token cache-write selector exposes a localized explanation');
+    assert.ok(/function debugGraphExplainAttrs[\s\S]*title="\$\{esc\(text\)\}"[\s\S]*aria-label="\$\{esc\(`\$\{label\}: \$\{text\}`\)\}"/.test(debugPaneSource), 'YO!stats explanation helper always exposes native hover text plus an accessible label');
+    assert.equal(/\b(pointerenter|mouseenter|touchstart|touchend)\b[\s\S]{0,240}data-js-debug-(?:legend-label|chart|summary|meta|model-token-dimension)-desc/.test(debugPaneSource), false, 'YO!stats explanations do not install passive hover or touch-only handlers');
+    for (const descKey of [
+      'debug.graph.status.attention.desc',
+      'debug.graph.status.transition.desc',
+      'debug.graph.status.idle.desc',
+      'debug.graph.status.working.desc',
+      'debug.graph.series.thisClient.desc',
+      'debug.graph.series.systemCpu.desc',
+    ]) {
+      assert.ok(graphLegendHtml.includes(`data-js-debug-legend-label-desc="${descKey}"`), `YO!stats legend label exposes ${descKey}`);
+    }
+    for (const descKey of [
+      'debug.graph.meta.uptime.desc',
+      'debug.graph.meta.rss.desc',
+      'debug.graph.meta.serverSequence.desc',
+      'debug.graph.meta.totalTraffic.desc',
+    ]) {
+      assert.ok(allChartTitleHtml.includes(`data-js-debug-meta-desc="${descKey}"`), `YO!stats metadata line exposes ${descKey}`);
+    }
+    assert.ok(debugPaneSource.includes('data-js-debug-meta-desc') && debugPaneSource.includes('debugGraphMetaItem') && debugPaneSource.includes('jsDebugGraphDescriptionKeyByLabelKey[labelKey]'), 'YO!stats meta lines route through the shared description lookup');
+    const hasAccessibleDesc = (htmlText, attr, descKey) => new RegExp(`title="[^"]+" aria-label="[^"]+" ${attr}="${escapeRegExp(descKey)}"`).test(htmlText);
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-chart-desc', 'debug.graph.chart.cpu.desc'), 'chart-title explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(graphLegendHtml, 'data-js-debug-legend-label-desc', 'debug.graph.series.thisClient.desc'), 'legend explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-summary-desc', 'debug.graph.sumDisplayed.desc'), 'summary explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-meta-desc', 'debug.graph.meta.uptime.desc'), 'metadata explanations expose an accessible name without pointer hover');
+    assert.ok(hasAccessibleDesc(allChartTitleHtml, 'data-js-debug-model-token-dimension-desc', 'debug.modelTokens.allBillable.desc'), 'model-token option explanations expose an accessible name without pointer hover');
+    const descListenerLines = debugPaneSource.split('\n').filter(line => /addEventListener\(['"](pointerenter|mouseenter|mouseover|touchstart)['"]/.test(line) && /data-js-debug-(chart|summary|meta|legend-label|model-token-dimension)-desc/.test(line));
+    assert.deepStrictEqual(descListenerLines, [], 'YO!stats explanations do not add passive hover/touch listeners on touch-only devices');
     const chartOrderText = `${chartKeys.slice(0, 4).map(key => chartLabels[key]).join(', ')}, then ${chartKeys.slice(4, -1).map(key => chartLabels[key]).join(', ')}, and ${chartLabels[chartKeys.at(-1)]}`;
     assert.equal(guiSpec.split(chartOrderText).length - 1, 1, 'YO!stats GUI spec has one canonical prose chart-order contract matching the source');
     const sourceKeyOrderText = chartKeys.map(key => `\`${key}\``).join(', ');
     assert.ok(guiSpec.includes(`source-key chart order ${sourceKeyOrderText}`), 'YO!stats coverage inventory names every chart key in shipped order');
-    assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2001;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30001;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 5000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30001;'), 'YO!stats retries cold-start samples just after two seconds, then keeps its thirty-second steady cadence and a bounded request timeout');
-    assert.ok(/const jsDebugStatsPollState = \{\s*inFlight: false,\s*pending: false,\s*pendingForceGraphRefresh: false,\s*firstSampleReceived: false,\s*\};/.test(debugPaneSource), 'YO!stats polling lifecycle has one state owner');
+    assert.ok(debugPaneSource.includes('const jsDebugStatsPollFastMs = 2001;') && debugPaneSource.includes('const jsDebugStatsPollMs = 30001;') && debugPaneSource.includes('const jsDebugStatsPollTimeoutMs = 8000;') && debugPaneSource.includes('const jsDebugStatsHistoryMaxTimeoutMs = 30000;') && debugPaneSource.includes('const jsDebugStatsHistoryFlushMs = 30000;') && debugPaneSource.includes('const jsDebugGraphRefreshMs = 30001;'), 'YO!stats retries cold-start samples just after two seconds, then keeps its thirty-second steady cadence and a range-bounded request timeout');
+    assert.ok(/const jsDebugStatsPollState = \{\s*inFlight: false,\s*pending: false,\s*pendingForceGraphRefresh: false,\s*firstSampleReceived: false,\s*lastSampleAtMs: 0,\s*\};/.test(debugPaneSource), 'YO!stats polling lifecycle has one state owner');
     for (const retiredName of ['jsDebugStatsPollInFlight', 'jsDebugStatsPollPending', 'jsDebugStatsPollPendingForceGraphRefresh', 'jsDebugStatsFirstSampleReceived']) {
       assert.equal(debugPaneSource.includes(retiredName), false, `YO!stats retires parallel polling global ${retiredName}`);
     }
@@ -3471,16 +4089,23 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     for (const retiredName of ['jsDebugStatsHistoryFlushTimer', 'jsDebugStatsHistoryFlushInFlight']) {
       assert.equal(debugPaneSource.includes(retiredName), false, `YO!stats retires parallel upload global ${retiredName}`);
     }
+    assert.equal(api.jsDebugStatsHistoryTimeoutMsForTest(15 * 60), 8000, 'short history uses the responsive eight-second timeout floor');
+    assert.equal(api.jsDebugStatsHistoryTimeoutMsForTest(24 * 60 * 60), 30000, '24-hour history scales to the bounded thirty-second timeout');
+    const largeUploadRecords = Array.from({length: 1000}, (_, index) => ({start: index, duration: 1, api_count: 1, note: 'x'.repeat(2048)}));
+    const uploadRequest = api.jsDebugStatsHistoryUploadRequestForTest(largeUploadRecords, 'browser-a', 7);
+    assert.ok(Buffer.byteLength(uploadRequest.body, 'utf8') <= 96 * 1024, 'history POST chunks stay below the route body budget');
+    assert.ok(uploadRequest.chunk.length > 0 && uploadRequest.chunk.length < largeUploadRecords.length, 'byte-bound chunking splits a large upload instead of relying only on record count');
+    assert.equal(uploadRequest.chunk.length + uploadRequest.held.length, largeUploadRecords.length, 'byte-bound chunking preserves every pending record');
     assert.ok(/const jsDebugGraphGeometry = \(\(\) => \{[\s\S]*const width = 600;[\s\S]*const height = 120;[\s\S]*const plotTop = 8;[\s\S]*const plotHeight = height - plotTop;[\s\S]*plotBottom: plotTop \+ plotHeight,[\s\S]*hoverBottom: plotTop \+ plotHeight/.test(debugPaneSource), 'YO!stats owns SVG width, visible plot baseline, and hover coordinates in one frozen model');
     const debugGeometryConsumers = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphPointForValue'));
     assert.equal(/viewBox="0 0 600 120"|x2="600"|\* 600|\/ 120|const top = 8|const height = 104|baseline = 112|y2="116"|height="120"/.test(debugGeometryConsumers), false, 'YO!stats renderers and interactions do not restate shared SVG coordinate literals');
-    assert.ok(/function debugGraphPointForValue[\s\S]*debugGraphPlotYForValue\(value, chartMax\)/.test(debugPaneSource) && /function debugGraphGridLineY[\s\S]*return debugGraphPlotYForValue\(value, chartMax\)/.test(debugPaneSource) && /function debugGraphPlotOverlayRectHtml[\s\S]*jsDebugGraphGeometry\.plotTop[\s\S]*jsDebugGraphGeometry\.plotHeight/.test(debugPaneSource), 'lines, bars, areas, grids, axes, and overlays share one plot-coordinate parent');
+    assert.ok(/function debugGraphPointForValue[\s\S]*debugGraphPlotYForValue\(value, chartMax, logScale\)/.test(debugPaneSource) && /function debugGraphGridLineY[\s\S]*return debugGraphPlotYForValue\(value, chartMax, logScale\)/.test(debugPaneSource) && /function debugGraphPlotOverlayRectHtml[\s\S]*jsDebugGraphGeometry\.plotTop[\s\S]*jsDebugGraphGeometry\.plotHeight/.test(debugPaneSource), 'lines, bars, areas, grids, axes, and overlays share one plot-coordinate parent');
     assert.ok(debugPaneSource.includes("textWithMovingEllipsisHtml(t('debug.waitingForServerStats'))"), 'YO!stats waiting metadata uses the shared localized moving ellipsis');
     assert.ok(/function refreshDebugGraphElement\(graph, \{force = false\} = \{\}\) \{[\s\S]*nowMs - lastRenderedAt < jsDebugGraphRefreshMs/.test(debugPaneSource), 'YO!stats keeps graph geometry stable between scheduled redraws while event counters continue updating');
     assert.ok(/function scheduleJsDebugPanelRefresh\(options = \{\}\) \{[\s\S]*if \(options\.force === true\) jsDebugRenderForce = true;[\s\S]*if \(jsDebugRenderTimer\) return;[\s\S]*const force = jsDebugRenderForce;[\s\S]*jsDebugRenderForce = false;[\s\S]*refreshDebugPanelsFromEvents\(\{force\}\)/.test(debugPaneSource), 'YO!stats latches a forced redraw into an already-pending shared refresh');
     assert.equal((debugPaneSource.match(/scheduleJsDebugPanelRefresh\(\{force: firstSampleApplied \|\| forceGraphRefresh\}\);/g) || []).length, 2, 'YO!stats forces first samples and widened-history responses through the shared refresh path');
     assert.ok(/if \(event\.type === 'pointerdown'\)[\s\S]*jsDebugGraphRangeSliderDragging = true;[\s\S]*return true;[\s\S]*if \(event\.type === 'change'\)[\s\S]*jsDebugGraphRangeSliderDragging = false;[\s\S]*setDebugGraphRangeFromSlider/.test(debugPaneSource), 'YO!stats range dragging preserves the native input and commits only on change');
-    assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)/.test(debugPaneSource), 'YO!stats stats polling requires a visible active Debug pane');
+    assert.ok(/function jsDebugStatsPanelVisible\(\)[\s\S]*debugModeEnabled === true[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemIsActivePaneTab\(debugPaneItemId\)[\s\S]*itemIsActivePaneTab\(yocostItemId\)/.test(debugPaneSource), 'YO!stats polling is shared by the visible YO!stats and YO!cost tabs');
     assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*syncJsDebugStatsPolling\(\{pollNow: true\}\)/.test(debugPaneSource), 'every Chrome-style pane-tab activation re-arms or stops the shared YO!stats sampler');
     assert.ok(/function syncJsDebugStatsPolling\(\{pollNow = true, forceGraphRefresh = false\} = \{\}\)[\s\S]*armJsDebugStatsPolling\(\{pollNow, forceGraphRefresh\}\)/.test(debugPaneSource), 'YO!stats uses one polling synchronizer for layout and browser visibility changes');
     assert.ok(/document\.addEventListener\('visibilitychange'[\s\S]*forceGraphRefresh: visible/.test(debugPaneSource), 'YO!stats forces a catch-up graph redraw when Chrome makes the page visible again');
@@ -3716,7 +4341,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(datedTicks.length >= 3, true, '24-hour X axes include local calendar dates on every tick');
     assert.notEqual(datedTicks[0][2], datedTicks[2][2], '24-hour start and end ticks identify different local dates even when their clock times match');
     assert.ok(html.includes('Client API&amp;SSE/sec') && html.includes('Client bandwidth/sec'), 'chart headers carry per-second units');
-    assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title">Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
+    assert.ok(/<div class="js-debug-chart-head">\s*<div class="js-debug-chart-heading-row">\s*<span class="js-debug-chart-title"[^>]*>Client latency<\/span>[\s\S]*?<\/div>\s*<div class="js-debug-legend"/.test(html), 'chart title owns a full row above its legend');
     assert.ok(html.includes('API (this client)') && html.includes('Client latency (this client)'), 'client legends identify this browser separately');
     assert.match(html, /data-js-debug-series="api"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client API keeps the stable solid line');
     assert.match(html, /data-js-debug-series="sse"[^>]*data-js-debug-client-series="this-client"[^>]*data-js-debug-client-line="solid"/, 'this-client SSE keeps the stable solid line');
@@ -3730,6 +4355,45 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-js-debug-axis-max="cpu"[^>]*>[0-9.]+%</.test(html), 'CPU chart Y axis shows percent units');
     assert.ok(html.includes('system avg CPU %'), 'CPU chart includes the host CPU total beside its stacked process areas');
     assert.ok(html.includes('uptime 1s') && html.includes('PID=9876') && html.includes('server seq 20'), 'graph renders restarted process metadata with retained sequence');
+  });
+
+  test('YO!stats chooses one finest source per instant and one display width across raw/rollup overlap', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 10_000) * 10_000;
+    const start = now - 20_000;
+    api.setDebugGraphRangeForTest(60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 1,
+      records: [
+        // The retained rollup reports ten requests for each of its ten seconds.
+        {start: start / 1000, duration: 10, api_count: 100, latency_total_ms: 1000, latency_count: 10},
+        // Three later-arriving raw instants supersede that rollup for only those
+        // instants; the other seven seconds still use its proportional history.
+        ...Array.from({length: 3}, (_unused, index) => ({
+          start: (start + (index * 1000)) / 1000,
+          duration: 1,
+          api_count: 1,
+          latency_total_ms: 10,
+          latency_count: 1,
+        })),
+        // The recent tail is non-overlapping, so this range also straddles
+        // the raw/rollup tier boundary rather than testing only one cell.
+        ...Array.from({length: 2}, (_unused, index) => ({
+          start: (now - 5000 + (index * 1000)) / 1000,
+          duration: 1,
+          api_count: 1,
+          latency_total_ms: 10,
+          latency_count: 1,
+        })),
+      ],
+    });
+    const buckets = api.debugGraphDisplayBucketsForTest(now);
+    assert.deepStrictEqual(Array.from(buckets, bucket => bucket.durationMs), [10_000, 10_000], 'a tier-straddling raw/rollup range produces one uniform bar width');
+    assert.equal(buckets[0].apiCount, 73, 'fine raw values replace their three instants; the rollup supplies only its remaining seven');
+    assert.equal(buckets[0].latencyTotalMs, 730, 'additive values are never double-counted while filling an uncovered rollup interval');
+    assert.equal(buckets[0].latencyCount, 10, 'rate denominators retain exactly one source per instant');
+    assert.equal(buckets[1].apiCount, 2, 'a non-overlapping raw tail remains present beside the compact historical bucket');
+    assert.deepStrictEqual([...api.debugGraphBucketSummaryForTest(now).displayBucketSeconds], [10], 'the display summary documents a single resolution for the selected set');
   });
 
   test('YO!stats API graph event records update, expire, and clear as one lifecycle', () => {
@@ -3830,17 +4494,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     api.setDebugGraphRangeForTest(60, {render: false});
     let summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 1, 'a one-minute graph always selects one-second resolution even when a stale coarse source record is present');
-    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="1"'), 'the read-only control reports one second for the one-minute graph');
+    assert.equal(summary.resolutionSeconds, 10, 'a one-minute graph uses the coarsest present retained source so its bars remain uniform');
+    assert.ok(api.debugGraphInnerHtmlForTest(now).includes('data-js-debug-resolution-seconds="10"'), 'the read-only control reports the one uniform source-safe resolution');
     api.setDebugGraphRangeForTest(5 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 5, 'a five-minute graph aggregates irregular client events into five-second display buckets');
+    assert.equal(summary.resolutionSeconds, 10, 'a five-minute graph does not choose a width finer than an available retained source');
     api.setDebugGraphRangeForTest(15 * 60, {render: false});
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 10, 'a fifteen-minute graph stays within the shared display point budget');
     api.setDebugGraphResolutionOverrideForTest(1);
     summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.resolutionSeconds, 1, 'a user may override AUTO with a finer retained resolution');
+    assert.equal(summary.resolutionSeconds, 10, 'a manual override cannot make mixed retained sources render at incompatible widths');
     api.setDebugGraphResolutionOverrideForTest(0);
     summary = api.debugGraphBucketSummaryForTest(now);
     assert.equal(summary.resolutionSeconds, 10, 'reset restores the automatic display resolution');
@@ -3941,9 +4605,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal((gappedChart.match(/data-js-debug-no-data-range=/g) || []).length, 1, 'the same real gap renders one consolidated no-data region');
   });
 
-  test('YO!stats keeps this-client outage overlays visible while a peer reports data', () => {
+  test('YO!stats only paints a this-client outage when its communication is actually absent', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000) * 1000;
+    const clientId = api.jsDebugStatsClientIdForRequestForTest();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(60, {render: false});
     api.debugGraphApplyServerHistoryForTest({
@@ -3952,21 +4617,19 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         start: (now / 1000) - 3,
         duration: 1,
         sequence: 1,
-        disconnected_ms: 1000,
-        clients: {'client-stale': {disconnected_ms: 1000}},
+        clients: {[clientId]: {disconnected_ms: 1000}, 'peer-client': {api_count: 1, latency_total_ms: 12, latency_count: 1}},
       }, {
         start: (now / 1000) - 2,
         duration: 1,
         sequence: 2,
-        clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+        clients: {[clientId]: {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256, disconnected_ms: 1000}},
       }, {
         start: (now / 1000) - 1,
         duration: 1,
         sequence: 3,
-        disconnected_ms: 1000,
         clients: {
-          'client-stale': {disconnected_ms: 1000},
-          'client-live': {disconnected_ms: 1000},
+          [clientId]: {disconnected_ms: 1000},
+          'peer-client': {api_count: 1, latency_total_ms: 12, latency_count: 1},
         },
       }],
     });
@@ -3974,7 +4637,31 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     for (const chart of ['latency', 'count', 'bandwidth']) {
       const start = html.indexOf(`data-js-debug-chart="${chart}"`);
       const chartHtml = html.slice(start, html.indexOf('</section>', start));
-      assert.equal((chartHtml.match(/data-js-debug-disconnected-range=/g) || []).length, 2, `${chart} preserves both this-client outage ranges even while a peer is represented`);
+      assert.equal((chartHtml.match(/data-js-debug-disconnected-range=/g) || []).length, 2, `${chart} keeps true this-client outages visible around peer traffic but suppresses a reconnect interval containing this-client requests`);
+    }
+  });
+
+  test('YO!stats treats this-client latency as communication coverage even without a health heartbeat', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const clientId = api.jsDebugStatsClientIdForRequestForTest();
+    api.setDebugGraphRangeForTest(60, {render: false});
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    api.debugGraphApplyServerHistoryForTest({sequence: 2, records: [{
+      start: (now / 1000) - 2,
+      duration: 1,
+      sequence: 1,
+      clients: {[clientId]: {api_count: 1, latency_total_ms: 15, latency_count: 1, disconnected_ms: 1000}},
+    }, {
+      start: (now / 1000) - 1,
+      duration: 1,
+      sequence: 2,
+      clients: {[clientId]: {api_count: 1, latency_total_ms: 16, latency_count: 1, disconnected_ms: 1000}},
+    }]});
+    const html = api.debugGraphInnerHtmlForTest(now);
+    for (const chart of ['latency', 'count', 'bandwidth']) {
+      const start = html.indexOf(`data-js-debug-chart="${chart}"`);
+      const chartHtml = html.slice(start, html.indexOf('</section>', start));
+      assert.equal(chartHtml.includes('data-js-debug-disconnected-range='), false, `${chart} does not show a false full-outage box when the selected client had successful traffic`);
     }
   });
 
@@ -4220,7 +4907,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-js-debug-axis-max="count"[^>]*>4</.test(html), 'API/SSE per-second axis rounds 3.8/s to a whole 4');
     assert.ok(/data-js-debug-axis-mid="count"[^>]*>2</.test(html), 'API/SSE per-second midpoint stays whole');
     assert.ok(/data-js-debug-axis-max="latency"[^>]*>200ms</.test(html), 'latency axis rounds 196ms to 200ms');
-    assert.ok(/data-js-debug-axis-mid="latency"[^>]*>100ms</.test(html), 'latency midpoint stays readable after rounding');
+    assert.ok(/data-js-debug-axis-mid="latency"[^>]*>100ms</.test(html), 'sub-second latency stays linear with its familiar midpoint');
     assert.ok(/data-js-debug-axis-max="bandwidth"[^>]*>200kB</.test(html), 'bandwidth axis rounds 140kB/s to 200kB');
     assert.ok(/data-js-debug-axis-mid="bandwidth"[^>]*>100kB</.test(html), 'bandwidth midpoint stays readable after rounding');
   });
@@ -4312,6 +4999,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(debugPaneCss, /\.js-debug-chart-summary\s*\{[\s\S]*color:\s*var\(--active-accent-bright\);[\s\S]*font:\s*700 var\(--ui-font-size-xs\)/, 'all displayed chart sums share a contrasty treatment');
     assert.match(html, /other clients avg/, 'the peer comparison is visible in the legend when peer samples exist');
     assert.match(html, /--js-debug-series-color: var\(--bad\)/, 'the peer comparison uses the same red token as system-average CPU');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.thisClient.desc"'), 'this-client legend labels explain their browser-client scope');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.otherClientsAverage.desc"'), 'other-client average legend labels explain the peer aggregation');
   });
 
   test('YO!stats graph keeps stable this-client series before client history arrives', () => {
@@ -4343,6 +5032,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         system_cpu_total_percent: 40,
         system_cpu_count: 1,
         host_metrics: {
+          cpu_label: 'Intel Xeon · 16 cores / 32 threads · 3.6GHz',
+          system_memory_label: 'DDR5',
           system_memory_used_total_bytes: 32 * 1024 * 1024 * 1024,
           system_memory_capacity_total_bytes: 64 * 1024 * 1024 * 1024,
           system_memory_count: 1,
@@ -4358,7 +5049,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             'memory:node': {label: 'node', total_bytes: 10 * 1024 * 1024 * 1024, samples: 1},
           },
           gpu_devices: {
-            'gpu:0': {label: 'GPU 0', util_total_percent: 70, memory_used_total_bytes: 60 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 80 * 1024 * 1024 * 1024, samples: 1},
+            'gpu:0': {label: 'GPU 0 (GPU Model A)', util_total_percent: 70, memory_used_total_bytes: 60 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 80 * 1024 * 1024 * 1024, samples: 1},
             'gpu:1': {label: 'GPU 1', util_total_percent: 0, memory_used_total_bytes: 30 * 1024 * 1024 * 1024, memory_capacity_total_bytes: 48 * 1024 * 1024 * 1024, samples: 1},
           },
         },
@@ -4367,7 +5058,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const allSeries = api.debugGraphSeriesDataForTest(now);
     assert.equal(allSeries.some(series => series.hostMetric === 'cpu'), false, 'CPU does not add generic host process-name groups');
     assert.equal(allSeries.some(series => series.hostProcessId === 'cpu:python'), false, 'CPU does not add generic python process lines');
-    assert.deepStrictEqual([...allSeries.filter(series => series.hostMetric === 'gpuUtil').map(series => series.label)], ['GPU 0', 'GPU 1'], 'multiple GPUs render device labels instead of process names');
+    assert.deepStrictEqual([...allSeries.filter(series => series.hostMetric === 'gpuUtil').map(series => series.label)], ['GPU 0 (GPU Model A)', 'GPU 1'], 'multiple GPUs render device labels instead of process names');
     api.setDebugGraphChartVisibleForTest('memory', true);
     api.setDebugGraphChartVisibleForTest('gpuUtil', true);
     api.setDebugGraphChartVisibleForTest('gpuMemory', true);
@@ -4380,6 +5071,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(html, /data-js-debug-axis-zero="memory"[^>]*>0GB</, 'System memory axis explicitly starts at 0GB');
     assert.match(html, /data-js-debug-bar-series="gpu:gpuUtil:gpu:1"[^>]*data-js-debug-bar-total="0"/, 'a sampled 0% GPU still renders a visible utilization bar');
     assert.ok(html.includes('System memory') && html.includes('GPU utilization') && html.includes('GPU memory'), 'the host graph quartet is labeled');
+    assert.ok(html.includes('CPU (Intel Xeon · 16 cores / 32 threads · 3.6GHz)') && html.includes('System memory (DDR5)'), 'CPU and memory chart headings identify the sampled host hardware');
+    assert.ok(html.includes('GPU 0 (GPU Model A)'), 'both GPU charts retain the device model in their legends');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.defaultProcessCpu.desc"'), 'fallback YOLOmux process CPU legend explains its process scope');
+    if (html.includes('data-js-debug-legend="cpu:port:')) {
+      assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.processCpu.desc"'), 'peer process CPU legends explain the specific process scope');
+    }
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.systemCpu.desc"'), 'system CPU legend explains host-wide utilization');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.systemMemory.desc"'), 'system memory legend explains host memory usage');
+    assert.ok(html.includes('data-js-debug-legend-label-desc="debug.graph.series.gpuDevice.desc"'), 'GPU device legends explain the device metric scope');
     assert.ok(html.includes('data-js-debug-chart-toggle="cpu"') && html.includes('data-js-debug-chart-toggle="memory"') && html.includes('data-js-debug-chart-close="cpu"'), 'every graph name is available in the persistent chart-toggle group while its heading retains a compact X');
     const debugPaneSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(debugPaneSource.includes("jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1'") && debugPaneSource.includes('data-js-debug-chart-toggle'), 'YO!stats preferences persist browser-local chart visibility through named toggle markup');
@@ -4432,6 +5132,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         active_agent_total: 3,
         inactive_agent_total: 0,
         agent_activity_samples: 1,
+        tokens_per_agent_total: 5,
+        agent_token_samples: 1,
+        agent_token_rates: [
+          {key: '1|0|claude', label: '1:0:claude', total: 5, samples: 1, tokens: 5, seconds: 60, source: 'transcript', model_rates: {'claude-sonnet-4.7': {total: 5, samples: 1, tokens: 5, seconds: 60}}},
+        ],
       }],
     });
     let baselineSummary = api.debugGraphBucketSummaryForTest(now);
@@ -4464,16 +5169,60 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(summary.charts.includes('agentTokens'), 'agent token chart appears when token counters exist');
     assert.deepStrictEqual([...summary.charts], ['cpu', 'activity', 'agentTokens', 'latency', 'count', 'bandwidth'], 'YO!stats keeps CPU open while System memory and both GPU charts start minimized, with agent charts immediately after memory');
 
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-chart="activity"') && html.includes('Agent status'), 'YO!stats renders the agent status chart');
     assert.ok(/data-js-debug-chart="activity"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="10"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'Agent status uses stacked ten-second bars');
     assert.ok(html.includes('data-js-debug-chart="agentTokens"') && html.includes('Agent tokens/min'), 'YO!stats renders the optional agent token-rate chart');
     assert.ok(html.includes('data-js-debug-chart-toggle="modelTokens"') && html.includes('>Model tokens<'), 'YO!stats exposes the model token-rate chart without making the default graph stack taller');
-    assert.ok(/data-js-debug-displayed-token-sum="210"[^>]*>\(210, Σ displayed\)<\/span>/.test(html), 'Agent tokens/min header sums the exact token deltas in displayed buckets');
+    assert.equal((html.match(/data-js-debug-displayed-token-sum="215"[^>]*>\(215, Σ displayed\)<\/span>/g) || []).length, 2, 'Agent and Model token headers independently sum the same normalized token partition');
     assert.ok(/class="js-debug-chart js-debug-chart--token-agents" data-js-debug-chart="agentTokens"[^>]*data-js-debug-chart-kind="bar"[^>]*data-js-debug-chart-bucket-seconds="60"[^>]*data-js-debug-chart-stacked="true"/.test(html), 'agent token chart is marked as stacked one-minute bars');
     const agentTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="agentTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="agentTokens"')));
+    const modelTokenChartHtml = html.slice(html.indexOf('data-js-debug-chart="modelTokens"'), html.indexOf('</section>', html.indexOf('data-js-debug-chart="modelTokens"')));
+    const agentAxisMax = agentTokenChartHtml.match(/data-js-debug-chart-axis-max="([0-9.]+)"/)?.[1];
+    const modelAxisMax = modelTokenChartHtml.match(/data-js-debug-chart-axis-max="([0-9.]+)"/)?.[1];
+    const agentAxisMid = agentTokenChartHtml.match(/data-js-debug-axis-mid="agentTokens"[^>]*>([^<]+)</)?.[1];
+    const modelAxisMid = modelTokenChartHtml.match(/data-js-debug-axis-mid="modelTokens"[^>]*>([^<]+)</)?.[1];
+    assert.equal(agentAxisMax, modelAxisMax, 'Agent and Model token charts consume one identical numeric Y-axis maximum');
+    assert.equal(agentAxisMid, modelAxisMid, 'Agent and Model token charts render the same Y-axis midpoint label');
+    assert.ok(agentTokenChartHtml.includes('data-js-debug-token-axis="shared"') && modelTokenChartHtml.includes('data-js-debug-token-axis="shared"'), 'both token charts identify the one shared axis owner');
+    assert.ok(agentTokenChartHtml.includes('data-js-debug-chart-scale="linear"') && modelTokenChartHtml.includes('data-js-debug-chart-scale="linear"'), 'ordinary token ranges remain identically linear');
+    const agentTop = agentTokenChartHtml.match(/data-js-debug-bar-total="210"[^>]* y="([0-9.]+)"/);
+    const modelTop = modelTokenChartHtml.match(/data-js-debug-bar-total="210"[^>]* y="([0-9.]+)"/);
+    assert.ok(agentTop && modelTop && agentTop[1] === modelTop[1], 'Agent and Model token stack tops use identical geometry for the same bucket total');
+    assert.ok(agentTokenChartHtml.includes('data-js-debug-legend-label-desc="debug.graph.series.agentToken.desc"'), 'agent token legends explain the specific agent series');
+    assert.ok(modelTokenChartHtml.includes('data-js-debug-legend-label-desc="debug.graph.series.modelToken.desc"'), 'model token legends explain the specific model series');
     assert.ok(agentTokenChartHtml.indexOf('js-debug-chart-title') < agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:'), 'agent token legend renders below the title');
     assert.ok(agentTokenChartHtml.indexOf('data-js-debug-legend="agentToken:') < agentTokenChartHtml.indexOf('js-debug-chart-body'), 'agent token legend uses the shared position above the plot body');
+
+    const spikeApi = loadYolomux('?debug=1&sessions=debug', ['1']);
+    spikeApi.clearJsDebugEventsForTest();
+    const spikeValues = [100, 110, 120, 130, 140, 150, 160, 170, 180, 5000];
+    spikeApi.debugGraphApplyServerHistoryForTest({
+      sequence: 95,
+      records: spikeValues.map((tokens, index) => ({
+        start: Math.floor(now / 60000) * 60 - ((spikeValues.length - 1 - index) * 60),
+        duration: 60,
+        sequence: 86 + index,
+        tokens_per_agent_total: tokens,
+        agent_token_samples: 1,
+        agent_token_rates: [{
+          key: '1|0|codex', label: '1:0:codex', total: tokens, samples: 1, tokens, seconds: 60, source: 'transcript',
+          model_rates: {'gpt-5.6-sol': {total: tokens, samples: 1, tokens, seconds: 60}},
+        }],
+      })),
+    });
+    spikeApi.setDebugGraphChartVisibleForTest('modelTokens', true);
+    const spikeHtml = spikeApi.debugPanelHtmlForTest();
+    const spikeAgent = spikeHtml.slice(spikeHtml.indexOf('data-js-debug-chart="agentTokens"'), spikeHtml.indexOf('</section>', spikeHtml.indexOf('data-js-debug-chart="agentTokens"')));
+    const spikeModel = spikeHtml.slice(spikeHtml.indexOf('data-js-debug-chart="modelTokens"'), spikeHtml.indexOf('</section>', spikeHtml.indexOf('data-js-debug-chart="modelTokens"')));
+    const spikeAgentBreak = spikeAgent.match(/data-js-debug-chart-axis-break="([0-9.]+)"/)?.[1];
+    const spikeModelBreak = spikeModel.match(/data-js-debug-chart-axis-break="([0-9.]+)"/)?.[1];
+    assert.ok(spikeAgent.includes('data-js-debug-chart-scale="broken-linear"') && spikeModel.includes('data-js-debug-chart-scale="broken-linear"'), 'a lone extreme peak activates the shared broken linear token axis');
+    assert.equal(spikeAgentBreak, spikeModelBreak, 'Agent and Model charts use the identical peak-break threshold');
+    assert.ok(Number(spikeAgentBreak) >= 180 && Number(spikeAgentBreak) < 5000, 'the break preserves the complete ordinary linear range below the peak');
+    assert.equal((spikeAgent.match(/data-js-debug-axis-break="agentTokens"/g) || []).length, 1, 'Agent tokens draws one explicit SVG zigzag break');
+    assert.equal((spikeModel.match(/data-js-debug-axis-break="modelTokens"/g) || []).length, 1, 'Model tokens draws the matching SVG zigzag break');
     assert.ok(/data-js-debug-axis-max="activity"[^>]*>4</.test(html), 'agent status Y axis reserves at least four agents even when the stacked total is smaller');
     for (const value of [4, 3, 2, 1, 0]) {
       assert.ok(html.includes(`data-js-debug-axis-tick="activity" data-js-debug-axis-value="${value}"`), `activity chart Y axis shows whole-number tick ${value}`);
@@ -4539,7 +5288,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual([...tokenSeries.map(series => series.agentTokenPatternIndex)], [0, 1, 2], 'agent token series receive stable palette-aligned infill patterns');
     const modelTokenSeries = api.debugGraphSeriesDataForTest(now).filter(series => series.tokenDimension === 'model');
     assert.deepStrictEqual([...modelTokenSeries.map(series => series.label)], ['claude-sonnet-4.7', 'gpt-5.4-mini', 'gpt-5.5'], 'model token chart groups the exact transcript model identifiers');
-    assert.equal(modelTokenSeries.find(series => series.label === 'gpt-5.5').values.at(-1), 45, 'model chart sums matching model records across parent windows without duplicating them');
+    for (const series of modelTokenSeries) {
+      const legendStart = html.indexOf(`data-js-debug-legend="${series.key}"`);
+      const legendItemHtml = html.slice(legendStart, html.indexOf('</div>', legendStart));
+      assert.ok(legendStart >= 0, `model token legend includes ${series.label}`);
+      assert.ok(legendItemHtml.includes(`--js-debug-series-color: ${series.color};`), `model token legend ${series.label} consumes its bar-series color`);
+    }
+    assert.ok(/\.js-debug-legend-swatch\s*\{[\s\S]*background:\s*var\(--js-debug-series-color, currentColor\)/.test(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8')), 'dynamic legend dots use the shared series color with currentColor only as the fixed-series fallback');
+    assert.equal(modelTokenSeries.find(series => series.label === 'gpt-5.5').values.at(-1), 90, 'model chart sums each agent contribution with its owning elapsed interval instead of dividing by the combined agent seconds');
     assert.equal((agentTokenChartHtml.match(/data-js-debug-token-pattern-def="/g) || []).length, 3, 'agent token chart emits one SVG infill definition per agent');
     for (const patternIndex of [0, 1, 2]) {
       assert.ok(agentTokenChartHtml.includes(`data-js-debug-token-pattern="${patternIndex}"`), `agent token bars and legend expose infill pattern ${patternIndex}`);
@@ -4552,14 +5308,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function debugGraphAgentTokenPatternDefinitionHtml\(series, options = \{\}\)[\s\S]*debugGraphAgentTokenPatternShapeHtml\(patternIndex\)[\s\S]*function debugGraphAgentTokenPatternDefsHtml[\s\S]*debugGraphAgentTokenPatternDefinitionHtml\(series\)[\s\S]*function debugGraphAgentTokenLegendSwatchHtml[\s\S]*debugGraphAgentTokenPatternDefinitionHtml\(series, \{legend: true\}\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'agent token bars and legend swatches consume one SVG pattern-definition helper');
     assert.ok(/const jsDebugGraphAgentTokenPatternShapes = Object\.freeze\(\[[\s\S]*<path d="M0 1H6"[\s\S]*const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenPatternShapes\.length/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'agent token infill variants come from one horizontal-only pattern owner');
     assert.equal(/js-debug-legend-item\[data-js-debug-token-pattern=/.test(fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8')), false, 'agent token legend does not maintain a duplicate CSS pattern map');
-    assert.ok(/data-js-debug-legend="agentToken:[^"]+"[\s\S]*<span>1:0:claude<\/span>/.test(html), 'per-agent token legend keeps the agent label');
+    assert.ok(/data-js-debug-legend="agentToken:[^"]+"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.series\.agentToken\.desc"[^>]*>1:0:claude<\/span>/.test(html), 'per-agent token legend keeps the agent label and explanation');
     assert.equal(/data-js-debug-legend="agentToken:[^"]+"[\s\S]{0,240}<strong>/.test(html), false, 'per-agent token legend omits current token/min values');
     assert.ok(/data-js-debug-bar-series="transitionAgents"[\s\S]{0,220}data-js-debug-bar-stacked="transitionAgents"[\s\S]{0,220}data-js-debug-bar-total="3"/.test(html), 'transition bars are only yellow transition, not idle agents');
     assert.ok(/data-js-debug-bar-series="idleAgents"[\s\S]{0,220}data-js-debug-bar-stacked="idleAgents"[\s\S]{0,220}data-js-debug-bar-total="3"/.test(html), 'idle bars stack above active status so the top remains the total agent count');
-    assert.ok(/data-js-debug-legend="askAgents"[\s\S]*<span>Attention<\/span>/.test(html), 'prompted agents render an attention legend label');
-    assert.ok(/data-js-debug-legend="workingAgents"[\s\S]*<span>Working<\/span>/.test(html), 'working agents render a working legend label');
-    assert.ok(/data-js-debug-legend="transitionAgents"[\s\S]*<span>Transition<\/span>/.test(html), 'yellow stopped agents render a Transition legend label');
-    assert.ok(/data-js-debug-legend="idleAgents"[\s\S]*<span>Idle<\/span>/.test(html), 'idle agents render a grey idle legend label');
+    assert.ok(/data-js-debug-legend="askAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.attention\.desc"[^>]*>Attention<\/span>/.test(html), 'prompted agents render an attention legend label with an explanation');
+    assert.ok(/data-js-debug-legend="workingAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.working\.desc"[^>]*>Working<\/span>/.test(html), 'working agents render a working legend label with an explanation');
+    assert.ok(/data-js-debug-legend="transitionAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.transition\.desc"[^>]*>Transition<\/span>/.test(html), 'yellow stopped agents render a Transition legend label with an explanation');
+    assert.ok(/data-js-debug-legend="idleAgents"[\s\S]*<span[^>]*data-js-debug-legend-label-desc="debug\.graph\.status\.idle\.desc"[^>]*>Idle<\/span>/.test(html), 'idle agents render a grey idle legend label with an explanation');
     assert.equal(/data-js-debug-legend="workingAgents"[\s\S]{0,180}<strong>/.test(html), false, 'activity legends omit current counts');
 
     const noTokenApi = loadYolomux('?debug=1&sessions=debug', ['1']);
@@ -4586,6 +5342,215 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(noTokenHtml.includes('data-js-debug-chart="activity"'), 'activity chart renders without token counters');
     assert.ok(noTokenHtml.includes('data-js-debug-chart="agentTokens"'), 'token chart renders without numeric token counters');
     assert.ok(/data-js-debug-displayed-token-sum="0"[^>]*>\(0, Σ displayed\)<\/span>/.test(noTokenHtml), 'empty Agent tokens/min charts report a zero displayed sum');
+  });
+
+  test('YO!stats agent status abuts held samples and marks real sampler outages', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const domain = {startMs: 0, endMs: 30000};
+    const bars = api.debugGraphBarRectsHtmlForTest({
+      key: 'workingAgents',
+      label: 'Working',
+      values: [1, 1],
+      times: [0, 10000],
+      durations: [10000, 10000],
+      hasDataValues: [true, true],
+    }, 1, domain);
+    const rects = [...bars.matchAll(/<rect[^>]* x="([0-9.]+)"[^>]* width="([0-9.]+)"/g)]
+      .map(match => ({x: Number(match[1]), width: Number(match[2])}));
+    assert.equal(rects.length, 2, 'two sampled held-state buckets render two bars');
+    assert.equal(rects[0].x + rects[0].width, rects[1].x, 'adjacent held-state bars touch exactly with no picket-fence seam');
+    const buckets = [
+      {startMs: 0, durationMs: 10000, cpuCount: 1, agentActivitySamples: 1},
+      {startMs: 20000, durationMs: 10000, cpuCount: 1, agentActivitySamples: 1},
+    ];
+    const noDataRuns = [...api.debugGraphAgentStatusNoDataRunsForTest(buckets, domain)]
+      .map(({startMs, endMs}) => ({startMs, endMs}));
+    assert.deepStrictEqual(noDataRuns, [{startMs: 10000, endMs: 20000}], 'a missing server/status interval remains an honest outage rather than carried green state');
+    const outage = api.debugGraphAgentStatusNoDataRectsHtmlForTest(buckets, domain);
+    assert.match(outage, /data-js-debug-agent-status-no-data-range="0"[^>]* x="200\.0"[^>]* width="200\.0"/, 'the status outage overlay exactly spans the missing slot');
+    assert.ok(/key: 'activity'[\s\S]{0,500}statusNoDataOverlay: true/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'only the held-state activity chart opts into sampler-outage rendering');
+    const trailingDomain = {startMs: 0, endMs: 70000};
+    const trailingRuns = [...api.debugGraphAgentStatusNoDataRunsForTest(buckets, trailingDomain)]
+      .map(({startMs, endMs}) => ({startMs, endMs}));
+    assert.deepStrictEqual(trailingRuns, [
+      {startMs: 10000, endMs: 20000},
+      {startMs: 60000, endMs: 70000},
+    ], 'an ongoing trailing sampler outage appears after the shared 30-second grace period');
+    assert.deepStrictEqual(
+      [1, 2, 3, 6, 20].map(attempt => api.jsDebugHistoryRetryDelayMsForTest(attempt)),
+      [10000, 20000, 40000, 300000, 300000],
+      'history retry backs off exponentially from 10 seconds and chills at the five-minute cap',
+    );
+  });
+
+  test('YO!stats CPU keeps genuine sampling gaps while preserving zero-valued samples', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 5) * 5;
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({sequence: 3, records: [
+      {start: now - 50, duration: 5, sequence: 1, system_cpu_total_percent: 0, system_cpu_count: 1},
+      {start: now - 45, duration: 5, sequence: 2, system_cpu_total_percent: 20, system_cpu_count: 1},
+      // 40s..25s are genuinely unsampled: do not carry the 20% value forward.
+      {start: now - 25, duration: 5, sequence: 3, system_cpu_total_percent: 40, system_cpu_count: 1},
+    ]});
+    const cpu = api.debugPanelHtmlForTest().match(/<section[^>]*data-js-debug-chart="cpu"[\s\S]*?<\/section>/)?.[0] || '';
+    assert.equal((cpu.match(/data-js-debug-series="systemCpu"/g) || []).length, 2, 'a true CPU sampling gap splits the line instead of interpolating it');
+    assert.equal(cpu.includes('data-js-debug-agent-status-no-data-range='), false, 'CPU gaps never reuse the Agent-status red sampler overlay');
+    const systemCpu = api.debugGraphSeriesDataForTest(now * 1000).find(series => series.key === 'systemCpu');
+    assert.ok(systemCpu.hasDataValues.includes(true) && systemCpu.values.includes(0), 'a sampled zero remains data, distinct from an unsampled gap');
+  });
+
+  test('YO!stats Cost summary is a compact non-chart card that opens YO!cost', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 201,
+      usage_atom_backfill: {state: 'running', sources: 2, missing: 0},
+      records: [{
+        start: Math.floor(now / 1000), duration: 1, sequence: 201,
+        tokens_per_agent_total: 12, agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 12, samples: 1, tokens: 12, seconds: 60, model_rates: {'gpt-5.6-terra': {total: 12, samples: 1, tokens: 12, seconds: 60}}}],
+        cost_summary: {
+          total_micro_usd: 256000, known_micro_usd: 256000, lower_micro_usd: 256000, upper_micro_usd: 330000, priced_count: 4, complete: true, unpriced_count: 0,
+          components: [
+            {key: 'uncached_input', label: 'Uncached input', provider: 'openai', model: 'gpt-5.6-terra', micro_usd: 70500, quantity: 23500, unit: 'tokens', rate_usd: '3', rate_scale: 1000000, effective_from: '2026-07-01T00:00:00Z', source_url: 'https://platform.openai.com/pricing'},
+            {key: 'cache_read', label: 'Cached read', provider: 'openai', model: 'gpt-5.6-terra', direction: 'input', cache_role: 'read', quantity: 125000, unit: 'tokens', micro_usd: 37500, source_url: 'https://platform.openai.com/pricing'},
+            {key: 'text_output', label: 'Text output', provider: 'anthropic', model: 'claude-opus-4-8', direction: 'output', quantity: 3700, unit: 'tokens', micro_usd: 95000, source_url: 'https://platform.claude.com/docs/en/about-claude/pricing'},
+            {key: 'image_output', label: 'Image output', direction: 'output', modality: 'image', quantity: 2, unit: 'images', micro_usd: 53000, source_url: 'javascript:alert(1)'},
+          ],
+          models: [
+            {provider: 'openai', model: 'gpt-5.6-terra', effort: 'med', token_quantity: 148500, input_tokens: 23500, cache_tokens: 125000, output_tokens: 0, input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000},
+            {provider: 'anthropic', model: 'claude-opus-4-8', effort: 'xhigh', token_quantity: 3700, input_tokens: 0, cache_tokens: 0, output_tokens: 3700, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000},
+            {provider: 'openai', model: 'gpt-5.6-sol', effort: 'high', token_quantity: 0, input_tokens: 0, cache_tokens: 0, output_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0, micro_usd: 0},
+            {provider: 'openai', model: 'gpt-5.6-sol', effort: 'low', token_quantity: 0, input_tokens: 0, cache_tokens: 0, output_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0, micro_usd: 0},
+            {provider: 'openai', model: 'gpt-image-2', effort: '', token_quantity: 0, input_tokens: 0, cache_tokens: 0, output_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 0, other_micro_usd: 0, micro_usd: 0},
+          ],
+          sources: [
+            {source: 'Root Codex', transcript: '/tmp/root.jsonl', tmux_key: 's|2|codex', tmux_label: 's:build', tmux_session: 's', tmux_window: '2', tmux_window_label: 'build', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'root', model: 'gpt-5.6-terra', token_quantity: 148500, input_tokens: 23500, cache_tokens: 125000, output_tokens: 0, other_tokens: 0, input_micro_usd: 70500, cache_micro_usd: 37500, output_micro_usd: 37000, other_micro_usd: 0, micro_usd: 145000, lower_micro_usd: 145000, upper_micro_usd: 180000},
+            {source: 'Research subagent', tmux_key: 's|2|codex', tmux_label: 's:build', tmux_session: 's', tmux_window: '2', tmux_window_label: 'build', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'child', model: 'claude-opus-4-8', token_quantity: 3700, input_tokens: 0, cache_tokens: 0, output_tokens: 3700, other_tokens: 0, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 58000, other_micro_usd: 53000, micro_usd: 111000, lower_micro_usd: 111000, upper_micro_usd: 150000},
+          ],
+          catalog_revision: 'seed-1', active_catalog_revision: 9, freshness: 'seed-only',
+        },
+      }],
+    });
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
+    const defaultCostHtml = api.debugPanelHtmlForTest();
+    assert.ok(defaultCostHtml.includes('data-js-debug-chart-toggle="costSummary" aria-pressed="false"') && !defaultCostHtml.includes('data-js-debug-summary-group="costSummary"'), 'Cost has a persistent toggle immediately after Model tokens but starts off');
+    api.setDebugGraphChartVisibleForTest('costSummary', true);
+    const summary = canonical(api.debugGraphCostSummaryForTest(api.debugGraphAgentTokenDisplayBucketsForTest(now)));
+    assert.equal(summary.totalMicroUsd, 256000, 'Cost summary preserves integer micro-USD totals from the existing stats bucket');
+    assert.equal(summary.knownMicroUsd, 256000, 'Cost summary does not convert the total to a float before reconciliation');
+    assert.equal(summary.lowerMicroUsd, 256000, 'Cost summary exposes the lower edge of the displayed estimate range');
+    assert.equal(summary.upperMicroUsd, 330000, 'Cost summary exposes the upper edge of the displayed estimate range');
+    assert.ok(/group\.key === 'modelTokens' && debugGraphChartVisible\('costSummary'\)[\s\S]*items\.push\(debugGraphCostSummaryHtml\(groupBuckets, domain\)\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Cost summary consumes the exact Model tokens/min bucket helper, including compact wide-range history');
+    const html = api.debugPanelHtmlForTest();
+    const reportHtml = api.debugGraphCostReportHtmlForTest(summary, {startMs: now - 60000, endMs: now});
+    const unpricedReportHtml = api.debugGraphCostReportHtmlForTest({
+      knownMicroUsd: 200000,
+      lowerMicroUsd: 200000,
+      upperMicroUsd: 950000,
+      pricedCount: 1,
+      complete: false,
+      unpricedCount: 1,
+      unpricedTokenQuantity: 50,
+      components: [{provider: 'openai', model: 'unknown-model', direction: 'input', unit: 'tokens', priced: false, unpriced_count: 1, unpriced_token_quantity: 50, token_quantity: 50, upper_micro_usd: 750000}],
+      models: [], sources: [], tmuxWindows: [],
+    }, {startMs: now - 60000, endMs: now});
+    assert.ok(unpricedReportHtml.includes('data-js-debug-cost-table="unpriced"') && unpricedReportHtml.includes('Known priced total') && unpricedReportHtml.includes('$0.20') && unpricedReportHtml.includes('Unpriced tokens') && unpricedReportHtml.includes('50 tokens') && unpricedReportHtml.includes('Worst-case additional estimate') && unpricedReportHtml.includes('$0.75') && unpricedReportHtml.includes('openai · unknown-model (input)'), 'unpriced usage keeps known cost, token volume, worst-case increment, and affected model/class explicit instead of widening the headline opaquely');
+    const modelIndex = html.indexOf('data-js-debug-chart="modelTokens"');
+    const costIndex = html.indexOf('data-js-debug-summary-group="costSummary"');
+    assert.ok(modelIndex >= 0 && costIndex > modelIndex, 'Cost summary is immediately ordered after Model tokens/min in the graph stack');
+    const modelToggleIndex = html.indexOf('data-js-debug-chart-toggle="modelTokens"');
+    const costToggleIndex = html.indexOf('data-js-debug-chart-toggle="costSummary"');
+    const gpuToggleIndex = html.indexOf('data-js-debug-chart-toggle="gpuUtil"');
+    assert.ok(modelToggleIndex >= 0 && modelToggleIndex < costToggleIndex && costToggleIndex < gpuToggleIndex, 'Cost control is immediately ordered after Model tokens and before GPU');
+    api.setDebugGraphChartVisibleForTest('costSummary', false);
+    assert.equal(api.debugPanelHtmlForTest().includes('data-js-debug-summary-group="costSummary"'), false, 'Cost control hides the independent summary card');
+    api.setDebugGraphChartVisibleForTest('costSummary', true);
+    assert.ok(api.debugPanelHtmlForTest().includes('data-js-debug-summary-group="costSummary"'), 'Cost control restores the summary card');
+    const cardBody = html.slice(costIndex).match(/<dl class="js-debug-cost-compact"[\s\S]*?<\/dl>/)?.[0] || '';
+    assert.ok(html.includes('(est. $0.2560 – $0.3300, Σ displayed)') && cardBody.includes('Input') && cardBody.includes('Cache') && cardBody.includes('Output') && cardBody.includes('Total'), 'the default card shows a lower-upper range while backfill/unknown usage is active and contains only compact input/cache/output/total accounting');
+    assert.ok(html.includes('Backfill in progress'), 'Cost summary marks a displayed estimate partial while retained transcript atoms are migrating');
+    assert.ok(cardBody.includes('Input') && cardBody.includes('$0.0705') && cardBody.includes('23.5k tokens') && cardBody.includes('Cache') && cardBody.includes('$0.0375') && cardBody.includes('125k tokens') && cardBody.includes('Output') && cardBody.includes('3.7k tokens') && cardBody.includes('Total') && cardBody.includes('$0.2560 – $0.3300') && cardBody.includes('152k tokens'), 'the compact card pairs every cost class and total range with token-only usage');
+    const cardHeader = html.slice(costIndex, html.indexOf('<dl class="js-debug-cost-compact"', costIndex));
+    assert.ok(cardHeader.includes('js-debug-cost-estimate'), 'the Cost card heading carries the plain estimate text');
+    assert.equal(cardHeader.includes('data-js-debug-cost-details'), false, 'the Cost card header keeps More Info out of the title/control row');
+    const cardFooter = html.slice(html.indexOf('</dl>', costIndex), html.indexOf('</section>', costIndex));
+    assert.ok(/<span class="js-debug-cost-modal-host"><button[^>]*class="[^"]*\bjs-debug-cost-details\b[^"]*\bcontrol-active-hover\b[^"]*"[^>]*data-js-debug-cost-details[^>]*>More Info<\/button><\/span>/.test(cardFooter), 'the Cost card exposes More Info below the Total row as the YO!cost tab opener');
+    assert.equal(cardBody.includes('<a '), false, 'the Cost card compact accounting list contains no pricing links');
+    assert.equal(cardBody.includes('js-debug-cost-usage-chart'), false, 'the Cost card compact accounting list contains no model usage chart');
+    assert.equal(html.includes('data-js-debug-cost-modal-template'), false, 'the Cost card retains no modal template');
+    assert.equal(html.includes('app-modal-overlay js-debug-cost-modal'), false, 'the Cost card retains no modal surface');
+    const modelUsagesSection = reportHtml.slice(reportHtml.indexOf('<section class="js-debug-cost-model-usages'), reportHtml.indexOf('<section class="js-debug-cost-details-section">\n    <h2>Cost calculation</h2>'));
+    assert.ok(modelUsagesSection.includes('23.5k tokens') && modelUsagesSection.includes('$0.0705') && modelUsagesSection.includes('125k tokens') && modelUsagesSection.includes('$0.0375') && modelUsagesSection.includes('<strong>0</strong><small>$0</small>'), 'every model row pairs per-class token counts and costs, including explicit zero cells');
+    assert.ok(modelUsagesSection.includes('aria-label="gpt-5.6-terra · med: Total 149k tokens $0.1450; Input 23.5k tokens $0.0705; Cached 125k tokens $0.0375; Output 0 $0.0370; Other 0 $0"'), 'each model row keeps an accessible per-class token and cost summary');
+    assert.equal(cardBody.includes('js-debug-line-chart') || cardBody.includes('data-js-debug-axis') || cardBody.includes('data-js-debug-bar-'), false, 'Cost summary is not a cost-per-minute chart');
+    assert.ok(reportHtml.includes('152k tokens') && reportHtml.includes('Cost calculation') && reportHtml.includes('By Agent') && reportHtml.includes('Model Usages') && reportHtml.includes('Agent and source attribution') && reportHtml.includes('<table'), 'YO!cost owns the complete by-agent and by-model report content');
+    assert.ok(reportHtml.includes('data-js-debug-cost-transcript-path="/tmp/root.jsonl"') && reportHtml.includes('>Root Codex</a>'), 'a source with a canonical transcript path renders a Preview link');
+    assert.equal(/data-js-debug-cost-transcript-path[^>]*>Research subagent</.test(reportHtml), false, 'a source without a transcript path remains plain text with no dead link');
+    const unsafePathHtml = api.debugGraphCostSourceTreeHtmlForTest([{source: 'Unsafe', transcript: '/tmp/../outside.jsonl', token_quantity: 1}]);
+    assert.equal(unsafePathHtml.includes('data-js-debug-cost-transcript-path'), false, 'a traversal-shaped non-canonical transcript path never becomes a Preview link');
+    const multiAgentHtml = api.debugGraphCostTmuxBreakdownHtmlForTest({tmuxWindows: [
+      {tmux_key: 'one', tmux_label: 'one:0:codex', input_tokens: 10, input_micro_usd: 100, token_quantity: 10, micro_usd: 100},
+      {tmux_key: 'two', tmux_label: 'two:1:claude', cache_tokens: 20, cache_micro_usd: 200, token_quantity: 20, micro_usd: 200},
+    ]});
+    assert.equal((multiAgentHtml.match(/<tr aria-label=/g) || []).length, 2, 'two distinct interactive agents render one semantic row each');
+    assert.ok(multiAgentHtml.includes('one:0:codex') && multiAgentHtml.includes('two:1:claude') && multiAgentHtml.includes('Grand total'), 'the multi-agent table retains both agents and one grand total');
+    const multiModelHtml = api.debugGraphCostModelUsageChartHtmlForTest([
+      {provider: 'openai', model: 'gpt-a', input_tokens: 1, input_micro_usd: 10, output_tokens: 2, output_micro_usd: 20, token_quantity: 3, micro_usd: 30},
+      {provider: 'anthropic', model: 'claude-b', cache_tokens: 4, cache_micro_usd: 40, other_tokens: 5, other_micro_usd: 50, token_quantity: 9, micro_usd: 90},
+    ], [], {report: true});
+    assert.equal((multiModelHtml.match(/<tr aria-label=/g) || []).length, 2, 'every distinct model renders one semantic row');
+    for (const model of ['gpt-a', 'claude-b']) assert.match(multiModelHtml, new RegExp(`aria-label="[^"]*${model}[^"]*Total[^"]*Input[^"]*Cached[^"]*Output[^"]*Other`), `${model} exposes every token-and-cost class plus Total`);
+    const sourceTreeIndex = reportHtml.indexOf('Agent and source attribution');
+    const pricingSourcesIndex = reportHtml.indexOf('Pricing sources');
+    const pricingSourcesSection = reportHtml.slice(pricingSourcesIndex, reportHtml.indexOf('</article>', pricingSourcesIndex));
+    assert.ok(pricingSourcesIndex > sourceTreeIndex, 'the consolidated Pricing sources section is rendered last after source attribution');
+    assert.equal((pricingSourcesSection.match(/href="https:\/\/platform\.openai\.com\/pricing"/g) || []).length, 1, 'duplicate component pricing URLs collapse to one bottom-section source link');
+    assert.equal((pricingSourcesSection.match(/href="https:\/\/platform\.claude\.com\/docs\/en\/about-claude\/pricing"/g) || []).length, 1, 'distinct authoritative pricing URLs stay visible in the bottom section');
+    assert.equal(pricingSourcesSection.includes('javascript:alert'), false, 'unsafe component source URLs are filtered from the consolidated pricing sources list');
+    const costSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.ok(costSource.includes('data-js-debug-cost-refresh') && costSource.includes("/api/pricing-catalog/refresh") && costSource.includes("/api/pricing-catalog', {cache: 'no-store'}") && costSource.includes('readOnlyMode ? \'\'') && costSource.includes('} catch (error) {\n    jsDebugPricingRefreshState.inFlight = false;'), 'the card exposes the server-owned Refresh control only to writable/admin sessions, polls its bounded status, clears a failed request state, and never crawls from the browser');
+    assert.ok(reportHtml.includes('Catalog revision') && reportHtml.includes('>9<') && reportHtml.includes('Catalog freshness') && reportHtml.includes('seed-only') && reportHtml.includes('Priced coverage') && reportHtml.includes('>4/4<') && reportHtml.includes('data-js-debug-cost-table="calculation"') && reportHtml.includes('23.5k tokens') && reportHtml.includes('2026-07-01T00:00:00Z') && reportHtml.includes('Unpriced exclusions') && reportHtml.includes('Estimated API list-price range $0.2560 – $0.3300') && reportHtml.includes('href="https://platform.openai.com/pricing"') && reportHtml.includes('>openai · gpt-5.6-terra<') && reportHtml.includes('data-js-debug-cost-table="source"') && reportHtml.includes('data-js-debug-cost-table="catalog"'), 'the report discloses active catalog state, safe pricing links, by-agent arithmetic, and source attribution in shared tables');
+    const tmuxSection = reportHtml.slice(reportHtml.indexOf('By Agent'), reportHtml.indexOf('Model Usages'));
+    assert.equal((tmuxSection.match(/>s:build</g) || []).length, 1, 'parent and subagent costs under one tmux window render as one combined tmux row');
+    assert.ok(tmuxSection.includes('data-js-debug-cost-table="agent"') && tmuxSection.includes('23.5k tokens') && tmuxSection.includes('125k tokens') && tmuxSection.includes('3.7k tokens') && tmuxSection.includes('$0.2560 – $0.3300') && tmuxSection.includes('Grand total'), 'agent row and grand total pair class counts/costs and equal parent plus subagent once');
+    assert.ok((reportHtml.match(/data-js-debug-cost-table=/g) || []).length >= 5, 'the Cost report renders every section in a shared table shell without former list/tree caps');
+
+    assert.ok(costSource.includes("debugGraphCostRangeUsdText(summary)") && costSource.includes("debug.cost.range") && costSource.includes("'est. —, Σ displayed'"), 'an interval with no priceable component is distinctly unestimated while incomplete priced ranges render as low-high estimates');
+  });
+
+  test('YO!stats Cost summary renders a single exact total when lower and upper match', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 202,
+      usage_atom_backfill: {state: 'complete', sources: 1, missing: 0},
+      records: [{
+        start: Math.floor(now / 1000), duration: 1, sequence: 202,
+        tokens_per_agent_total: 10, agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 10, samples: 1, tokens: 10, seconds: 60, model_rates: {'gpt-5.6-terra': {total: 10, samples: 1, tokens: 10, seconds: 60}}}],
+        cost_summary: {
+          total_micro_usd: 420000, known_micro_usd: 420000, lower_micro_usd: 420000, upper_micro_usd: 420000, priced_count: 1, complete: true, unpriced_count: 0,
+          components: [{key: 'exact', provider: 'openai', model: 'gpt-5.6-terra', direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 10, micro_usd: 420000}],
+          models: [{provider: 'openai', model: 'gpt-5.6-terra', token_quantity: 10, input_tokens: 10, input_micro_usd: 420000, micro_usd: 420000}],
+          sources: [{source: 'Root Codex', root_thread_id: 'root', agent_thread_id: 'root', token_quantity: 10, input_micro_usd: 420000, micro_usd: 420000}],
+        },
+      }],
+    });
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
+    api.setDebugGraphChartVisibleForTest('costSummary', true);
+    const html = api.debugPanelHtmlForTest();
+    const costIndex = html.indexOf('data-js-debug-summary-group="costSummary"');
+    const cardHeader = html.slice(costIndex, html.indexOf('<dl class="js-debug-cost-compact"', costIndex));
+    const estimateText = cardHeader.match(/<span class="js-debug-chart-summary js-debug-cost-estimate">\(([^<]+)\)<\/span>/)?.[1] || '';
+
+    assert.ok(cardHeader.includes('(est. $0.4200, Σ displayed)'), 'complete priced usage renders one exact estimate instead of a range');
+    assert.equal(estimateText.includes(' – '), false, 'complete priced usage does not render a low-high separator in the estimate text');
+    assert.ok(html.includes('Estimated API list-price total $0.4200'), 'the details report describes exact usage as a total');
   });
 
   test('YO!stats aligns server activity and latency samples by timestamp', () => {
@@ -4693,6 +5658,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(summary.rangeSeconds, 4 * 60 * 60, 'the graph time range survives reload');
     assert.equal(summary.charts.includes('gpuMemory'), false, 'a closed chart remains hidden after reload');
     assert.ok(html.includes('data-js-debug-chart-toggle="gpuMemory" aria-pressed="false"'), 'the persistent toggle retains a closed chart after reload');
+  });
+
+  test('YO!stats Logs merges bounded server and client levels with filters', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.clearJsDebugEventsForTest();
+    api.setJsDebugLogsPayloadForTest([
+      {id: 1, timestamp: 100, level: 'info', source: 'server', category: 'boot', message: 'ready'},
+      {id: 2, timestamp: 101, level: 'warning', source: 'sessions', category: 'process-discovery', message: 'used lsof fallback'},
+      {id: 3, timestamp: 102, level: 'debug', source: 'statsd', category: 'history', message: 'cache hit'},
+      {id: 4, timestamp: 103, level: 'error', source: 'server', category: 'request', message: 'request failed'},
+    ]);
+    api.recordJsDebugEventForTest('error', {message: 'client exploded', source: 'browser-test'});
+
+    const html = api.debugLogsInnerHtmlForTest();
+    assert.ok(html.includes('used lsof fallback') && html.includes('client exploded'), 'Logs merges server warnings and client errors');
+    for (const level of ['info', 'warning', 'debug', 'error']) {
+      assert.ok(html.includes(`data-level="${level}"`), `Logs renders the ${level} level row`);
+      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="true"`), `Logs exposes an active ${level} filter`);
+    }
+    assert.ok(/data-js-debug-subtab="graph"[\s\S]*data-js-debug-subtab="events"[\s\S]*data-js-debug-subtab="system"[\s\S]*data-js-debug-subtab="logs"/.test(api.debugPanelHtmlForTest()), 'Logs is the fourth YO!stats sub-tab after System');
+    api.setJsDebugLogLevelsForTest(['warning']);
+    const warningOnly = api.debugLogsInnerHtmlForTest();
+    assert.ok(warningOnly.includes('used lsof fallback'), 'warning filter retains warnings');
+    assert.equal(warningOnly.includes('ready'), false, 'warning filter hides info');
+    assert.equal(warningOnly.includes('client exploded'), false, 'warning filter hides client errors');
+    assert.match(api.debugLogsTextForClipboardForTest(), /WARNING.*sessions\/process-discovery.*used lsof fallback/, 'Logs copy text includes level, source, category, and message');
+    assert.ok(/const jsDebugLogsState = \{[\s\S]*payload: \[\][\s\S]*levels: new Set\(jsDebugLogLevels\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Logs uses one bounded server/client viewer state owner');
   });
 
   test('YO!stats hover guides sync across charts and drag-select zooms with reset', () => {
@@ -4906,7 +5898,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setJsDebugHistoryReadinessForTest('ready');
     const emptyReady = api.jsDebugHistoryReadinessForTest();
     assert.equal(emptyReady.loadedStartSeconds, 0, 'successful empty history does not invent or regress a loaded start');
-    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(targetStart, nowSeconds, 5), false, 'successful empty history marks the requested domain satisfied');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(targetStart, nowSeconds, 5), true, 'an empty partial response cannot claim the requested domain is satisfied');
     assert.equal(api.debugPanelHtmlForTest().includes('aria-busy="true"'), false, 'successful empty history clears busy state');
 
     api.resetJsDebugHistoryReadinessForTest();
@@ -4937,6 +5929,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {startSeconds: 500, endSeconds: 600},
       'a disjoint fine zoom aligns its bounded replacement to the retained five-second bucket edges',
     );
+  });
+
+  test('YO!stats partial live deltas retain the durable prefix and leave its gap refreshable', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.resetJsDebugHistoryReadinessForTest();
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'older', requestedStart: 100, requestedEnd: 160, coveredStart: 100, coveredEnd: 160,
+      resolutionSeconds: 1, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: 100, requestedEnd: 0, coveredStart: 140, coveredEnd: 160,
+      resolutionSeconds: 1, complete: false, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(100, 160, 1), false, 'a partial live tail cannot erase the already durable prefix');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(80, 160, 1), true, 'the uncovered older prefix remains refreshable instead of becoming Infinity coverage');
   });
 
   test('YO!stats accepts the server-selected retained resolution for a wide range', () => {
@@ -5048,6 +6055,70 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(debugSource.includes("clientPerfStart('statsHistoryRender')"), 'retained chart rendering uses the shared phase counter owner');
+  });
+
+  await testAsync('YO!stats missing history coverage reaches error instead of retrying forever', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({history: {
+      sequence: 1,
+      latest_sequence: 1,
+      records: [],
+    }})));
+    await api.pollJsDebugStatsSampleForTest();
+    const state = api.jsDebugHistoryReadinessForTest();
+    assert.equal(state.phase, 'error', 'missing history coverage is a bounded explicit error, not a permanent retrying state');
+    assert.match(state.error, /coverage/, 'the error names the malformed coverage envelope');
+    const html = api.debugPanelHtmlForTest();
+    assert.ok(html.includes('data-js-debug-history-retry'), 'malformed history still exposes the manual Retry action');
+  });
+
+  await testAsync('YO!stats history errors back off automatic polls but manual Retry remains immediate', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('error', {
+      requestedRangeSeconds: 3600,
+      targetStartSeconds: 100,
+      targetEndSeconds: 200,
+      requestedStartSeconds: 100,
+      requestedEndSeconds: 0,
+      requestedResolutionSeconds: 1,
+      attemptCount: 2,
+      error: 'history unavailable',
+      generation: 12,
+      nextAutoRetryAtMs: Number.MAX_SAFE_INTEGER,
+    });
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        return Promise.resolve(jsonResponse({
+          pid: 123,
+          uptime_seconds: 10,
+          history: {sequence: 1, records: []},
+        }));
+      }
+      return Promise.resolve(jsonResponse({history: {
+        sequence: 2,
+        records: [],
+        coverage: statsHistoryCoverageForRequest(url, {covered_start: 0, covered_end: 0}),
+      }}));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'error', 'automatic poll keeps the visible error during backoff');
+    assert.equal(new URL(requests[0], 'http://localhost').searchParams.get('history'), '0', 'automatic poll disables history during backoff');
+    assert.equal(api.debugPanelHtmlForTest().includes('Retrying history'), false, 'automatic backoff does not flash the retrying overlay');
+
+    assert.equal(api.retryJsDebugHistoryForTest(), true, 'manual Retry bypasses automatic backoff');
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'retrying', 'manual Retry still exposes the in-progress state');
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'manual Retry can clear the backed-off error');
+    assert.notEqual(new URL(requests[1], 'http://localhost').searchParams.get('history_start'), '0', 'manual Retry requests the current history window immediately');
   });
 
   await testAsync('YO!stats follows has-more coverage until the requested history window is complete', async () => {
@@ -5303,14 +6374,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.syncJsDebugStatsPollingForTest({pollNow: true});
     const coldInterval = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 2001 && !clearedTimeouts.has(timer.id)).at(-1);
     await flushAsyncWork();
-    const timeout = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 5000).at(-1);
+    const timeout = [...timeouts.entries()].map(([id, timer]) => ({id, ...timer})).filter(timer => timer.ms === 8000).at(-1);
     assert.equal(coldInterval.ms, 2001, 'cold-start polling uses the just-over-two-second retry cadence');
     assert.ok(abortSignal, 'the cold-start stats request receives an abort signal');
-    assert.ok(timeout, 'the cold-start stats request arms the five-second timeout');
+    assert.ok(timeout, 'the cold-start stats request arms the eight-second timeout');
     timeout.callback();
     await flushAsyncWork();
     await flushAsyncWork();
     assert.equal(abortSignal.aborted, true, 'the timeout aborts a stalled stats request');
+    assert.match(api.jsDebugHistoryReadinessForTest().error, /history request timed out after 8s/, 'the timeout exposes its bounded reason instead of a reasonless AbortError');
     assert.equal(api.jsDebugStatsPollingStateForTest().inFlight, false, 'an aborted stats request releases the in-flight guard for the next fast retry');
 
     coldInterval.callback();
@@ -5321,7 +6393,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.jsDebugStatsPollingStateForTest().firstSampleReceived, true, 'a real stats payload records the first successful sample');
     assert.equal(steadyInterval.ms, 30001, 'first success re-arms polling at the just-over-thirty-second steady cadence');
     assert.ok(clearedTimeouts.has(timeout.id), 'the aborted request clears its timeout handle');
-    assert.ok([...timeouts.entries()].some(([id, timer]) => timer.ms === 5000 && clearedTimeouts.has(id)), 'the successful request also clears its timeout handle');
+    assert.ok([...timeouts.entries()].some(([id, timer]) => timer.ms === 8000 && clearedTimeouts.has(id)), 'the successful request also clears its timeout handle');
 
     const waitingHtml = api.debugGraphMetaHtmlForTest();
     assert.equal(waitingHtml.includes('Waiting for server stats'), false, 'server metadata replaces the waiting state after a successful sample');
@@ -5677,7 +6749,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('tab search fields index PR and Linear metadata', () => {
     const api = loadYolomux();
     const info = {
-      selected_pane: {current_path: '/home/test/project/project3'},
+      selected_pane: {target: '%4', window: '0', pane: '0', current_path: '/home/test/project/project3'},
+      panes: [{target: '%4', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/project/project3'}],
       project: {
         git: {branch: 'keivenc/GH-2132__reasoning-dangling-end-marker', root: '/home/test/project/project3'},
         pull_request: {
@@ -5691,8 +6764,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       },
     };
     api.setTranscriptInfoForTest('4', info);
+    const graphInfo = api.transcriptInfoForTest('4');
 
-    const detail = api.tabMenuDetailText('4', info);
+    const detail = api.tabMenuDetailText('4', graphInfo);
     const searchFields = api.tabSearchFields('4');
     assert.ok(searchFields.includes('PR'), 'tab search fields include the literal PR token');
     assert.ok(searchFields.includes('PR#9981'), 'tab search fields include PR#number');
@@ -5718,7 +6792,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(command.html.includes('fix(parser): parse dangling reasoning end markers'), 'tab menu row includes long PR title');
     assert.ok(command.html.includes('pane-tab-core'), 'tab menu row uses pane tab markup');
 
-    const popover = api.sessionPopoverHtml('4', info, 'codex', true);
+    const popover = api.sessionPopoverHtml('4', graphInfo, 'codex', true);
     assert.ok(popover.indexOf('popover-label">Linear') < popover.indexOf('popover-label">PR'), 'tab popover lists Linear before PR');
   });
 
@@ -5912,6 +6986,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('YO!info builds branch records from the repository inventory', () => {
     const api = loadYolomux('', ['s1']);
     api.setTranscriptInfoForTest('s1', {
+      selected_pane: {target: '%s1', window: '0', pane: '0', current_path: '/repo/app'},
+      panes: [{target: '%s1', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/app'}],
+      agents: [{kind: 'shell', pane_target: '%s1'}],
       project: {
         git: {
           root: '/repo/app',
@@ -5950,9 +7027,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     const rowKey = row => `${row.path}\n${row.branch}`;
     const rows = new Map(api.infoBranchRows().map(row => [rowKey(row), row]));
-    assert.deepStrictEqual(canonical(rows.get('/repo/app\nmain').tabAgents.map(item => item.label)), ['s1 / no AI'], 'YO!info lists the Tab/AI entry for the primary checked-out branch');
+    assert.deepStrictEqual(canonical(rows.get('/repo/app\nmain').tabAgents.map(item => item.label)), ['s1 / shell'], 'YO!info lists the Tab/RuntimeActor entry for the primary checked-out branch');
     assert.equal(rows.get('/repo/app\nfeature/app').session, '', 'YO!info leaves non-current primary repo branches unassigned');
-    assert.deepStrictEqual(canonical(rows.get('/repo/lib\nlib-main').tabAgents.map(item => item.label)), ['s1 / no AI'], 'YO!info assigns the tab to a checked-out branch in a secondary touched repo');
+    assert.deepStrictEqual(canonical(rows.get('/repo/lib\nlib-main').tabAgents.map(item => item.label)), [], 'YO!info keeps a secondary checked-out worktree visible without fabricating an actor ownership edge');
     assert.equal(rows.get('/repo/lib\nfeature/lib').session, '', 'YO!info shows secondary repo branches without pretending the session owns them');
     assert.equal(rows.get('/repo/lib\nfeature/lib').updatedTs, 100, 'YO!info keeps the branch last-modified timestamp from the touched repo inventory');
     assert.equal(rows.get('/repo/lib\nfeature/lib').pathLabel, '/repo/lib', 'YO!info shows the secondary touched repo path');
@@ -5979,8 +7056,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       },
     });
     api.setTranscriptInfoForTest('shell', {
-      window_metadata: [{
-        window_index: '2',
+      selected_pane: {target: '%shell', window: '2', pane: '0', current_path: '/repo/app'},
+      panes: [{target: '%shell', window: '2', pane: '0', current_path: '/repo/app', active: true, window_active: true}],
+      project: {
         git: {
           root: '/repo/app',
           branch: 'feature/shell',
@@ -5990,40 +7068,34 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
             ],
           },
         },
-      }],
-      project: {
-        git: null,
         repos: [],
         pull_request: null,
         linear: [],
       },
     });
     api.setTranscriptInfoForTest('activity', {
+      selected_pane: {target: '%activity', window: '0', pane: '0', current_path: '/repo/activity'},
+      panes: [{target: '%activity', window: '0', pane: '0', current_path: '/repo/activity', active: true, window_active: true}],
+      agent_windows: [{
+        kind: 'claude',
+        state: 'working',
+        window_index: 0,
+        pane_target: '%activity',
+        git: {root: '/repo/activity', branch: 'feature/activity'},
+      }],
       project: {
-        git: null,
+        git: {
+          root: '/repo/activity',
+          branch: 'feature/activity',
+          other_branches: {
+            branches: [
+              {name: 'feature/activity', current: true, updated: 'now', updated_ts: 600, subject: 'activity window branch'},
+            ],
+          },
+        },
         repos: [],
         pull_request: null,
         linear: [],
-      },
-    });
-    api.setTabberActivityForTest({
-      activity: {},
-      agents: [],
-      agent_windows: {
-        activity: [{
-          kind: 'claude',
-          state: 'working',
-          window_index: 0,
-          git: {
-            root: '/repo/activity',
-            branch: 'feature/activity',
-            other_branches: {
-              branches: [
-                {name: 'feature/activity', current: true, updated: 'now', updated_ts: 600, subject: 'activity window branch'},
-              ],
-            },
-          },
-        }],
       },
     });
 
@@ -6158,7 +7230,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [
       'tab-a|0:codex|/repo/lib',
     ], 'YO!info search can match branch text inside the Branch field');
-    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'codx lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [], 'YO!info search does not combine one query across different field types');
+    assert.deepStrictEqual(canonical(api.infoFilteredRecordsForTest(records, 'codx lib-main').map(record => `${record.tabLabel}|${record.aiLabel}|${record.pathLabel}`)), [
+      'tab-a|0:codex|/repo/lib',
+    ], 'YO!info relationship search combines terms across canonical RuntimeActor and Branch fields');
     const visibleSearchRecords = [
       {id: 'tab-7777', tabKey: '7777', tabLabel: '7777', tabTitle: '7777', tabSession: '7777', aiKey: 'ai-0', aiKind: 'codex', aiWindow: '0', aiWindowIndex: 0, aiLabel: '0:codex', pathKey: '/repo/no-match', pathLabel: '/repo/no-match', pathTitle: '/repo/no-match', branchKey: 'main', branchLabel: 'main', branchTitle: 'main'},
       {id: 'split-seven', tabKey: '7', tabLabel: '7', tabTitle: '7', tabSession: '7', aiKey: 'ai-7', aiKind: 'codex', aiWindow: '7', aiWindowIndex: 7, aiLabel: '7:codex', pathKey: '/repo/7-path', pathLabel: '/repo/7-path', pathTitle: '/repo/7-path', branchKey: 'branch-7', branchLabel: 'branch-7', branchTitle: 'branch-7', prKey: '#70', prLabel: '#70', prTitle: '#70 one seven only', prNumber: 70, linearKey: 'ABC-7', linearLabel: 'ABC-7', linearTitle: 'ABC-7 one seven only'},
@@ -6286,25 +7360,26 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['linear'], {key: 'linear', dir: 'desc'}).children.map(group => group.label)), ['ZZZ-200 zeta issue', 'AAA-100 alpha issue', 'No Linear'], 'YO!info reverse Linear grouping keeps No Linear after real Linear issues');
     assert.deepStrictEqual(canonical(api.infoGroupTree(missingSortRecords, ['pr'], {key: 'pr', dir: 'desc'}).children.map(group => group.label)), ['#200 zeta PR', '#100 alpha PR', 'No PR'], 'YO!info reverse PR grouping keeps No PR after numbered PRs');
 	    assert.deepStrictEqual(canonical(api.infoGroupingPresetsForTest().map(preset => `${preset.key}:${preset.label}:${preset.grouping.join('>')}`)), [
-	      'tab-tmux-window:Tab > tmux-window:tab>tmux-window',
+	      'tab-tmux-window:Tab > tmux-window > Path:tab>tmux-window>path',
 	      'tab-path:Tab > Path > tmux-window:tab>path>tmux-window',
-	      'path-branch:Path > Branch:path>branch',
+      'path-branch:Path > Branch:git-worktree>local-repository>branch',
 	      'linear-pr:Linear > PR:linear>pr',
-	      'pr-branch:PR > Branch:pr>branch',
+      'pr-branch:PR > Branch:hosted-repository>pr>branch',
 	    ], 'YO!info quick preset buttons abbreviate tmux sub-window as tmux-window');
 	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info defaults to Tab > Path > tmux sub-window');
 	    api.setInfoGroupingPresetForTest('tab-tmux-window');
-	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window'], 'YO!info first quick preset selects Tab then tmux sub-window');
+	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'tmux-window', 'path'], 'YO!info first quick preset selects Tab then tmux sub-window then Path');
 	    api.setInfoGroupingPresetForTest('tab-path');
 	    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['tab', 'path', 'tmux-window'], 'YO!info Tab > Path preset adds tmux sub-window as its third level');
 	    api.setInfoGroupingPresetForTest('linear-pr');
     assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['linear', 'pr'], 'YO!info Linear > PR quick preset selects Linear then PR');
     api.setInfoGroupingPresetForTest('pr-branch');
-    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['pr', 'branch'], 'YO!info PR > Branch quick preset selects PR then Branch');
+    assert.deepStrictEqual(canonical(api.currentInfoGroupingForTest()), ['hosted-repository', 'pr', 'branch'], 'YO!info PR > Branch quick preset preserves hosted repository ownership before PR then Branch');
     const storedGroupingFor = grouping => loadYolomux('', ['stored'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {'yolomux.info2.grouping.v1': JSON.stringify(grouping)},
     }).currentInfoGroupingForTest();
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'ai', 'path', 'branch'])), ['tab', 'path', 'tmux-window'], 'YO!info migrates the old stored Tab-first quick grouping to Tab > Path > tmux sub-window');
+	    assert.deepStrictEqual(canonical(storedGroupingFor(['tab', 'tmux-window'])), ['tab', 'tmux-window', 'path'], 'YO!info migrates the former first quick preset to Tab > tmux sub-window > Path');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['path', 'branch', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the old stored Path-first quick grouping to Path > Branch');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['branch', 'path', 'tab', 'ai'])), ['path', 'branch'], 'YO!info migrates the removed stored branch-first quick grouping to Path > Branch');
 	    assert.deepStrictEqual(canonical(storedGroupingFor(['ai', 'tab', 'path', 'branch'])), ['linear', 'pr'], 'YO!info migrates the removed stored AI-first quick grouping to Linear > PR');
@@ -6325,7 +7400,17 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	      assert.ok(match, `YO!info renders Order by select ${level + 1}`);
 	      return [...match[1].matchAll(/<option value="([^"]*)"/g)].map(matchItem => matchItem[1]);
 	    };
+	    const optionLabelsForLevel = (html, level) => {
+	      const match = html.match(new RegExp(`<select data-info-group-level="${level}"[^>]*>([\\s\\S]*?)<\\/select>`));
+	      assert.ok(match, `YO!info renders Order by select ${level + 1}`);
+	      return [...match[1].matchAll(/<option value="[^"]*"[^>]*>([^<]*)<\/option>/g)].map(matchItem => matchItem[1]);
+	    };
 	    const tabFirstControlsHtml = api.infoGroupingControlsHtmlForTest();
+	    for (let level = 0; level < 4; level += 1) {
+	      const labels = optionLabelsForLevel(tabFirstControlsHtml, level);
+	      assert.equal(new Set(labels).size, labels.length, `YO!info Order by select ${level + 1} has no duplicate visible names`);
+	    }
+	    assert.equal(['tmux-session', 'tmux-pane', 'git-worktree', 'local-repository', 'hosted-repository'].some(key => optionValuesForLevel(tabFirstControlsHtml, 0).includes(key)), false, 'YO!info hides internal relationship dimensions from ordinary Order by choices');
 	    assert.ok(!optionValuesForLevel(tabFirstControlsHtml, 0).includes('ai') && !optionValuesForLevel(tabFirstControlsHtml, 0).includes('tmux-window'), 'YO!info first Order by dropdown excludes AI and tmux sub-window');
 	    assert.ok(optionValuesForLevel(tabFirstControlsHtml, 1).includes('tmux-window') && optionValuesForLevel(tabFirstControlsHtml, 1).includes('ai'), 'YO!info second Order by dropdown includes tmux sub-window and AI when the first dropdown is Tab');
 	    assert.equal(optionValuesForLevel(tabFirstControlsHtml, 2).includes('tmux-window'), true, 'YO!info third Order by dropdown includes tmux sub-window when the first dropdown is Tab');
@@ -6366,7 +7451,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(pathOnlyHtml.includes('data-info-open-tab="tab-a"') && pathOnlyHtml.includes('data-info-open-ai-window="0"'), 'YO!info Tab and AI fields are actionable links to the owning tab/window');
     assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && !/\bA(?:S)K\b/.test(pathOnlyHtml), 'YO!info AI rows show shared working/attention activity indicators without a text attention label');
     assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
-    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">tmux sub-window:</span>'), 'YO!info leaf rows label Tab session and window actions');
+    assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">AI:</span>'), 'YO!info leaf rows keep legacy Tab actions and explicitly label the RuntimeActor view as AI');
     assert.ok(/info-tree-field-tab[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">App main PR full description<\/span>/.test(pathOnlyHtml), 'YO!info Tab leaf values use the shared tab detail without repeating the PR badge');
     assert.ok(/info-tree-field-branch[\s\S]*?info-tree-meta-updated/.test(pathOnlyHtml) && !pathOnlyHtml.includes('<span class="info-tree-field-label">updated:</span>'), 'YO!info leaf rows attach branch recency to the Git branch instead of rendering a detached Updated row');
     const pathBranchHtml = api.infoTreeHtmlForTest(records, ['path', 'branch']);
@@ -6518,7 +7603,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    const editorCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
 	    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 	    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
-	    assert.ok(/function infoFieldLabel\(kind\)[\s\S]*path:\s*'common\.field\.path'[\s\S]*branch:\s*'info\.field\.gitBranch'[\s\S]*pr:\s*'info\.field\.githubPr'[\s\S]*'tmux-window':\s*'info\.field\.tmuxSubWindow'[\s\S]*return t\(labels\[kind\] \|\| kind\)/.test(infoSource), 'YO!info field and group labels route through one localized label owner');
+	    assert.ok(/function infoFieldLabel\(kind\)[\s\S]*path:\s*'common\.field\.path'[\s\S]*branch:\s*'info\.field\.gitBranch'[\s\S]*pr:\s*'info\.field\.githubPr'[\s\S]*'tmux-window':\s*'info\.field\.tmuxWindow'[\s\S]*return t\(labels\[kind\] \|\| kind\)/.test(infoSource), 'YO!info field and group labels route through one localized label owner');
 	    assert.ok(/function infoGroupDimensionLabel\(key\)[\s\S]*infoFieldLabel\(key\)/.test(infoSource), 'YO!info group dimension labels reuse the same localized field label owner as leaf rows');
 	    assert.ok(/\.info-tree-group\[data-info-dimension="tmux-window"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info tmux sub-window group labels preserve lowercase text');
 	    assert.ok(/\.info-tree-group\[data-info-dimension="branch"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info Git branch group labels preserve the mixed-case Git prefix');
@@ -7087,11 +8172,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setInfoGroupingForTest(['pr', 'tab', 'path', 'branch']);
     api.setInfoSortForTest({key: 'name', dir: 'desc'});
     api.setInfoSearchForTest('alpha pr', {publish: false});
+    api.setInfoTreeGroupCollapsedForTest('group:host-collapsed', true);
     const shareInfoSnapshot = api.shareUiStateSnapshotForTest().info;
     assert.equal('branchSort' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table branch-sort state');
     assert.deepStrictEqual(canonical(shareInfoSnapshot.grouping), ['pr', 'tab', 'path', 'branch'], 'YO!share snapshots the host YO!info grouping order');
     assert.deepStrictEqual(canonical(shareInfoSnapshot.sort), {dir: 'desc', key: 'name'}, 'YO!share snapshots the host YO!info sort mode');
     assert.equal(shareInfoSnapshot.search, 'alpha pr', 'YO!share snapshots the host YO!info search query');
+    assert.deepStrictEqual(canonical(shareInfoSnapshot.collapsedGroupKeys), ['group:host-collapsed'], 'YO!share snapshots host-owned YO!info collapse state');
     assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'YO!share snapshots host-owned YO!info rows');
     assert.equal('columnWidths' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table column widths');
     const shareApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
@@ -7114,11 +8201,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       },
     });
     assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['1 / no AI'], 'share client starts with local YO!info rows before a host snapshot arrives');
-    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, grouping: shareInfoSnapshot.grouping, sort: shareInfoSnapshot.sort, search: shareInfoSnapshot.search, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
+    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, grouping: shareInfoSnapshot.grouping, sort: shareInfoSnapshot.sort, search: shareInfoSnapshot.search, collapsedGroupKeys: shareInfoSnapshot.collapsedGroupKeys, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
     assert.equal('branchSort' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table sort snapshots');
     assert.deepStrictEqual(canonical(shareApi.currentInfoGroupingForTest()), ['pr', 'tab', 'path', 'branch'], 'share viewers apply host YO!info grouping state');
     assert.deepStrictEqual(canonical(shareApi.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'share viewers apply host YO!info sort state');
     assert.equal(shareApi.currentInfoSearchForTest(), 'alpha pr', 'share viewers apply host YO!info search state');
+    assert.deepStrictEqual(canonical(shareApi.infoCollapsedGroupKeysForTest()), ['group:host-collapsed'], 'share viewers preserve host YO!info collapse state');
     assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
     assert.equal('columnWidths' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table column widths');
     shareApi.applyShareScrollStateForTest({target: 'info', kind: 'info', top: 88, left: 144});
@@ -7143,8 +8231,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(terminalBootSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
     assert.equal(/function setInfoColumnWidth/.test(source), false, 'deleted YO!info table column width code is not retained');
     assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*options\.includeRows !== false[\s\S]*snapshot\.branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows when full state is requested');
-    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, and search state');
-    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info rows without persisting or echo-publishing');
+    assert.ok(/function shareInfoRowSnapshot\(row = \{\}\)[\s\S]*branchState:\s*normalizeInfoBranchState\(row\.branchState\)/.test(source), 'YO!share preserves each path branch current/available state instead of downgrading it during replay');
+    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)[\s\S]*collapsedGroupKeys/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, search, and collapse state');
+    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*collapsedGroupKeys[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info collapse state and rows without persisting or echo-publishing');
   });
 
   await testAsync('YO!agent chat queue waits for pending target-agent waits before sending', async () => {
@@ -8232,7 +9321,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     const topbarOwnerHtml = api.topbarOwnerStatusHtmlForTest();
     assert.ok(topbarOwnerHtml.includes('topbar-owner-status-shared') && topbarOwnerHtml.includes('IDX|STATS|SESS') && topbarOwnerHtml.includes('follower'), 'topbar owner chip shows shared background follower status');
-    assert.ok(api.topbarOwnerStatusTitleForTest(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload), api.backgroundOwnerStatsSummaryForTest(readerPayload), api.backgroundOwnerSessionFilesSummaryForTest(readerPayload)).includes('STATS leader: devhost:8002'), 'topbar title names the YO!stats leader');
+    const ownerTitle = api.topbarOwnerStatusTitleForTest(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload), api.backgroundOwnerStatsSummaryForTest(readerPayload), api.backgroundOwnerSessionFilesSummaryForTest(readerPayload));
+    assert.ok(ownerTitle.includes('IDX = Index: Search / Quick Open index owner; builds the file index.'), 'topbar title defines the IDX abbreviation');
+    assert.ok(ownerTitle.includes('STATS = Stats: Stats sampler (statsd / YO!stats); samples usage and metrics history.'), 'topbar title defines the STATS abbreviation');
+    assert.ok(ownerTitle.includes('SESS = Session files: Session-file owner; stores session-file state.'), 'topbar title defines the SESS abbreviation');
+    assert.ok(ownerTitle.includes('Leader means this server owns the role; follower means another connected server owns it.'), 'topbar title explains leader/follower state');
+    assert.ok(ownerTitle.includes('STATS leader: devhost:8002'), 'topbar title names the YO!stats leader');
+    assert.ok(ownerTitle.includes('IDX state: follower') && ownerTitle.includes('STATS state: follower') && ownerTitle.includes('SESS state: follower'), 'topbar title includes payload-derived state for every owner role');
+    assert.ok(ownerTitle.includes('Right-click this status to take over as leader.'), 'topbar title explains the right-click takeover affordance');
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes("new EventSource(`/api/client-events?${params.toString()}`)"), 'client subscribes to the demand-filtered server event stream');
     assert.ok(source.includes('function clientEventDemandDescriptor()') && source.includes("channels.add('files')") && source.includes("channels.add('yoagent')"), 'one browser demand descriptor owns pane-specific channels');
@@ -8250,7 +9346,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
     assert.ok(/function transcriptPreviewPaneIsActive\(session\)[\s\S]*pane\?\.classList\?\.contains\(CLS\.active\)[\s\S]*preview\?\.isConnected/.test(source), 'transcript context previews only subscribe when their transcript pane is active');
     assert.ok(/function transcriptContextWatchRequests\(\)[\s\S]*activeSessions[\s\S]*filter\(transcriptPreviewPaneIsActive\)[\s\S]*messages: transcriptPreviewMessages/.test(source), 'watch state derives context-item requests from visible transcript previews');
-    assert.ok(source.includes("['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']"), 'client listens for the expected push event types');
+    assert.ok(source.includes("['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']"), 'client listens for the expected push event types');
     assert.ok(/if \(type === 'attention_acks_changed'\)[\s\S]{0,120}applyAttentionAcknowledgementResponse\(payload\)/.test(source), 'attention acknowledgement pushes apply scoped key patches without refetching every session status');
     assert.ok(/addEventListener\('ready',[\s\S]{0,520}refreshAutoStatuses\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
     assert.ok(/addEventListener\('ready',[\s\S]{0,700}refreshBackgroundOwnerStatus\(\{preferFresh: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
@@ -8452,8 +9548,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes('function applyFileTreeRowDataset('), 'RA4: row dataset/class work has a named applier');
     assert.ok(source.includes('function bindFinderRowHandlers('), 'RA4: Finder handlers have a named binder');
     assert.ok(source.includes('function bindDifferRowData('), 'RA4: Differ row data has a named binder');
-    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState[\s\S]*applyFileTreeRowDataset[\s\S]*applyFileTreeRowDerivedState[\s\S]*bindDifferRowData[\s\S]*bindFinderRowHandlers/.test(source), 'RA4: updateFileTreeRow is the short dispatcher over the row helpers');
+    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState[\s\S]*applyFileTreeRowDataset[\s\S]*applyFileTreeRowDerivedState[\s\S]*applyFileExplorerSessionHighlightRow[\s\S]*bindDifferRowData[\s\S]*bindFinderRowHandlers/.test(source), 'RA4: updateFileTreeRow is the short dispatcher over the row helpers');
     assert.ok(source.includes('syncFileTreeRowKindClass(row, entry.kind)'), 'Finder row kind classes update through stable toggles');
+    assert.ok(/function fileExplorerSyncTargetDirs\(plan\)[\s\S]*pathIsInsideDirectory\(path, root\)/.test(source)
+      && !/function fileExplorerSyncTargetDirs\(plan\)[\s\S]{0,500}dirs\.filter\(path => !dirs\.some/.test(source), 'Finder Sync stars every affected directory under the visible root instead of pruning ancestors');
+    assert.ok(source.includes("marker.className = 'file-tree-sync-target'")
+      && /function applyFileExplorerSessionHighlightRow\([\s\S]*updateFileTreeSyncTargetMarker\(row, isSyncTarget, sets\.syncTargetTitle/.test(source), 'Finder Sync star is a real row marker with localized title updates');
     assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'rows flag symlinks');
     assert.ok(source.includes("row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken')"), 'rows flag broken symlinks');
     assert.ok(/entry\.is_symlink === true && entry\.symlink_target[\s\S]{0,160}→ \$\{entry\.symlink_target\}/.test(source), 'a symlink row title shows name → target');
@@ -9157,6 +10257,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'info.dimension.tab': 'Tab A',
       'info.preset.tabTmuxWindow.label': 'Preset A',
       'info.preset.tabTmuxWindow.title': 'Preset title A',
+      'common.pathLabel': 'Path A',
       'preview.unsupported.archive': 'Archive fallback A',
       'fs.error.notDirectory': '{path} directory error A',
     };
@@ -9169,6 +10270,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'info.dimension.tab': 'Tab B',
       'info.preset.tabTmuxWindow.label': 'Preset B',
       'info.preset.tabTmuxWindow.title': 'Preset title B',
+      'common.pathLabel': 'Path B',
       'preview.unsupported.archive': 'Archive fallback B',
       'fs.error.notDirectory': '{path} directory error B',
     };
@@ -9198,8 +10300,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       const tabDimension = api.infoGroupDimensions().find(definition => definition.key === 'tab');
       const tabPreset = api.infoGroupingPresetsForTest().find(definition => definition.key === 'tab-tmux-window');
       assert.equal(tabDimension.label, `Tab ${suffix}`, `YO!info resolves dimension labelKey for locale ${suffix}`);
-      assert.equal(tabPreset.label, `Preset ${suffix}`, `YO!info resolves preset labelKey for locale ${suffix}`);
-      assert.equal(tabPreset.title, `Preset title ${suffix}`, `YO!info resolves preset titleKey for locale ${suffix}`);
+      assert.equal(tabPreset.label, `Preset ${suffix} > Path ${suffix}`, `YO!info composes the first preset with the localized Path label for locale ${suffix}`);
+      assert.equal(tabPreset.title, tabPreset.label, `YO!info keeps the composed first-preset title synchronized for locale ${suffix}`);
     };
 
     const archiveRenderer = api.previewRendererForPath('/tmp/archive.zip');
@@ -9955,6 +11057,53 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     trackpadApi.setAutoFocusEnabledForTest(true);
     assert.equal(trackpadApi.browserHasCursorHoverForTest(), true, 'an iPad with a trackpad or mouse exposes hover capability');
     assert.equal(trackpadApi.autoFocusCanFollowCursorForTest(), true, 'cursor-capable iPads retain passive auto-focus');
+  });
+
+  test('Model tokens/min selects normalized billable token classes and retains exact effort grouping', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const start = Math.floor((now - 60000) / 1000 / 60) * 60;
+    api.clearJsDebugEventsForTest();
+    api.debugGraphApplyServerHistoryForTest({
+      sequence: 991,
+      records: [{
+        start, duration: 60, sequence: 991, tokens_per_agent_total: 20, agent_token_samples: 1,
+        agent_token_rates: [{key: 'root|0|codex', label: 'root:0:codex', total: 20, samples: 1, tokens: 20, seconds: 60, model_rates: {'legacy-output': {total: 20, samples: 1, tokens: 20, seconds: 60}}}],
+        cost_summary: {
+          total_micro_usd: 0, known_micro_usd: 0, complete: true, unpriced_count: 0,
+          components: [
+            {provider: 'openai', model: 'gpt-5.6', effort: 'high', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 7},
+            {provider: 'openai', model: 'gpt-5.6', effort: 'low', direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 90},
+            {provider: 'openai', model: 'gpt-5.6', effort: 'low', direction: 'input', modality: 'text', cache_role: 'read', unit: 'tokens', quantity: 40},
+            {provider: 'anthropic', model: 'claude-opus', effort: 'xhigh', direction: 'input', modality: 'text', cache_role: 'write_5m', unit: 'tokens', quantity: 30},
+            {provider: 'openai', model: 'gpt-image-2', effort: 'unknown', direction: 'output', modality: 'image', cache_role: 'none', unit: 'images', quantity: 1},
+          ], models: [], sources: [],
+        },
+      }],
+    });
+    const labelsFor = dimension => {
+      api.setDebugGraphModelTokenDimensionForTest(dimension);
+      return api.debugGraphTokenSeriesDataForTest(now)
+        .filter(series => series.tokenDimension === 'model')
+        .map(series => [series.label, series.values.at(-1)]);
+    };
+    const hostLabelsFor = dimension => [...labelsFor(dimension)].map(item => [...item]);
+    assert.deepStrictEqual(hostLabelsFor('output'), [['legacy-output', 20]], 'default Output keeps the authoritative per-model partition exactly synchronized with Agent tokens');
+    assert.deepStrictEqual(hostLabelsFor('input'), [['gpt-5.6 · low', 90]], 'Input excludes cached input');
+    assert.deepStrictEqual(hostLabelsFor('cacheRead'), [['gpt-5.6 · low', 40]], 'Cache read is independently selectable');
+    assert.deepStrictEqual(hostLabelsFor('cacheWrite'), [['claude-opus · xhigh', 30]], 'Cache writes retain their model and effort');
+    assert.deepStrictEqual(hostLabelsFor('all'), [['claude-opus · xhigh', 30], ['gpt-5.6 · high', 7], ['gpt-5.6 · low', 130]], 'All billable combines only billable token components, not image units');
+    const effortVariants = api.debugGraphTokenSeriesDataForTest(now).filter(series => series.label.startsWith('gpt-5.6 ·'));
+    assert.equal(effortVariants[0].color, effortVariants[1].color, 'exact-model color stays stable across effort variants');
+    assert.notEqual(effortVariants[0].agentTokenPatternIndex, effortVariants[1].agentTokenPatternIndex, 'effort variants retain a distinct stable pattern when available');
+    api.setDebugGraphModelTokenDimensionForTest('input');
+    const descriptor = api.debugGraphTokenAxisDescriptorForTest(now);
+    assert.ok(descriptor.axisMax >= 90, 'the shared token axis grows for selected model input instead of clipping it');
+    api.setDebugGraphChartVisibleForTest('modelTokens', true);
+    const html = api.debugPanelHtmlForTest();
+    assert.ok(html.includes('data-js-debug-model-token-dimension-select') && html.includes('>Cache write<') && fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8').includes("debug.modelTokens.cacheWrite"), 'the model chart owns a localized shared selector control');
+    const controlSource = sourceBetween(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8'), '  const modelDimension = event.target.closest', "  const chartLayout = event.target.closest");
+    assert.equal(/requestJsDebugHistory|apiFetchJson|fetch\(/.test(controlSource), false, 'switching the local model token class only rerenders retained buckets and never refetches history');
   });
 }
 

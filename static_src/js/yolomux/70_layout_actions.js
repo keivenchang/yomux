@@ -141,10 +141,22 @@ function maxTabsPerPane() {
   return Math.max(2, Math.min(30, raw));
 }
 
-// A tab may be auto-evicted unless it is the one being kept active, pinned, the Finder dock,
+function capKeepItemSet(keepItem, keepItems = []) {
+  const result = new Set();
+  if (keepItem instanceof Set) {
+    for (const item of keepItem) if (isLayoutItem(item)) result.add(item);
+  } else if (isLayoutItem(keepItem)) {
+    result.add(keepItem);
+  }
+  for (const item of keepItems || []) if (isLayoutItem(item)) result.add(item);
+  return result;
+}
+
+// A tab may be auto-evicted unless it is being kept active, pinned, the Finder dock,
 // or a dirty/unsaved editor (never silently drop unsaved edits).
 function tabIsEvictableForCap(item, keepItem) {
-  if (item === keepItem || tabIsPinned(item) || isFileExplorerItem(item)) return false;
+  const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
+  if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
     const state = openFiles.get(fileItemPath(item));
     if (state && state.dirty) return false;
@@ -152,16 +164,81 @@ function tabIsEvictableForCap(item, keepItem) {
   return true;
 }
 
+function capRefusalReason(tabs, keep) {
+  const protectedTabs = tabs.filter(item => !keep.has(item));
+  return protectedTabs.length > 0 && protectedTabs.every(item => tabIsPinned(item)) ? 'all-pinned' : 'nothing-evictable';
+}
+
+function paneCapacityCheckForInsert(slot, incomingTabs = [], keepItem = null, slots = layoutSlots, options = {}) {
+  const keep = capKeepItemSet(keepItem, options.keepItems);
+  const baseTabs = Array.isArray(options.tabs) ? [...options.tabs] : paneTabs(slot, slots);
+  const tabs = appendUniqueItems([...baseTabs], Array.isArray(incomingTabs) ? incomingTabs : [incomingTabs]);
+  const cap = maxTabsPerPane();
+  const overflow = tabs.length - cap;
+  if (overflow <= 0) return {ok: true, cap, overflow: 0, evicted: [], finalTabs: tabs, reason: ''};
+  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keep));
+  if (!evictable.length) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
+  const originalIndex = new Map(tabs.map((item, index) => [item, index]));
+  const byLeastRecent = [...evictable].sort((a, b) => {
+    const delta = (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0);
+    return delta || ((originalIndex.get(a) || 0) - (originalIndex.get(b) || 0));
+  });
+  const evicted = byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+  if (evicted.length < overflow) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
+  return {ok: true, cap, overflow, evicted, finalTabs: tabs.filter(item => !evicted.includes(item)), reason: ''};
+}
+
 // Given a pane's tab list (newest tab already inserted) return the least-recently-used evictable
 // tabs to drop so the pane fits the cap. Keeps keepItem, dirty editors, and the Finder.
 function tabsToEvictForCap(tabs, keepItem) {
-  const cap = maxTabsPerPane();
-  const overflow = tabs.length - cap;
-  if (overflow <= 0) return [];
-  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keepItem));
-  if (!evictable.length) return [];
-  const byLeastRecent = [...evictable].sort((a, b) => (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0));
-  return byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+  return paneCapacityCheckForInsert('', [], keepItem, layoutSlots, {tabs}).evicted;
+}
+
+function paneCapacityRefusalStatus(item, capacity, targetSlot = '') {
+  return paneCapacityRefusalStatusForItems([item], capacity, targetSlot);
+}
+
+function layoutItemLabels(items = []) {
+  return (Array.isArray(items) ? items : [items]).filter(isLayoutItem).map(itemLabel).join(', ');
+}
+
+function paneCapacityRefusalStatusForItems(items, capacity, targetSlot = '') {
+  const statusKey = capacity?.reason === 'all-pinned'
+    ? 'layout.status.paneFullPinned'
+    : 'layout.status.nothingEvictable';
+  return t(statusKey, {
+    item: layoutItemLabels(items) || targetSlot || t('layout.zone.middle'),
+    pane: targetSlot || t('layout.zone.middle'),
+    limit: capacity?.cap || maxTabsPerPane(),
+  });
+}
+
+function pinnedPaneAtCapStatus(items, cap = maxTabsPerPane()) {
+  return t('layout.status.pinnedPaneAtCap', {items: layoutItemLabels(items) || t('tab.pinned'), limit: cap});
+}
+
+function pinnedTabsInSlot(slot, slots = layoutSlots) {
+  return paneTabs(slot, slots).filter(tabIsPinned);
+}
+
+function unpinnedTabsInSlot(slot, slots = layoutSlots) {
+  return paneTabs(slot, slots).filter(item => !tabIsPinned(item));
+}
+
+function dropIntentCapacityCheckForSession(session, intent, sourceSlot = null) {
+  if (!intent?.targetSlot || intent.zone !== 'middle' || intent.boundary) return null;
+  if (sourceSlot && sourceSlot === intent.targetSlot) return null;
+  return paneCapacityCheckForInsert(intent.targetSlot, [session], session, layoutSlots);
+}
+
+function dropIntentCapacityAllowsSession(session, intent, sourceSlot = null) {
+  const capacity = dropIntentCapacityCheckForSession(session, intent, sourceSlot);
+  return !capacity || capacity.ok;
+}
+
+function dropIntentCapacityRefusalStatus(session, intent, sourceSlot = null) {
+  const capacity = dropIntentCapacityCheckForSession(session, intent, sourceSlot);
+  return capacity && !capacity.ok ? paneCapacityRefusalStatus(session, capacity, intent.targetSlot) : '';
 }
 
 function paneTabsForGenericActions(slot, slots = layoutSlots) {
@@ -172,7 +249,7 @@ function paneTabsForGenericActions(slot, slots = layoutSlots) {
 // therefore operate on the selected tab; removing the only pane would make the control appear to
 // do nothing (or blank the whole view). Keep one remaining tab as the stable single-column view.
 function narrowPaneFrameActionTargetsTab(item, slots = layoutSlots) {
-  if (!sidePaneConstrainedMode()) return false;
+  if (!narrowSingleColumnMode()) return false;
   const slot = slotForItem(item, slots);
   return Boolean(slot && paneTabs(slot, slots).length > 1);
 }
@@ -191,7 +268,7 @@ function canPaneExpand(item, slots = layoutSlots) {
   return layoutSlotKeys(slots).some(slot => (
     slot !== targetSlot
     && !slotIsSidePane(slot, slots)
-    && paneTabsForGenericActions(slot, slots).length > 0
+    && unpinnedTabsInSlot(slot, slots).length > 0
   ));
 }
 
@@ -202,25 +279,33 @@ function minimizePaneFromLayout(item) {
     removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
     return;
   }
-  if (sidePaneConstrainedMode()) return;
+  if (narrowSingleColumnMode()) return;
   if (slotIsSidePane(sourceSlot)) {
     removePaneFromLayout(item);
     return;
   }
-  const minimizedTabs = paneTabsForGenericActions(sourceSlot);
+  const sourceTabs = paneTabsForGenericActions(sourceSlot);
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
-  if (!targetSlot || !minimizedTabs.length) {
+  if (!targetSlot || !sourceTabs.length) {
     removePaneFromLayout(item);
     return;
   }
   const targetActive = activeItemForSide(targetSlot);
   const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  const targetTabs = appendUniqueItems(paneTabsForGenericActions(targetSlot, next), minimizedTabs);
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, targetTabs, targetActive, next);
+  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems: sourceTabs});
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(sourceTabs, capacity, targetSlot), 'danger');
+    return;
+  }
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive, next);
+  const messages = [t('layout.status.minimized', {items: sourceTabs.map(itemLabel).join(', ')})];
+  if (capacity.evicted.length) {
+    messages.push(t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}));
+  }
   applyLayoutSlots(next, {
-    focusSession: targetActive || targetTabs[0],
+    focusSession: targetActive || capacity.finalTabs[0],
     prune: false,
-    message: t('layout.status.minimized', {items: minimizedTabs.map(itemLabel).join(', ')}),
+    message: messages.filter(Boolean).join('; '),
   });
 }
 
@@ -229,18 +314,39 @@ function expandPaneFromLayout(item) {
   if (!targetSlot || !canPaneExpand(item)) return;
   const active = activeItemForSide(targetSlot);
   if (!active) return;
-  const targetTabs = appendUniqueItems([], paneTabsForGenericActions(targetSlot));
+  const incomingTabs = [];
   for (const slot of layoutSlotKeys()) {
     if (slot === targetSlot) continue;
-    appendUniqueItems(targetTabs, paneTabsForGenericActions(slot));
+    appendUniqueItems(incomingTabs, unpinnedTabsInSlot(slot));
   }
-  const content = emptyLayoutSlots();
-  content[targetSlot] = paneStateWithTabs(targetTabs, active, paneRoleDefinition(paneRoleGeneric));
-  content[layoutTreeKey] = leafNode(targetSlot);
-  const next = layoutWithPreservedSidePanes(content);
+  if (!incomingTabs.length) return;
+  const capacity = paneCapacityCheckForInsert(targetSlot, incomingTabs, active, layoutSlots);
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(incomingTabs, capacity, targetSlot), 'danger');
+    return;
+  }
+  if (!incomingTabs.some(tab => capacity.finalTabs.includes(tab))) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(incomingTabs, {
+      ...capacity,
+      ok: false,
+      reason: 'nothing-evictable',
+    }, targetSlot), 'danger');
+    return;
+  }
+  const next = cloneLayoutSlots(layoutSlots);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, active, next);
+  for (const slot of layoutSlotKeys(next)) {
+    if (slot === targetSlot || slotIsSidePane(slot, next)) continue;
+    const pinnedTabs = pinnedTabsInSlot(slot, next);
+    next[slot] = pinnedTabs.length
+      ? paneStateWithTabsForSlot(slot, pinnedTabs, pinnedTabs[0], next)
+      : emptyPaneState(paneRoleForSlot(slot, next));
+  }
   applyLayoutSlots(next, {
     focusSession: active,
     prune: false,
+    preserveMissingSidePane: sidePaneSlots(next).length > 0,
+    preservePlaceholderSlots: true,
     message: t('layout.status.expanded', {item: itemLabel(active)}),
   });
 }
@@ -280,7 +386,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(sidePaneConstrainedMode() ? 'single' : normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(narrowSingleColumnMode() ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -437,8 +543,10 @@ async function openFileSurfacePane(item) {
   }
   if (sidePaneConstrainedMode()) {
     const next = layoutWithItems(layoutSlots, [resolved], slotForNewSession());
-    const narrowed = narrowSingleColumnLayoutSlots(next, {focusSession: resolved});
-    applyLayoutSlots(narrowed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
+    const placed = narrowSingleColumnMode()
+      ? narrowSingleColumnLayoutSlots(next, {focusSession: resolved})
+      : next;
+    applyLayoutSlots(placed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
     return true;
   }
   const next = layoutWithSidePaneItems(layoutSlots, [resolved], {side: paneSideLeft});
@@ -568,16 +676,19 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   const index = Math.max(0, Math.min(Number.isFinite(insertIndex) ? insertIndex : 0, tabs.length));
   tabs.splice(index, 0, session);
   recordTabActivation(session);
-  // Enforce the per-pane tab cap: if this pane is now over the limit, auto-close the least-recently
-  // used tabs (keeping the new active tab, the Finder, and any dirty editors).
-  const evicted = tabsToEvictForCap(tabs, session);
-  const keptTabs = evicted.length ? tabs.filter(item => !evicted.includes(item)) : tabs;
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, keptTabs, session, next);
+  // Enforce the per-pane tab cap through the shared capacity owner. Later pinned/cap items reuse
+  // the same result shape for visible refusals, preview parity, minimize, and expand.
+  const capacity = paneCapacityCheckForInsert(targetSlot, [], session, next, {tabs});
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatus(session, capacity, targetSlot), 'danger');
+    return false;
+  }
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, session, next);
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
     preservePlaceholderSlots: options.preserveSourcePlaceholder === true,
-    message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
+    message: capacity.evicted.length ? t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}) : '',
   });
   return true;
 }
@@ -821,7 +932,7 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
   const allowed = Boolean(
     isLayoutItem(item)
       && sourceSlot
-      && !sidePaneConstrainedMode()
+      && !narrowSingleColumnMode()
       && !tabIsPinned(item)
       && sourceRect,
   );
@@ -1570,109 +1681,49 @@ function repoSummaryAsGit(repo) {
   return gitFromRepoSummary(repo);
 }
 
-function activeAgentWindowMetadataItemForProjectMeta(session, info) {
-  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof windowViewModel !== 'function') return null;
-  const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
-  if (activeWindowIndex === null) return null;
-  const agent = windowViewModel(session, activeWindowIndex, info, autoApproveStates.get(session));
-  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : String(agent?.kind || '').trim().toLowerCase();
-  if (!['claude', 'codex'].includes(kind)) return null;
-  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
-  const paths = pathEntries.map(item => item.path).filter(Boolean);
-  const meta = {
-    window: String(agent?.window ?? ''),
-    window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
-    window_name: String(agent?.window_name || ''),
-    path: paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || '')),
-    paths,
-    path_entries: pathEntries,
-    git: typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null),
-  };
-  return {agent, meta};
-}
-
-function projectMetaPathFromWindowMetadata(meta) {
-  const pathEntries = Array.isArray(meta?.path_entries) ? meta.path_entries.map(item => String(item?.path || '').trim()).filter(Boolean) : [];
-  if (pathEntries.length) return pathEntries[0];
-  const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
-  if (paths.length) return paths[0];
-  const path = String(meta?.path || '').trim();
-  if (path) return path;
-  return String(meta?.git?.root || '').trim();
-}
-
 function projectMetaContextOverridesPrimaryPullRequest(info, contextGit) {
-  const projectGit = info?.project?.git;
-  const primaryPullRequest = displayPullRequest(info);
-  if (!primaryPullRequest?.number) return true;
-  const primaryRoot = repoRootKey(projectGit?.root);
-  const contextRoot = repoRootKey(contextGit?.root);
-  // The selected project is transcript-derived and carries an open PR. A raw pane cwd or a
-  // Tabber activity-cache path is weaker evidence, so it must not hide that PR. A different
-  // active window with its own resolved PR remains an equally strong, more local context.
-  if (!primaryRoot || !contextRoot || primaryRoot === contextRoot) return contextRoot === primaryRoot;
   return Boolean(displayPullRequestForGit(info, contextGit)?.number);
 }
 
 function projectMetaSelection(session, info) {
-  const project = info?.project || {};
-  const repos = sessionRepoSummaries(info);
   const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
-  const primaryRoot = repoRootKey(project.git?.root);
-  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   const activePane = activeWindowPaneForProjectMeta(session, info);
-  const activePath = normalizeDirectoryPath(activePane?.current_path || '');
-  const activeAgent = activePane ? agentForPane(info, activePane) : null;
-  const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
-  const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
-  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info) : null;
-  const activeWindowMeta = activeWindowMetadataItem?.meta || null;
-  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || Boolean(projectMetaPathFromWindowMetadata(activeWindowMeta));
-  const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
+  const activeTarget = String(activePane?.target || '');
+  // The active TmuxWindow's PathObservation owns the Info Bar context. Browser-selected terminal
+  // state and auto-approve status are presentation inputs only; neither may recreate a parallel
+  // per-window Git owner or displace the active tmux window's canonical worktree.
+  const workSummary = sessionWorkSummary(session, info, {tmuxTarget: explicitRoot ? '' : activeTarget});
+  const repos = workSummary.repositories;
+  const activePath = normalizeDirectoryPath(activePane?.current_path || workSummary.selectedPath || '');
+  const hasActiveTmuxTarget = Boolean(activeTarget);
+  const primaryRoot = repoRootKey(workSummary.git?.root);
+  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   let repoIndex = selectedSessionRepoIndex(session, info);
-  if (!explicitRoot && activePath && repos.length) {
+  const hasPinnedRepoSelection = selectedSessionRepoIndex(session, info) >= 0 && Boolean(sessionRepoDisplayRoot.get(session));
+  if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && primaryRepoIndex >= 0) {
+    repoIndex = primaryRepoIndex;
+  } else if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && activePath && repos.length) {
     const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
     const activeRepoGit = activeRepoIndex >= 0 ? repoSummaryAsGit(repos[activeRepoIndex]) : null;
     if (activeRepoIndex >= 0 && projectMetaContextOverridesPrimaryPullRequest(info, activeRepoGit)) repoIndex = activeRepoIndex;
-  }
-  if (!explicitRoot && primaryRepoIndex >= 0 && !projectMetaContextOverridesPrimaryPullRequest(info, repoSummaryAsGit(repos[repoIndex]))) {
-    repoIndex = primaryRepoIndex;
   }
   let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
   let repoSwitchRepos = repos;
   let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
-  if (!explicitRoot && activeWindowMetaHasSharedData) {
-    const activeMetaRoot = repoRootKey(activeWindowMeta.git?.root || '');
-    const activeMetaRepoIndex = activeMetaRoot
-      ? repos.findIndex(repo => repoRootKey(repo.root) === activeMetaRoot)
-      : activeWindowMetaPath
-        ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
-        : -1;
-    const activeMetaGit = activeWindowMeta.git || (activeMetaRepoIndex >= 0 ? repoSummaryAsGit(repos[activeMetaRepoIndex]) : null);
-    if (projectMetaContextOverridesPrimaryPullRequest(info, activeMetaGit)) {
-      if (activeMetaRepoIndex >= 0) {
-        repoIndex = activeMetaRepoIndex;
-        selectedRepo = repos[repoIndex];
-      }
-      if (activeWindowMeta.git) git = activeWindowMeta.git;
-      else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
-      if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
-    }
-  }
-  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
+  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root)) {
     git = null;
     selectedRepo = null;
     repoIndex = -1;
     repoSwitchRepos = [];
     fullPath = activePath;
   }
-  return {project, repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
+  return {repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
 }
 
 function panelFullPath(session, info) {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
@@ -1680,6 +1731,7 @@ function panelFullPath(session, info) {
   if (nonHomePane?.current_path) return nonHomePane.current_path;
   if (git?.cwd) return git.cwd;
   if (git?.root) return git.root;
+  if (summary.selectedPath) return summary.selectedPath;
   if (info?.selected_pane?.current_path) return info.selected_pane.current_path;
   return '';
 }
@@ -1694,8 +1746,9 @@ function compactHomePath(path) {
 }
 
 function projectMetaParts(session, info, options = {}) {
-  const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
-  const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
+  const summary = sessionWorkSummary(session, info);
+  const {repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
+  const showingPrimaryGit = !selectedRepo || repoRootKey(git?.root) === repoRootKey(selectedRepo.root);
   const metadataParts = [];
   const fullText = options.fullText === true;
   const repoSwitchHtml = repos.length > 1 ? (() => {
@@ -1712,11 +1765,11 @@ function projectMetaParts(session, info, options = {}) {
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
-  const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
+  const prGit = selectedRepo ? gitFromRepoSummary(selectedRepo) : git;
   const pr = displayPullRequestForGit(info, prGit);
   if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
-  if (showingPrimaryGit) {
-    for (const issue of project.linear || []) {
+  if (showingPrimaryGit && (!selectedRepo || repoRootKey(selectedRepo.root) === repoRootKey(summary.git?.root))) {
+    for (const issue of summary.linearIssues) {
       const state = issue.state ? ` ${issue.state}` : '';
       metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
@@ -1730,7 +1783,7 @@ function projectMetaParts(session, info, options = {}) {
     const ci = pullRequestCiStatus(pr);
     if (ci) metadataParts.push(pullRequestStatusBadgeHtml('', ci.text, ci.className, {variant: 'meta'}));
   }
-  const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
+  const desc = pr?.title || pr?.description || (showingPrimaryGit ? summary.linearIssues.find(issue => issue.title)?.title : '');
   if (desc) {
     const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
     if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
@@ -1844,8 +1897,8 @@ function summaryContextHtml(session, info, agent) {
     })));
   }
 
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   if (git) {
     lines.push(summaryContextLine(t('common.field.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine(t('popover.repo'), git.root));
@@ -1860,7 +1913,7 @@ function summaryContextHtml(session, info, agent) {
     const label = pullRequestLinkLabel(pr);
     lines.push(summaryContextLine(t('pref.section.github'), `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
   }
-  for (const issue of project.linear || []) {
+  for (const issue of summary.linearIssues) {
     const label = `${issue.identifier}${issue.state ? ` ${issue.state}` : ''}`;
     lines.push(summaryContextLine(t('info.field.linear'), `${label} ${issue.title || ''}`, issue.url, issue.identifier));
   }
@@ -3355,7 +3408,7 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     const slotNode = event.target?.closest?.('.drop-slot');
     const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
     const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
@@ -3513,7 +3566,7 @@ function itemCanSplitSinglePurposePane(item, intent) {
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
   const sourceSlot = options.sourceSlot || slotForItem(session);
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return Boolean(intent?.targetSlot)
       && intent.zone === 'middle'
       && paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
@@ -3547,6 +3600,7 @@ function dropIntentAllowsSession(session, intent, options = {}) {
   if (!paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
     allowCandidate: options.allowCandidate === true,
   })) return false;
+  if (!dropIntentCapacityAllowsSession(session, intent, sourceSlot)) return false;
   if (slotIsSidePane(intent.targetSlot)) {
     return intent.zone === 'middle'
       || (['top', 'bottom'].includes(intent.zone) && dropIntentHasRoomForItem(session, intent));
@@ -3707,7 +3761,7 @@ function classifyLayoutDrag(event, {intentForFile, intentForSession, suppressSes
   const intent = intentForSession?.(event) || null;
   if (intent) intent.item = session.session;
   if (ignoreMissingIntent && !intent) return null;
-  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent), dropEffect: 'move'};
+  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent, {sourceSlot: session.sourceSlot}), dropEffect: 'move'};
 }
 
 function applyLayoutDragIntent(event, drag, {phase = 'over'} = {}) {

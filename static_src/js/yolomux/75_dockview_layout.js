@@ -129,10 +129,16 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
 
 function dockviewRootBoundaryDropIntent(event) {
   if (narrowSingleColumnMode()) return null;
-  const pointerIntent = event?.nativeEvent
-    ? dockviewTabPointerRootBoundaryIntent(event.nativeEvent, dockviewLayoutState.tabPointerDrag)
-    : null;
-  if (pointerIntent) return pointerIntent;
+  const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
+  if (event?.nativeEvent && tabPointerDrag?.item) {
+    // Dockview labels the tab strip at the top of an outermost pane as a `top` edge. That is
+    // useful for a deliberate root drop, but wrong for an ordinary tab move across that strip.
+    // The pointer gesture owns the decision while it is live: it only returns a root intent when
+    // the drag actually reaches an eligible root boundary. Falling through to Dockview's broad
+    // overlay here would recreate the false top-root drop after the shared pointer resolver
+    // rejected it.
+    return dockviewTabPointerRootBoundaryIntentWithMemory(event.nativeEvent, tabPointerDrag);
+  }
   if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -298,8 +304,12 @@ function dockviewShowRootBoundaryPreview(intent) {
 
 function dockviewTrackRootBoundaryOverlay(event) {
   const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
-  dockviewSetInvalidTabDropPreview(invalidTabDrop);
-  if (invalidTabDrop) {
+  const paneInfo = dockviewPaneContentDropInfo(event);
+  const capacityRefusal = dockviewTabCapacityRefusalStatus(event) || (paneInfo?.intent?.zone === 'middle'
+    ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+    : '');
+  dockviewSetInvalidTabDropPreview(invalidTabDrop || Boolean(capacityRefusal));
+  if (invalidTabDrop || capacityRefusal) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
     return;
@@ -506,6 +516,12 @@ function dockviewTabDropViolatesPinnedPartition(event) {
     : info.adjustedIndex < info.pinnedBoundary;
 }
 
+function dockviewTabCapacityRefusalStatus(event) {
+  const info = dockviewTabStripEndDropInfoForEvent(event) || dockviewTabInsertionInfo(event);
+  if (!info || !info.targetSlot) return '';
+  return dropIntentCapacityRefusalStatus(info.item, {targetSlot: info.targetSlot, zone: 'middle'}, info.sourceSlot);
+}
+
 function dockviewPinnedTabCrossPaneViolation(info) {
   if (!info?.item || !tabIsPinned(info.item) || !info.sourceSlot) return false;
   if (info.createsPane === true) return true;
@@ -573,6 +589,9 @@ function dockviewBeginTabPointerDrag(event, item) {
     slot,
     x: Number(event.clientX) || 0,
     y: Number(event.clientY) || 0,
+    rootBoundaryStartEdges: dockviewRootBoundaryEdgesAtPoint(event),
+    rootBoundaryExitedEdges: {},
+    lastRootBoundaryIntent: null,
   };
 }
 
@@ -583,11 +602,38 @@ function dockviewTabContentInteractionSuppressed() {
   );
 }
 
+function dockviewRootBoundaryEdgesAtPoint(event, rect = null) {
+  const targetRect = rect || rootBoundaryLayoutTarget()?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
+  if (!targetRect?.width || !targetRect?.height) return {};
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return {};
+  const xBand = layoutBoundaryDropBandPx(targetRect.width);
+  const yBand = layoutBoundaryDropBandPx(targetRect.height);
+  return {
+    left: x >= targetRect.left && x <= targetRect.left + xBand,
+    right: x <= targetRect.right && x >= targetRect.right - xBand,
+    top: y >= targetRect.top && y <= targetRect.top + yBand,
+    bottom: y <= targetRect.bottom && y >= targetRect.bottom - yBand,
+  };
+}
+
+function dockviewUpdateRootBoundaryExitEdges(event, state, rect) {
+  if (!state) return;
+  const startEdges = state.rootBoundaryStartEdges || {};
+  const currentEdges = dockviewRootBoundaryEdgesAtPoint(event, rect);
+  const exitedEdges = state.rootBoundaryExitedEdges || (state.rootBoundaryExitedEdges = {});
+  for (const zone of ['left', 'right', 'top', 'bottom']) {
+    if (startEdges[zone] && !currentEdges[zone]) exitedEdges[zone] = true;
+  }
+}
+
 function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState.tabPointerDrag) {
   if (!state?.item || narrowSingleColumnMode()) return null;
   const target = rootBoundaryLayoutTarget();
   const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!rect) return null;
+  dockviewUpdateRootBoundaryExitEdges(event, state, rect);
   const dx = (Number(event.clientX) || 0) - state.x;
   const dy = (Number(event.clientY) || 0) - state.y;
   const horizontalZone = Math.abs(dx) >= DRAG_HYSTERESIS_PX
@@ -596,9 +642,23 @@ function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState
   const verticalZone = Math.abs(dy) >= DRAG_HYSTERESIS_PX
     ? rootBoundaryDropZoneForEvent(event, rect, dy >= 0 ? 'bottom' : 'top')
     : null;
-  const zone = horizontalZone && verticalZone
+  let zone = horizontalZone && verticalZone
     ? (Math.abs(dx) >= Math.abs(dy) ? horizontalZone : verticalZone)
     : (horizontalZone || verticalZone);
+  // A deliberate edge gesture can return to the tab's original root band, making its final
+  // start-to-end delta too small to identify an axis. The tracked exit proves it was not merely
+  // released in the header; use the current boundary only for that re-entry case.
+  if (!zone) {
+    const reenteredZone = rootBoundaryDropZoneForEvent(event, rect);
+    if (reenteredZone && state.rootBoundaryStartEdges?.[reenteredZone] && state.rootBoundaryExitedEdges?.[reenteredZone]) {
+      zone = reenteredZone;
+    }
+  }
+  // A tab header can itself live inside an outer root band's top/left/right/bottom hit area.
+  // Require the pointer to leave that same band once before it can create a new outer pane there.
+  // That preserves ordinary tab movement from the outermost pane while retaining an explicit,
+  // intentional root-edge gesture: move into the content area, then back to the desired edge.
+  if (zone && state.rootBoundaryStartEdges?.[zone] && !state.rootBoundaryExitedEdges?.[zone]) return null;
   if (!layoutSplitZone(zone) || !dockviewSplitLayoutHasMinimumSize(zone, rect)) return null;
   return {
     item: state.item,
@@ -609,13 +669,27 @@ function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState
   };
 }
 
+function dockviewTabPointerRootBoundaryIntentWithMemory(event, state = dockviewLayoutState.tabPointerDrag) {
+  if (!state) return null;
+  const intent = dockviewTabPointerRootBoundaryIntent(event, state);
+  if (intent) {
+    state.lastRootBoundaryIntent = intent;
+    return intent;
+  }
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  const hasUsableCoordinates = Number.isFinite(x) && Number.isFinite(y) && (x !== 0 || y !== 0);
+  if (hasUsableCoordinates) state.lastRootBoundaryIntent = null;
+  return hasUsableCoordinates ? null : state.lastRootBoundaryIntent;
+}
+
 function dockviewTrackTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   if (!state?.item) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
-  const intent = dockviewTabPointerRootBoundaryIntent(event, state);
+  const intent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) dockviewShowRootBoundaryPreview(intent);
   else dockviewClearRootBoundaryPreview();
 }
@@ -641,14 +715,13 @@ function dockviewFinishTabPointerDrag(event) {
     void dockviewCommitSideVerticalDrop(sideIntent);
     return;
   }
-  const rootIntent = dockviewTabPointerRootBoundaryIntent(event, state);
+  const rootIntent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (rootIntent && !dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
-    const signature = layoutSlotsSignature(layoutSlots);
-    window.setTimeout(() => {
-      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
-      if (layoutSlotsSignature(layoutSlots) !== signature || !itemInLayout(rootIntent.item)) return;
-      void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
-    }, 0);
+    // The app owns the visible root-edge preview. Commit it before Dockview's generic tab-drop
+    // stamp can make the pointer fallback stand down without producing the requested root split.
+    event.preventDefault?.();
+    dockviewLayoutState.tabDropHandledAt = Date.now();
+    void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
     return;
   }
   const stripEnd = dockviewTabStripEndDropInfoForPointer(event, state);
@@ -839,20 +912,45 @@ function dockviewFileDropIntentForEvent(event) {
   return dockviewGroupDropIntentForEvent(event);
 }
 
+function dockviewCapacityRefusalForDrag(drag) {
+  if (drag?.kind !== 'session' || !drag.intent) return '';
+  return dropIntentCapacityRefusalStatus(drag.payload?.session, drag.intent, drag.payload?.sourceSlot || slotForItem(drag.payload?.session));
+}
+
 function dockviewHandleFileDragOver(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }));
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'none';
+    dockviewSetInvalidTabDropPreview(true);
+    showDropPreview(drag.intent);
+    return;
+  }
+  applyLayoutDragIntent(event, drag);
 }
 
 function dockviewHandleFileDrop(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }), {phase: 'drop'});
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
+    showLayoutStatus(capacityRefusal, 'danger');
+    return;
+  }
+  applyLayoutDragIntent(event, drag, {phase: 'drop'});
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -861,6 +959,7 @@ function dockviewInstallFileDropBridge(host) {
   const dragLeave = event => {
     if (host?.contains?.(event.relatedTarget)) return;
     clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
   };
   host.addEventListener('dragover', dragOver, true);
   host.addEventListener('drop', drop, true);
@@ -1183,6 +1282,14 @@ function dockviewInit() {
         event.preventDefault();
         return;
       }
+      const tabCapacityRefusal = dockviewTabCapacityRefusalStatus(event);
+      if (tabCapacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(tabCapacityRefusal, 'danger');
+        return;
+      }
       const tabInsertion = dockviewTabInsertionInfo(event);
       // A tab-header drop is `kind: tab`, not `kind: content`. Dockview otherwise owns that move
       // internally and its later adoption path rejects the protected home group. A triplet item
@@ -1208,6 +1315,16 @@ function dockviewInit() {
         return;
       }
       const paneInfo = dockviewPaneContentDropInfo(event);
+      const capacityRefusal = paneInfo?.intent?.zone === 'middle'
+        ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+        : '';
+      if (capacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(capacityRefusal, 'danger');
+        return;
+      }
       // Dockview's default center-drop mutates its private group first and relies on a later
       // adoption pass. That lost center drops into the protected triplet home column. Apply every
       // allowed center move through the same layout transaction as the rest of the app instead.
@@ -1904,6 +2021,7 @@ function createDockviewTabRenderer() {
     }
     syncDockviewTabShell(element, item, api);
     if (paneTabShouldPreserve(element)) {
+      syncPaneTabPinnedIcon(element, item);
       const popover = paneTabPopoverForAnchor(element);
       if (popover) positionPaneTabPopover(element, popover);
       if (isFileEditorItem(item)) refreshFileTabPopover(element, item);

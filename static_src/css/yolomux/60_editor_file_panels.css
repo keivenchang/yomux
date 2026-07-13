@@ -433,7 +433,7 @@ body.editor-theme-light .file-editor-image-panel {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--panel);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
+  box-shadow: var(--app-modal-dialog-shadow);
   color: var(--text);
 }
 .file-editor-dialog-title {
@@ -1617,6 +1617,23 @@ body :is(
 .file-tree-row.file-tree-row--session-touched > .file-tree-name,
 .file-tree-row.file-tree-row--changed-ancestor > .file-tree-name {
   font-weight: 800;
+}
+.file-tree-sync-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--accent-gold);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent-gold) 60%, transparent);
+}
+.file-tree-sync-target[hidden] {
+  display: none;
+}
+.file-tree-row.file-tree-row--sync-target > .file-tree-sync-target {
+  opacity: 1;
 }
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
@@ -3010,6 +3027,37 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--text);
   background: var(--panel2);
   font-weight: 800;
+}
+.file-editor-jsonl-preview table {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
+  font-family: var(--mono-font);
+}
+.file-editor-jsonl-preview col.file-editor-jsonl-compact-column {
+  inline-size: clamp(8ch, 18%, 18ch);
+}
+.file-editor-jsonl-preview col.file-editor-jsonl-payload {
+  inline-size: auto;
+}
+.file-editor-jsonl-preview th,
+.file-editor-jsonl-preview td {
+  max-width: none;
+}
+.file-editor-jsonl-preview thead th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-layer-raised);
+}
+.file-editor-jsonl-preview td {
+  white-space: pre-wrap;
+}
+.file-editor-jsonl-preview .file-editor-jsonl-overflow {
+  color: var(--muted);
+}
+.file-editor-jsonl-unparsed td {
+  color: var(--code-invalid);
+  background: color-mix(in srgb, var(--code-invalid) 9%, var(--editor-preview-bg));
 }
 .file-editor-native-media {
   display: block;

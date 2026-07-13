@@ -44,7 +44,13 @@
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   box-shadow: var(--shadow-elevated);
   font: 700 var(--ui-font-size)/1 var(--ui-font);
-  touch-action: manipulation;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.mobile-terminal-key-launcher--open {
+  font-size: 20px;
 }
 /* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
    not a permanent row, so an idle terminal keeps its full visible height. */
@@ -52,40 +58,40 @@
   position: absolute;
   z-index: var(--z-terminal-popover);
   inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
-  inset-block-start: 50%;
-  transform: translateY(-50%);
+  inset-block-end: calc(max(var(--space-8), env(safe-area-inset-bottom)) + 44px);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   grid-auto-rows: max-content;
   align-content: start;
   gap: var(--space-4);
   width: min(18rem, calc(100vw - var(--space-12)));
-  max-height: calc(100% - var(--space-12));
-  padding: var(--space-5);
+  max-height: calc(100% - var(--space-4));
+  padding: var(--space-2);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   box-shadow: var(--shadow-elevated), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 .mobile-terminal-keybar[hidden] {
   display: none;
 }
-.mobile-terminal-key-drag {
-  grid-row: 1 / -1;
-  align-self: stretch;
-  width: 18px;
-  min-height: 36px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  background: transparent;
-  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
-  cursor: grab;
-  touch-action: none;
+.mobile-terminal-key-side {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-rows: repeat(6, 36px);
+  align-self: start;
+  align-content: start;
+  gap: var(--space-1);
 }
-.mobile-terminal-key-drag:active {
-  cursor: grabbing;
+.mobile-terminal-key-side .mobile-terminal-key {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
 }
 .mobile-terminal-keyrow {
   display: flex;
@@ -98,7 +104,7 @@
 }
 .mobile-terminal-keyrow--primary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: visible;
 }
 .mobile-terminal-keyrow-shell {
@@ -127,6 +133,7 @@
   display: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
+.mobile-terminal-keybar--more .mobile-terminal-key-side,
 .mobile-terminal-keybar--more .mobile-terminal-key-dpad {
   display: none;
 }
@@ -182,6 +189,9 @@
 .mobile-terminal-key--interrupt {
   color: var(--danger-text);
   border-color: var(--danger-border);
+}
+.mobile-terminal-key.locked {
+  box-shadow: inset 0 0 0 2px var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
 }
 .mobile-terminal-key:disabled {
   opacity: 0.48;
@@ -307,20 +317,20 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu {
   position: fixed;
   z-index: var(--z-terminal-popover);
-  min-width: 150px;
-  padding: var(--space-4);
+  padding: var(--space-3);
   color: var(--chrome-text-strong);
   background: var(--overlay-surface-strong);
   border: 1px solid var(--sep-muted);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-elevated);
 }
-.session-context-menu {
-  min-width: 178px;
+.terminal-context-menu:not(.repo-chip-menu) {
+  max-width: var(--context-menu-compact-inline-size);
 }
-.tab-action-sheet {
-  width: min(calc(100vw - (2 * var(--popover-edge-gap))), 38rem);
-  max-height: min(72vh, 42rem);
+.terminal-context-menu.tab-action-sheet {
+  width: var(--context-menu-compact-inline-size);
+  max-width: var(--popover-max-inline-size);
+  max-height: var(--context-menu-max-block-size);
   overflow: auto;
   transform: none;
 }
@@ -329,7 +339,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   width: 100%;
   min-width: 0;
   border: 0;
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-4) var(--space-6);
   color: var(--chrome-text-strong);
   background: transparent;
   cursor: pointer;
@@ -344,12 +354,12 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .tab-directional-action-groups {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2);
 }
 .tab-split-actions {
   display: grid;
-  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  grid-template-columns: auto repeat(var(--context-menu-direction-count), minmax(0, 1fr));
   grid-template-rows: var(--touch-target-min-size);
   gap: var(--space-2);
   min-width: 0;
@@ -384,8 +394,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: none;
 }
 .tab-directional-action-icon {
-  --tab-directional-icon-inline-size: 32px;
-  --tab-directional-icon-block-size: 24px;
+  --tab-directional-icon-inline-size: 2.75em;
+  --tab-directional-icon-block-size: 2em;
   --tab-directional-icon-border-width: var(--space-2);
   --tab-directional-icon-outer-radius: var(--radius-control);
   --tab-directional-icon-inner-radius: var(--space-2);
@@ -478,11 +488,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu button {
   width: 100%;
   display: block;
-  padding: var(--space-5) var(--space-8);
+  padding: var(--space-4) var(--space-6);
   color: inherit;
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   text-align: start;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
@@ -492,20 +502,20 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-8);
+  gap: var(--space-6);
 }
 .context-menu-icon {
   display: inline-flex;
   align-items: center;
 }
 .context-menu-icon .app-menu-ui-icon {
-  width: 20px;
-  height: 18px;
+  width: 1.75em;
+  height: 1.55em;
   border-radius: var(--radius-control);
 }
 .context-menu-icon .app-menu-ui-icon::before {
-  width: 12px;
-  height: 12px;
+  width: 1em;
+  height: 1em;
 }
 .context-menu-label {
   min-width: 0;
@@ -516,11 +526,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   white-space: nowrap;
 }
 .terminal-context-menu button.danger {
-  color: #ffd6dc;
+  color: var(--danger-text-soft);
 }
 .terminal-context-menu button.danger:hover,
 .terminal-context-menu button.danger:focus-visible {
-  color: #1d0307;
+  color: var(--danger-confirm-text);
   background: var(--bad);
 }
 .terminal-context-menu button:disabled:hover,
@@ -530,8 +540,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .terminal-context-menu-separator {
   height: 1px;
-  margin: var(--space-4) var(--space-2);
-  background: #394354;
+  margin: var(--space-3) var(--space-2);
+  background: var(--menu-tab-row-separator);
 }
 .file-image-preview-popover {
   position: fixed;
@@ -960,6 +970,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   margin-inline-start: auto;
 }
 .info-tree-actions-bar {
+  container: info-tree-toolbar / inline-size;
   align-items: flex-start;
   flex-wrap: wrap;
   column-gap: var(--space-8);
@@ -2566,6 +2577,7 @@ button.info-tree-tab-token.active:focus-visible {
 }
 .info-tree-record {
   --info-tree-field-label-width: 18ch;
+  container: info-tree-record / inline-size;
   display: block;
   gap: var(--space-6);
   padding: var(--space-2) var(--space-4) var(--space-3);
@@ -2635,6 +2647,27 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-field-ai .info-tree-field-value {
   min-width: 0;
 }
+.info-tree-path-observations {
+  width: 100%;
+  margin-block-start: var(--space-2);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+}
+.info-tree-path-observations > summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--info-tree-dimension-hover);
+}
+.info-tree-path-observations ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding-inline-start: var(--space-12);
+}
+.info-tree-path-observations code {
+  color: var(--text);
+  font: inherit;
+}
 .info-tree-ai-value {
   min-width: 0;
   flex-wrap: wrap;
@@ -2701,6 +2734,22 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-field-ai .info-tree-action-link {
   color: var(--info-tree-field-color);
 }
+.info-tree-branch-state {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-inline-start: var(--space-4);
+  padding: 0 var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--info-tree-field-color) 58%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--info-tree-field-color);
+  font: 700 var(--ui-font-size-2xs)/1.35 var(--mono-font);
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+.info-tree-branch-state-current { color: var(--good); border-color: color-mix(in srgb, var(--good) 70%, transparent); }
+.info-tree-branch-state-worked { color: var(--warning-border-strong); border-color: color-mix(in srgb, var(--warning-border-strong) 70%, transparent); }
+.info-tree-branch-state-missing { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 70%, transparent); }
 .info-tree-chip {
   padding: var(--space-1) var(--space-6);
   background: var(--info-tree-chip-bg);
@@ -2768,30 +2817,68 @@ button.info-tree-tab-token.active:focus-visible {
   margin-inline-start: auto;
   text-align: end;
 }
-/* A Vertical Side Pane deliberately trades width for a persistent edge view. Keep the same
-   information hierarchy, but stack field labels above values and tighten each tree level so deep
-   branch/path records retain a readable value column instead of wrapping one character per line. */
+/* Tree depth, not only Dockview role, determines how much width a record can actually use. Let
+   each record respond to its own measured inline size so a deeply nested item in an otherwise
+   wide pane cannot squeeze branch/status text into one-character columns. */
+@container info-tree-record (max-width: 48rem) {
+  .info-tree-record-main {
+    padding-inline-start: var(--space-4);
+  }
+  .info-tree-field {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+  .info-tree-field-label {
+    white-space: normal;
+  }
+  .info-tree-field-value {
+    width: 100%;
+  }
+  .info-tree-field-branch .info-tree-field-value,
+  .info-tree-field-path .info-tree-field-value,
+  .info-tree-field-ai .info-tree-field-value {
+    flex-wrap: wrap;
+  }
+  .info-tree-field-branch .info-tree-value-text {
+    flex: 1 1 14rem;
+  }
+  .info-tree-field-branch .info-tree-meta-updated,
+  .info-tree-field-path .info-tree-meta-path-activity,
+  .info-tree-field-ai .info-tree-trailing-meta {
+    flex: 0 0 100%;
+    margin-inline-start: 0;
+    text-align: start;
+  }
+}
+/* At toolbar widths where a flex line can strand a `>` by itself, use a stable two-column control
+   grid. The DOM order remains the grouping order, while the redundant visual separators disappear. */
+@container info-tree-toolbar (max-width: 62rem) {
+  .info-tree-group-selects {
+    flex: 1 1 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+  .info-tree-order-label {
+    grid-column: 1 / -1;
+  }
+  .info-tree-order-separator {
+    display: none;
+  }
+  .info-tree-order-select,
+  .info-tree-order-select select {
+    width: 100%;
+  }
+  .info-tree-sort-controls {
+    margin-inline-start: 0;
+    justify-content: flex-start;
+  }
+}
+/* A Vertical Side Pane deliberately trades width for a persistent edge view. Tighten tree
+   indentation here; the shared info-tree-record container rule above owns field stacking. */
 .yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-group-children {
   margin-inline-start: var(--space-8);
   padding-inline-start: var(--space-8);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-record-main {
-  padding-inline-start: var(--space-4);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field {
-  grid-template-columns: minmax(0, 1fr);
-  row-gap: var(--space-1);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-label {
-  white-space: normal;
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-value {
-  width: 100%;
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-branch .info-tree-meta-updated,
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-ai .info-tree-trailing-meta {
-  margin-inline-start: 0;
-  text-align: start;
 }
 .info-tree-trailing-meta {
   color: var(--subwindow-recency-color);

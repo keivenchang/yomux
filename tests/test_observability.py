@@ -11,6 +11,7 @@ from yolomux_lib.common import SessionInfo
 from yolomux_lib.events import EventLog
 from yolomux_lib.events import RunHistoryStore
 from yolomux_lib.metadata import MetadataCache
+from yolomux_lib.metadata import empty_work_graph
 from yolomux_lib.transcripts import format_transcript_item
 from yolomux_lib.transcripts import transcript_items_from_raw_line
 
@@ -322,21 +323,27 @@ def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, t
     )
     info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[agent])
     monkeypatch.setattr("yolomux_lib.app.discover_sessions", lambda _sessions: ({"s1": info}, ["tmux discovery diagnostic"]))
-    monkeypatch.setattr(
-        "yolomux_lib.app.session_project_metadata",
-        lambda _info, _cache, allow_network=False: {
-            "git": {"root": str(tmp_path), "branch": "feature/search"},
-            "pull_request": {
-                "number": 42,
-                "title": "Add search",
-                "url": "https://example.test/pull/42",
-                "state": "open",
-                "draft": False,
-                "description": "not stored in compact history",
-            },
-            "linear": [],
-        },
-    )
+    graph = empty_work_graph()
+    graph["git_worktrees"]["worktree:repo"] = {
+        "id": "worktree:repo",
+        "root": str(tmp_path),
+        "git_dir": str(tmp_path / ".git"),
+        "kind": "primary",
+        "local_repository_id": "local:repo",
+        "current_branch_id": "branch:repo:feature/search",
+        "branch_activity_ids": [],
+        "path_observation_ids": [],
+        "activity_priority": 0,
+        "activity_ts": 0,
+        "activity_source": "",
+        "has_current_pull_request": True,
+        "git": {"root": str(tmp_path), "branch": "feature/search"},
+    }
+    graph["local_repositories"]["local:repo"] = {"id": "local:repo", "common_git_dir": str(tmp_path / ".git"), "local_branch_ids": ["branch:repo:feature/search"]}
+    graph["hosted_repositories"]["hosted:repo"] = {"id": "hosted:repo", "url": "https://example.test/repo"}
+    graph["local_branches"]["branch:repo:feature/search"] = {"id": "branch:repo:feature/search", "local_repository_id": "local:repo", "name": "feature/search", "pull_request_ids": ["pr:42"], "linear_issue_ids": []}
+    graph["pull_requests"]["pr:42"] = {"id": "pr:42", "hosted_repository_id": "hosted:repo", "number": 42, "title": "Add search", "url": "https://example.test/pull/42", "state": "open", "draft": False, "description": "not stored in compact history", "linear_issue_ids": []}
+    monkeypatch.setattr("yolomux_lib.app.session_work_graph", lambda _info, _cache, allow_network=False: graph)
     app.yoagent_session_summaries = {
         "s1": {
             "rolling_summary": "beta rollout finished",

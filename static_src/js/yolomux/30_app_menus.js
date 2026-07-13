@@ -38,6 +38,17 @@ function menuGroups(...groups) {
   return items;
 }
 
+function compareLocalizedMenuLabels(left, right) {
+  return String(left || '').localeCompare(String(right || ''), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function sortMenuCommandsByLabel(commands) {
+  return [...commands].sort((left, right) => compareLocalizedMenuLabels(left?.label, right?.label));
+}
+
 function layoutMenuCommand(mode) {
   const normalized = normalizeLayoutMode(mode);
   const detail = normalized === 'single'
@@ -192,7 +203,13 @@ function menuTabDetail(item) {
 
 function commandPaletteTabDetail(item) {
   const detail = menuTabDetail(item);
-  const pr = displayPullRequest(transcriptMetadataState.payload.sessions?.[item]);
+  const info = transcriptMetadataState.payload.sessions?.[item];
+  const summary = sessionWorkSummary(item, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) {
+    const aggregate = pullRequestAggregateLabel(summary.pullRequests);
+    return detail.includes(aggregate) ? detail : [aggregate, detail].filter(Boolean).join(' · ');
+  }
+  const pr = displayPullRequest(info);
   if (!pr?.number) return detail;
   const bareNumber = `#${pr.number}`;
   const visibleNumber = `PR ${bareNumber}`;
@@ -215,7 +232,7 @@ function menuTabRowHtml(item, options = {}) {
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
   return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestSummaryBadgesHtml(item, info)}${detailHtml}</span></span>`;
 }
 
 function menuTabCommand(item, options = {}) {
@@ -596,7 +613,11 @@ function pullRequestSearchFields(pr) {
     pr.author_login,
     pr.number ? 'PR' : '',
     ...prNumberSearchForms(pr.number),
-    ...linearSearchFields(pr.linear_ids),
+    // Normalized graph PRs own canonical `linear_issue_ids`; older view models exposed the
+    // same relationship as `linear_ids`. Search must index both shapes while metadata is
+    // rendered directly from the graph, otherwise an other-branch PR becomes invisible to
+    // Cmd-P despite being visible in YO!info.
+    ...linearSearchFields(pr.linear_issue_ids || pr.linear_ids),
   ].filter(Boolean);
 }
 
@@ -610,17 +631,19 @@ function finderSearchAliases(item) {
 
 function tabSearchFields(item) {
   const info = transcriptMetadataState.payload.sessions?.[item] || {};
+  const summary = sessionWorkSummary(item, info);
   const filePath = fileItemPath(item) || '';
   // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
   // session is findable by any related branch even when it is not the currently checked-out branch.
-  const primaryRoot = info.project?.git?.root || info.project?.git?.cwd || '';
+  const primaryRoot = summary.git?.root || summary.git?.cwd || '';
+  const repositories = summary.graphBacked ? summary.repositories : [
+    ...(summary.git ? [{...summary.git, root: summary.git.root || summary.git.cwd || ''}] : []),
+    ...summary.repositories,
+  ];
   const branchSources = [
-    ...(info.project?.git?.other_branches?.branches || []),
-    ...(Array.isArray(info.project?.repos)
-      ? info.project.repos
-        .filter(repo => (repo?.root || repo?.cwd || '') !== primaryRoot)
-        .flatMap(repo => repo?.other_branches?.branches || [])
-      : []),
+    ...repositories
+      .filter(repo => (repo?.root || repo?.cwd || '') === primaryRoot || !primaryRoot || summary.graphBacked)
+      .flatMap(repo => repo?.other_branches?.branches || []),
   ];
   const pr = displayPullRequest(info);
   return [
@@ -638,12 +661,14 @@ function tabSearchFields(item) {
     ...finderSearchAliases(item),
     ...pullRequestSearchFields(pr),
     ...linearSearchFields(info.linear),
-    ...linearSearchFields(info.project?.linear),
+    ...linearSearchFields(summary.linearIssues),
     ...branchSources.flatMap(branch => [
       branch.name,
       branch.subject,
-      ...pullRequestSearchFields(branch.pull_request),
+      ...pullRequestSearchFields(branch.pull_request || branch.pull_requests?.[0]),
+      ...(branch.pull_requests || []).flatMap(pullRequestSearchFields),
       ...linearSearchFields(branch.linear_ids),
+      ...linearSearchFields(branch.linear),
     ]),
   ].filter(Boolean);
 }
@@ -682,10 +707,8 @@ function inactiveTabMenuItems() {
 
 function sortTabItemsForMenu(items) {
   const unique = Array.from(new Set(items.filter(isLayoutItem)));
-  const compare = (left, right) => String(itemLabel(left)).localeCompare(String(itemLabel(right)), undefined, {
-    numeric: true,
-    sensitivity: 'base',
-  }) || String(left).localeCompare(String(right));
+  const compare = (left, right) => compareLocalizedMenuLabels(itemLabel(left), itemLabel(right))
+    || compareLocalizedMenuLabels(left, right);
   // Tabs is a navigator, not a status dashboard: tmux sessions always form the first simple,
   // naturally sorted group; every YOLOmux-owned/file tab follows in the same stable label order.
   return [
@@ -706,6 +729,28 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   );
   const resultItems = groupedItems.length ? groupedItems : [menuCommand(t('menu.tabs.noMatch'), null, {disabled: true})];
   return resultItems;
+}
+
+function refreshOpenTabsMenuRows() {
+  const wrapper = Array.from(sessionButtons?.querySelectorAll?.('.app-menu') || [])
+    .find(menu => menu.dataset.appMenu === 'tabs' && menu.classList.contains(CLS.open));
+  if (!wrapper) return false;
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (!popover) return false;
+  const tabsMenu = appMenuTree().find(menu => menu.id === 'tabs');
+  if (!tabsMenu) return false;
+  popover.replaceChildren(...tabsMenu.items.map(createAppMenuItem));
+  fitAppMenuPopover(popover);
+  scheduleSharePopupLayerPublish({immediate: true});
+  return true;
+}
+
+function refreshTabsMenuMetadataOnOpen() {
+  // Opening Tabs must be instant: render the last accepted metadata snapshot first. A fresh
+  // forced request then performs tmux list-sessions in the background and refreshes only this
+  // open menu when names/descriptions arrive. The metadata request record coalesces repeats.
+  if (typeof refreshSessionMetadata !== 'function') return;
+  void refreshSessionMetadata({force: true, refreshAuto: false, refreshActivity: false, refreshContext: false});
 }
 
 function fileMenuVirtualCommand(item, detail) {
@@ -771,30 +816,31 @@ function appMenuTree() {
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
+  const fileDestinationCommands = sortMenuCommandsByLabel([
+    menuCommand(t('common.openFile'), openFileQuickOpen, {
+      detail: appShortcutText('P'),
+      iconHtml: appMenuUiIcon('document'),
+    }),
+    ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
+    menuCommand(t('menu.file.share'), () => showShareModal(), {
+      disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
+      detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
+      iconHtml: appMenuUiIcon('share', shareMenuActive),
+    }),
+    menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
+      checked: itemInLayout(prefsItemId),
+      detail: compactHomePath(settingsConfigPath()),
+      iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
+      targetItem: prefsItemId,
+    }),
+  ]);
   return [
     {
       id: 'file',
       label: t('menu.file'),
       items: menuGroups(
         newTmuxSessionItems(),
-        [
-          menuCommand(t('common.openFile'), openFileQuickOpen, {
-            detail: appShortcutText('P'),
-            iconHtml: appMenuUiIcon('document'),
-          }),
-          ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
-          menuCommand(t('menu.file.share'), () => showShareModal(), {
-            disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
-            detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
-            iconHtml: appMenuUiIcon('share', shareMenuActive),
-          }),
-          menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
-            checked: itemInLayout(prefsItemId),
-            detail: compactHomePath(settingsConfigPath()),
-            iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
-            targetItem: prefsItemId,
-          }),
-        ],
+        fileDestinationCommands,
         [
           menuCommand(t('menu.file.logout'), logOut, {
             detail: t('menu.file.logout.detail'),
@@ -1909,6 +1955,7 @@ function openAppMenu(wrapper, options = {}) {
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   scheduleSharePopupLayerPublish({immediate: true});
   scheduleShareTopologySnapshot('popup-open');
+  if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
 

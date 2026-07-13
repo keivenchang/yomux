@@ -45,7 +45,7 @@ async function runSidePaneSuite() {
     );
     assert.deepStrictEqual(
       Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideAllowed).map(([key]) => key),
-      ['info', 'yoagent', 'chat', 'debug'],
+      ['info', 'yoagent', 'chat', 'debug', 'yocost'],
     );
     assert.equal(policies.preferences, api.panePlacementGenericOnly);
     assert.equal(policies['search-history'], api.panePlacementGenericOnly);
@@ -59,6 +59,7 @@ async function runSidePaneSuite() {
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.finderItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.infoItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.debugPaneItemId), true);
+    assert.equal(api.paneRoleAllowsItem(sideLeft, api.yocostItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, '1'), false);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.prefsItemId), false);
     assert.equal(api.paneRoleAllowsItem(generic, api.finderItemId), false);
@@ -370,9 +371,9 @@ async function runSidePaneSuite() {
     assert.equal(api.compactCurrentLayoutSlotsForTest(), true);
     const constrained = api.currentSlots();
     assert.equal(api.sidePaneSlots(constrained).length, 0);
-    assert.equal(api.layoutSlotKeys(constrained).length, 1);
+    assert.equal(api.layoutSlotKeys(constrained).length, 2, 'Side Pane constraint preserves ordinary Generic Pane splits');
     const constrainedItems = api.layoutSlotKeys(constrained).flatMap(slot => api.paneTabs(slot, constrained));
-    assert.equal(constrainedItems.filter(item => [api.finderItemId, api.differItemId, api.tabberItemId].includes(item)).length, 1);
+    assert.equal(constrainedItems.filter(item => [api.finderItemId, api.differItemId, api.tabberItemId].includes(item)).length, 3);
 
     api.setNativeViewportForTest({width: 1200, height: 800});
     assert.equal(api.compactCurrentLayoutSlotsForTest(), true);

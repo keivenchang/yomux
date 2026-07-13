@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STARTUP_COMMON = ROOT / "tools" / "startup_common.sh"
 
 
 def printable_command_text(output: str) -> str:
@@ -35,6 +38,7 @@ def test_boot_print_command_uses_any_configured_primary_port():
     assert "--dang --self-signed" in command
     assert "--dev" not in command
     assert "MALLOC_ARENA_MAX=2" in command
+    assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=48123" in command
     clears_tmux_inline = "TMUX= TMUX_PANE=" in command
     clears_tmux_in_detacher = (
         'env.pop("TMUX", None)' in command
@@ -72,6 +76,7 @@ def test_boot_restart_waits_for_stable_listener_after_ready():
 
 def test_boot_restart_requires_old_listener_to_stop_before_launch():
     source = (ROOT / "boot.sh").read_text(encoding="utf-8")
+    startup_common = STARTUP_COMMON.read_text(encoding="utf-8")
 
     assert "wait_for_port_free()" in source
     assert "listener still alive after SIGTERM; sending SIGKILL" in source
@@ -82,3 +87,103 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'env.pop("TMUX_PANE", None)' in source
     assert "acquire_port_restart_lock \"$port\"" in source
     assert "a YOLOmux restart for port $port is already in progress" in source
+    assert "another YOLOmux stack start is already in progress" in startup_common
+    assert 'source "$repo_root/tools/startup_common.sh"' in source
+    assert "yolomux_acquire_start_lock" in source
+    assert "trap yolomux_release_start_lock EXIT" in source
+    assert 'trap yolomux_release_start_lock EXIT\nyolomux_wait_for_system_capacity "$python_bin"\nensure_xterm_assets' in source
+    assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
+    assert 'yolomux_bootout_macos_server "$port"\n  fi\n  stop_port_listener "$port"' in source
+    assert "yolomux_submit_macos_server" in source
+
+
+def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_path):
+    lock_dir = tmp_path / "start.lock"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; trap yolomux_release_start_lock EXIT; yolomux_acquire_start_lock; echo ready; read -r _',
+            "startup-lock-holder",
+            str(STARTUP_COMMON),
+            str(lock_dir),
+        ],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "ready"
+
+    contender = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yolomux_acquire_start_lock',
+            "startup-lock-contender",
+            str(STARTUP_COMMON),
+            str(lock_dir),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert contender.returncode != 0
+    assert "another YOLOmux stack start is already in progress" in contender.stderr
+
+    assert holder.stdin is not None
+    holder.stdin.close()
+    assert holder.wait(timeout=5) in {0, 1}
+    assert lock_dir.exists() is False
+
+
+def test_shared_start_lock_recovers_dead_owner(tmp_path):
+    lock_dir = tmp_path / "start.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("99999999\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yolomux_acquire_start_lock; yolomux_release_start_lock',
+            "startup-lock-stale",
+            str(STARTUP_COMMON),
+            str(lock_dir),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert lock_dir.exists() is False
+
+
+def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; yolomux_system_load_snapshot "$2"',
+            "startup-capacity",
+            str(STARTUP_COMMON),
+            sys.executable,
+        ],
+        text=True,
+        capture_output=True,
+    )
+    expected = min(os.cpu_count() or 1, 8) if platform.system() == "Darwin" else max(1, os.cpu_count() or 1)
+
+    assert result.returncode in {0, 1}
+    assert f"cpu_budget={expected}" in result.stdout
+
+
+def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; TMPDIR="$2" yolomux_start_lock_path', "startup-lock-path", str(STARTUP_COMMON), str(tmp_path)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout == str(Path.home() / ".cache" / "yolomux" / "start.lock")

@@ -249,7 +249,7 @@ class AuthMixin:
         self._share_mode = "ro"
         bypass_auth = test_auth_bypass_enabled()
         if auth_setup_required() and not bypass_auth:
-            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", ""), secure=self.request_is_https()))
             return False
         share_token = self.share_token_text()
         if share_token:
@@ -342,7 +342,7 @@ class AuthMixin:
             self.write_redirect(self.login_success_path(next_path))
             return
         if auth_setup_required():
-            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", ""), secure=self.request_is_https()))
             return
         if not self.has_logout_marker() and self.cookie_auth_identity() is not None:
             self.write_redirect(self.login_success_path(next_path))
@@ -361,7 +361,7 @@ class AuthMixin:
             self.write_redirect(self.login_success_path(next_path))
             return
         if auth_setup_required():
-            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
+            self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", ""), secure=self.request_is_https()))
             return
         username = form.get("username", [""])[0]
         password = form.get("password", [""])[0]

@@ -320,12 +320,17 @@
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
+  --context-menu-direction-count: 4;
+  --context-menu-action-column-count: calc(var(--context-menu-direction-count) + 1);
+  --context-menu-compact-inline-size: min(calc(var(--touch-target-min-size) * var(--context-menu-action-column-count)), var(--popover-max-inline-size));
+  --context-menu-max-block-size: var(--app-menu-max-block-size);
   --dialog-compact-inline-size: 80ch;
   --dialog-standard-inline-size: 112ch;
   --dialog-wide-inline-size: 144ch;
   --app-modal-backdrop-bg: rgba(0, 0, 0, 0.46);
   --app-modal-border-width: max(2px, var(--pane-split-gap));
   --app-modal-border-color: color-mix(in srgb, var(--pane-tab-panel-ring) var(--pane-active-ring-opacity), transparent);
+  --app-modal-dialog-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
   --share-stage-bg: var(--paint-black);
@@ -618,7 +623,9 @@
   --icon-gear: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z'/%3E%3Cpath d='M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.3 7.3 0 0 0-1.7-1L15 6.4h-6L8.6 9a7.3 7.3 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.3 7.3 0 0 0 1.7 1l.4 2.6h6l.4-2.6a7.3 7.3 0 0 0 1.7-1l2.4 1 2-3.5z'/%3E%3C/svg%3E");
   --icon-pin: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M5 17h14'/%3E%3Cpath d='M8 3h8l-1 7 3 4H6l3-4z'/%3E%3C/svg%3E");
   --icon-branch-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='2.5'/%3E%3Ccircle cx='18' cy='18' r='2.5'/%3E%3Ccircle cx='6' cy='18' r='2.5'/%3E%3Cpath d='M8.5 6H12a4 4 0 0 1 4 4v5.5'/%3E%3Cpath d='M6 8.5v7'/%3E%3C/svg%3E");
-  --icon-yoagent: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5A3.5 3.5 0 0 1 7.5 3h9A3.5 3.5 0 0 1 20 6.5v5A3.5 3.5 0 0 1 16.5 15H12l-5 4v-4A3 3 0 0 1 4 12z'/%3E%3Cpath d='M8 8h8'/%3E%3Cpath d='M8 11h5'/%3E%3C/svg%3E");
+  --icon-robot: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v3'/%3E%3Ccircle cx='12' cy='2.5' r='1'/%3E%3Crect x='4' y='6' width='16' height='13' rx='3'/%3E%3Ccircle cx='9' cy='12' r='1.25' fill='black' stroke='none'/%3E%3Ccircle cx='15' cy='12' r='1.25' fill='black' stroke='none'/%3E%3Cpath d='M9 16h6'/%3E%3Cpath d='M2 10v5'/%3E%3Cpath d='M22 10v5'/%3E%3C/svg%3E");
+  --icon-chat-bubble: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'/%3E%3Cpath d='M8 9h8'/%3E%3Cpath d='M8 13h5'/%3E%3C/svg%3E");
+  --icon-chart: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 3v17h17'/%3E%3Cpath d='m7 15 4-4 3 2 5-6'/%3E%3Cpath d='M16 7h3v3'/%3E%3C/svg%3E");
   --icon-changes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10'/%3E%3Cpath d='M7 20h10'/%3E%3Cpath d='M12 6v12'/%3E%3Cpath d='M5 10h5'/%3E%3Cpath d='M14 14h5'/%3E%3C/svg%3E");
   --editor-preview-bg: var(--editor-scheme-preview-bg);
   --topbar-height: 38px;
@@ -676,7 +683,7 @@
   --20-sessions-popovers-popover-desc-fg-38: var(--text);
   --20-sessions-popovers-session-popover-fg-39: var(--text);
   --20-sessions-popovers-branch-link-fg-40: var(--text);
-  --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: #3f4754;
+  --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: #596273;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: var(--bad);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: var(--good);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: var(--accent-gold);
@@ -1440,7 +1447,8 @@ body.theme-light {
 .yoagent-message-details pre,
 .modal pre,
 .drop-action-result pre,
-.file-editor-conflict-compare pre {
+.file-editor-conflict-compare pre,
+.js-debug-log-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1491,13 +1499,13 @@ body.theme-light {
 .yoagent-jobs-list,
 .info-tree-chip,
 .share-field select,
-.share-field input[type="number"],
-.share-field input[type="text"],
-.file-explorer-path,
-.file-explorer-path-inline,
-.js-debug-hover-tooltip {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
+  .share-field input[type="number"],
+  .share-field input[type="text"],
+  .file-explorer-path,
+  .file-explorer-path-inline,
+  .js-debug-hover-tooltip {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
   color: var(--text);
 }
 :where(button),
@@ -1506,12 +1514,12 @@ body.theme-light {
 .conversation-message,
 .yoagent-composer-pill,
 .yoagent-backend-pill,
-.terminal-drop-suggestions,
-.file-editor-preview-fallback,
-.markdown-image-error,
-.mermaid-preview-error {
-  border: 1px solid var(--line);
-  background: var(--panel2);
+  .terminal-drop-suggestions,
+  .file-editor-preview-fallback,
+  .markdown-image-error,
+  .mermaid-preview-error {
+    border: 1px solid var(--line);
+    background: var(--panel2);
   color: var(--text);
 }
 :where(button) {
@@ -1597,7 +1605,10 @@ body.theme-light {
 .file-explorer-head,
 .file-editor-head,
 .file-explorer-toolbar-row,
-.file-explorer-panel-meta {
+.file-explorer-panel-meta,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   align-items: center;
   gap: var(--space-6);
@@ -1653,7 +1664,10 @@ body.theme-light {
 .info-tree-group-selects,
 .info-tree-sort-controls,
 .yoagent-job-controls,
-.yoagent-chat-error {
+.yoagent-chat-error,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);
@@ -1686,6 +1700,8 @@ body.theme-light {
 .file-explorer-date-toggle.active,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
+.js-debug-log-level[aria-pressed="true"],
+.js-debug-cost-details:hover,
 .file-editor-preview-zoom-toolbar button[aria-pressed="true"],
 .file-editor-codemirror .cm-search label:has(input:checked),
 .file-editor-codemirror-panel .cm-search label:has(input:checked) {

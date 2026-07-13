@@ -120,11 +120,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     )
     path = str(REPO_ROOT / "README.md")
     original = subprocess.check_output(["git", "show", "HEAD:README.md"], cwd=REPO_ROOT, text=True)
-    current = original.replace(
-        "Browser tools for watching, driving, and summarizing tmux sessions.",
-        "Browser tools for watching and summarizing tmux sessions.\n\nDeterministic test-only README diff line.",
-        1,
-    )
+    current = original.replace("# YOLOmux\n", "# YOLOmux — Deterministic test-only README diff line.\n", 1)
     diff = "diff --git a/README.md b/README.md\n" + "".join(difflib.unified_diff(
         original.splitlines(keepends=True),
         current.splitlines(keepends=True),
@@ -208,20 +204,6 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
               panel.classList.add('active-pane');
               panelNodes.set(item, panel);
               document.getElementById('mount').append(panel);
-              const originalLoadCodeMirrorApi = loadCodeMirrorApi;
-              window.__holdReadmeCodeMirrorLoad = false;
-              window.__readmeDiffLoadEntered = false;
-              let releaseLoad = null;
-              loadCodeMirrorApi = async function(...args) {{
-                if (window.__holdReadmeCodeMirrorLoad) {{
-                  window.__readmeDiffLoadEntered = true;
-                  await new Promise(resolve => {{
-                    releaseLoad = resolve;
-                    window.__releaseReadmeCodeMirrorLoad = resolve;
-                  }});
-                }}
-                return originalLoadCodeMirrorApi.apply(this, args);
-              }};
               const {{frame}} = window.__yolomuxTestHelpers;
               const waitFor = window.__yolomuxTestWaitFor;
               renderFileEditorPanel(panel, item);
@@ -230,27 +212,20 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
               await frame();
               const modeWhilePayloadUnresolved = panel._cmMode || '';
               const textWhilePayloadUnresolved = panel._cmView?.state?.doc?.toString?.() || '';
-              window.__holdReadmeCodeMirrorLoad = true;
               window.__resolveReadmeDiffFetch();
               const diffLoadedWait = await waitFor(() => openFiles.get(path)?.diffLoaded === true);
-              let manualRenderCalled = false;
-              if (!window.__readmeDiffLoadEntered) {{
-                manualRenderCalled = true;
-                renderFileEditorPanel(panel, item);
-              }}
-              const loadEnteredWait = await waitFor(() => window.__readmeDiffLoadEntered);
               const modeBeforeDiffBuildRelease = panel._cmMode || '';
-              if (releaseLoad) releaseLoad();
-              const finalWait = await waitFor(() => panel._cmMode === 'diff' && panel._cmView?.state?.doc?.toString?.().includes('Browser tools for watching'));
+              const finalWait = await waitFor(
+                () => panel._cmMode === 'diff' && panel._cmView?.state?.doc?.toString?.().includes('Deterministic test-only README diff line.'),
+                {{timeoutMs: 15000, description: 'README diff CodeMirror payload build'}}
+              );
               const finalText = panel._cmView?.state?.doc?.toString?.() || '';
               const state = openFiles.get(path) || {{}};
               return {{
                 modeWhilePayloadUnresolved,
                 textWhilePayloadUnresolved,
                 diffLoadedWait,
-                loadEnteredWait,
                 finalWait,
-                manualRenderCalled,
                 modeBeforeDiffBuildRelease,
                 finalMode: panel._cmMode || '',
                 finalTextLength: finalText.length,
@@ -264,7 +239,6 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 viewMode: editorViewModeFor(path, item),
                 panelItems: filePanelItemsForPath(path),
                 panelConnected: panel.isConnected === true,
-                loadEntered: window.__readmeDiffLoadEntered === true,
                 apiHasMergeView: Boolean(window.YOLOmuxCodeMirror?.MergeView),
                 apiHasUnifiedMergeView: Boolean(window.YOLOmuxCodeMirror?.unifiedMergeView),
                 statusText: panel.querySelector('.file-editor-status-message')?.textContent || '',
@@ -283,7 +257,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     )
     assert "error" not in metrics, metrics
     assert metrics["modeWhilePayloadUnresolved"] != "edit", metrics
-    assert "Browser tools for watching" not in metrics["textWhilePayloadUnresolved"], metrics
+    assert "Deterministic test-only README diff line." not in metrics["textWhilePayloadUnresolved"], metrics
     assert metrics["finalMode"] == "diff", json.dumps(metrics, sort_keys=True)
     assert metrics["finalTextLength"] == metrics["expectedTextLength"], metrics
     assert metrics["deletedRows"] > 0, metrics
@@ -839,6 +813,68 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_editor_opens_jsonl_table_preview_by_default_and_keeps_raw_edit(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const {frame} = window.__yolomuxTestHelpers;
+            const originalFetch = window.fetch.bind(window);
+            const path = '/home/test/repo/transcript.jsonl';
+            const content = [
+              JSON.stringify({type: 'session_meta', session: {id: 's1'}}),
+              JSON.stringify({type: 'assistant', message: {text: 'hello'}}),
+              '{still-streaming',
+            ].join('\\n');
+            window.fetch = async (input, options = {}) => {
+              const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/read') {
+                return new Response(JSON.stringify({path, name: 'transcript.jsonl', size: content.length, mtime: 20, content}), {
+                  status: 200,
+                  headers: {'Content-Type': 'application/json'},
+                });
+              }
+              return originalFetch(input, options);
+            };
+            const item = await openFileInEditor(path, {name: 'transcript.jsonl', size: content.length, mtime: 20}, {userInitiated: true});
+            await frame();
+            const panel = panelNodes.get(item);
+            const preview = panel?.querySelector('.file-editor-preview-pane-panel');
+            const initial = {
+              mode: editorViewModeFor(path, item),
+              previewHidden: preview?.hidden === true,
+              headers: Array.from(preview?.querySelectorAll('.file-editor-jsonl-preview th') || []).map(node => node.textContent),
+              rows: preview?.querySelectorAll('.file-editor-jsonl-preview tbody tr').length || 0,
+              unparsed: preview?.querySelector('[data-unparsed-line]')?.textContent || '',
+            };
+            const editButton = panel?.querySelector('[data-editor-mode="edit"]');
+            editButton?.click();
+            await frame();
+            done({
+              initial,
+              editButtonVisible: editButton?.hidden === false,
+              finalMode: editorViewModeFor(path, item),
+              editorHidden: panel?.querySelector('.file-editor-codemirror-panel')?.hidden === true,
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["initial"]["mode"] == "preview" and metrics["initial"]["previewHidden"] is False, metrics
+    assert metrics["initial"]["headers"] == ["type", "session", "message"], metrics
+    assert metrics["initial"]["rows"] == 3 and metrics["initial"]["unparsed"] == "{still-streaming", metrics
+    assert metrics["editButtonVisible"] is True, metrics
+    assert metrics["finalMode"] == "edit" and metrics["editorHidden"] is False, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_path):
     browser.set_window_size(1200, 900)
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
@@ -1374,7 +1410,10 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
         const markdown = makePanel('/home/test/repo/docs/README.md', {kind: 'text', content: mdText, original: mdText, dirty: false, language: 'markdown'});
         const validJson = makePanel('/home/test/repo/config.json', {kind: 'text', content: '{"b":2,"a":1}', original: '{"b":2,"a":1}', dirty: false, language: 'json'});
         const invalidJson = makePanel('/home/test/repo/bad.json', {kind: 'text', content: '{"b":', original: '{"b":', dirty: false, language: 'json'});
-        const jsonl = makePanel('/home/test/repo/events.jsonl', {kind: 'text', content: '{"id":1}\\n{"id":2}\\n', original: '', dirty: false, language: 'json'});
+        const jsonl = makePanel('/home/test/repo/events.jsonl', {kind: 'text', content: [
+          JSON.stringify({timestamp: '2026-07-12T19:00:00Z', type: 'assistant', payload: {message: 'short'}}),
+          JSON.stringify({timestamp: '2026-07-12T19:00:01Z', type: 'tool', payload: {message: 'x'.repeat(120)}}),
+        ].join('\\n'), original: '', dirty: false, language: 'json'});
         const badJsonl = makePanel('/home/test/repo/bad.jsonl', {kind: 'text', content: '{"id":1}\\n{"id":\\n', original: '', dirty: false, language: 'json'});
         const geojson = makePanel('/home/test/repo/map.geojson', {kind: 'text', content: '{"type":"FeatureCollection","features":[]}', original: '', dirty: false, language: 'json'});
         const notebookText = JSON.stringify({cells: [{cell_type: 'markdown', source: ['# Title\\n']}, {cell_type: 'code', source: ['print(1)\\n'], outputs: [{output_type: 'stream'}]}]});
@@ -1387,6 +1426,45 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
         const tsv = makePanel('/home/test/repo/table.tsv', {kind: 'text', content: 'name\\tcount\\nalpha\\t1\\n', original: '', dirty: false, language: 'text'});
         const mdPreview = markdown.panel.querySelector('.file-editor-preview-pane-panel');
         const image = mdPreview.querySelector('img[alt="local"]');
+        const jsonlThemeMetrics = light => {
+          document.body.classList.toggle('theme-light', light);
+          document.body.classList.toggle('editor-theme-light', light);
+          const heading = jsonl.panel.querySelector('.file-editor-jsonl-preview th');
+          const cell = jsonl.panel.querySelector('.file-editor-jsonl-preview td');
+          const headingRect = heading.getBoundingClientRect();
+          const cellRect = cell.getBoundingClientRect();
+          return {
+            headingLeft: headingRect.left,
+            cellLeft: cellRect.left,
+            headingWidth: headingRect.width,
+            cellWidth: cellRect.width,
+            headingBackground: getComputedStyle(heading).backgroundColor,
+            cellColor: getComputedStyle(cell).color,
+          };
+        };
+        const jsonlDarkTheme = jsonlThemeMetrics(false);
+        const jsonlLightTheme = jsonlThemeMetrics(true);
+        const jsonlLayout = () => {
+          const preview = jsonl.panel.querySelector('.file-editor-jsonl-preview');
+          const table = preview?.querySelector('table');
+          const payload = preview?.querySelector('th.file-editor-jsonl-payload');
+          const compact = preview?.querySelector('th.file-editor-jsonl-compact-column');
+          const previewRect = preview?.getBoundingClientRect();
+          const tableRect = table?.getBoundingClientRect();
+          const payloadRect = payload?.getBoundingClientRect();
+          const compactRect = compact?.getBoundingClientRect();
+          return {
+            previewWidth: previewRect?.width || 0,
+            tableWidth: tableRect?.width || 0,
+            payloadWidth: payloadRect?.width || 0,
+            compactWidth: compactRect?.width || 0,
+            payloadTitle: Array.from(preview?.querySelectorAll('td.file-editor-jsonl-payload') || []).at(-1)?.title || '',
+          };
+        };
+        const jsonlWideLayout = jsonlLayout();
+        jsonl.panel.style.width = '460px';
+        const jsonlNarrowLayout = jsonlLayout();
+        document.body.classList.remove('theme-light', 'editor-theme-light');
         return {
           markdown: {
             heading: mdPreview.querySelector('h1')?.textContent || '',
@@ -1409,11 +1487,19 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
           },
           jsonl: {
             header: jsonl.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
-            text: jsonl.panel.querySelector('.file-editor-data-preview code')?.textContent || '',
+            headers: Array.from(jsonl.panel.querySelectorAll('.file-editor-jsonl-preview th')).map(node => node.textContent),
+            cells: Array.from(jsonl.panel.querySelectorAll('.file-editor-jsonl-preview td')).map(node => node.textContent),
+            modeButtons: Array.from(jsonl.panel.querySelectorAll('[data-editor-mode]')).filter(node => !node.hidden).map(node => node.dataset.editorMode),
+            tableOverflowX: getComputedStyle(jsonl.panel.querySelector('.file-editor-jsonl-preview')).overflowX,
+            darkTheme: jsonlDarkTheme,
+            lightTheme: jsonlLightTheme,
+            wideLayout: jsonlWideLayout,
+            narrowLayout: jsonlNarrowLayout,
           },
           badJsonl: {
             header: badJsonl.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
-            error: badJsonl.panel.querySelector('.file-editor-preview-error')?.textContent || '',
+            unparsed: badJsonl.panel.querySelector('[data-unparsed-line]')?.textContent || '',
+            unparsedLine: badJsonl.panel.querySelector('[data-unparsed-line]')?.dataset.unparsedLine || '',
           },
           geojson: {
             header: geojson.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
@@ -1465,8 +1551,24 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
     assert '"a": 1' in metrics["validJson"]["text"], metrics
     assert "JSON parse error" in metrics["invalidJson"]["header"], metrics
     assert metrics["invalidJson"]["error"], metrics
-    assert "JSONL preview" in metrics["jsonl"]["header"] and '"id":1' in metrics["jsonl"]["text"], metrics
-    assert "JSONL parse error" in metrics["badJsonl"]["header"] and "line 2" in metrics["badJsonl"]["error"], metrics
+    assert "JSONL preview" in metrics["jsonl"]["header"], metrics
+    assert metrics["jsonl"]["headers"] == ["timestamp", "type", "payload"], metrics
+    assert metrics["jsonl"]["cells"][0:3] == ["2026-07-12T19:00:00Z", "assistant", '{"message":"short"}'], metrics
+    assert metrics["jsonl"]["modeButtons"][:3] == ["edit", "preview", "split"], metrics
+    assert metrics["jsonl"]["tableOverflowX"] == "auto", metrics
+    for theme in ("darkTheme", "lightTheme"):
+        assert abs(metrics["jsonl"][theme]["headingLeft"] - metrics["jsonl"][theme]["cellLeft"]) < 0.5, metrics
+        assert abs(metrics["jsonl"][theme]["headingWidth"] - metrics["jsonl"][theme]["cellWidth"]) < 0.5, metrics
+        assert metrics["jsonl"][theme]["headingBackground"] != "rgba(0, 0, 0, 0)", metrics
+        assert metrics["jsonl"][theme]["cellColor"] != "rgba(0, 0, 0, 0)", metrics
+    wide = metrics["jsonl"]["wideLayout"]
+    narrow = metrics["jsonl"]["narrowLayout"]
+    assert abs(wide["tableWidth"] - wide["previewWidth"]) < 1.5, metrics
+    assert abs(narrow["tableWidth"] - narrow["previewWidth"]) < 1.5, metrics
+    assert narrow["payloadWidth"] < wide["payloadWidth"], metrics
+    assert wide["payloadWidth"] > wide["compactWidth"], metrics
+    assert len(wide["payloadTitle"]) > 120, metrics
+    assert metrics["badJsonl"]["unparsed"] == '{"id":' and metrics["badJsonl"]["unparsedLine"] == "2", metrics
     assert "GeoJSON preview" in metrics["geojson"]["header"] and '"FeatureCollection"' in metrics["geojson"]["text"], metrics
     assert "Notebook preview" in metrics["notebook"]["header"], metrics
     assert "2 cells" in metrics["notebook"]["text"] and "outputs hidden" in metrics["notebook"]["text"], metrics

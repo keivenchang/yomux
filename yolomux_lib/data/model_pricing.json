@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "catalog_revision": 1,
+  "generated_at": "2026-07-11T00:00:00Z",
+  "models": [
+    {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "aliases": ["gpt-4.1"],
+      "source": {
+        "url": "https://platform.openai.com/docs/pricing",
+        "kind": "official",
+        "checked_at": "2026-07-11T00:00:00Z"
+      },
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "2.00", "effective_from": "2025-01-01T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.50", "effective_from": "2025-01-01T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "8.00", "effective_from": "2025-01-01T00:00:00Z"}
+      ]
+    }
+  ]
+}

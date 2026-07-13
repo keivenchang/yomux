@@ -95,16 +95,17 @@
 .yolomux-dockview .dv-right-actions-container {
   position: absolute;
   top: 0;
-  right: 1px;
+  right: 0;
   z-index: var(--z-pane-tab-strip);
   flex: 0 0 auto;
   align-items: flex-start;
   min-height: calc(var(--pane-tab-height) + 2px);
-  padding-top: var(--space-2);
+  padding-top: 0;
   pointer-events: none;
 }
 .yolomux-dockview .dockview-pane-header-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   min-width: 0;
   pointer-events: auto;
@@ -516,6 +517,11 @@ body.layout-resizing {
 }
 .grid.drop-preview::before {
   z-index: var(--z-drop-preview);
+}
+.yolomux-dockview.dockview-invalid-tab-drop-preview .dv-groupview.drop-preview::before {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger-bg) 20%, transparent);
+  border-color: var(--danger-border);
 }
 .drop-slot.drop-preview-middle::before {
   inset: 18%;
@@ -1953,7 +1959,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: 0;
   padding-inline: var(--space-3);
 }
-.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-popout):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: var(--space-3);

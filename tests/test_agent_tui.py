@@ -300,6 +300,7 @@ def test_classify_agent_pane_handles_idle_ghost_disconnected_and_transcript_upgr
         include_transcript_activity=False,
         capture_func=lambda _target, visible_only=False: ghost_plain,
         capture_styled_func=lambda _target, visible_only=False: ghost_styled,
+        cursor_func=lambda _target: AgentTuiCursor(x=1, y=2, character="›"),
         prompt_classifier=lambda _target, _visible, _pane, _source: {"visible": False},
         screen_classifier=lambda _visible, _pane_target: {"key": "idle", "text": ""},
     )

@@ -28,6 +28,7 @@ for _env_var, _prefix in (("YOLOMUX_CONFIG_DIR", "yolomux-test-config-"), ("YOLO
         os.environ[_env_var] = tempfile.mkdtemp(prefix=f"{_prefix}{_xdist_worker}-")
     else:
         os.environ.setdefault(_env_var, tempfile.mkdtemp(prefix=_prefix))
+os.environ.setdefault("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "1")
 
 
 from yolomux_lib import app as app_module

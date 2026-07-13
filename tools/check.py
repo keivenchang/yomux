@@ -24,10 +24,10 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,10 +38,16 @@ if str(REPO_ROOT) not in sys.path:
 
 from yolomux_lib.background_owner import pid_is_alive
 
-DEFAULT_TOOL_LOCK_PATH = Path(tempfile.gettempdir()) / "yolomux-expensive-tools.lock"
+DEFAULT_TOOL_LOCK_PATH = Path(
+    os.environ.get("YOLOMUX_TOOL_LOCK_PATH", str(Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"))
+).expanduser()
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
 EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e"})
+
+
+class ToolGuardBusy(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -76,7 +82,49 @@ def py_compile_files() -> list[str]:
     ]
 
 
-def lanes() -> list[Lane]:
+def check_cpu_capacity() -> int:
+    cpus = max(1, os.cpu_count() or 1)
+    return min(cpus, 8) if platform.system() == "Darwin" else cpus
+
+
+def pytest_worker_counts(*, serial: bool = False) -> tuple[str, str, str]:
+    """Divide a core-derived concurrent worker budget across pytest pools."""
+    if serial:
+        return "1", "1", "1"
+    override = os.environ.get("YOLOMUX_PYTEST_WORKERS", "").strip()
+    if override:
+        parts = [part.strip() for part in override.split(",")]
+        if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) > 0:
+            return parts[0], parts[0], parts[0]
+        if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
+            return parts[0], parts[1], parts[2]
+        raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
+    cpus = check_cpu_capacity()
+    # The three pools run together, and browser workers also own Chrome
+    # processes. Reserve one quarter of the logical CPUs for Chrome, Node,
+    # service daemons, live YOLOmux servers, and the OS. Split the remaining
+    # budget 1/2 non-browser, 1/3 browser, and the remainder E2E.
+    # Browser workers own Chrome process trees and macOS security/indexing
+    # services scan their temporary profiles. Keep the Mac gate to half of the
+    # capped CPU budget; Linux keeps the measured 75% allocation.
+    budget = max(3, cpus // 2) if platform.system() == "Darwin" else max(3, (cpus * 3) // 4)
+    nonbrowser = max(1, budget // 2)
+    browser = max(1, budget // 3)
+    e2e = max(1, budget - nonbrowser - browser)
+    return str(nonbrowser), str(browser), str(e2e)
+
+
+def pytest_xdist_args(workers: str, *, serial: bool = False, worksteal: bool = False) -> list[str]:
+    if serial:
+        return []
+    args = ["-n", workers]
+    if worksteal:
+        args.extend(["--dist", "worksteal"])
+    return args
+
+
+def lanes(*, serial: bool = False) -> list[Lane]:
+    nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial)
     return [
         Lane(
             "py-compile",
@@ -119,7 +167,7 @@ def lanes() -> list[Lane]:
             # fast unit failure surfaces immediately and the two pools do not thrash each other's cores.
             # Exclude browser too: Selenium tests are a separate `pytest-browser` lane so browser-only
             # script errors and timing flakes do not hide inside the generic pytest lane.
-            (Step("pytest non-browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e and not browser", "-q"]),),
+            (Step("pytest non-browser", ["python3", "-m", "pytest", "tests", *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not e2e and not browser", "-q"]),),
             True,
         ),
         Lane(
@@ -134,8 +182,12 @@ def lanes() -> list[Lane]:
                 Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),
                 # Browser durations vary enough that xdist's initial load assignment leaves a long
                 # tail even with valid slow-first hints. Two same-code A/B pairs made work stealing
-                # repeatably faster, while boot smoke stays serial and separate above.
-                Step("pytest browser", ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot", "-q"]),
+                # repeatably faster, while boot smoke stays serial and separate above. Local visual
+                # goldens compare rendered pixels against reviewed machine baselines, so they run in
+                # a separate serial step: parallel Chrome font/compositor pressure can otherwise add
+                # enough non-product raster variation to cross the RMS threshold.
+                Step("pytest browser", ["python3", "-m", "pytest", "tests", *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
+                Step("pytest browser visual goldens", ["python3", "-m", "pytest", "tests", "-m", "visual_golden", "-q"]),
             ),
             True,
         ),
@@ -146,7 +198,7 @@ def lanes() -> list[Lane]:
             # bounded: `-n auto` can launch dozens of tmux/mock-agent subprocesses while the browser and
             # unit pools are also running, which slows the whole default gate down and makes flakes harder
             # to diagnose.
-            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]),),
+            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),),
             True,
         ),
         Lane(
@@ -262,7 +314,10 @@ def expensive_tool_lock(enabled: bool = True, lock_path: Path = DEFAULT_TOOL_LOC
         return
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ToolGuardBusy(f"another expensive YOLOmux check already owns {lock_path}") from exc
         try:
             yield True
         finally:
@@ -330,6 +385,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock and live-server priority lowering")
     args = parser.parse_args(argv)
 
+    if args.serial:
+        available = lanes(serial=True)
+
     if args.list_lanes:
         for lane in available:
             print(f"{lane.name}\t{lane.label}")
@@ -343,18 +401,22 @@ def main(argv: list[str] | None = None) -> int:
 
     guard_enabled = selected_needs_tool_guard(selected, args.lane) and not args.no_tool_guard
     if guard_enabled:
-        print(f"Waiting for YOLOmux expensive-tool lock: {DEFAULT_TOOL_LOCK_PATH}", flush=True)
+        print(f"Acquiring YOLOmux expensive-tool lock: {DEFAULT_TOOL_LOCK_PATH}", flush=True)
     started = time.monotonic()
-    with expensive_tool_lock(enabled=guard_enabled):
-        if guard_enabled:
-            active_records = active_yolomux_server_records()
-            if lower_current_process_priority(active_records):
-                ports = sorted({str(record.get("port") or "?") for record in active_records})
-                print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
-        mode = "serial" if args.serial else "parallel"
-        print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
-        results = run_serial(selected) if args.serial else run_parallel(selected)
-        elapsed = time.monotonic() - started
+    try:
+        with expensive_tool_lock(enabled=guard_enabled):
+            if guard_enabled:
+                active_records = active_yolomux_server_records()
+                if lower_current_process_priority(active_records):
+                    ports = sorted({str(record.get("port") or "?") for record in active_records})
+                    print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
+            mode = "serial" if args.serial else "parallel"
+            print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
+            results = run_serial(selected) if args.serial else run_parallel(selected)
+            elapsed = time.monotonic() - started
+    except ToolGuardBusy as exc:
+        print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
+        return 3
 
     failed = [result.label for result in results if not result.ok]
     print("\n" + ("=" * 40))

@@ -321,12 +321,17 @@
   --popover-hide-delay: 300ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
+  --context-menu-direction-count: 4;
+  --context-menu-action-column-count: calc(var(--context-menu-direction-count) + 1);
+  --context-menu-compact-inline-size: min(calc(var(--touch-target-min-size) * var(--context-menu-action-column-count)), var(--popover-max-inline-size));
+  --context-menu-max-block-size: var(--app-menu-max-block-size);
   --dialog-compact-inline-size: 80ch;
   --dialog-standard-inline-size: 112ch;
   --dialog-wide-inline-size: 144ch;
   --app-modal-backdrop-bg: rgba(0, 0, 0, 0.46);
   --app-modal-border-width: max(2px, var(--pane-split-gap));
   --app-modal-border-color: color-mix(in srgb, var(--pane-tab-panel-ring) var(--pane-active-ring-opacity), transparent);
+  --app-modal-dialog-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
   --shadow-popover: 0 18px 50px rgba(0, 0, 0, 0.45);
   --shadow-elevated: 0 16px 42px rgba(0, 0, 0, 0.45);
   --share-stage-bg: var(--paint-black);
@@ -619,7 +624,9 @@
   --icon-gear: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z'/%3E%3Cpath d='M19.4 15a8 8 0 0 0 .1-1l2-1.5-2-3.5-2.4 1a7.3 7.3 0 0 0-1.7-1L15 6.4h-6L8.6 9a7.3 7.3 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a8 8 0 0 0 .1 2l-2 1.5 2 3.5 2.4-1a7.3 7.3 0 0 0 1.7 1l.4 2.6h6l.4-2.6a7.3 7.3 0 0 0 1.7-1l2.4 1 2-3.5z'/%3E%3C/svg%3E");
   --icon-pin: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M5 17h14'/%3E%3Cpath d='M8 3h8l-1 7 3 4H6l3-4z'/%3E%3C/svg%3E");
   --icon-branch-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='2.5'/%3E%3Ccircle cx='18' cy='18' r='2.5'/%3E%3Ccircle cx='6' cy='18' r='2.5'/%3E%3Cpath d='M8.5 6H12a4 4 0 0 1 4 4v5.5'/%3E%3Cpath d='M6 8.5v7'/%3E%3C/svg%3E");
-  --icon-yoagent: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5A3.5 3.5 0 0 1 7.5 3h9A3.5 3.5 0 0 1 20 6.5v5A3.5 3.5 0 0 1 16.5 15H12l-5 4v-4A3 3 0 0 1 4 12z'/%3E%3Cpath d='M8 8h8'/%3E%3Cpath d='M8 11h5'/%3E%3C/svg%3E");
+  --icon-robot: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v3'/%3E%3Ccircle cx='12' cy='2.5' r='1'/%3E%3Crect x='4' y='6' width='16' height='13' rx='3'/%3E%3Ccircle cx='9' cy='12' r='1.25' fill='black' stroke='none'/%3E%3Ccircle cx='15' cy='12' r='1.25' fill='black' stroke='none'/%3E%3Cpath d='M9 16h6'/%3E%3Cpath d='M2 10v5'/%3E%3Cpath d='M22 10v5'/%3E%3C/svg%3E");
+  --icon-chat-bubble: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'/%3E%3Cpath d='M8 9h8'/%3E%3Cpath d='M8 13h5'/%3E%3C/svg%3E");
+  --icon-chart: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 3v17h17'/%3E%3Cpath d='m7 15 4-4 3 2 5-6'/%3E%3Cpath d='M16 7h3v3'/%3E%3C/svg%3E");
   --icon-changes: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10'/%3E%3Cpath d='M7 20h10'/%3E%3Cpath d='M12 6v12'/%3E%3Cpath d='M5 10h5'/%3E%3Cpath d='M14 14h5'/%3E%3C/svg%3E");
   --editor-preview-bg: var(--editor-scheme-preview-bg);
   --topbar-height: 38px;
@@ -677,7 +684,7 @@
   --20-sessions-popovers-popover-desc-fg-38: var(--text);
   --20-sessions-popovers-session-popover-fg-39: var(--text);
   --20-sessions-popovers-branch-link-fg-40: var(--text);
-  --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: #3f4754;
+  --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: #596273;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: var(--bad);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: var(--good);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: var(--accent-gold);
@@ -1441,7 +1448,8 @@ body.theme-light {
 .yoagent-message-details pre,
 .modal pre,
 .drop-action-result pre,
-.file-editor-conflict-compare pre {
+.file-editor-conflict-compare pre,
+.js-debug-log-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1492,13 +1500,13 @@ body.theme-light {
 .yoagent-jobs-list,
 .info-tree-chip,
 .share-field select,
-.share-field input[type="number"],
-.share-field input[type="text"],
-.file-explorer-path,
-.file-explorer-path-inline,
-.js-debug-hover-tooltip {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
+  .share-field input[type="number"],
+  .share-field input[type="text"],
+  .file-explorer-path,
+  .file-explorer-path-inline,
+  .js-debug-hover-tooltip {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
   color: var(--text);
 }
 :where(button),
@@ -1507,12 +1515,12 @@ body.theme-light {
 .conversation-message,
 .yoagent-composer-pill,
 .yoagent-backend-pill,
-.terminal-drop-suggestions,
-.file-editor-preview-fallback,
-.markdown-image-error,
-.mermaid-preview-error {
-  border: 1px solid var(--line);
-  background: var(--panel2);
+  .terminal-drop-suggestions,
+  .file-editor-preview-fallback,
+  .markdown-image-error,
+  .mermaid-preview-error {
+    border: 1px solid var(--line);
+    background: var(--panel2);
   color: var(--text);
 }
 :where(button) {
@@ -1598,7 +1606,10 @@ body.theme-light {
 .file-explorer-head,
 .file-editor-head,
 .file-explorer-toolbar-row,
-.file-explorer-panel-meta {
+.file-explorer-panel-meta,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   align-items: center;
   gap: var(--space-6);
@@ -1654,7 +1665,10 @@ body.theme-light {
 .info-tree-group-selects,
 .info-tree-sort-controls,
 .yoagent-job-controls,
-.yoagent-chat-error {
+.yoagent-chat-error,
+.js-debug-logs-toolbar,
+.js-debug-log-levels,
+.js-debug-log-meta {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);
@@ -1687,6 +1701,8 @@ body.theme-light {
 .file-explorer-date-toggle.active,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
+.js-debug-log-level[aria-pressed="true"],
+.js-debug-cost-details:hover,
 .file-editor-preview-zoom-toolbar button[aria-pressed="true"],
 .file-editor-codemirror .cm-search label:has(input:checked),
 .file-editor-codemirror-panel .cm-search label:has(input:checked) {
@@ -2197,6 +2213,39 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   max-width: 112px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+#status.layout-status-visible {
+  position: fixed !important;
+  z-index: var(--z-file-editor-dialog);
+  inset-block-start: calc(var(--topbar-height) + var(--space-8)) !important;
+  inset-inline-end: var(--space-12) !important;
+  width: max-content !important;
+  max-width: min(42rem, calc(100vw - var(--space-12) - var(--space-12))) !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: var(--space-6) var(--space-10) !important;
+  overflow: visible !important;
+  clip: auto !important;
+  white-space: normal !important;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+  font: 600 var(--ui-font-size-sm)/1.35 var(--ui-font);
+  pointer-events: none;
+}
+#status.layout-status-danger {
+  color: var(--danger-panel-text);
+  border-color: var(--danger-panel-border) !important;
+  background: color-mix(in srgb, var(--danger-muted-bg) 86%, var(--panel2));
+}
+body.theme-light #status.layout-status-danger {
+  color: var(--danger-light-text);
+  background: var(--danger-panel-light-bg);
+}
+#status.layout-status-advisory {
+  color: var(--warning-border-strong);
+  border-color: var(--warning-border-strong) !important;
+  background: color-mix(in srgb, var(--warning-border-strong) 12%, var(--panel2));
 }
 #status:empty {
   display: none;
@@ -3054,8 +3103,14 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 .app-menu-ui-icon-branch-info {
   --app-menu-ui-icon: var(--icon-branch-info);
 }
-.app-menu-ui-icon-yoagent {
-  --app-menu-ui-icon: var(--icon-yoagent);
+.app-menu-ui-icon-robot {
+  --app-menu-ui-icon: var(--icon-robot);
+}
+.app-menu-ui-icon-chat-bubble {
+  --app-menu-ui-icon: var(--icon-chat-bubble);
+}
+.app-menu-ui-icon-chart {
+  --app-menu-ui-icon: var(--icon-chart);
 }
 .app-menu-ui-icon-changes {
   --app-menu-ui-icon: var(--icon-changes);
@@ -4340,7 +4395,9 @@ body :is(
   height: var(--pane-tab-height);
   border: 1px solid var(--line);
   border-radius: var(--radius-md) var(--radius-md) 0 0;
-  overflow: hidden;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--pane-bar-bg, var(--panel2));
 }
 .js-debug-subtab {
@@ -4369,6 +4426,240 @@ body :is(
 }
 .js-debug-subview[hidden] {
   display: none;
+}
+.js-debug-system-view {
+  min-height: 0;
+  overflow: auto;
+}
+.js-debug-logs-view {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--space-8);
+  min-height: 0;
+  overflow: hidden;
+}
+.js-debug-logs-toolbar,
+.js-debug-log-levels {
+  min-width: 0;
+}
+.js-debug-logs-toolbar {
+  justify-content: space-between;
+}
+.js-debug-log-levels {
+  flex: 1 1 auto;
+}
+.js-debug-log-level {
+  text-transform: none;
+}
+.js-debug-logs-error {
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--danger-border-soft);
+  border-radius: var(--radius-control);
+  color: var(--bad);
+  background: var(--danger-panel-bg);
+  overflow-wrap: anywhere;
+}
+.js-debug-log-list {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+}
+.js-debug-log-row {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-7) var(--space-8);
+  border-block-end: 1px solid var(--line);
+}
+.js-debug-log-row:last-child {
+  border-block-end: 0;
+}
+.js-debug-log-meta {
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.3 var(--mono-font);
+}
+.js-debug-log-chip {
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-control);
+  font-weight: 800;
+}
+.js-debug-log-row--info .js-debug-log-chip {
+  color: var(--good);
+}
+.js-debug-log-row--warning .js-debug-log-chip {
+  color: var(--attention);
+}
+.js-debug-log-row--debug .js-debug-log-chip {
+  color: var(--muted);
+}
+.js-debug-log-row--error .js-debug-log-chip {
+  color: var(--bad);
+}
+.js-debug-log-message {
+  min-width: 0;
+  color: var(--text);
+  font: 500 var(--ui-font-size-sm)/1.45 var(--mono-font);
+}
+.js-debug-log-empty {
+  padding: var(--space-12);
+  color: var(--muted);
+  text-align: center;
+}
+.js-debug-system-toolbar {
+  position: sticky;
+  z-index: var(--z-layer-control);
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding-block-end: var(--space-8);
+  color: var(--muted);
+  background: var(--bg);
+  font: 600 var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-system-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  align-items: start;
+  gap: var(--space-8);
+}
+.js-debug-system-card {
+  min-width: 0;
+  padding: var(--space-10);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel2);
+}
+.js-debug-system-card--wide {
+  grid-column: 1 / -1;
+}
+.js-debug-system-card h3 {
+  margin: 0 0 var(--space-8);
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.js-debug-system-kv {
+  display: grid;
+  gap: var(--space-5);
+  margin: 0;
+}
+.js-debug-system-kv > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  gap: var(--space-8);
+  align-items: baseline;
+}
+.js-debug-system-kv dt {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.js-debug-system-kv dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  text-align: end;
+  font-family: var(--mono-font);
+}
+.js-debug-system-state {
+  flex: 0 0 auto;
+  padding: var(--space-2) var(--space-6);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  background: var(--line);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-system-state--good {
+  color: var(--good);
+}
+.js-debug-system-state--bad {
+  color: var(--bad);
+}
+.js-debug-system-local-services-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.js-debug-system-local-services-table {
+  --js-debug-system-local-services-field-width: 10rem;
+  --js-debug-system-local-services-service-width: 9rem;
+  table-layout: fixed;
+  width: max(100%, var(--js-debug-system-local-services-min-width, 46rem));
+}
+.js-debug-system-table.js-debug-system-local-services-table th:first-child,
+.js-debug-system-table.js-debug-system-local-services-table td:first-child {
+  width: var(--js-debug-system-local-services-field-width);
+  min-width: var(--js-debug-system-local-services-field-width);
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.js-debug-system-local-services-table th:not(:first-child) {
+  width: var(--js-debug-system-local-services-service-width);
+  min-width: var(--js-debug-system-local-services-service-width);
+  vertical-align: top;
+}
+.js-debug-system-local-services-table td:not(:first-child) {
+  width: var(--js-debug-system-local-services-service-width);
+  min-width: var(--js-debug-system-local-services-service-width);
+  vertical-align: top;
+}
+.js-debug-system-local-services-table thead th:not(:first-child) {
+  text-align: end;
+}
+.js-debug-system-service-name {
+  display: block;
+  margin-block-end: var(--space-3);
+  color: var(--text);
+  font-family: var(--ui-font);
+}
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] th,
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
+  border-block-end: 0;
+  vertical-align: top;
+}
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.js-debug-system-service-cell--fresh {
+  color: var(--text);
+}
+.js-debug-system-service-cell--stale,
+.js-debug-system-service-cell--prev {
+  color: var(--muted);
+}
+.js-debug-system-service-cell--prev {
+  font-style: italic;
+}
+.js-debug-system-table-wrap {
+  max-width: 100%;
+  overflow: auto;
+}
+.js-debug-system-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+}
+.js-debug-system-table th,
+.js-debug-system-table td {
+  padding: var(--space-5) var(--space-7);
+  border-block-end: 1px solid var(--line);
+  text-align: end;
+  white-space: nowrap;
+}
+.js-debug-system-table th:first-child,
+.js-debug-system-table td:first-child {
+  width: 100%;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.js-debug-system-loading,
+.js-debug-system-empty {
+  color: var(--muted);
 }
 .ui-disclosure-triangle,
 .info-tree-group summary::before,
@@ -4488,6 +4779,14 @@ body :is(
   padding: var(--space-1) var(--space-2);
   color: inherit;
   font: inherit;
+}
+.js-debug-model-token-dimension {
+  flex: 0 1 auto;
+  justify-self: auto;
+}
+.js-debug-model-token-dimension select {
+  width: auto;
+  max-width: min(9rem, 32vw);
 }
 .js-debug-chart-layout-control,
 .js-debug-chart-toggle-control {
@@ -4632,8 +4931,8 @@ body :is(
 .js-debug-history-overlay {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: block;
+  min-height: 100%;
   padding: var(--space-12);
   color: var(--text);
   background: color-mix(in srgb, var(--panel) 76%, transparent);
@@ -4643,7 +4942,13 @@ body :is(
   display: none;
 }
 .js-debug-history-overlay-message {
-  display: inline-flex;
+  position: sticky;
+  top: 50%;
+  display: flex;
+  width: max-content;
+  max-width: min(100%, 42rem);
+  margin-inline: auto;
+  transform: translateY(-50%);
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
@@ -4670,6 +4975,7 @@ body :is(
   gap: var(--space-10) 14px;
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
 }
 .js-debug-chart-grid[data-js-debug-chart-layout="1"] { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); --js-debug-chart-min-height: 150px; }
 .js-debug-chart-grid[data-js-debug-chart-layout="2"] { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); --js-debug-chart-min-height: 210px; }
@@ -4750,6 +5056,344 @@ body :is(
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-chart-body {
   grid-template-rows: minmax(72px, 1fr) minmax(20px, auto);
 }
+.js-debug-cost-summary {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  align-content: start;
+  min-block-size: 0;
+}
+.js-debug-cost-summary .js-debug-chart-head {
+  gap: var(--space-4);
+}
+.js-debug-cost-details {
+  min-height: var(--compact-control-height);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-5);
+  color: var(--active-control-bg);
+  background: var(--active-control-soft-bg);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-cost-details:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-cost-range {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-model-usages {
+  min-width: 0;
+  margin-top: var(--space-7);
+}
+.js-debug-cost-model-usages h4 {
+  margin: 0 0 var(--space-4);
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-usage-swatch {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+}
+.js-debug-cost-usage-swatch--input {
+  background: var(--js-debug-agent-token-cyan);
+}
+.js-debug-cost-usage-swatch--cache {
+  background: var(--js-debug-agent-token-orange);
+}
+.js-debug-cost-usage-swatch--output {
+  background: var(--js-debug-agent-token-magenta);
+}
+.js-debug-cost-usage-swatch--other {
+  background: var(--js-debug-agent-token-beige);
+}
+.js-debug-cost-model-list > li {
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  margin: var(--space-6) 0 0;
+}
+.js-debug-cost-compact div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-6);
+  min-width: 0;
+}
+.js-debug-cost-compact dt {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-compact dd {
+  margin: 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1.15 var(--mono-font);
+  text-align: end;
+}
+.js-debug-cost-token-count {
+  margin-inline-start: var(--space-4);
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.15 var(--mono-font);
+}
+.js-debug-cost-summary > .js-debug-cost-modal-host {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+}
+.js-debug-cost-token-summary {
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-table-wrap {
+  max-inline-size: 100%;
+}
+.js-debug-cost-table {
+  min-inline-size: min(100%, var(--dialog-compact-inline-size));
+}
+.js-debug-cost-table th:not(:first-child) {
+  color: var(--muted);
+}
+.js-debug-cost-table th[aria-sort] {
+  white-space: nowrap;
+}
+.js-debug-cost-sort {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.js-debug-cost-sort:hover,
+.js-debug-cost-sort:focus-visible {
+  color: var(--active-control-text);
+}
+.js-debug-cost-sort:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-cost-table th > .js-debug-cost-usage-swatch {
+  margin-inline-end: var(--space-2);
+}
+.js-debug-cost-table tbody th,
+.js-debug-cost-table tfoot th {
+  color: var(--text);
+  font-weight: 700;
+}
+.js-debug-cost-table tfoot th,
+.js-debug-cost-table tfoot td {
+  border-block-start: 2px solid var(--line);
+  border-block-end: 0;
+}
+.js-debug-cost-table-metric {
+  display: grid;
+  gap: var(--space-1);
+}
+.js-debug-cost-table-metric strong,
+.js-debug-cost-table-metric small {
+  font-family: var(--mono-font);
+}
+.js-debug-cost-table-metric small {
+  color: var(--muted);
+}
+.js-debug-cost-transcript-link {
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-report-title {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+.js-debug-cost-report h1 {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-lg)/1.25 var(--ui-font);
+}
+.js-debug-cost-report-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-top: var(--space-5);
+}
+.js-yocost-panel .js-yocost-body,
+.js-yocost-panel .js-yocost-scroll,
+.js-yocost-panel .js-debug-cost-report,
+.js-yocost-panel .js-debug-cost-report-body {
+  min-inline-size: 0;
+}
+.js-yocost-panel .js-yocost-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.js-yocost-data-age {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-block-end: var(--space-6);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-debug-range-slider:disabled {
+  cursor: not-allowed;
+  filter: grayscale(1);
+  opacity: 0.52;
+}
+.js-yocost-panel .js-debug-cost-report {
+  display: flex;
+  flex-direction: column;
+  inline-size: 100%;
+  max-inline-size: 100%;
+}
+.js-yocost-panel .js-debug-cost-report-body {
+  overflow: visible;
+}
+.js-debug-cost-report-body > p {
+  margin: var(--space-4) 0;
+  line-height: 1.5;
+}
+.js-debug-cost-details-section {
+  margin-top: var(--space-10);
+}
+.js-debug-cost-details-section h2 {
+  margin: 0 0 var(--space-5);
+  padding-bottom: var(--space-3);
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.3 var(--ui-font);
+  border-bottom: 1px solid var(--line);
+}
+.js-debug-cost-report-list {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding-inline-start: var(--space-10);
+  line-height: 1.45;
+}
+.js-debug-cost-report-list ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding-inline-start: var(--space-10);
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+}
+.js-debug-cost-report-list li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-report-list li::marker {
+  color: var(--muted);
+}
+.js-debug-cost-report-list span {
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-weight: 600;
+}
+.js-debug-cost-pricing-links {
+  margin-inline-start: var(--space-4);
+  font-family: var(--ui-font);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 600;
+}
+.js-debug-cost-pricing-links::before {
+  content: "[";
+  color: var(--muted);
+}
+.js-debug-cost-pricing-links::after {
+  content: "]";
+  color: var(--muted);
+}
+.js-debug-cost-report-total {
+  margin: var(--space-6) 0 0;
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-catalog {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-5);
+  margin: var(--space-6) 0;
+}
+.js-debug-cost-catalog div {
+  min-width: 0;
+}
+.js-debug-cost-catalog dt {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+}
+.js-debug-cost-catalog dd {
+  margin: var(--space-2) 0 0;
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-source-tree {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.js-debug-cost-source-tree li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-4);
+  font: var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-cost-source-tree li[aria-level="2"] {
+  margin-inline-start: var(--space-8);
+}
+.js-debug-cost-source-label {
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-source-subtotals {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-source-tree li:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+@container (max-width: 22rem) {
+  .js-debug-cost-summary .js-debug-chart-heading-row {
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+  .js-debug-cost-summary .js-debug-chart-title {
+    flex-basis: 100%;
+  }
+  .js-debug-cost-catalog {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .js-debug-chart-unavailable {
   display: grid;
   min-height: 138px;
@@ -4774,6 +5418,10 @@ body :is(
   inset-inline: 0;
   top: var(--js-debug-axis-y, 0%);
   transform: translateY(-50%);
+}
+.js-debug-y-axis--broken [data-js-debug-axis-break-label]::after {
+  content: " ≋";
+  color: var(--active-accent-bright);
 }
 .js-debug-plot {
   display: grid;
@@ -4820,6 +5468,11 @@ body :is(
 .js-debug-grid-line--integer {
   stroke: color-mix(in srgb, var(--text) 55%, var(--line));
   stroke-width: 0.3;
+}
+.js-debug-axis-break {
+  stroke: var(--active-accent-bright);
+  stroke-width: 1.2;
+  opacity: 0.9;
 }
 .js-debug-line {
   stroke: var(--js-debug-series-color, var(--text));
@@ -4971,7 +5624,7 @@ body :is(
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--js-debug-series-color, currentColor);
 }
 .js-debug-legend-line {
   width: 18px;
@@ -6418,16 +7071,17 @@ body .file-explorer-changes-panel {
 .yolomux-dockview .dv-right-actions-container {
   position: absolute;
   top: 0;
-  right: 1px;
+  right: 0;
   z-index: var(--z-pane-tab-strip);
   flex: 0 0 auto;
   align-items: flex-start;
   min-height: calc(var(--pane-tab-height) + 2px);
-  padding-top: var(--space-2);
+  padding-top: 0;
   pointer-events: none;
 }
 .yolomux-dockview .dockview-pane-header-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   min-width: 0;
   pointer-events: auto;
@@ -6839,6 +7493,11 @@ body.layout-resizing {
 }
 .grid.drop-preview::before {
   z-index: var(--z-drop-preview);
+}
+.yolomux-dockview.dockview-invalid-tab-drop-preview .dv-groupview.drop-preview::before {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger-bg) 20%, transparent);
+  border-color: var(--danger-border);
 }
 .drop-slot.drop-preview-middle::before {
   inset: 18%;
@@ -8276,7 +8935,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   min-width: 0;
   padding-inline: var(--space-3);
 }
-.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-popout):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: var(--space-3);
@@ -8517,7 +9176,13 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   box-shadow: var(--shadow-elevated);
   font: 700 var(--ui-font-size)/1 var(--ui-font);
-  touch-action: manipulation;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.mobile-terminal-key-launcher--open {
+  font-size: 20px;
 }
 /* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
    not a permanent row, so an idle terminal keeps its full visible height. */
@@ -8525,40 +9190,40 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   position: absolute;
   z-index: var(--z-terminal-popover);
   inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
-  inset-block-start: 50%;
-  transform: translateY(-50%);
+  inset-block-end: calc(max(var(--space-8), env(safe-area-inset-bottom)) + 44px);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   grid-auto-rows: max-content;
   align-content: start;
   gap: var(--space-4);
   width: min(18rem, calc(100vw - var(--space-12)));
-  max-height: calc(100% - var(--space-12));
-  padding: var(--space-5);
+  max-height: calc(100% - var(--space-4));
+  padding: var(--space-2);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   box-shadow: var(--shadow-elevated), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 .mobile-terminal-keybar[hidden] {
   display: none;
 }
-.mobile-terminal-key-drag {
-  grid-row: 1 / -1;
-  align-self: stretch;
-  width: 18px;
-  min-height: 36px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  background: transparent;
-  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
-  cursor: grab;
-  touch-action: none;
+.mobile-terminal-key-side {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-rows: repeat(6, 36px);
+  align-self: start;
+  align-content: start;
+  gap: var(--space-1);
 }
-.mobile-terminal-key-drag:active {
-  cursor: grabbing;
+.mobile-terminal-key-side .mobile-terminal-key {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
 }
 .mobile-terminal-keyrow {
   display: flex;
@@ -8571,7 +9236,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 }
 .mobile-terminal-keyrow--primary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: visible;
 }
 .mobile-terminal-keyrow-shell {
@@ -8600,6 +9265,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   display: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
+.mobile-terminal-keybar--more .mobile-terminal-key-side,
 .mobile-terminal-keybar--more .mobile-terminal-key-dpad {
   display: none;
 }
@@ -8655,6 +9321,9 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .mobile-terminal-key--interrupt {
   color: var(--danger-text);
   border-color: var(--danger-border);
+}
+.mobile-terminal-key.locked {
+  box-shadow: inset 0 0 0 2px var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
 }
 .mobile-terminal-key:disabled {
   opacity: 0.48;
@@ -8780,20 +9449,20 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu {
   position: fixed;
   z-index: var(--z-terminal-popover);
-  min-width: 150px;
-  padding: var(--space-4);
+  padding: var(--space-3);
   color: var(--chrome-text-strong);
   background: var(--overlay-surface-strong);
   border: 1px solid var(--sep-muted);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-elevated);
 }
-.session-context-menu {
-  min-width: 178px;
+.terminal-context-menu:not(.repo-chip-menu) {
+  max-width: var(--context-menu-compact-inline-size);
 }
-.tab-action-sheet {
-  width: min(calc(100vw - (2 * var(--popover-edge-gap))), 38rem);
-  max-height: min(72vh, 42rem);
+.terminal-context-menu.tab-action-sheet {
+  width: var(--context-menu-compact-inline-size);
+  max-width: var(--popover-max-inline-size);
+  max-height: var(--context-menu-max-block-size);
   overflow: auto;
   transform: none;
 }
@@ -8802,7 +9471,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   width: 100%;
   min-width: 0;
   border: 0;
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-4) var(--space-6);
   color: var(--chrome-text-strong);
   background: transparent;
   cursor: pointer;
@@ -8817,12 +9486,12 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .tab-directional-action-groups {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2);
 }
 .tab-split-actions {
   display: grid;
-  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  grid-template-columns: auto repeat(var(--context-menu-direction-count), minmax(0, 1fr));
   grid-template-rows: var(--touch-target-min-size);
   gap: var(--space-2);
   min-width: 0;
@@ -8857,8 +9526,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: none;
 }
 .tab-directional-action-icon {
-  --tab-directional-icon-inline-size: 32px;
-  --tab-directional-icon-block-size: 24px;
+  --tab-directional-icon-inline-size: 2.75em;
+  --tab-directional-icon-block-size: 2em;
   --tab-directional-icon-border-width: var(--space-2);
   --tab-directional-icon-outer-radius: var(--radius-control);
   --tab-directional-icon-inner-radius: var(--space-2);
@@ -8951,11 +9620,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-context-menu button {
   width: 100%;
   display: block;
-  padding: var(--space-5) var(--space-8);
+  padding: var(--space-4) var(--space-6);
   color: inherit;
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   text-align: start;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
@@ -8965,20 +9634,20 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-8);
+  gap: var(--space-6);
 }
 .context-menu-icon {
   display: inline-flex;
   align-items: center;
 }
 .context-menu-icon .app-menu-ui-icon {
-  width: 20px;
-  height: 18px;
+  width: 1.75em;
+  height: 1.55em;
   border-radius: var(--radius-control);
 }
 .context-menu-icon .app-menu-ui-icon::before {
-  width: 12px;
-  height: 12px;
+  width: 1em;
+  height: 1em;
 }
 .context-menu-label {
   min-width: 0;
@@ -8989,11 +9658,11 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   white-space: nowrap;
 }
 .terminal-context-menu button.danger {
-  color: #ffd6dc;
+  color: var(--danger-text-soft);
 }
 .terminal-context-menu button.danger:hover,
 .terminal-context-menu button.danger:focus-visible {
-  color: #1d0307;
+  color: var(--danger-confirm-text);
   background: var(--bad);
 }
 .terminal-context-menu button:disabled:hover,
@@ -9003,8 +9672,8 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .terminal-context-menu-separator {
   height: 1px;
-  margin: var(--space-4) var(--space-2);
-  background: #394354;
+  margin: var(--space-3) var(--space-2);
+  background: var(--menu-tab-row-separator);
 }
 .file-image-preview-popover {
   position: fixed;
@@ -9433,6 +10102,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   margin-inline-start: auto;
 }
 .info-tree-actions-bar {
+  container: info-tree-toolbar / inline-size;
   align-items: flex-start;
   flex-wrap: wrap;
   column-gap: var(--space-8);
@@ -11039,6 +11709,7 @@ button.info-tree-tab-token.active:focus-visible {
 }
 .info-tree-record {
   --info-tree-field-label-width: 18ch;
+  container: info-tree-record / inline-size;
   display: block;
   gap: var(--space-6);
   padding: var(--space-2) var(--space-4) var(--space-3);
@@ -11108,6 +11779,27 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-field-ai .info-tree-field-value {
   min-width: 0;
 }
+.info-tree-path-observations {
+  width: 100%;
+  margin-block-start: var(--space-2);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+}
+.info-tree-path-observations > summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--info-tree-dimension-hover);
+}
+.info-tree-path-observations ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding-inline-start: var(--space-12);
+}
+.info-tree-path-observations code {
+  color: var(--text);
+  font: inherit;
+}
 .info-tree-ai-value {
   min-width: 0;
   flex-wrap: wrap;
@@ -11174,6 +11866,22 @@ button.info-tree-tab-token.active:focus-visible {
 .info-tree-field-ai .info-tree-action-link {
   color: var(--info-tree-field-color);
 }
+.info-tree-branch-state {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-inline-start: var(--space-4);
+  padding: 0 var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--info-tree-field-color) 58%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--info-tree-field-color);
+  font: 700 var(--ui-font-size-2xs)/1.35 var(--mono-font);
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+.info-tree-branch-state-current { color: var(--good); border-color: color-mix(in srgb, var(--good) 70%, transparent); }
+.info-tree-branch-state-worked { color: var(--warning-border-strong); border-color: color-mix(in srgb, var(--warning-border-strong) 70%, transparent); }
+.info-tree-branch-state-missing { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 70%, transparent); }
 .info-tree-chip {
   padding: var(--space-1) var(--space-6);
   background: var(--info-tree-chip-bg);
@@ -11241,30 +11949,68 @@ button.info-tree-tab-token.active:focus-visible {
   margin-inline-start: auto;
   text-align: end;
 }
-/* A Vertical Side Pane deliberately trades width for a persistent edge view. Keep the same
-   information hierarchy, but stack field labels above values and tighten each tree level so deep
-   branch/path records retain a readable value column instead of wrapping one character per line. */
+/* Tree depth, not only Dockview role, determines how much width a record can actually use. Let
+   each record respond to its own measured inline size so a deeply nested item in an otherwise
+   wide pane cannot squeeze branch/status text into one-character columns. */
+@container info-tree-record (max-width: 48rem) {
+  .info-tree-record-main {
+    padding-inline-start: var(--space-4);
+  }
+  .info-tree-field {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+  .info-tree-field-label {
+    white-space: normal;
+  }
+  .info-tree-field-value {
+    width: 100%;
+  }
+  .info-tree-field-branch .info-tree-field-value,
+  .info-tree-field-path .info-tree-field-value,
+  .info-tree-field-ai .info-tree-field-value {
+    flex-wrap: wrap;
+  }
+  .info-tree-field-branch .info-tree-value-text {
+    flex: 1 1 14rem;
+  }
+  .info-tree-field-branch .info-tree-meta-updated,
+  .info-tree-field-path .info-tree-meta-path-activity,
+  .info-tree-field-ai .info-tree-trailing-meta {
+    flex: 0 0 100%;
+    margin-inline-start: 0;
+    text-align: start;
+  }
+}
+/* At toolbar widths where a flex line can strand a `>` by itself, use a stable two-column control
+   grid. The DOM order remains the grouping order, while the redundant visual separators disappear. */
+@container info-tree-toolbar (max-width: 62rem) {
+  .info-tree-group-selects {
+    flex: 1 1 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+  .info-tree-order-label {
+    grid-column: 1 / -1;
+  }
+  .info-tree-order-separator {
+    display: none;
+  }
+  .info-tree-order-select,
+  .info-tree-order-select select {
+    width: 100%;
+  }
+  .info-tree-sort-controls {
+    margin-inline-start: 0;
+    justify-content: flex-start;
+  }
+}
+/* A Vertical Side Pane deliberately trades width for a persistent edge view. Tighten tree
+   indentation here; the shared info-tree-record container rule above owns field stacking. */
 .yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-group-children {
   margin-inline-start: var(--space-8);
   padding-inline-start: var(--space-8);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-record-main {
-  padding-inline-start: var(--space-4);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field {
-  grid-template-columns: minmax(0, 1fr);
-  row-gap: var(--space-1);
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-label {
-  white-space: normal;
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-value {
-  width: 100%;
-}
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-branch .info-tree-meta-updated,
-.yolomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-field-ai .info-tree-trailing-meta {
-  margin-inline-start: 0;
-  text-align: start;
 }
 .info-tree-trailing-meta {
   color: var(--subwindow-recency-color);
@@ -13123,7 +13869,7 @@ body.editor-theme-light .file-editor-image-panel {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--panel);
   border: var(--app-modal-border-width) solid var(--app-modal-border-color);
-  box-shadow: 0 20px 46px rgb(var(--shadow-rgb) / 0.48), var(--active-control-focus-shadow-compact);
+  box-shadow: var(--app-modal-dialog-shadow);
   color: var(--text);
 }
 .file-editor-dialog-title {
@@ -14307,6 +15053,23 @@ body :is(
 .file-tree-row.file-tree-row--session-touched > .file-tree-name,
 .file-tree-row.file-tree-row--changed-ancestor > .file-tree-name {
   font-weight: 800;
+}
+.file-tree-sync-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--accent-gold);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent-gold) 60%, transparent);
+}
+.file-tree-sync-target[hidden] {
+  display: none;
+}
+.file-tree-row.file-tree-row--sync-target > .file-tree-sync-target {
+  opacity: 1;
 }
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
@@ -15700,6 +16463,37 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   color: var(--text);
   background: var(--panel2);
   font-weight: 800;
+}
+.file-editor-jsonl-preview table {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
+  font-family: var(--mono-font);
+}
+.file-editor-jsonl-preview col.file-editor-jsonl-compact-column {
+  inline-size: clamp(8ch, 18%, 18ch);
+}
+.file-editor-jsonl-preview col.file-editor-jsonl-payload {
+  inline-size: auto;
+}
+.file-editor-jsonl-preview th,
+.file-editor-jsonl-preview td {
+  max-width: none;
+}
+.file-editor-jsonl-preview thead th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-layer-raised);
+}
+.file-editor-jsonl-preview td {
+  white-space: pre-wrap;
+}
+.file-editor-jsonl-preview .file-editor-jsonl-overflow {
+  color: var(--muted);
+}
+.file-editor-jsonl-unparsed td {
+  color: var(--code-invalid);
+  background: color-mix(in srgb, var(--code-invalid) 9%, var(--editor-preview-bg));
 }
 .file-editor-native-media {
   display: block;

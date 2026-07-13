@@ -69,6 +69,24 @@ def test_client_event_broker_filters_disjoint_subscriber_channels_and_accounts_b
     assert broker.snapshot()["subscribers"] == 0
 
 
+def test_client_event_broker_delivers_live_stats_only_to_stats_demand():
+    broker = ClientEventBroker()
+    stats_id, stats_queue = broker.subscribe(channels={"stats"})
+    core_id, core_queue = broker.subscribe(channels={"core"})
+
+    event = broker.publish("stats_sample", {"sequence": 9, "record": {"start": 1000, "duration": 1}})
+
+    assert stats_queue.get_nowait() == event
+    with pytest.raises(queue.Empty):
+        core_queue.get_nowait()
+    snapshot = broker.snapshot()
+    assert snapshot["channel_counts"]["stats"] == 1
+    assert snapshot["delivered_by_type"]["stats_sample"]["events"] == 1
+    assert snapshot["filtered_by_type"]["stats_sample"]["events"] == 1
+    broker.unsubscribe(stats_id)
+    broker.unsubscribe(core_id)
+
+
 def test_app_publishes_only_known_client_event_types():
     # every event name app.py emits via publish_client_event("...") must be in the canonical
     # CLIENT_EVENT_TYPES set. The browser's EventSource subscribes by these names, so a server-side typo

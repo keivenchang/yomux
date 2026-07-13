@@ -363,6 +363,58 @@ async function runLayoutAsyncSuite() {
     assert.ok(api.vmConsoleErrorsForTest().some(message => message.includes('session metadata fetch failed')), 'the expected transport diagnostic is captured by this test instead of printed in a green run');
   });
 
+  await testAsync('Tabs menu shows cached labels immediately then refreshes its open rows from live session metadata', async () => {
+    const pending = [];
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/session-metadata?force=1', 'opening Tabs requests one live metadata refresh after rendering cached rows');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    api.renderSessionButtonsForTest({force: true});
+    const tabs = Array.from(api.sessionButtonsForTest().querySelectorAll('.app-menu'))
+      .find(menu => menu.dataset.appMenu === 'tabs');
+    assert.ok(tabs, 'Tabs menu is rendered from the existing cached session snapshot');
+    const cachedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
+    assert.ok(cachedCommand, 'cached session row is available without waiting for list-sessions');
+    assert.equal(cachedCommand.html.includes('fresh-session-name'), false, 'the initial row is the pre-refresh cached label');
+
+    api.openAppMenuForTest(tabs);
+    assert.equal(tabs.classList.contains('open'), true, 'Tabs opens immediately while live metadata is pending');
+    assert.equal(pending.length, 1, 'reopening work is coalesced through the shared metadata request record');
+    pending[0].resolve(jsonResponse({
+      session_order: ['1'],
+      sessions: {
+        '1': {
+          panes: [],
+          agents: [],
+          work_graph: {
+            version: 1,
+            generation: 1,
+            tmux_sessions: {'tmux-session:1': {id: 'tmux-session:1', name: '1', tmux_window_ids: ['tmux-window:1:0'], tmux_pane_ids: ['tmux-pane:1:0.0'], runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
+            tmux_windows: {'tmux-window:1:0': {id: 'tmux-window:1:0', tmux_session_id: 'tmux-session:1', index: '0', name: '', tmux_pane_ids: ['tmux-pane:1:0.0']}},
+            tmux_panes: {'tmux-pane:1:0.0': {id: 'tmux-pane:1:0.0', tmux_window_id: 'tmux-window:1:0', target: '%1-0', index: '0', current_path: '/tmp/fresh-session-name', active: true, window_active: true, runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
+            runtime_actors: {'actor:1:0': {id: 'actor:1:0', tmux_pane_id: 'tmux-pane:1:0.0', kind: 'shell', cwd: '/tmp/fresh-session-name', status: '', path_observation_ids: ['observation:1:0']}},
+            path_observations: {'observation:1:0': {id: 'observation:1:0', tmux_pane_id: 'tmux-pane:1:0.0', runtime_actor_id: 'actor:1:0', git_worktree_id: 'worktree:/tmp/fresh-session-name', path: '/tmp/fresh-session-name', source: 'fixture', priority: 0, last_observed_at: 1}},
+            git_worktrees: {'worktree:/tmp/fresh-session-name': {id: 'worktree:/tmp/fresh-session-name', root: '/tmp/fresh-session-name', git_dir: '/tmp/fresh-session-name/.git', kind: 'primary', parent_root: '', local_repository_id: 'local:/tmp/fresh-session-name', hosted_repository_id: null, current_branch_id: 'branch:local:/tmp/fresh-session-name:fresh-session-name', branch_activity_ids: [], path_observation_ids: ['observation:1:0'], git: {root: '/tmp/fresh-session-name', branch: 'fresh-session-name'}}},
+            local_repositories: {'local:/tmp/fresh-session-name': {id: 'local:/tmp/fresh-session-name', common_git_dir: '/tmp/fresh-session-name/.git', git_worktree_ids: ['worktree:/tmp/fresh-session-name'], local_branch_ids: ['branch:local:/tmp/fresh-session-name:fresh-session-name'], hosted_repository_id: null}},
+            hosted_repositories: {},
+            local_branches: {'branch:local:/tmp/fresh-session-name:fresh-session-name': {id: 'branch:local:/tmp/fresh-session-name:fresh-session-name', local_repository_id: 'local:/tmp/fresh-session-name', name: 'fresh-session-name', current: true, pull_request_ids: [], linear_issue_ids: []}},
+            pull_requests: {},
+            linear_issues: {},
+            worktree_branch_activity: {},
+          },
+        },
+      },
+    }));
+    await flushAsyncWork();
+    assert.equal(tabs.classList.contains('open'), true, 'the live update patches the open Tabs menu instead of closing it');
+    const refreshedCommand = api.appMenuTree().find(menu => menu.id === 'tabs')?.items.find(item => item.targetItem === '1');
+    assert.ok(refreshedCommand, 'the live update retains the cached session row identity');
+    assert.equal(refreshedCommand.html.includes('fresh-session-name'), true, 'the open Tabs row receives the live list-sessions name/description');
+  });
+
   await testAsync('Search and Runs records reject stale query and refresh completions', async () => {
     const pendingSearch = [];
     const pendingRuns = [];
@@ -539,6 +591,9 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/a')), {
       expandedPaths: ['/repo/a/src'],
       manualCollapsedPaths: ['/repo/a/src'],
+      cursorPath: '',
+      selectedPaths: [],
+      anchorPath: '',
     }, 'one target record owns both disclosure fields');
 
     api.setFileExplorerVisibleSyncTargetForTest('1', '/repo/b');
@@ -548,6 +603,9 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/b')), {
       expandedPaths: ['/repo/b/lib'],
       manualCollapsedPaths: [],
+      cursorPath: '',
+      selectedPaths: [],
+      anchorPath: '',
     }, 'a second target receives an independent complete record');
 
     api.resetFileExplorerSyncManualCollapsesForTest({session: '1', root: '/repo/a'});
@@ -564,6 +622,216 @@ async function runLayoutAsyncSuite() {
     assert.equal(source.includes('fileExplorerExpandedBySyncTarget'), false, 'retired expansion map stays absent');
     assert.equal(source.includes('fileExplorerSyncManualCollapsedByTarget'), false, 'retired manual-collapse map stays absent');
     assert.ok(source.includes('const fileExplorerSyncTargetRecords = new Map()'), 'one target-record map remains');
+  });
+
+  await testAsync('Finder Sync remembers independent same-root keyboard cursors without taking focus', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const root = '/home/test';
+    api.setFileExplorerDirListingForTest(root, [
+      {name: 'one.txt', kind: 'file'},
+      {name: 'two.txt', kind: 'file'},
+    ]);
+    const terminal = new TestElement('terminal');
+    terminal.classList.add('xterm');
+    api.setDocumentActiveElementForTest(terminal);
+    const firstPlan = {session: '1', root, expandPaths: [], affectedDirs: [root]};
+    const secondPlan = {session: '2', root, expandPaths: [], affectedDirs: [root]};
+
+    await api.syncFileExplorerRootToPlanForTest(firstPlan, '1');
+    const firstRow = api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/home/test/one.txt"]');
+    let firstScrolls = 0;
+    firstRow.scrollIntoView = () => { firstScrolls += 1; };
+    api.selectFileTreePath('/home/test/one.txt');
+    await api.syncFileExplorerRootToPlanForTest(secondPlan, '2');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetRecordForTest(`1\x1f${root}`)), {
+      expandedPaths: [],
+      manualCollapsedPaths: [],
+      cursorPath: '/home/test/one.txt',
+      selectedPaths: ['/home/test/one.txt'],
+      anchorPath: '/home/test/one.txt',
+    }, 'leaving a target stores its cursor and selection in the existing session+root record');
+
+    api.selectFileTreePath('/home/test/two.txt');
+    await api.syncFileExplorerRootToPlanForTest(firstPlan, '1');
+    const restoredOne = api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/home/test/one.txt"]');
+    assert.equal(api.fileExplorerSelectionLeadForTest(), '/home/test/one.txt', 'returning to session 1 restores its own lead row');
+    assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/home/test/one.txt'], 'the remembered lead is selected after restore');
+    assert.equal(api.fileExplorerTreeForTest().getAttribute('aria-activedescendant'), restoredOne.id, 'the tree active-descendant names the restored cursor row');
+    assert.equal(firstScrolls, 0, 'an already visible restored cursor does not force the native scroll fallback');
+    assert.equal(api.documentActiveElementForTest(), terminal, 'cursor restore never steals terminal/browser focus');
+
+    await api.syncFileExplorerRootToPlanForTest(secondPlan, '2');
+    assert.equal(api.fileExplorerSelectionLeadForTest(), '/home/test/two.txt', 'the same-root session 2 record remains independent');
+  });
+
+  await testAsync('Finder Sync cursor restore falls back to a visible ancestor without a fetch', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const root = '/home/test';
+    api.setFileExplorerDirListingForTest(root, [{name: 'project', kind: 'dir'}]);
+    api.setFileExplorerDirListingForTest(`${root}/project`, [{name: 'inside.txt', kind: 'file'}]);
+    let fetchCalls = 0;
+    api.setFetchForTest(() => {
+      fetchCalls += 1;
+      return Promise.reject(new Error('cursor restoration must stay cache-first'));
+    });
+    const expandedPlan = {session: '1', root, expandPaths: [`${root}/project`], affectedDirs: [`${root}/project`]};
+    const collapsedPlan = {session: '2', root, expandPaths: [], affectedDirs: [root]};
+    await api.syncFileExplorerRootToPlanForTest(expandedPlan, '1');
+    api.selectFileTreePath(`${root}/project/inside.txt`);
+    api.setFileExplorerExpandedForTest([]); // emulate a manually collapsed parent before leaving session 1
+    await api.syncFileExplorerRootToPlanForTest(collapsedPlan, '2');
+    await api.syncFileExplorerRootToPlanForTest({session: '1', root, expandPaths: [], affectedDirs: [root]}, '1');
+    assert.equal(api.fileExplorerSelectionLeadForTest(), `${root}/project`, 'a hidden remembered child degrades to its visible ancestor');
+    assert.equal(api.fileExplorerTreeForTest().getAttribute('aria-activedescendant'), api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/home/test/project"]').id, 'fallback cursor remains exposed to assistive tree navigation');
+    assert.equal(fetchCalls, 0, 'restoring a collapsed cursor adds no blocking fetch');
+  });
+
+  await testAsync('Finder Sync warm session switches render synchronously from the bounded listing cache', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const listings = new Map([
+      ['/home/test', [{name: 'project', kind: 'dir'}]],
+      ['/home/test/project', [{name: 'one', kind: 'dir'}, {name: 'two', kind: 'dir'}]],
+      ['/home/test/project/one', [{name: 'a.js', kind: 'file'}]],
+      ['/home/test/project/two', [{name: 'b.js', kind: 'file'}]],
+    ]);
+    for (const [path, entries] of listings) api.setFileExplorerDirListingForTest(path, entries);
+    let fetchCalls = 0;
+    api.setFetchForTest(() => {
+      fetchCalls += 1;
+      return Promise.reject(new Error('warm switch must not block on HTTP'));
+    });
+    const firstPlan = {
+      session: '1',
+      root: '/home/test',
+      expandPaths: ['/home/test/project', '/home/test/project/one'],
+      affectedDirs: ['/home/test/project/one'],
+    };
+    const first = api.syncFileExplorerRootToPlanForTest(firstPlan, '1');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/home/test/project', '/home/test/project/one'], 'the cached expansion is visible before the returned promise is awaited');
+    assert.equal(fetchCalls, 0, 'the warm switch hot path issues no blocking request');
+    await first;
+    const projectRow = Array.from(api.fileExplorerTreeForTest().children).find(row => row.dataset?.path === '/home/test/project');
+    assert.ok(projectRow, 'the cached root is materialized immediately');
+
+    const secondPlan = {
+      session: '2',
+      root: '/home/test',
+      expandPaths: ['/home/test/project', '/home/test/project/two'],
+      affectedDirs: ['/home/test/project/two'],
+    };
+    const second = api.syncFileExplorerRootToPlanForTest(secondPlan, '2');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/home/test/project', '/home/test/project/two'], 'the next session expansion replaces the first session expansion synchronously');
+    assert.equal(fetchCalls, 0, 'switching back and forth remains cache-only until background revalidation');
+    assert.equal(Array.from(api.fileExplorerTreeForTest().children).find(row => row.dataset?.path === '/home/test/project'), projectRow, 'same-root session switches reconcile and retain the existing directory row node');
+    await second;
+    assert.ok(api.fileExplorerFsResourceKeysForTest().length <= api.fileExplorerMemoryCacheLimitForTest, 'the reused listing cache remains under the shared LRU bound');
+  });
+
+  await testAsync('Finder Sync revalidates a warm tree after its cache-first frame without collapsing it', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerDirListingForTest('/repo', [{name: 'old.txt', kind: 'file'}]);
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const items = JSON.parse(options.body).requests;
+      requests.push(items.map(item => item.path));
+      return Promise.resolve(jsonResponse({
+        responses: items.map(item => ({
+          id: item.id,
+          ok: true,
+          status: 200,
+          payload: {entries: [{name: 'new.txt', kind: 'file'}]},
+        })),
+      }));
+    });
+    const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
+    const sync = api.syncFileExplorerRootToPlanForTest(plan, '1');
+    assert.equal(requests.length, 0, 'the cache-first render performs no request before its frame');
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/old.txt"]'), 'the cached row is visible synchronously');
+    await sync;
+    assert.equal(frames.length, 1, 'one deferred revalidation frame is scheduled');
+    frames.shift()();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(requests.length, 1, 'background listings settle in one batched request after the frame');
+    assert.deepStrictEqual([...new Set(requests[0])], ['/repo'], 'revalidation is scoped to the visible cached directory');
+    assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/old.txt"]'), null, 'a changed cached row is removed in place after revalidation');
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/new.txt"]'), 'the changed directory appears after revalidation');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'background freshness does not collapse or invent disclosure state');
+  });
+
+  await testAsync('Finder Sync unchanged revalidation preserves the mounted row identity', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerDirListingForTest('/repo', [{name: 'same.txt', kind: 'file'}]);
+    api.setFetchForTest((_url, options = {}) => {
+      const items = JSON.parse(options.body).requests;
+      return Promise.resolve(jsonResponse({responses: items.map(item => ({
+        id: item.id, ok: true, status: 200, payload: {entries: [{name: 'same.txt', kind: 'file'}]},
+      }))}));
+    });
+    const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
+    await api.syncFileExplorerRootToPlanForTest(plan, '1');
+    const row = api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/same.txt"]');
+    assert.ok(row, 'the cache-first row is mounted before revalidation');
+    frames.shift()();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/same.txt"]'), row, 'an unchanged signature skips reconciliation and preserves DOM identity');
+  });
+
+  await testAsync('Finder Sync cold listings start in bounded parallel batches and share the LRU bound', async () => {
+    const api = loadYolomux('', ['1']);
+    const directories = Array.from({length: 12}, (_value, index) => `/cold/${index}`);
+    const batches = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const items = JSON.parse(options.body).requests;
+      batches.push(items.map(item => item.path));
+      return Promise.resolve(jsonResponse({
+        responses: items.map(item => ({id: item.id, ok: true, status: 200, payload: {entries: []}})),
+      }));
+    });
+    const listings = await api.fetchFileExplorerSyncListingsForTest(directories, {force: true});
+    assert.equal(listings.size, directories.length, 'every cold directory settles');
+    assert.equal(batches[0].length, 8, 'the first response is awaited only after all eight bounded workers have started');
+    assert.deepStrictEqual(batches.map(batch => batch.length), [8, 4], 'twelve cold listings take two bounded batches rather than twelve sequential round trips');
+
+    const limit = api.fileExplorerMemoryCacheLimitForTest;
+    for (let index = 0; index < limit + 5; index += 1) {
+      api.setFileExplorerDirListingForTest(`/lru/${index}`, []);
+    }
+    const keys = api.fileExplorerFsResourceKeysForTest();
+    assert.equal(keys.length, limit, 'the shared filesystem-resource LRU remains strictly bounded');
+    assert.equal(keys.some(key => key.endsWith('/lru/0')), false, 'the oldest listing is evicted');
+    assert.equal(keys.some(key => key.endsWith(`/lru/${limit + 4}`)), true, 'the newest listing remains cached');
+  });
+
+  test('Finder Sync cold and stale paths share bounded parallel fetch and deferred revalidation owners', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const syncOwner = source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab('));
+    assert.ok(/function fetchFileExplorerSyncListings[\s\S]*workerCount = Math\.min\(8, queue\.length\)[\s\S]*Promise\.all\(Array\.from/.test(source), 'cold directory listings use one bounded parallel worker owner');
+    assert.ok(/function scheduleFileExplorerSyncRevalidation[\s\S]*requestAnimationFrame[\s\S]*fresh: true, force: true/.test(source), 'stale-while-revalidate starts only after the cache-first frame and bypasses background suppression');
+    assert.equal(syncOwner.includes('for (const path of expandPaths)'), false, 'the retired sequential per-folder expansion loop cannot return');
+    assert.equal(syncOwner.includes('preserveExpanded: false'), false, 'session switches no longer enter the destructive subtree teardown path');
   });
 
   await testAsync('Tabber activity cache treats direct snapshots as newer than in-flight HTTP work', async () => {
@@ -2107,17 +2375,19 @@ async function runLayoutAsyncSuite() {
       });
       assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
         session: '1',
-        root: '/home/test/project',
+        root: '/home/test',
         expandPaths: [
+          '/home/test/project',
           '/home/test/project/1',
           '/home/test/project/2',
+          '/home/test/project/1/src',
         ],
         affectedDirs: [
           '/home/test/project/1',
           '/home/test/project/2',
           '/home/test/project/1/src',
         ],
-      }, 'Finder sync opens the nearest common project root and expands the active tab working repos under it');
+      }, 'Finder sync opens home for home-contained tabs and expands the full active-tab working chain under it');
 
       api.setTranscriptInfoForTest('2', {
         project: {git: {cwd: '/tmp/outside/src', root: '/tmp/outside'}},
@@ -2160,17 +2430,22 @@ async function runLayoutAsyncSuite() {
       api.scheduleFileExplorerActiveTabSyncForTest('1', {explicit: true});
       await flushAsyncWork();
       await flushAsyncWork();
-      assert.equal(api.fileExplorerRootForTest(), '/home/test/project', 'syncing a home tab opens the nearest common project root');
+      assert.equal(api.fileExplorerRootForTest(), '/home/test', 'syncing a home tab opens the home root');
+      assert.equal(api.fileExplorerPathDisplayForTest(), '~', 'the Finder path display shows the home-compacted sync root');
       assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
         '/home/test/project/1',
+        '/home/test/project/1/src',
         '/home/test/project/2',
-      ], 'sync expands the working repo roots for the focused home tab');
+      ], 'sync expands the full working chain for the focused home tab');
 
       const collapseParent = new TestElement('collapse-parent');
       const collapseRow = new TestElement('collapse-row');
       collapseParent.appendChild(collapseRow);
       api.collapseDirectoryRowForTest(collapseRow, '/home/test/project/1', {manual: true});
       assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
+        '/home/test/project/1/src',
         '/home/test/project/2',
       ], 'manual collapse removes the collapsed folder from the active tab expanded set');
 
@@ -2186,7 +2461,10 @@ async function runLayoutAsyncSuite() {
       api.scheduleFileExplorerActiveTabSyncForTest('2', {explicit: true});
       await flushAsyncWork();
       await flushAsyncWork();
-      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'focusing another tab swaps to the single-repo root without carrying previous expanded folders');
+      assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
+        '/home/test/project/3',
+      ], 'focusing another home tab swaps to that tab chain without carrying previous expanded folders');
 
       api.setSessionFilesPayloadForTest({
         session: '1',
@@ -2200,6 +2478,7 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       await flushAsyncWork();
       assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [
+        '/home/test/project',
         '/home/test/project/2',
       ], 'returning to the tab restores its in-memory state without auto-reopening the manually collapsed working folder');
     }
@@ -2274,6 +2553,11 @@ async function runLayoutAsyncSuite() {
         type: 'input',
         data: `[Image #1] '/home/test/${generatedName}'`,
       }, 'pasted image upload inserts the image reference into xterm without trailing whitespace');
+      assert.equal(
+        calls.some(call => String(call.url).startsWith('/api/session-metadata')),
+        false,
+        'pasted image upload does not force a transcript/session-metadata rescan on the latency-sensitive path',
+      );
     }
 
     // DOIT.78 payload-matrix contract (78.5): the ONE shared image-payload detector/extractor used by BOTH
@@ -3382,6 +3666,7 @@ async function runLayoutAsyncSuite() {
         send(frame) { frames.push(JSON.parse(frame)); },
       });
       assert.equal(api.terminalMobileAccessoryDataForTest('1', 'escape'), '\x1b', 'mobile accessory maps Esc to the terminal escape byte');
+      assert.equal(api.terminalMobileAccessoryDataForTest('1', 'backspace'), '\x7f', 'mobile accessory maps its visible Backspace key to the terminal DEL byte');
       assert.equal(api.terminalMobileAccessoryDataForTest('1', 'arrow-up'), '\x1b[A', 'mobile accessory uses the normal cursor sequence outside application-cursor mode');
       assert.equal(api.terminalMobileAccessoryRepeatsForTest('arrow-up'), true, 'holding an arrow is repeatable like a hardware cursor key');
       assert.equal(api.terminalMobileAccessoryRepeatsForTest('tmux-scroll-down'), true, 'holding PgDown repeats tmux scrolling without closing the palette');
@@ -3391,15 +3676,36 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher toggles the existing palette closed');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'interrupt'), true, 'mobile Ctrl-C sends through the shared terminal transport');
-      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}], 'mobile Ctrl-C preserves the terminal interrupt byte');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'backspace'), true, 'visible mobile Backspace sends through the shared terminal transport');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}], 'mobile Ctrl-C and Backspace preserve their terminal control bytes');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
       assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
-      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
-      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
+      assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
+      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: false, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
       assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
       assert.equal(frames.at(-1).data, '\x1bx', 'Alt prefixes the next key with Escape');
-      assert.ok(api.terminalMobileAccessoryHtmlForTest('1').includes('⌘P') && api.terminalMobileAccessoryHtmlForTest('1').includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'shift'), true, 'mobile Shift latch turns on independently');
+      assert.equal(api.handleTerminalDataForTest('1', 'a'), true, 'Shift-modified phone input follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, 'A', 'Shift uppercases the next lowercase character');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'shift'), true, 'mobile Shift latch can shift punctuation');
+      assert.equal(api.handleTerminalDataForTest('1', '1'), true, 'Shift-modified punctuation follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, '!', 'Shift maps number-row punctuation to the shifted glyph');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'cmd'), true, 'mobile Cmd/Meta latch turns on independently');
+      assert.equal(api.handleTerminalDataForTest('1', 'k'), true, 'Cmd/Meta-modified phone input follows the existing terminal data path');
+      assert.equal(frames.at(-1).data, '\x1bk', 'Cmd/Meta prefixes the next key with Escape like terminal Meta');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'first Ctrl tap arms a one-shot modifier');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'second Ctrl tap inside the double-tap window locks the modifier');
+      assert.equal(api.handleTerminalDataForTest('1', 'a'), true, 'locked Ctrl applies to the first typed key');
+      assert.equal(api.handleTerminalDataForTest('1', 'b'), true, 'locked Ctrl persists for another typed key');
+      assert.equal(frames.at(-2).data, '\x01', 'locked Ctrl maps A to SOH');
+      assert.equal(frames.at(-1).data, '\x02', 'locked Ctrl maps B to STX');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, true, 'locked Ctrl stays visibly locked after terminal input');
+      assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
+      const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
+      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"/.test(keyboardHtml), 'the touch palette keeps Ctrl-C above bottom Alt/Cmd and exposes Backspace beside Tab/Ctrl-B');
+      assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 
     await testAsync('server/client version mismatch asks whether to reload the browser', async () => {

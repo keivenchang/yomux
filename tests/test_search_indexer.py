@@ -3,6 +3,8 @@ import time
 
 from yolomux_lib import search_indexer
 from yolomux_lib.filesystem import search
+from yolomux_lib.local_services.registry import LocalServiceRegistry
+from yolomux_lib.local_services.registry import LocalServiceSpec
 
 
 SEARCH_INDEXER_ENSURE_STARTED = search_indexer.SearchIndexerClient.ensure_started
@@ -117,42 +119,115 @@ def test_persistent_indexer_owns_unindex_writes(tmp_path, monkeypatch):
     assert removed == [root]
 
 
-def test_persistent_indexer_applies_trailing_debounce_and_churn_backoff(tmp_path, monkeypatch):
-    root = tmp_path / "root"
-    root.mkdir()
-    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
-    moment = [100.0]
-    monkeypatch.setattr(search_indexer.time, "monotonic", lambda: moment[0])
+def test_indexer_service_leases_prevent_idle_exit_then_allow_shutdown(tmp_path):
+    socket_path = tmp_path / "indexer.sock"
+    service = search_indexer.PersistentSearchIndexer(socket_path, idle_seconds=0.02)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = search_indexer.SearchIndexerClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
 
-    service.enqueue(str(root), [], "watch")
-    assert service.pending_due_at[str(root)] == 102.0
-    moment[0] = 101.0
-    service.enqueue(str(root), [], "watch")
-    assert service.pending_due_at[str(root)] == 103.0
-
-    service.pending_due_at[str(root)] = 0.0
-    monkeypatch.setattr(search, "_ensure_search_index", lambda _root: None)
-    monkeypatch.setattr(search, "reindex_roots_for_paths", lambda *_args, **_kwargs: None)
-    moment[0] = 102.0
-    service.process_due()
-    moment[0] = 103.0
-    service.enqueue(str(root), [], "watch")
-    assert service.pending_due_at[str(root)] == 105.0
-
-    service.pending_due_at[str(root)] = 0.0
-    moment[0] = 104.0
-    service.process_due()
-    moment[0] = 105.0
-    service.enqueue(str(root), [], "watch")
-    assert service.pending_due_at[str(root)] == 109.0
+    lease = client.registry.acquire_lease()
+    assert lease["ok"] is True
+    time.sleep(0.05)
+    assert worker.is_alive() is True
+    assert client.registry.release_lease(lease["lease_id"])["ok"] is True
+    assert client.request({"action": "shutdown_if_idle"})["shutdown"] is True
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+    assert service.socket_path.exists() is False
 
 
-def test_persistent_indexer_does_not_spin_idle_maintenance(tmp_path, monkeypatch):
-    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
-    scheduled = []
-    monkeypatch.setattr(search_indexer.file_index, "schedule_refreshes", lambda **_kwargs: scheduled.append(True) or 0)
+def test_local_service_registry_serializes_starters_and_reuses_healthy_winner(tmp_path):
+    socket_path = tmp_path / "indexer.sock"
+    service = search_indexer.PersistentSearchIndexer(socket_path)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    spec = LocalServiceSpec("indexd", "yolomux_lib.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION)
+    first = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
+    second = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
 
-    service.process_due()
-    service.process_due()
+    results = []
+    starters = [threading.Thread(target=lambda registry=registry: results.append(registry.ensure_started())) for registry in (first, second)]
+    for starter in starters:
+        starter.start()
+    for starter in starters:
+        starter.join(timeout=1.0)
 
-    assert scheduled == [True]
+    assert results == [True, True]
+    assert first.status()["healthy"] is True
+    assert second.status()["healthy"] is True
+    assert first.record_path.exists() is True
+    assert first._request("shutdown", timeout=0.2) == {"ok": True}
+    worker.join(timeout=1.0)
+
+
+def test_local_service_registry_backoff_blocks_repeated_failed_spawns(tmp_path):
+    starts = []
+
+    class FailedProcess:
+        def poll(self):
+            return 1
+
+    def failing_popen(args, **kwargs):
+        starts.append((args, kwargs))
+        return FailedProcess()
+
+    now = [0.0]
+    spec = LocalServiceSpec("missing", "missing.module", "missing.sock", 1)
+    registry = LocalServiceRegistry(tmp_path, spec, popen=failing_popen, clock=lambda: now[0], sleep=lambda _seconds: None)
+
+    assert registry.ensure_started() is False
+    assert registry.ensure_started() is False
+    assert len(starts) == 1
+    now[0] = 1.0
+    assert registry.ensure_started() is False
+    assert len(starts) == 2
+
+
+def test_local_service_registry_starts_real_indexd_and_recovers_stale_socket_record(tmp_path):
+    socket_path = tmp_path / "state directory with spaces" / "indexer.sock"
+    registry = LocalServiceRegistry(
+        socket_path.parent,
+        LocalServiceSpec("indexd", "yolomux_lib.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION, idle_seconds=30.0),
+        socket_path=socket_path,
+    )
+    socket_path.parent.mkdir(parents=True)
+    socket_path.write_text("stale", encoding="utf-8")
+    registry._write_record({"pid": 999_999_999, "service": "indexd"})
+
+    assert registry.ensure_started() is True
+    status = registry.status()
+    assert status["healthy"] is True
+    assert status["record"]["pid"] > 0
+    assert status["record"]["socket"] == str(registry.socket_path)
+    assert registry._request("shutdown", timeout=0.5) == {"ok": True}
+    deadline = time.monotonic() + 2.0
+    while registry.socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert registry.socket_path.exists() is False
+
+
+def test_indexd_common_status_has_bounded_worker_schema(tmp_path):
+    socket_path = tmp_path / "indexer.sock"
+    service = search_indexer.PersistentSearchIndexer(socket_path)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = search_indexer.SearchIndexerClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    status = client.request({"action": "status"})
+    profile = client.request({"action": "profile"})
+    drained = client.request({"action": "drain"})
+
+    assert set(status) >= {"ok", "version", "pid", "started_at", "socket", "clients", "queues", "active_task", "cache", "last_success", "last_failure", "restart_backoff_seconds", "generation", "idle_seconds", "status"}
+    assert status["version"] == search_indexer.INDEXER_PROTOCOL_VERSION
+    assert set(status["queues"]) == {"interactive", "normal", "maintenance"}
+    assert profile["profile"]["pid"] == status["pid"]
+    assert drained["ok"] is True
+    assert client.request({"action": "shutdown"}) == {"ok": True}
+    worker.join(timeout=1.0)

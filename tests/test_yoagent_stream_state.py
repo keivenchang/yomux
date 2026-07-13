@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from yolomux_lib import app as app_module
 from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
@@ -41,6 +42,49 @@ def test_yoagent_stream_callback_uses_extracted_stream_owner(monkeypatch):
         "labelParams": {},
         "fallback": "thinking",
     }]
+
+
+def test_yoagent_usage_event_submits_structured_atoms_without_parsing_diagnostic_text(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    submitted = []
+    monkeypatch.setattr(webapp, "record_owned_usage_atoms", lambda **kwargs: submitted.append(kwargs) or True)
+    try:
+        callback = webapp.yoagent_stream_callback("stream-cost", "claude", model="claude-opus-4-8", effort="xhigh")
+        callback({
+            "kind": "usage",
+            "text": 'rendered prose {"usage":"must not be parsed"}',
+            "thread_id": "claude-thread",
+            "metadata": {"usage": {"input_tokens": 12, "cache_read_input_tokens": 4, "output_tokens": 7}},
+        })
+    finally:
+        webapp.control_server.stop()
+
+    assert len(submitted) == 1
+    assert submitted[0]["provider"] == "anthropic"
+    assert submitted[0]["model"] == "claude-opus-4-8"
+    assert submitted[0]["usage"] == {"input_tokens": 12, "cache_read_input_tokens": 4, "output_tokens": 7}
+    assert submitted[0]["source"] == "YO!agent"
+    assert submitted[0]["event_id"].startswith("yoagent:stream-cost:claude-thread:")
+
+
+def test_owned_usage_submission_normalizes_structured_components_for_statsd_wire():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    submitted = []
+    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, now: submitted.append((records, now)) or {"ok": True})
+    try:
+        assert webapp.record_owned_usage_atoms(
+            provider="openai", model="gpt-5.6", usage={"input_tokens": 12, "cached_input_tokens": 4, "output_tokens": 7},
+            source="AI Summary", event_id="summary-event", effort="high", endpoint="codex-exec", timestamp=1_000,
+        ) is True
+    finally:
+        webapp.control_server.stop()
+
+    atoms = submitted[0][0][0]["usage_atoms"]
+    assert {(atom["direction"], atom["cache_role"], atom["quantity"]) for atom in atoms} == {
+        ("input", "none", 8.0), ("input", "read", 4.0), ("output", "none", 7.0),
+    }
+    assert {atom["source"] for atom in atoms} == {"AI Summary"}
+    assert {atom["effort"] for atom in atoms} == {"high"}
 
 
 def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypatch):

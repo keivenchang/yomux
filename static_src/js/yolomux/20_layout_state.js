@@ -495,8 +495,18 @@ function nextAvailableLayoutSlot(slots, preferred = null) {
 
 function canonicalizeSidePaneLayout(slots, options = {}) {
   if (!slots?.[layoutTreeKey]) return slots;
-  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return narrowSingleColumnLayoutSlots(slots, {focusSession: options.focusSession});
+  }
+  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+    const generic = cloneLayoutSlots(slots);
+    for (const slot of sidePaneSlots(generic)) {
+      const tabs = paneTabs(slot, generic);
+      generic[slot] = tabs.length
+        ? paneStateWithTabs(tabs, activeItemForSide(slot, generic), paneRoleDefinition(paneRoleGeneric))
+        : emptyPlaceholderPaneState(paneRoleDefinition(paneRoleGeneric));
+    }
+    return compactLayoutSlots(generic, {preservePlaceholderSlots: options.preservePlaceholderSlots === true});
   }
 
   const original = cloneLayoutSlots(slots);
@@ -787,7 +797,9 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutWithDefaultLeftSidePane(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
+  const content = layoutSlotsForItems(items, configuredDefaultLayoutMode());
+  if (!sidePaneConstrainedMode()) return layoutWithDefaultLeftSidePane(content);
+  return layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0]);
 }
 
 function layoutFromParam(raw, tabsRaw = '', options = {}) {
@@ -1057,7 +1069,7 @@ function legacyFileSurfaceSelection(params) {
 function migrateLegacyFileSurfaceLayout(slots, params) {
   const selected = legacyFileSurfaceSelection(params);
   if (!selected) return slots;
-  if (sidePaneConstrainedMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
+  if (narrowSingleColumnMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
   const legacySlot = slotForItem(finderItemId, slots) || slotForItem(differItemId, slots) || slotForItem(tabberItemId, slots);
   if (!legacySlot) return layoutWithSidePaneItems(slots, fileSurfaceItems, {
     side: paneSideLeft,
@@ -1113,9 +1125,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
     setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
-  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
-  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
-  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
   if ('diffRefsByRepo' in finder) {
@@ -1331,22 +1341,26 @@ function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
 }
 
 function normalizeLayoutSlotsForViewport(value, options = {}) {
-  const constrained = sidePaneConstrainedMode();
-  let source = constrained
+  const singleColumn = narrowSingleColumnMode();
+  const sideConstrained = sidePaneConstrainedMode();
+  // Side-pane capacity controls the special narrow Finder/Differ/Tabber role, not whether the
+  // viewport can hold ordinary Generic Pane splits. A portrait tablet can fit two generic panes
+  // even when it cannot reserve the Side Pane's capped one-third column.
+  let source = singleColumn
     ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
-  if (!constrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
+  if (!sideConstrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
     const hasFileSurface = layoutFileSurfaceItems().some(item => itemInLayout(item, source));
     if (hasFileSurface) {
       source = canonicalizeSidePaneLayout(source, {...options, allowSidePanes: true});
       source = layoutWithDefaultLeftSidePane(source);
     }
   }
-  sidePaneLayoutWasConstrained = constrained;
+  sidePaneLayoutWasConstrained = sideConstrained;
   return normalizeLayoutSlots(source, {
     ...options,
-    allowSidePanes: !constrained,
-    preserveMissingSidePane: constrained || options.preserveMissingSidePane === true,
+    allowSidePanes: !sideConstrained,
+    preserveMissingSidePane: sideConstrained || options.preserveMissingSidePane === true,
   });
 }
 
@@ -1356,7 +1370,7 @@ function rememberInitialConstrainedLayout(value) {
 }
 
 function availableLayoutModes() {
-  return sidePaneConstrainedMode() ? ['single'] : layoutModeValues;
+  return narrowSingleColumnMode() ? ['single'] : layoutModeValues;
 }
 
 function initialLayoutSlots() {
@@ -1380,7 +1394,9 @@ function initialLayoutSlots() {
   }
   if (selected.length) {
     const selectedLayout = layoutFromSessionList(selected);
-    return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout)) : selectedLayout;
+    return narrowSingleColumnMode()
+      ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout))
+      : normalizeLayoutSlotsForViewport(selectedLayout);
   }
   return defaultLayoutSlots();
 }
@@ -1388,8 +1404,13 @@ function initialLayoutSlots() {
 function defaultLayoutSlots() {
   if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  const standard = layoutWithDefaultLeftSidePane(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()));
-  return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard)) : standard;
+  const content = layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
+  const standard = sidePaneConstrainedMode()
+    ? layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0])
+    : layoutWithDefaultLeftSidePane(content);
+  return narrowSingleColumnMode()
+    ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard))
+    : normalizeLayoutSlotsForViewport(standard);
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -1525,6 +1546,13 @@ function setTabPinned(item, pinned) {
     next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);
   }
   applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
+  const slot = slotForItem(resolved, layoutSlots);
+  const pinnedInSlot = slot ? paneTabs(slot, layoutSlots).filter(tabIsPinned) : [];
+  if (pinned && pinnedInSlot.length >= maxTabsPerPane() && typeof showLayoutStatus === 'function') {
+    showLayoutStatus(pinnedPaneAtCapStatus(pinnedInSlot, maxTabsPerPane()), 'advisory');
+    return true;
+  }
+  if (typeof resetLayoutStatusSurface === 'function') resetLayoutStatusSurface();
   statusEl.textContent = pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)});
   return true;
 }
@@ -2196,7 +2224,7 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
     .map(pane => `${pane.command || ''} ${pane.title || ''}`)
     .join(' ')
     .toLowerCase();
-  const pr = info?.project?.pull_request;
+  const pr = displayPullRequest(info);
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
   const checksState = pullRequestCiState(pr);
 
@@ -2910,14 +2938,33 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
+  const roleExplainers = [
+    {abbr: 'IDX', role: t('backgroundOwner.index'), description: t('backgroundOwner.desc.index'), summary: indexSummary},
+    {abbr: 'STATS', role: t('tab.debug.short'), description: t('backgroundOwner.desc.stats'), summary: statsSummary},
+    {abbr: 'SESS', role: t('backgroundOwner.sessionFiles'), description: t('backgroundOwner.desc.sessionFiles'), summary: sessionSummary},
+  ];
+  const roleDefinitionLines = roleExplainers.map(item => t('backgroundOwner.summaryRole', {
+    abbr: item.abbr,
+    role: item.role,
+    description: item.description,
+  }));
+  const roleStateLines = roleExplainers.map(item => {
+    const state = item.summary?.mode;
+    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
+    return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
+  });
   const lines = [
     t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
+    ...roleDefinitionLines,
+    t('backgroundOwner.desc.leaderFollower'),
     indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
     statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
     sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
+    ...roleStateLines,
     indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
     statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
     sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
+    t('backgroundOwner.desc.takeOver'),
     indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');
@@ -3456,7 +3503,7 @@ function keyboardLegendCatalog() {
     ]},
     {section: t('legend.section.icons'), items: [
       {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
-      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
+      {sampleHtml: appMenuUiIcon('robot'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
       {sampleHtml: appMenuUiIcon('gear'), label: t('legend.icon.gear.label'), detail: t('legend.icon.gear.detail')},
       {sampleHtml: appMenuUiIcon('tab-meta'), label: t('legend.icon.tabMetadata.label'), detail: t('legend.icon.tabMetadata.detail')},
       {sampleHtml: appMenuUiIcon('share'), label: t('legend.icon.share.label'), detail: t('legend.icon.share.detail')},
@@ -5901,8 +5948,9 @@ function applyLayoutSlots(nextSlots, options = {}) {
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
-    statusEl.textContent = options.message;
+    showLayoutStatus(options.message, options.messageKind || '');
   } else {
+    resetLayoutStatusSurface();
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();

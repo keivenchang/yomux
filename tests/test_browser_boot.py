@@ -98,10 +98,16 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
                     """
                     const terminal = document.querySelector(`#term-${arguments[0]} .xterm`);
                     const item = terminals.get(arguments[0]);
+                    const buffer = item?.term?.buffer?.active;
+                    const text = buffer
+                      ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n')
+                      : '';
+                    const screen = terminal?.querySelector('.xterm-screen');
                     return {
-                      text: terminal?.textContent || '',
-                      rows: terminal?.querySelectorAll('.xterm-rows > div').length || 0,
+                      text,
+                      rows: buffer?.length || 0,
                       rect: terminal?.getBoundingClientRect().toJSON?.() || null,
+                      screenRect: screen?.getBoundingClientRect().toJSON?.() || null,
                       cols: item?.term?.cols || 0,
                       terminalRows: item?.term?.rows || 0,
                       connected: item?.socket?.readyState === WebSocket.OPEN,
@@ -123,8 +129,14 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
                     const terminal = document.querySelector(`#term-${arguments[0]} .xterm`);
                     const rect = terminal?.getBoundingClientRect();
                     const item = terminals.get(arguments[0]);
+                    const buffer = item?.term?.buffer?.active;
+                    const text = buffer
+                      ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n')
+                      : '';
+                    const screen = terminal?.querySelector('.xterm-screen');
                     return {
-                      text: terminal?.textContent || '', rect: rect?.toJSON?.() || null,
+                      text, rect: rect?.toJSON?.() || null,
+                      screenRect: screen?.getBoundingClientRect().toJSON?.() || null,
                       cols: item?.term?.cols || 0, terminalRows: item?.term?.rows || 0,
                       connected: item?.socket?.readyState === WebSocket.OPEN, viewport: window.innerWidth,
                     };
@@ -135,9 +147,11 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
             ),
         )
         assert glyphs["rows"] > 0 and glyphs["cols"] > 0 and glyphs["terminalRows"] > 0, glyphs
+        assert glyphs["screenRect"] and glyphs["screenRect"]["width"] > 0 and glyphs["screenRect"]["height"] > 0, glyphs
         # The live terminal stays connected and keeps its actual xterm glyphs after a real viewport
         # resize.  Its pane can legitimately be width-capped by the current saved layout.
         assert after["connected"] is True and after["viewport"] > glyphs["viewport"], {"before": glyphs, "after": after}
+        assert after["screenRect"] and after["screenRect"]["width"] > 0 and after["screenRect"]["height"] > 0, after
     finally:
         stop_browser_share_server(server, thread)
         stop_isolated_browser_share_app(runtime)

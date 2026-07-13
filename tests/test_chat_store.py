@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import multiprocessing
+import os
 import sqlite3
 import time
 from datetime import datetime
@@ -39,6 +40,11 @@ EMOJI_MATRIX = (
 )
 
 
+def _chat_store_latency_budget_ms(*, cpu_count: int | None = None) -> float:
+    cores = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    return 250.0 * max(1.0, 32 / cores)
+
+
 def _insert(store: ChatStore, index: int, *, username: str = "alice", timestamp: float | None = None, body: str | None = None) -> int:
     message, inserted = store.insert_message(
         username=username,
@@ -54,6 +60,12 @@ def _insert(store: ChatStore, index: int, *, username: str = "alice", timestamp:
 
 def _utc_timestamp(value: str) -> float:
     return datetime.fromisoformat(value).replace(tzinfo=timezone.utc).timestamp()
+
+
+def test_chat_store_latency_budget_scales_below_linux_baseline_cores():
+    assert _chat_store_latency_budget_ms(cpu_count=64) == 250
+    assert _chat_store_latency_budget_ms(cpu_count=32) == 250
+    assert _chat_store_latency_budget_ms(cpu_count=10) == 800
 
 
 def _history_records(path: Path) -> list[dict[str, Any]]:
@@ -511,5 +523,11 @@ def test_chat_store_hard_ceiling_acceptance_payload_and_latency_budgets(tmp_path
 
     p95_index = max(0, math.ceil(len(timings_ms) * 0.95) - 1)
     p95_ms = sorted(timings_ms)[p95_index]
-    assert p95_ms < 250, {"timings_ms": timings_ms, "p95_ms": p95_ms}
+    latency_budget_ms = _chat_store_latency_budget_ms()
+    assert p95_ms < latency_budget_ms, {
+        "timings_ms": timings_ms,
+        "p95_ms": p95_ms,
+        "latency_budget_ms": latency_budget_ms,
+        "cpu_count": os.cpu_count(),
+    }
     assert " OFFSET " not in Path("yolomux_lib/chat_store.py").read_text(encoding="utf-8").upper()

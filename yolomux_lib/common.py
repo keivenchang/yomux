@@ -55,16 +55,20 @@ SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fas
 YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
 CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
 STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
+# Reconstructible provider metadata belongs in the cache root, rather than in
+# STATE_DIR alongside user activity/history.  Keep this as the one owner of
+# the path so tests and future cache consumers do not grow ad-hoc ~/.cache
+# literals.
+_DEFAULT_XDG_CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+YOLOMUX_CACHE_DIR = Path(os.environ.get("YOLOMUX_CACHE_DIR", str(_DEFAULT_XDG_CACHE_HOME / "yolomux"))).expanduser()
+MODEL_PRICING_CACHE_DIR = YOLOMUX_CACHE_DIR / "model-pricing"
+MODEL_PRICING_DATABASE_PATH = MODEL_PRICING_CACHE_DIR / "pricing.sqlite3"
 YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME") or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
 STATE_PATH = CONFIG_DIR / "state.json"
 EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 RUN_HISTORY_PATH = STATE_DIR / "run-history.json"
 ACTIVITY_PATH = STATE_DIR / "activity.json"
 TMUX_AI_STATUS_PATH = STATE_DIR / "tmux-AI-status.json"
-# Bucket layouts are not losslessly interchangeable during a rolling restart: an older process can
-# otherwise downsample a newer coarse bucket and make the next process count the same data again.
-STATS_CLIENT_HISTORY_VERSION = 4
-STATS_CLIENT_HISTORY_PATH = STATE_DIR / f"stats-client-history-v{STATS_CLIENT_HISTORY_VERSION}.json"
 LEGACY_ATTENTION_ACKS_PATH = STATE_DIR / "attention-acks.json"
 ACTIVITY_HEARTBEATS_PATH = STATE_DIR / "activity-heartbeats.jsonl"
 WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"
@@ -218,10 +222,6 @@ def path_mtime_or_zero(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
-
-
-def project_git(project: Any) -> dict[str, Any]:
-    return as_dict(as_dict(project).get("git"))
 
 
 def codex_exec_argv(
@@ -458,7 +458,7 @@ def is_generated_upload_name(path: str | Path) -> bool:
 
 
 @dataclass(frozen=True)
-class PaneInfo:
+class TmuxPaneInfo:
     session: str
     window: str
     pane: str
@@ -473,6 +473,11 @@ class PaneInfo:
     process_label: str | None = None
     process_label_pid: int | None = None
     window_name: str = ""
+
+
+# Compatibility import for third-party callers during the terminology migration. New backend code
+# must use TmuxPaneInfo so it cannot be confused with a physical YOLOmux YOPane.
+PaneInfo = TmuxPaneInfo
 
 
 @dataclass(frozen=True)
@@ -500,8 +505,8 @@ class AgentInfo:
 @dataclass(frozen=True)
 class SessionInfo:
     session: str
-    panes: list[PaneInfo]
-    selected_pane: PaneInfo | None
+    panes: list[TmuxPaneInfo]
+    selected_pane: TmuxPaneInfo | None
     agents: list[AgentInfo]
 
 

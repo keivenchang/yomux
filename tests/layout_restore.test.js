@@ -859,7 +859,8 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewKindForPath('/repo/spec.pdf'), 'pdf', 'PDF paths route to raw PDF Preview');
     assert.equal(api.previewKindForPath('/repo/chart.mmd'), 'mermaid', 'Mermaid source files route to Mermaid Preview');
     assert.equal(api.previewKindForPath('/repo/config.json'), 'structured', 'JSON paths route to structured Preview');
-    assert.equal(api.previewKindForPath('/repo/events.jsonl'), 'structured', 'JSONL paths route to structured Preview');
+    assert.equal(api.previewKindForPath('/repo/events.jsonl'), 'table', 'JSONL paths route to table Preview');
+    assert.equal(api.previewKindForPath('/repo/events.ndjson'), 'table', 'NDJSON paths route to table Preview');
     assert.equal(api.previewKindForPath('/repo/map.geojson'), 'structured', 'GeoJSON paths route to structured Preview');
     assert.equal(api.previewKindForPath('/repo/notebook.ipynb'), 'structured', 'notebooks route to safe structured Preview');
     assert.equal(api.previewKindForPath('/repo/diagram.drawio'), 'structured', 'Draw.io XML routes to structured Preview');
@@ -877,6 +878,9 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewKindForPath('/repo/archive.zip'), 'unsupported', 'archives are recognized fallback, not unpacked');
     assert.equal(api.previewKindForPath('/repo/app.py'), 'text', 'known code files get the code-preview fallback');
     assert.equal(api.previewRendererForPath('/repo/config.json').id, 'structured', 'preview dispatch comes from the shared renderer registry');
+    assert.equal(api.previewRendererForPath('/repo/events.jsonl').id, 'json-lines-table', 'JSONL table dispatch comes from the shared renderer registry');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.jsonl', 'text'), 'preview', 'JSONL opens in table Preview by default');
+    assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.ndjson', 'text'), 'preview', 'NDJSON opens in table Preview by default');
     assert.equal(api.previewPathIsPreviewable('/repo/app.py'), false, 'generic code/text renderer is not a distinct Preview affordance');
     assert.equal(api.previewPathIsPreviewable('/repo/notes.txt'), false, 'plain text renderer is not a distinct Preview affordance');
     assert.equal(api.previewPathIsPreviewable('/repo/config.json'), true, 'structured JSON preview stays available because it differs from the editor');
@@ -889,7 +893,7 @@ async function runLayoutRestoreSuite() {
       'docs/preview-samples/12-image.svg': 'image',
       'docs/preview-samples/14-mermaid.mmd': 'mermaid',
       'docs/preview-samples/15-structured.json': 'structured',
-      'docs/preview-samples/16-structured.jsonl': 'structured',
+      'docs/preview-samples/16-structured.jsonl': 'json-lines-table',
       'docs/preview-samples/17-notebook.ipynb': 'structured',
       'docs/preview-samples/18-structured.yaml': 'structured',
       'docs/preview-samples/19-structured.toml': 'structured',
@@ -902,6 +906,28 @@ async function runLayoutRestoreSuite() {
       assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a docs/preview-samples fixture`);
       assert.equal(api.previewRendererForPath(`/repo/${samplePath}`).id, rendererId, `${samplePath} routes to ${rendererId}`);
     }
+    const transcriptPreview = api.jsonLinesTablePreview('/repo/transcript.jsonl', [
+      JSON.stringify({type: 'session_meta', session: {id: 's1'}}),
+      JSON.stringify({type: 'user', message: {role: 'user', content: 'hello'}}),
+      JSON.stringify({type: 'assistant', tokens: {input: 10, output: 4}}),
+      JSON.stringify({type: 'tool', tool_name: 'shell', result: ['ok']}),
+      '{malformed',
+    ].join('\n'));
+    assert.deepStrictEqual(canonical(transcriptPreview.columns), ['type', 'session', 'message', 'tokens', 'tool_name', 'result'], 'heterogeneous JSONL columns preserve first-seen key order');
+    assert.equal(transcriptPreview.rows.length, 5, 'JSONL produces one table row per non-empty input line');
+    assert.equal(transcriptPreview.rows[1].cells[2].text, '{"role":"user","content":"hello"}', 'nested JSONL values render compactly');
+    assert.equal(transcriptPreview.rows[4].parsed, false, 'malformed JSONL remains as a raw fallback row');
+    assert.equal(transcriptPreview.rows[4].raw, '{malformed', 'malformed JSONL raw text is preserved');
+    const longJsonl = api.jsonLinesTablePreview('/repo/long.jsonl', JSON.stringify({payload: 'x'.repeat(300)}));
+    assert.equal(longJsonl.rows[0].cells[0].text.endsWith('…'), true, 'long JSONL values are compacted in the visible cell');
+    assert.equal(longJsonl.rows[0].cells[0].title.length, 300, 'the complete JSONL value remains available on hover');
+    const boundedJsonl = api.jsonLinesTablePreview('/repo/large.jsonl', Array.from({length: 260}, (_, index) => JSON.stringify({index})).join('\n'));
+    assert.equal(boundedJsonl.rows.length, 200, 'large JSONL rendering is capped');
+    assert.equal(boundedJsonl.total, 260, 'large JSONL still reports the full non-empty line count');
+    assert.equal(boundedJsonl.truncated, true, 'large JSONL reports truncation');
+    const wideJsonl = api.jsonLinesTablePreview('/repo/wide.jsonl', JSON.stringify(Object.fromEntries(Array.from({length: 44}, (_, index) => [`key${index}`, index]))));
+    assert.equal(wideJsonl.columns.length, 40, 'JSONL column count is capped');
+    assert.equal(wideJsonl.overflowColumns.length, 4, 'JSONL retains overflow keys behind one affordance');
     [
       'docs/preview-samples/13-pdf.pdf',
       'docs/preview-samples/24-audio.wav',
@@ -1536,7 +1562,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/scheduleToastRemoval\(id, node, options\.countdownMs \|\| toastDurationMs\)/.test(source), '#85: toast removal uses options.countdownMs through the shared scheduler');
     assert.ok(/function confirmSessionGoneOrReconnect[\s\S]*?if \(item\.confirmingGone\) return;[\s\S]*?item\.confirmingGone = true/.test(source), '#86: reconnect confirmation has an in-flight guard');
     assert.ok(/function showFileTreeRepoPopover[\s\S]*?clampToViewport\(/.test(source), '#87: the repo popover is clamped to the viewport');
-    assert.ok(/function fileTreeRepoHoverController\(row, path\)[\s\S]*?createHoverPopover\([\s\S]*?onOpen: \(\) => \{ void showRepoRowHoverPopover\(row, path\); \}/.test(source), '#87: repo directory hover popovers use the shared delayed hover controller');
+    assert.ok(/function fileTreeRepoHoverController\(row, path\)[\s\S]*?createHoverPopover\([\s\S]*?canOpen: \(\) => row\.dataset\.isRepo === 'true' \|\| Boolean\(row\.dataset\.syncTargetTitle\)[\s\S]*?onOpen: \(\) => \{ if \(row\.dataset\.isRepo === 'true'\) void showRepoRowHoverPopover\(row, path\); \}/.test(source), '#87: repo and starred Finder rows use the shared delayed hover controller');
     assert.equal(source.includes('row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);'), false, '#87: repo directory hover must not open the popover immediately on mouseenter');
     assert.ok(/function fileEntryChanged[\s\S]*?state\.size == null \|\| entry\.size == null\) return true/.test(source), '#88: unknown-size equal-mtime entries are treated as changed');
     // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
@@ -2310,9 +2336,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.file-tree-repo-ahead/.test(css) && /\.file-tree-repo-dirty/.test(css), 'inline ahead/dirty markers are styled');
   });
 
-  test('per-pane tab cap normalizes and applies settings', () => {
+  testAsync('per-pane tab cap normalizes, refuses, and applies settings', async () => {
     // Max tabs per pane + LRU eviction (Preference).
-    const api = loadYolomux('', ['1', '2', '3', '4', '5']);
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', 'file:/x/draft.txt']);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
     assert.equal(api.maxTabsPerPane(), 3, 'tab cap reads appearance.max_tabs_per_pane');
@@ -2348,10 +2374,173 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual([...api.normalizeLayoutSlots(rawPinnedSlots).left.tabs], ['1', '2', '3'], 'raw layout normalization also enforces pinned-first ordering');
     assert.ok(api.pinnedTabIconHtml('1').includes('pane-tab-pin-icon'), 'pinned tabs render a pin icon helper');
     assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2', '3', '4'], '4')], ['3', '2'], 'LRU eviction skips pinned tabs');
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
+    rawPinnedSlots.left = {tabs: ['1', '2', '3'], active: '3'};
+    assert.deepStrictEqual(canonical(api.paneCapacityCheckForInsert('left', ['4'], '4', rawPinnedSlots)), {
+      cap: 3,
+      evicted: ['3'],
+      finalTabs: ['1', '2', '4'],
+      ok: true,
+      overflow: 1,
+      reason: '',
+    }, 'the shared capacity helper returns final tabs and LRU evictions');
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+    rawPinnedSlots.left = {tabs: ['1', '2'], active: '1'};
+    api.setPinnedTabsForTest(['1', '2']);
+    assert.deepStrictEqual(canonical(api.paneCapacityCheckForInsert('left', ['3'], '3', rawPinnedSlots)), {
+      cap: 2,
+      evicted: [],
+      finalTabs: ['1', '2', '3'],
+      ok: false,
+      overflow: 1,
+      reason: 'all-pinned',
+    }, 'the shared capacity helper refuses an over-cap pane whose residents are all pinned');
+    rawPinnedSlots.left = {tabs: ['1', editorItem], active: '1'};
+    api.setPinnedTabsForTest(['1']);
+    assert.deepStrictEqual(canonical(api.paneCapacityCheckForInsert('left', ['3'], '3', rawPinnedSlots)), {
+      cap: 2,
+      evicted: [],
+      finalTabs: ['1', editorItem, '3'],
+      ok: false,
+      overflow: 1,
+      reason: 'nothing-evictable',
+    }, 'the shared capacity helper refuses mixed unevictable residents with a distinct reason');
     assert.equal(api.isPinnableTab(api.fileExplorerItemId), false, 'Finder/Differ is not pinnable');
     assert.equal(api.isPinnableTab('2'), true, 'normal tmux tabs are pinnable');
     api.setPinnedTabsForTest([]);
-    assert.ok(source.includes('const evicted = tabsToEvictForCap(tabs, session);'), 'moveSessionToSlot enforces the tab cap when a tab joins a pane');
+    assert.ok(/function tabsToEvictForCap\(tabs, keepItem\)[\s\S]*paneCapacityCheckForInsert\('', \[\], keepItem/.test(source), 'legacy eviction helper delegates to the shared capacity owner');
+    assert.equal((source.match(/tabsToEvictForCap\(/g) || []).length, 1, 'product code has no direct cap-eviction callers outside the compatibility wrapper');
+    assert.ok(/function paneCapacityRefusalStatus\(item, capacity, targetSlot = ''\)[\s\S]*layout\.status\.paneFullPinned[\s\S]*layout\.status\.nothingEvictable[\s\S]*pane: targetSlot[\s\S]*limit: capacity/.test(source), 'cap refusals use dedicated localized pinned/cap status keys and name the target pane plus cap');
+    assert.ok(/const capacity = paneCapacityCheckForInsert\(targetSlot, \[\], session, next, \{tabs\}\);[\s\S]*if \(!capacity\.ok\)[\s\S]*showLayoutStatus\(paneCapacityRefusalStatus\(session, capacity, targetSlot\), 'danger'\)[\s\S]*return false;[\s\S]*next\[targetSlot\] = paneStateWithTabsForSlot/.test(source), 'moveSessionToSlot refuses over-cap inserts before applying a changed layout');
+    assert.ok(/function showLayoutStatus\(message, kind = ''\)[\s\S]*kind === 'danger'[\s\S]*layout-status-visible[\s\S]*`layout-status-\$\{tone\}`/.test(source), 'layout danger messages reuse #status as a visible status surface');
+    assert.ok(/function dropIntentCapacityCheckForSession\(session, intent, sourceSlot = null\)[\s\S]*paneCapacityCheckForInsert\(intent\.targetSlot, \[session\], session, layoutSlots\)[\s\S]*function dropIntentCapacityAllowsSession/.test(source), 'drag preview capacity checks reuse the shared capacity owner');
+    assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dropIntentCapacityRefusalStatus\(paneInfo\.item, paneInfo\.intent, paneInfo\.intent\.sourceSlot\)[\s\S]*dockviewSetInvalidTabDropPreview\(invalidTabDrop \|\| Boolean\(capacityRefusal\)\)/.test(source), 'Dockview preview paints capacity refusals through the existing invalid-drop danger state');
+    assert.ok(/const capacityRefusal = paneInfo\?\.intent\?\.zone === 'middle'[\s\S]*showLayoutStatus\(capacityRefusal, 'danger'\)[\s\S]*return;[\s\S]*Dockview's default center-drop mutates/.test(source), 'Dockview release prevents capacity-refused drops and shows the shared danger status');
+    const moveSlots = api.emptyLayoutSlots();
+    moveSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
+    moveSlots.left = api.paneStateWithTabs(['3'], '3');
+    moveSlots.right = api.paneStateWithTabs(['1', '2'], '1');
+    api.setPinnedTabsForTest(['1', '2']);
+    api.setLayoutSlotsForTest(moveSlots);
+    const refused = await api.moveSessionToSlot('3', 'right', 'left', 2);
+    const afterRefusal = api.serialize(api.layoutSlotsForTest());
+    assert.equal(refused, false, 'moveSessionToSlot reports a refused full-pinned target');
+    assert.deepStrictEqual([...afterRefusal.panes.left.tabs], ['3'], 'refused move leaves the source pane unchanged');
+    assert.deepStrictEqual([...afterRefusal.panes.right.tabs], ['1', '2'], 'refused move leaves the target pane unchanged');
+    assert.ok(api.statusTextForTest().includes('tab limit 2'), 'refused move status names the active cap');
+    assert.ok(api.statusTextForTest().includes('right'), 'refused move status names the target pane');
+    assert.equal(api.statusKindForTest(), 'danger', 'refused move publishes a visible danger layout status');
+    assert.ok(api.statusClassForTest().includes('layout-status-visible'), 'refused move makes the existing status live region visible');
+    assert.ok(api.statusClassForTest().includes('layout-status-danger'), 'refused move applies danger status styling');
+    assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), false, 'drag preview refuses a cross-pane drop into a full all-pinned target');
+    moveSlots.right = api.paneStateWithTabs(['1', editorItem], '1');
+    api.setLayoutSlotsForTest(moveSlots);
+    assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), false, 'drag preview refuses a cross-pane drop into a mixed unevictable target');
+    moveSlots.right = api.paneStateWithTabs(['1', '2'], '1');
+    api.setPinnedTabsForTest(['1']);
+    api.setLayoutSlotsForTest(moveSlots);
+    assert.equal(api.dropIntentAllowsSession('3', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'left'}), true, 'drag preview allows an at-cap target when an unpinned LRU tab can be evicted');
+    assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'right', zone: 'middle'}, {sourceSlot: 'right'}), true, 'same-pane reorder stays allowed even when the pane is at the cap');
+    api.setPinnedTabsForTest([]);
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+    assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2', '3', '4'], '4')], ['1', '2'], 'never-activated LRU ties evict in pane order');
+    api.setTabLastActivatedForTest('1', 50);
+    api.setTabLastActivatedForTest('2', 60);
+    api.setTabLastActivatedForTest('3', 70);
+    api.setTabLastActivatedForTest('4', 0);
+    assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2', '3', '4'], '4')], ['1', '2'], 'the kept incoming/active tab is never evicted even when it has the oldest timestamp');
+    const minimizeSlots = api.emptyLayoutSlots();
+    minimizeSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
+    minimizeSlots.left = api.paneStateWithTabs(['1', '2', '3'], '3');
+    minimizeSlots.right = api.paneStateWithTabs(['4'], '4');
+    api.setPinnedTabsForTest(['1']);
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 10}});
+    api.setLayoutSlotsForTest(minimizeSlots);
+    assert.ok(api.panelControlsHtml('3').includes('data-pane-minimize="3"'), 'mixed generic pane keeps the minimize affordance visible');
+    api.minimizePaneFromLayout('3');
+    let afterMinimize = api.serialize(api.layoutSlotsForTest());
+    assert.deepStrictEqual([...afterMinimize.panes.right.tabs], ['1', '4', '2', '3'], 'mixed generic minimize moves pinned and unpinned tabs together with their pane');
+    minimizeSlots.left = api.paneStateWithTabs(['1', '2'], '1');
+    minimizeSlots.right = api.paneStateWithTabs(['3'], '3');
+    api.setPinnedTabsForTest(['1', '2']);
+    api.setLayoutSlotsForTest(minimizeSlots);
+    assert.ok(api.panelControlsHtml('1').includes('data-pane-minimize="1"'), 'all-pinned generic pane keeps its normal pane minimize affordance');
+    api.minimizePaneFromLayout('1');
+    afterMinimize = api.serialize(api.layoutSlotsForTest());
+    assert.deepStrictEqual([...afterMinimize.panes.right.tabs], ['1', '2', '3'], 'all-pinned generic minimize moves its complete pane without a pin-specific refusal');
+    assert.notEqual(api.statusKindForTest(), 'danger', 'all-pinned generic minimize has no pin-specific danger status');
+    const sideMinimizeSlots = api.emptyLayoutSlots();
+    sideMinimizeSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
+    sideMinimizeSlots.left = api.paneStateWithTabs([api.infoItemId], api.infoItemId, api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft));
+    sideMinimizeSlots.right = api.paneStateWithTabs(['3'], '3');
+    api.setPinnedTabsForTest([api.infoItemId]);
+    api.setLayoutSlotsForTest(sideMinimizeSlots);
+    assert.ok(api.panelControlsHtml(api.infoItemId).includes(`data-pane-minimize="${api.infoItemId}"`), 'pinned side-pane resident keeps the pane minimize affordance');
+    api.minimizePaneFromLayout(api.infoItemId);
+    const afterSideMinimize = api.serialize(api.layoutSlotsForTest());
+    assert.equal(afterSideMinimize.panes.left, undefined, 'side-pane minimize removes a pinned side pane like any other side pane');
+    assert.notEqual(api.statusKindForTest(), 'danger', 'side-pane pinned minimize has no pin-specific danger status');
+    minimizeSlots.left = api.paneStateWithTabs(['3', '4'], '3');
+    minimizeSlots.right = api.paneStateWithTabs(['1', '2'], '1');
+    api.setPinnedTabsForTest(['1', '2']);
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+    api.setLayoutSlotsForTest(minimizeSlots);
+    api.minimizePaneFromLayout('3');
+    afterMinimize = api.serialize(api.layoutSlotsForTest());
+    assert.deepStrictEqual([...afterMinimize.panes.left.tabs], ['3', '4'], 'minimize into an all-pinned full target refuses without changing the source');
+    assert.deepStrictEqual([...afterMinimize.panes.right.tabs], ['1', '2'], 'minimize into an all-pinned full target refuses without changing the target');
+    api.setPinnedTabsForTest([]);
+    api.setLayoutSlotsForTest(minimizeSlots);
+    api.minimizePaneFromLayout('3');
+    afterMinimize = api.serialize(api.layoutSlotsForTest());
+    assert.deepStrictEqual([...afterMinimize.panes.right.tabs], ['3', '4'], 'minimize target capacity evicts target-side LRU tabs and keeps the minimized tabs');
+    const expandSlots = api.emptyLayoutSlots();
+    expandSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'middle'}, {type: 'leaf', slot: 'right'}]}]};
+    expandSlots.left = api.paneStateWithTabs(['1'], '1');
+    expandSlots.middle = api.paneStateWithTabs(['2', '3'], '3');
+    expandSlots.right = api.paneStateWithTabs(['4'], '4');
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 10}});
+    api.setPinnedTabsForTest(['2']);
+    api.setLayoutSlotsForTest(expandSlots);
+    api.expandPaneFromLayout('1');
+    const afterExpand = api.serialize(api.layoutSlotsForTest());
+    assert.deepStrictEqual([...afterExpand.panes.left.tabs], ['1', '3', '4'], 'expand gathers only unpinned tabs into the target');
+    assert.deepStrictEqual([...afterExpand.panes.middle.tabs], ['2'], 'expand leaves pinned tabs in their original pane');
+    expandSlots.left = api.paneStateWithTabs(['1', '2'], '1');
+    expandSlots.middle = api.paneStateWithTabs(['3'], '3');
+    api.setPinnedTabsForTest(['1', '2']);
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+    api.setLayoutSlotsForTest(expandSlots);
+    const beforeRefusedExpand = api.serialize(api.layoutSlotsForTest());
+    api.expandPaneFromLayout('1');
+    const refusedExpand = api.serialize(api.layoutSlotsForTest());
+    assert.deepStrictEqual([...refusedExpand.panes.left.tabs], [...beforeRefusedExpand.panes.left.tabs], 'expand into an all-pinned full target refuses instead of silently evicting the incoming tab');
+    assert.deepStrictEqual([...refusedExpand.panes.middle.tabs], [...beforeRefusedExpand.panes.middle.tabs], 'refused expand leaves source panes unchanged');
+    assert.equal(api.statusKindForTest(), 'danger', 'refused expand reports a danger status');
+    api.setLayoutSlotsForTest(minimizeSlots);
+    api.setPinnedTabsForTest(['1']);
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+    api.setTabPinned('2', true);
+    assert.equal(api.statusKindForTest(), 'advisory', 'pinning up to the cap shows an advisory status');
+    assert.ok(api.statusTextForTest().includes('tab limit 2'), 'pin-at-cap advisory names the active cap');
+    api.setTabPinned('2', false);
+    assert.equal(api.statusKindForTest(), '', 'unpinning clears the advisory layout status');
+    const loweredCapSlots = api.emptyLayoutSlots();
+    loweredCapSlots[api.layoutTreeKey] = {type: 'split', direction: 'row', children: [{type: 'leaf', slot: 'left'}, {type: 'leaf', slot: 'right'}]};
+    loweredCapSlots.left = api.paneStateWithTabs(['1', '2', '3'], '1');
+    loweredCapSlots.right = api.paneStateWithTabs(['4'], '4');
+    api.setPinnedTabsForTest(['1', '2', '3']);
+    api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+    api.setLayoutSlotsForTest(loweredCapSlots);
+    const overCapBefore = api.serialize(api.layoutSlotsForTest());
+    assert.deepStrictEqual([...overCapBefore.panes.left.tabs], ['1', '2', '3'], 'lowering the cap below pinned count preserves the over-cap pinned pane');
+    assert.equal(api.statusKindForTest(), '', 'loading/restoring an over-cap pinned pane does not spam an error status');
+    const lowerCapMove = await api.moveSessionToSlot('4', 'left', 'right', 3);
+    const overCapAfter = api.serialize(api.layoutSlotsForTest());
+    assert.equal(lowerCapMove, false, 'incoming moves into a cap-lowered over-pinned pane are refused');
+    assert.deepStrictEqual([...overCapAfter.panes.left.tabs], ['1', '2', '3'], 'refused incoming move keeps the over-cap pinned pane intact');
+    assert.deepStrictEqual([...overCapAfter.panes.right.tabs], ['4'], 'refused incoming move keeps the source pane intact');
+    assert.equal(api.statusKindForTest(), 'danger', 'incoming move into cap-lowered over-pinned pane reports a danger status');
   });
 
   test('pull request review badges render review outcomes', () => {

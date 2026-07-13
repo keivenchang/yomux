@@ -138,6 +138,27 @@ def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
+def test_info_order_by_popup_has_unique_public_dimension_names(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof infoGroupingControlsHtml === 'function'"))
+    metrics = browser.execute_script(
+        """
+        const root = document.createElement('div');
+        root.innerHTML = infoGroupingControlsHtml();
+        return [...root.querySelectorAll('[data-info-group-level]')].map(select => ({
+          values: [...select.options].map(option => option.value),
+          labels: [...select.options].map(option => option.textContent.trim()),
+        }));
+        """
+    )
+
+    assert len(metrics) == 4, metrics
+    for level in metrics:
+        assert len(level["labels"]) == len(set(level["labels"])), metrics
+    hidden_dimensions = {"tmux-session", "tmux-pane", "git-worktree", "local-repository", "hosted-repository"}
+    assert not hidden_dimensions.intersection(metrics[0]["values"]), metrics
+
+
 def test_pane_width_fixture_keeps_the_production_tab_row_contract(browser, tmp_path):
     """The CSS-only width fixture may be small, but its tab row must not fork from the real builder."""
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
@@ -294,7 +315,7 @@ def test_tab_metadata_hidden_removes_symbols_from_regular_and_compact_tmux_tabs(
         page_html(f"""
       <button id="regular-tab" class="pane-tab active">{tab_body}</button>
       <button id="compact-tab" class="tmux-pane-tab-token active">{tab_body}</button>
-    """),
+        """),
     )
     metrics = browser.execute_script(
         """
@@ -996,18 +1017,18 @@ def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(bro
           noDataRegions: chart.querySelectorAll('[data-js-debug-no-data-range]').length,
         };
 
-        clearJsDebugGraphData();
-        setDebugGraphRange(60, {render: false});
-        debugGraphApplyServerHistory({sequence: 3, records: [{
-          start: nowSeconds - 3, duration: 1, sequence: 1, disconnected_ms: 1000,
-          clients: {'client-stale': {disconnected_ms: 1000}},
-        }, {
-          start: nowSeconds - 2, duration: 1, sequence: 2,
-          clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
-        }, {
-          start: nowSeconds - 1, duration: 1, sequence: 3, disconnected_ms: 1000,
-          clients: {'client-stale': {disconnected_ms: 1000}, 'client-live': {disconnected_ms: 1000}},
-        }]});
+            clearJsDebugGraphData();
+            setDebugGraphRange(60, {render: false});
+            debugGraphApplyServerHistory({sequence: 3, records: [{
+              start: nowSeconds - 3, duration: 1, sequence: 1,
+              clients: {[currentClientId]: {disconnected_ms: 1000}, 'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+            }, {
+              start: nowSeconds - 2, duration: 1, sequence: 2,
+              clients: {'client-live': {api_count: 1, latency_total_ms: 12, latency_count: 1, bandwidth_bytes: 256}},
+            }, {
+              start: nowSeconds - 1, duration: 1, sequence: 3,
+              clients: {[currentClientId]: {disconnected_ms: 1000}, 'client-live': {disconnected_ms: 1000}},
+            }]});
         renderDebugPanels({force: true});
         const thisClientOutageRegions = document.querySelectorAll('[data-js-debug-chart="bandwidth"] [data-js-debug-disconnected-range]').length;
         return {
@@ -1026,6 +1047,127 @@ def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(bro
     assert metrics["thisClientOutageRegions"] == 2, metrics
     assert metrics["zeroBaselineDelta"] <= 0.75, metrics
     assert metrics["zeroStyle"] == "100.000%", metrics
+
+
+def test_debug_graph_raw_rollup_overlap_uses_finest_values_at_one_uniform_resolution(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof debugGraphDisplayBuckets === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.floor(Date.now() / 10_000) * 10_000;
+        const start = now - 20_000;
+        setDebugGraphRange(60, {render: false});
+        debugGraphApplyServerHistory({sequence: 1, records: [
+          {start: start / 1000, duration: 10, api_count: 100, latency_total_ms: 1000, latency_count: 10},
+          ...Array.from({length: 3}, (_unused, index) => ({
+            start: (start + (index * 1000)) / 1000,
+            duration: 1,
+            api_count: 1,
+            latency_total_ms: 10,
+            latency_count: 1,
+          })),
+          ...Array.from({length: 2}, (_unused, index) => ({
+            start: (now - 5000 + (index * 1000)) / 1000,
+            duration: 1,
+            api_count: 1,
+            latency_total_ms: 10,
+            latency_count: 1,
+          })),
+        ]});
+        renderDebugPanels({force: true});
+        const buckets = debugGraphDisplayBuckets(now);
+        return {
+          bucketDurations: buckets.map(bucket => bucket.durationMs),
+          apiCounts: buckets.map(bucket => bucket.apiCount),
+          latencyTotalMs: buckets[0]?.latencyTotalMs,
+          latencyCount: buckets[0]?.latencyCount,
+          controlResolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+        };
+        """
+    )
+    assert metrics == {
+        "bucketDurations": [10_000, 10_000],
+        "apiCounts": [73, 2],
+        "latencyTotalMs": 730,
+        "latencyCount": 10,
+        "controlResolution": 10,
+    }, metrics
+
+
+def test_yostats_chart_title_descriptions_cover_theme_and_pane_role(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyLayoutSlots === 'function'
+              && typeof emptyLayoutSlots === 'function'
+              && typeof paneStateWithTabs === 'function'
+              && typeof paneRoleDefinition === 'function'
+              && typeof renderDebugPanels === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        const collect = label => {
+          renderDebugPanels({force: true});
+          const slot = slotForItem(debugPaneItemId);
+          const role = paneRoleForSlot(slot);
+          const panel = panelNodes.get(debugPaneItemId);
+          const title = panel?.querySelector('[data-js-debug-chart="latency"] .js-debug-chart-title');
+          return {
+            label,
+            slot,
+            role: role.kind,
+            side: role.side || '',
+            light: document.body.classList.contains('theme-light'),
+            text: title?.textContent || '',
+            title: title?.getAttribute('title') || '',
+            aria: title?.getAttribute('aria-label') || '',
+            descKey: title?.dataset.jsDebugChartDesc || '',
+            pointTooltipCount: panel?.querySelectorAll('[data-js-debug-hover-tooltip]').length || 0,
+          };
+        };
+        const cases = [];
+        document.body.classList.remove('theme-light');
+        cases.push(collect('generic-dark'));
+        document.body.classList.add('theme-light');
+        cases.push(collect('generic-light'));
+        const next = emptyLayoutSlots();
+        next[layoutTreeKey] = splitNode('row', leafNode('stats'), leafNode('main'), 28);
+        next.stats = paneStateWithTabs([debugPaneItemId], debugPaneItemId, paneRoleDefinition(paneRoleSide, paneSideLeft));
+        next.main = paneStateWithTabs(['1'], '1', paneRoleDefinition(paneRoleGeneric));
+        applyLayoutSlots(next, {focusSession: debugPaneItemId, forceFull: true});
+        document.body.classList.remove('theme-light');
+        cases.push(collect('side-dark'));
+        document.body.classList.add('theme-light');
+        cases.push(collect('side-light'));
+        return cases;
+        """
+    )
+    assert {case["label"] for case in metrics} == {"generic-dark", "generic-light", "side-dark", "side-light"}, metrics
+    assert {case["role"] for case in metrics[:2]} == {"generic"}, metrics
+    assert {case["role"] for case in metrics[2:]} == {"side"}, metrics
+    assert {case["light"] for case in metrics} == {False, True}, metrics
+    for case in metrics:
+        assert case["text"] == "Client latency", metrics
+        assert case["descKey"] == "debug.graph.chart.latency.desc", metrics
+        assert case["title"] and "round-trip latency" in case["title"], metrics
+        assert case["aria"].startswith("Client latency: "), metrics
+        assert case["title"] in case["aria"], metrics
+        assert case["pointTooltipCount"] >= 1, metrics
 
 
 def test_debug_graph_cpu_chart_yields_plot_height_to_a_wrapped_legend(browser, tmp_path):
@@ -1252,9 +1394,19 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
         });
         renderDebugPanels({force: true});
         const graph = document.querySelector('[data-js-debug-graph]');
+        const view = graph.closest('.js-debug-graph-view');
+        const shell = graph.querySelector('.js-debug-chart-shell');
+        view.style.height = '260px';
+        view.style.maxHeight = '260px';
+        view.style.overflow = 'auto';
+        shell.style.minHeight = '1200px';
+        view.scrollTop = 420;
         const meta = graph.querySelector('.js-debug-graph-meta');
         const overlay = graph.querySelector('[data-js-debug-history-overlay]');
+        const message = overlay.querySelector('.js-debug-history-overlay-message');
         const dots = Array.from(overlay.querySelectorAll('.moving-ellipsis > span'));
+        const viewRect = view.getBoundingClientRect();
+        const messageRect = message.getBoundingClientRect();
         return {
           busy: graph.getAttribute('aria-busy'),
           phase: graph.dataset.jsDebugHistoryState,
@@ -1263,6 +1415,12 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
           dotCount: dots.length,
           animationNames: dots.map(dot => getComputedStyle(dot).animationName),
           labelText: Array.from(overlay.querySelector('.js-debug-history-overlay-message > span').childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join(''),
+          viewCenterY: viewRect.top + viewRect.height / 2,
+          messageCenterY: messageRect.top + messageRect.height / 2,
+          messageLeft: messageRect.left,
+          messageRight: messageRect.right,
+          viewLeft: viewRect.left,
+          viewRight: viewRect.right,
         };
         """
     )
@@ -1273,6 +1431,8 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
     assert metrics["dotCount"] == 3, metrics
     assert all(name == "moving-ellipsis-dot" for name in metrics["animationNames"]), metrics
     assert metrics["labelText"] == "Loading history", metrics
+    assert abs(metrics["messageCenterY"] - metrics["viewCenterY"]) <= 12, metrics
+    assert metrics["messageLeft"] >= metrics["viewLeft"] - 0.5 and metrics["messageRight"] <= metrics["viewRight"] + 0.5, metrics
 
 
 @pytest.mark.boot
@@ -1312,8 +1472,11 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
         for path in sorted(Path("static_src/locales").glob("*.json"))
     }
     assert set(locale_catalogs) == set(SHIPPED_LOCALES)
-    metrics = browser.execute_async_script(
-        r"""
+    previous_script_timeout = browser.timeouts.script
+    browser.set_script_timeout(30)
+    try:
+        setup_metrics = browser.execute_async_script(
+            r"""
         const localeCatalogs = arguments[0];
         const selectedPath = arguments[1];
         const done = arguments[arguments.length - 1];
@@ -1550,80 +1713,144 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
               };
             };
           const baselineState = preservedState();
-          const surfaceMatrix = {};
-          for (const [locale, catalog] of Object.entries(localeCatalogs)) {
-            await selectLocale(locale);
-            await frame();
-            await frame();
-            const help = keyboardShortcutsNode;
-            const stats = panelNodes.get(debugPaneItemId);
-            const finder = panelNodes.get(fileExplorerItemId);
-            const editor = panelNodes.get(editorItem);
-            const terminal = panelNodes.get('1');
-              const expectedChartTitles = jsDebugGraphChartGroups
-                .filter(group => debugGraphChartVisible(group.key))
-                .map(group => catalog[group.labelKey]);
-            surfaceMatrix[locale] = {
-              activeLocale: i18nActiveLocale,
-              resolvedHelpHeading: t('common.keyboardShortcuts'),
-              helpHeading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
-              helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
-              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
-              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
-              languageTitle: document.querySelector('.topbar-language')?.title || '',
-              lang: document.documentElement.lang,
-              dir: document.documentElement.dir,
-              helpConnected: Boolean(help?.isConnected),
-              statsConnected: Boolean(stats?.isConnected),
-              state: preservedState(),
-              englishLeaks: obviousSourceEnglishLeaks(
-                locale,
-                catalog,
-                visibleSurfaceValues([help, stats, finder, editor, terminal]),
-              ),
-              expected: {
-                helpHeading: catalog['common.keyboardShortcuts'],
-                statsTitle: catalog['tab.debug'],
-                chartTitles: expectedChartTitles,
-                languageTitle: catalog['common.language'],
-              },
-            };
-          }
-          await selectLocale('zh-Hant');
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const help = keyboardShortcutsNode;
-          const helpText = help?.textContent || '';
-          const stats = panelNodes.get(debugPaneItemId);
-          const statsText = stats?.textContent || '';
-          const zhHant = {
-            heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
-            sections: Array.from(help?.querySelectorAll('.keyboard-shortcuts-section h3') || []).map(node => node.textContent),
-            englishLeak: /Agent status glyphs|Color meanings|Icon meanings|YO button meanings|Menus, palettes, and pickers|Open selected file or folder/.test(helpText),
-            markerTexts: Array.from(help?.querySelectorAll('.session-yolo-marker') || []).map(node => node.textContent),
-            statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
-            chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
-            statsEnglishLeak: /Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|Graph bucket size|Graph time range/.test(statsText),
+          window.__yolomuxLocaleMatrixHarness = {
+            async collect(locale) {
+              const catalog = localeCatalogs[locale];
+              if (!catalog) throw new Error(`missing locale catalog: ${locale}`);
+              await selectLocale(locale);
+              await frame();
+              await frame();
+              const help = keyboardShortcutsNode;
+              const stats = panelNodes.get(debugPaneItemId);
+              const finder = panelNodes.get(fileExplorerItemId);
+              const editor = panelNodes.get(editorItem);
+              const terminal = panelNodes.get('1');
+              const visibleChartGroups = jsDebugGraphChartGroups
+                .filter(group => debugGraphChartVisible(group.key));
+              const expectedChartTitles = visibleChartGroups.map(group => catalog[group.labelKey]);
+              const expectedChartTitleDescriptions = visibleChartGroups.map(group => ({
+                text: catalog[group.labelKey],
+                title: catalog[group.descKey],
+                ariaLabel: `${catalog[group.labelKey]}: ${catalog[group.descKey]}`,
+                descKey: group.descKey,
+              }));
+              return {
+                activeLocale: i18nActiveLocale,
+                resolvedHelpHeading: t('common.keyboardShortcuts'),
+                helpHeading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+                helpAria: help?.querySelector('.keyboard-shortcuts-dialog')?.getAttribute('aria-label') || '',
+                statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+                chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+                chartTitleDescriptions: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => ({
+                  text: node.textContent,
+                  title: node.getAttribute('title') || '',
+                  ariaLabel: node.getAttribute('aria-label') || '',
+                  descKey: node.getAttribute('data-js-debug-chart-desc') || '',
+                })),
+                languageTitle: document.querySelector('.topbar-language')?.title || '',
+                lang: document.documentElement.lang,
+                dir: document.documentElement.dir,
+                helpConnected: Boolean(help?.isConnected),
+                statsConnected: Boolean(stats?.isConnected),
+                state: preservedState(),
+                englishLeaks: obviousSourceEnglishLeaks(
+                  locale,
+                  catalog,
+                  visibleSurfaceValues([help, stats, finder, editor, terminal]),
+                ),
+                expected: {
+                  helpHeading: catalog['common.keyboardShortcuts'],
+                  statsTitle: catalog['tab.debug'],
+                  chartTitles: expectedChartTitles,
+                  chartTitleDescriptions: expectedChartTitleDescriptions,
+                  languageTitle: catalog['common.language'],
+                },
+              };
+            },
+            async collectDirectionChecks() {
+              await selectLocale('zh-Hant');
+              await frame();
+              await frame();
+              const help = keyboardShortcutsNode;
+              const helpText = help?.textContent || '';
+              const stats = panelNodes.get(debugPaneItemId);
+              const statsText = stats?.textContent || '';
+              const zhHant = {
+                heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+                sections: Array.from(help?.querySelectorAll('.keyboard-shortcuts-section h3') || []).map(node => node.textContent),
+                englishLeak: /Agent status glyphs|Color meanings|Icon meanings|YO button meanings|Menus, palettes, and pickers|Open selected file or folder/.test(helpText),
+                markerTexts: Array.from(help?.querySelectorAll('.session-yolo-marker') || []).map(node => node.textContent),
+                statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
+                chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+                statsEnglishLeak: /Client latency|Client bandwidth|Agent status|Agent tokens\/min|other clients avg|this client|Graph bucket size|Graph time range/.test(statsText),
+              };
+              await selectLocale('he');
+              await frame();
+              await frame();
+              const hebrewHelp = keyboardShortcutsNode;
+              const hebrewStats = panelNodes.get(debugPaneItemId);
+              return {
+                zhHant,
+                hebrew: {
+                  heading: hebrewHelp?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
+                  statsTitle: hebrewStats?.querySelector('.panel-session-label')?.textContent || '',
+                  chartTitles: Array.from(hebrewStats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
+                  dir: document.documentElement.dir,
+                },
+              };
+            },
           };
-          await selectLocale('he');
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           done({
             beforeHeading,
             codeMirrorLocaleState,
             baselineState,
-            surfaceMatrix,
-            zhHant,
-            hebrew: {
-              heading: help?.querySelector('.keyboard-shortcuts-head h2')?.textContent || '',
-              statsTitle: stats?.querySelector('.panel-session-label')?.textContent || '',
-              chartTitles: Array.from(stats?.querySelectorAll('.js-debug-chart-title') || []).map(node => node.textContent),
-              dir: document.documentElement.dir,
-            },
           });
         })().catch(error => done({error: String(error), stack: error?.stack || ''}));
-        """,
-        locale_catalogs,
-        selected_path,
-    )
+            """,
+            locale_catalogs,
+            selected_path,
+        )
+        assert "error" not in setup_metrics, setup_metrics
+        surface_matrix = {}
+        for locale in locale_catalogs:
+            result = browser.execute_async_script(
+                """
+                const locale = arguments[0];
+                const done = arguments[arguments.length - 1];
+                const harness = window.__yolomuxLocaleMatrixHarness;
+                if (!harness) {
+                  done({error: 'locale matrix harness is unavailable'});
+                  return;
+                }
+                harness.collect(locale)
+                  .then(value => done({value}))
+                  .catch(error => done({error: String(error), stack: error?.stack || ''}));
+                """,
+                locale,
+            )
+            assert "error" not in result, {"locale": locale, **result}
+            surface_matrix[locale] = result["value"]
+        direction_metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const harness = window.__yolomuxLocaleMatrixHarness;
+            if (!harness) {
+              done({error: 'locale matrix harness is unavailable'});
+              return;
+            }
+            harness.collectDirectionChecks()
+              .then(value => done(value))
+              .catch(error => done({error: String(error), stack: error?.stack || ''}));
+            """
+        )
+        assert "error" not in direction_metrics, direction_metrics
+        metrics = {
+            **setup_metrics,
+            "surfaceMatrix": surface_matrix,
+            **direction_metrics,
+        }
+    finally:
+        browser.set_script_timeout(previous_script_timeout)
     assert "error" not in metrics, metrics
     assert set(metrics["surfaceMatrix"]) == set(locale_catalogs), metrics
     expected_editor_text = "\n".join(f"STATE_{index:02d}_{'X' * 160}" for index in range(1, 49))
@@ -1654,6 +1881,15 @@ def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
         assert surface["helpAria"] == surface["expected"]["helpHeading"], (locale, surface)
         assert surface["statsTitle"] == surface["expected"]["statsTitle"], (locale, surface)
         assert set(surface["expected"]["chartTitles"]).issubset(set(surface["chartTitles"])), (locale, surface)
+        chart_title_descriptions = {
+            (entry["text"], entry["descKey"]): entry
+            for entry in surface["chartTitleDescriptions"]
+        }
+        for expected in surface["expected"]["chartTitleDescriptions"]:
+            actual = chart_title_descriptions.get((expected["text"], expected["descKey"]))
+            assert actual is not None, (locale, expected, surface["chartTitleDescriptions"])
+            assert actual["title"] == expected["title"], (locale, expected, actual)
+            assert actual["ariaLabel"] == expected["ariaLabel"], (locale, expected, actual)
         assert surface["languageTitle"] == surface["expected"]["languageTitle"], (locale, surface)
         assert surface["lang"] == locale, (locale, surface)
         assert surface["dir"] == ("rtl" if locale in {"ar", "he"} else "ltr"), (locale, surface)
@@ -1775,6 +2011,56 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
     assert result["pollRequests"] == 1, result
     assert result["renderedAtAfter"] > result["renderedAt"], result
     assert result["finishedAt"] - result["startedAt"] < 3000, result
+
+
+def test_debug_graph_stats_sse_push_advances_live_tail_without_poll(browser, tmp_path):
+    """A durable SSE sample paints the live tail without waiting for polling."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyJsDebugStatsSamplePush === 'function'
+              && typeof clearJsDebugGraphData === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const before = Number(graph.dataset.jsDebugGraphRenderedAt || 0);
+        const originalFetch = window.fetch;
+        let polls = 0;
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/stats-sample') polls += 1;
+          return originalFetch(input, options);
+        };
+        const now = Math.floor(Date.now() / 1000);
+        const applied = applyJsDebugStatsSamplePush({
+          sequence: 901,
+          sample: {time: now, cpu_percent: 7, system_cpu_percent: 19},
+          record: {
+            start: now, duration: 1, sequence: 901,
+            cpu_total_percent: 7, cpu_count: 1,
+            system_cpu_total_percent: 19, system_cpu_count: 1,
+          },
+        });
+        window.setTimeout(() => {
+          const after = Number(graph.dataset.jsDebugGraphRenderedAt || 0);
+          const charts = graph.querySelectorAll('[data-js-debug-chart]').length;
+          window.fetch = originalFetch;
+          done({applied, before, after, charts, polls});
+        }, 900);
+        """
+    )
+    assert result["applied"] is True, result
+    assert result["after"] > result["before"], result
+    assert result["charts"] == 6, result
+    assert result["polls"] == 0, result
 
 
 def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediately(browser, tmp_path):
@@ -2017,8 +2303,8 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
           tokens_per_agent_total: 60,
           agent_token_samples: 1,
           agent_token_rates: [
-            {key: '1|0|claude', label: '1:0:claude', total: 10, samples: 1, tokens: 10, seconds: 60, source: 'transcript'},
-            {key: '1|1|codex', label: '1:1:codex', total: 20, samples: 1, tokens: 20, seconds: 60, source: 'transcript'},
+            {key: '1|0|claude', label: '1:0:claude', total: 10, samples: 1, tokens: 10, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-sol': {total: 10, samples: 1, tokens: 10, seconds: 60}}},
+            {key: '1|1|codex', label: '1:1:codex', total: 20, samples: 1, tokens: 20, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-terra': {total: 20, samples: 1, tokens: 20, seconds: 60}}},
             {key: '2|0|codex', label: '2:0:codex', total: 30, samples: 1, tokens: 30, seconds: 60, source: 'transcript'},
             {key: '3|0|codex', label: '3:0:codex', total: 40, samples: 1, tokens: 40, seconds: 60, source: 'transcript'},
             {key: '4|0|codex', label: '4:0:codex', total: 50, samples: 1, tokens: 50, seconds: 60, source: 'transcript'},
@@ -2026,10 +2312,13 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
             {key: '6|0|codex', label: '6:0:codex', total: 70, samples: 1, tokens: 70, seconds: 60, source: 'transcript'},
           ],
         }]}}, {forceGraphRefresh: true});
+        setDebugGraphChartVisible('modelTokens', true);
         renderDebugPanels({force: true});
         const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
         const bars = [...chart.querySelectorAll('[data-js-debug-bar-series^="agentToken:"]')];
         const legends = [...chart.querySelectorAll('[data-js-debug-legend^="agentToken:"]')];
+        const modelChart = document.querySelector('[data-js-debug-chart="modelTokens"]');
+        const modelBars = new Map([...modelChart.querySelectorAll('[data-js-debug-bar-series^="modelToken:"]')].map(bar => [bar.dataset.jsDebugBarSeries, bar]));
         return {
           patternDefs: [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')].map(node => ({
             id: node.id,
@@ -2045,6 +2334,25 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
             const rect = [...(swatch?.children || [])].find(node => node.tagName?.toLowerCase() === 'rect');
             return {pattern: item.dataset.jsDebugTokenPattern, fill: getComputedStyle(rect).fill, fillAttr: rect?.getAttribute('fill') || '', definition: pattern?.innerHTML || ''};
           }),
+          modelLegends: [...modelChart.querySelectorAll('[data-js-debug-legend^="modelToken:"]')].map(item => {
+            const key = item.dataset.jsDebugLegend;
+            const swatch = item.querySelector('.js-debug-legend-swatch');
+            const bar = modelBars.get(key);
+            return {
+              key,
+              background: getComputedStyle(swatch).backgroundColor,
+              barFill: getComputedStyle(bar).fill,
+              swatchSeriesColor: getComputedStyle(swatch).getPropertyValue('--js-debug-series-color').trim(),
+              barSeriesColor: getComputedStyle(bar).getPropertyValue('--js-debug-series-color').trim(),
+            };
+          }),
+          tokenAxes: [chart, modelChart].map(item => ({
+            key: item.dataset.jsDebugChart,
+            owner: item.dataset.jsDebugTokenAxis,
+            max: item.dataset.jsDebugChartAxisMax,
+            scale: item.dataset.jsDebugChartScale || 'linear',
+            midpoint: item.querySelector('[data-js-debug-axis-mid]')?.textContent || '',
+          })),
           hover: (() => {
             const svg = chart.querySelector('.js-debug-line-chart');
             const rect = bars[0].getBoundingClientRect();
@@ -2071,9 +2379,467 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
     assert [item["pattern"] for item in metrics["legends"]] == [str(index) for index in range(7)], metrics
     assert all(item["fillAttr"].startswith("url(") for item in metrics["legends"]), metrics
     assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
+    assert [item["key"].endswith(model) for item, model in zip(metrics["modelLegends"], ["gpt-5.6-sol", "gpt-5.6-terra"])] == [True, True], metrics
+    assert all(item["key"].startswith("modelToken:legacy�") for item in metrics["modelLegends"]), metrics
+    assert len({item["background"] for item in metrics["modelLegends"]}) == 2, metrics
+    assert all(item["background"] == item["barFill"] for item in metrics["modelLegends"]), metrics
+    assert all(item["swatchSeriesColor"] == item["barSeriesColor"] for item in metrics["modelLegends"]), metrics
+    assert [item["owner"] for item in metrics["tokenAxes"]] == ["shared", "shared"], metrics
+    assert len({(item["max"], item["scale"], item["midpoint"]) for item in metrics["tokenAxes"]}) == 1, metrics
     assert all(item["hovered"] for item in metrics["hover"]["dark"]), metrics
     assert all(item["color"] == "rgb(228, 232, 238)" for item in metrics["hover"]["dark"]), metrics
     assert all(color == "rgb(23, 32, 44)" for color in metrics["hover"]["light"]), metrics
+
+
+def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof recordJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        const values = [100, 110, 120, 130, 140, 150, 160, 170, 180, 5000];
+        const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+        recordJsDebugStatsSample({history: {sequence: 20, records: values.map((tokens, index) => ({
+          start: nowSeconds - ((values.length - 1 - index) * 60),
+          duration: 60,
+          sequence: 10 + index,
+          tokens_per_agent_total: tokens,
+          agent_token_samples: 1,
+          agent_token_rates: [{
+            key: '1|0|codex', label: '1:0:codex', total: tokens, samples: 1, tokens, seconds: 60, source: 'transcript',
+            model_rates: {'gpt-5.6-sol': {total: tokens, samples: 1, tokens, seconds: 60}},
+          }],
+          cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: Math.max(1, tokens / 10)}]},
+        }))}}, {forceGraphRefresh: true});
+        setDebugGraphChartVisible('modelTokens', true);
+        renderDebugPanels({force: true});
+        return ['agentTokens', 'modelTokens'].map(key => {
+          const chart = document.querySelector(`[data-js-debug-chart="${key}"]`);
+          const breakPath = chart.querySelector(`[data-js-debug-axis-break="${key}"]`);
+          const breakLabel = chart.querySelector(`[data-js-debug-axis-break-label="${key}"]`);
+          const ordinary = chart.querySelector('[data-js-debug-bar-total="180"]');
+          const peak = chart.querySelector('[data-js-debug-bar-total="5000"]');
+          return {
+            key,
+            owner: chart.dataset.jsDebugTokenAxis,
+            scale: chart.dataset.jsDebugChartScale,
+            max: chart.dataset.jsDebugChartAxisMax,
+            threshold: chart.dataset.jsDebugChartAxisBreak,
+            breakPathValue: breakPath?.dataset.jsDebugAxisBreakValue || '',
+            breakPathY: breakPath?.getBBox?.().y ?? -1,
+            breakLabel: breakLabel?.textContent || '',
+            breakGlyph: getComputedStyle(breakLabel, '::after').content,
+            ordinaryY: Number(ordinary?.getAttribute('y')),
+            peakY: Number(peak?.getAttribute('y')),
+            barCount: chart.querySelectorAll('[data-js-debug-bar-total]').length,
+            displayedTokens: Number(chart.querySelector('[data-js-debug-displayed-token-sum]')?.dataset.jsDebugDisplayedTokenSum || 0),
+          };
+        });
+        """
+    )
+    assert [item["owner"] for item in metrics] == ["shared", "shared"], metrics
+    assert [item["scale"] for item in metrics] == ["broken-linear", "broken-linear"], metrics
+    assert len({(item["max"], item["threshold"], item["breakPathValue"], item["breakPathY"]) for item in metrics}) == 1, metrics
+    assert 180 <= float(metrics[0]["threshold"]) < 5000, metrics
+    assert all("≋" in item["breakGlyph"] for item in metrics), metrics
+    assert all(item["ordinaryY"] > item["peakY"] for item in metrics), metrics
+    assert all(item["barCount"] > 0 for item in metrics), metrics
+    assert metrics[0]["displayedTokens"] == metrics[1]["displayedTokens"] == sum([100, 110, 120, 130, 140, 150, 160, 170, 180, 5000]), metrics
+
+
+def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_display_range(browser, tmp_path):
+    """The cost card follows the Model tokens bucket/range owner, not a second chart state."""
+    transcript = tmp_path / "cost-source.jsonl"
+    transcript.write_text('{"type":"session_meta","payload":{"id":"cost-source"}}\n', encoding="utf-8")
+    browser.set_window_size(1280, 800)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && typeof setDebugGraphRange === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const transcriptPath = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+          const records = Array.from({length: 6}, (_unused, index) => ({
+            start: nowSeconds - ((5 - index) * 60), duration: 60, sequence: index + 1,
+            tokens_per_agent_total: 100 + index, agent_token_samples: 1,
+            agent_token_rates: [{
+              key: 'root|0|codex', label: 'root:0:codex', total: 100 + index, samples: 1,
+              tokens: 100 + index, seconds: 60, source: 'transcript',
+              model_rates: {'gpt-5.6-terra': {total: 100 + index, samples: 1, tokens: 100 + index, seconds: 60}},
+            }],
+            cost_summary: {
+              total_micro_usd: 10000, known_micro_usd: 10000, priced_count: 3, complete: true, unpriced_count: 0,
+              components: [
+                {key: 'input', direction: 'input', quantity: 10, unit: 'tokens', micro_usd: 2000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://platform.openai.com/pricing'},
+                {key: 'cache', cache_role: 'read', quantity: 10, unit: 'tokens', micro_usd: 3000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://platform.openai.com/pricing'},
+                {key: 'output', direction: 'output', quantity: 10, unit: 'tokens', micro_usd: 5000, provider: 'anthropic', model: 'claude-opus-4-8', source_url: 'https://platform.claude.com/docs/en/about-claude/pricing'},
+                {key: 'bad', direction: 'output', quantity: 1, unit: 'tokens', micro_usd: 0, provider: 'bad', model: 'bad', source_url: 'javascript:alert(1)'},
+              ],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000}],
+              sources: [{tmux_key: 'root|0|codex', tmux_label: 'root:0', tmux_session: 'root', tmux_window: '0', tmux_window_label: '0', agent_kind: 'codex', root_thread_id: 'root', agent_thread_id: 'root', source: 'Codex', transcript: transcriptPath, model: 'gpt-5.6-terra', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000, lower_micro_usd: 10000, upper_micro_usd: 10000}],
+              catalog_revision: 'test-catalog', freshness: 'verified',
+            },
+          }));
+          debugGraphApplyServerHistory({sequence: 6, records});
+          setDebugGraphChartVisible('modelTokens', true);
+          setDebugGraphChartVisible('costSummary', true);
+          setDebugGraphRange(6 * 60);
+          renderDebugPanels({force: true});
+
+          const modelGroup = jsDebugGraphChartGroups.find(group => group.key === 'modelTokens');
+          const cardState = () => {
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const model = graph?.querySelector('[data-js-debug-chart="modelTokens"]');
+            const card = graph?.querySelector('[data-js-debug-summary-group="costSummary"]');
+            const buckets = debugGraphBucketsForChartGroup(modelGroup, debugGraphDisplayBuckets(), Date.now());
+            const expected = debugGraphCostSummaryForBuckets(buckets);
+            const expectedAmount = debugGraphCostRangeUsdText(expected);
+            return {
+              graph, model, card, buckets, expectedAmount,
+              renderedAmount: card?.querySelector('.js-debug-cost-estimate')?.textContent || '',
+                renderedTokens: card?.querySelector('.js-debug-cost-token-count')?.textContent || '',
+            };
+          };
+          const initial = cardState();
+          const toggleOrder = [...document.querySelectorAll('[data-js-debug-chart-toggle]')]
+            .map(button => button.dataset.jsDebugChartToggle);
+          const gridChildren = [...initial.graph.querySelector('[data-js-debug-chart-grid]').children];
+          const initialOrder = {
+            model: gridChildren.indexOf(initial.model),
+            cost: gridChildren.indexOf(initial.card),
+          };
+          initial.card?.scrollIntoView({block: 'center'});
+          const details = initial.card?.querySelector('[data-js-debug-cost-details]');
+          details?.click();
+          await window.__yolomuxTestWaitFor(
+            () => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('.js-debug-cost-report'),
+            {timeoutMs: 1000, intervalMs: 20, description: 'YO!cost tab'},
+          );
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const yocostPanel = document.getElementById(panelDomId(yocostItemId));
+          const overlay = document.querySelector('[data-js-debug-cost-modal]');
+          const popover = yocostPanel?.querySelector('.js-debug-cost-report');
+          const reportBody = yocostPanel?.querySelector('.js-yocost-scroll');
+          if (reportBody) reportBody.style.maxBlockSize = '16rem';
+          if (reportBody) reportBody.scrollTop = reportBody.scrollHeight;
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const popoverRect = popover?.getBoundingClientRect();
+          const popoverState = {
+            tabActive: activePaneItems().includes(yocostItemId),
+            overlay: Boolean(overlay),
+            costCalculation: popover?.textContent.includes('Cost calculation'),
+            modelUsages: popover?.textContent.includes('Model Usages'),
+            sourceAttribution: popover?.textContent.includes('Agent and source attribution'),
+            pricingSources: popover?.textContent.includes('Pricing sources'),
+            agentTable: popover?.textContent.includes('By Agent'),
+            agentRows: popover?.querySelectorAll('[data-js-debug-cost-table="agent"] tbody tr').length || 0,
+            agentTableText: popover?.querySelector('[data-js-debug-cost-table="agent"]')?.textContent || '',
+            report: popover?.matches('article.js-debug-cost-report'),
+            tokenChartKeys: [...(yocostPanel?.querySelectorAll('[data-js-debug-chart]') || [])].map(node => node.dataset.jsDebugChart),
+            chartsAboveReport: Boolean(yocostPanel?.querySelector('[data-js-yocost-graphs]')?.compareDocumentPosition(popover) & Node.DOCUMENT_POSITION_FOLLOWING),
+            rangeControl: Boolean(yocostPanel?.querySelector('[data-js-debug-range-control]')),
+            resolutionControl: Boolean(yocostPanel?.querySelector('[data-js-debug-resolution-override]')),
+            statsVisible: jsDebugStatsPanelVisible(),
+            dataAge: yocostPanel?.querySelector('[data-js-yocost-data-age]')?.textContent || '',
+            refreshButton: yocostPanel?.querySelector('[data-js-debug-cost-refresh]')?.textContent || '',
+            headings: [...(popover?.querySelectorAll('h1, h2') || [])].map(node => node.textContent.trim()),
+            pricingSourcesLast: (() => {
+              const sections = [...(popover?.querySelectorAll('.js-debug-cost-details-section') || [])];
+              return sections.length > 0 && sections[sections.length - 1]?.classList.contains('js-debug-cost-pricing-sources');
+            })(),
+            pricingSourceLinks: [...(popover?.querySelectorAll('.js-debug-cost-pricing-sources a') || [])].map(node => ({text: node.textContent.trim(), href: node.getAttribute('href')})),
+            pricingSourcesText: popover?.querySelector('.js-debug-cost-pricing-sources')?.textContent || '',
+            hasTable: Boolean(popover?.querySelector('table')),
+            usageTitle: popover?.querySelector('.js-debug-cost-model-usages h2')?.textContent || '',
+            usageHeaderLabels: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] thead th') || [])].map(node => node.textContent.trim()),
+            usageHeaderRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] thead th') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
+            usageRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr').length || 0,
+            usageGrandRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tfoot tr').length || 0,
+            usageRowAria: popover?.querySelector('[data-js-debug-cost-table="model"] tbody tr')?.getAttribute('aria-label') || '',
+            usageMetricTexts: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child .js-debug-cost-table-metric') || [])].map(node => node.textContent.trim()),
+            usageMetricRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
+            totalHeaderInside: (() => { const rect = popover?.querySelector('[data-js-debug-cost-table="model"] thead th:last-child')?.getBoundingClientRect(); return Boolean(rect && popoverRect && rect.right <= popoverRect.right && rect.left >= popoverRect.left); })(),
+            sourceLinkCount: popover?.querySelectorAll('[data-js-debug-cost-transcript-path]').length || 0,
+            outerOverflow: popover ? getComputedStyle(popover).overflowY : '',
+            bodyOverflow: reportBody ? getComputedStyle(reportBody).overflowY : '',
+            scrollTop: reportBody?.scrollTop || 0,
+            scrollHeight: reportBody?.scrollHeight || 0,
+            clientHeight: reportBody?.clientHeight || 0,
+            left: popoverRect?.left, right: popoverRect?.right, top: popoverRect?.top, bottom: popoverRect?.bottom,
+          };
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: 0,
+            loadedEndSeconds: Infinity,
+            resolutionSeconds: 1,
+            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+          });
+          const yocostSlider = yocostPanel?.querySelector('[data-js-debug-range-slider]');
+          if (yocostSlider) {
+            yocostSlider.value = '2';
+            yocostSlider.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          }
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const yocostAfterRange = document.getElementById(panelDomId(yocostItemId));
+          const yocostRangeGrid = yocostAfterRange?.querySelector('[data-js-debug-chart-grid]');
+          const yocostResolution = yocostAfterRange?.querySelector('[data-js-debug-resolution-override]');
+          const yocostResolutionChoice = [...(yocostResolution?.options || [])].find(option => option.value === '60')
+            || [...(yocostResolution?.options || [])].find(option => option.value !== '0');
+          if (yocostResolution && yocostResolutionChoice) {
+            yocostResolution.value = yocostResolutionChoice.value;
+            yocostResolution.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          }
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          selectSession(debugPaneItemId, {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const statsPanel = document.getElementById(panelDomId(debugPaneItemId));
+          const statsRangeGrid = statsPanel?.querySelector('[data-js-debug-chart-grid]');
+          selectSession(yocostItemId, {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          let yocostAfterResolution = document.getElementById(panelDomId(yocostItemId));
+          const providerSort = yocostAfterResolution?.querySelector('[data-js-debug-cost-table="calculation"] [data-js-debug-cost-sort="provider"]');
+          providerSort?.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          yocostAfterResolution = document.getElementById(panelDomId(yocostItemId));
+          const providerSortAscending = yocostAfterResolution?.querySelector('[data-js-debug-cost-table="calculation"] [data-js-debug-cost-sort="provider"]');
+          const providerAscending = [...(yocostAfterResolution?.querySelectorAll('[data-js-debug-cost-table="calculation"] tbody tr') || [])]
+            .map(row => row.cells[0]?.textContent.trim() || '');
+          providerSortAscending?.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          yocostAfterResolution = document.getElementById(panelDomId(yocostItemId));
+          const providerDescending = [...(yocostAfterResolution?.querySelectorAll('[data-js-debug-cost-table="calculation"] tbody tr') || [])]
+            .map(row => row.cells[0]?.textContent.trim() || '');
+          const providerHeader = yocostAfterResolution?.querySelector('[data-js-debug-cost-table="calculation"] th[aria-sort="descending"]');
+          const originalApiFetchJson = apiFetchJson;
+          apiFetchJson = async (url) => String(url).endsWith('/api/pricing-catalog/refresh') ? {status: 'complete'} : {};
+          const requestedBeforeRefresh = jsDebugPricingRefreshState.lastRequestedAtMs;
+          yocostAfterResolution?.querySelector('[data-js-debug-cost-refresh]')?.click();
+          await window.__yolomuxTestWaitFor(
+            () => !jsDebugPricingRefreshState.inFlight && jsDebugPricingRefreshState.lastRequestedAtMs > requestedBeforeRefresh,
+            {timeoutMs: 1000, intervalMs: 20, description: 'YO!cost pricing refresh'},
+          );
+          const yocostAfterPricingRefresh = document.getElementById(panelDomId(yocostItemId));
+          const refreshAge = yocostAfterPricingRefresh?.querySelector('[data-js-yocost-data-age]')?.textContent || '';
+          apiFetchJson = originalApiFetchJson;
+          const yocostScrollStyle = document.createElement('style');
+          yocostScrollStyle.textContent = '.js-yocost-scroll { max-block-size: 16rem !important; }';
+          document.head.append(yocostScrollStyle);
+          const yocostScroll = yocostAfterResolution?.querySelector('.js-yocost-scroll');
+          if (yocostScroll) yocostScroll.scrollTop = yocostScroll.scrollHeight;
+          renderYoCostPanels();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const yocostAfterRefresh = document.getElementById(panelDomId(yocostItemId));
+          const yocostRestoredScroll = yocostAfterRefresh?.querySelector('.js-yocost-scroll');
+          const yocostControls = {
+            rangeSeconds: (Number(yocostRangeGrid?.dataset.jsDebugDomainEnd) - Number(yocostRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
+            statsRangeSeconds: (Number(statsRangeGrid?.dataset.jsDebugDomainEnd) - Number(statsRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
+            rangeSliderValue: yocostAfterRange?.querySelector('[data-js-debug-range-slider]')?.value || '',
+            resolutionChoice: yocostResolutionChoice?.value || '',
+            resolutionValue: yocostAfterResolution?.querySelector('[data-js-debug-resolution-override]')?.value || '',
+            providerAscending,
+            providerDescending,
+            providerSort: providerHeader?.getAttribute('aria-sort') || '',
+            refreshAge,
+            preservedScroll: yocostRestoredScroll?.scrollTop || 0,
+            scrollHeight: yocostRestoredScroll?.scrollHeight || 0,
+            clientHeight: yocostRestoredScroll?.clientHeight || 0,
+          };
+          yocostScrollStyle.remove();
+          const compact = initial.card?.querySelector('.js-debug-cost-compact');
+          const compactStyle = compact ? getComputedStyle(compact) : null;
+          const detailsStyle = details ? getComputedStyle(details) : null;
+          const detailsHost = initial.card?.querySelector('.js-debug-cost-modal-host');
+          const detailsRect = details?.getBoundingClientRect();
+          const detailsHostStyle = detailsHost ? getComputedStyle(detailsHost) : null;
+          const compactLastRect = compact?.lastElementChild?.getBoundingClientRect();
+          // A 21rem graph column represents the narrow Side Pane/card width. The
+          // card must reflow rather than overflow its display box.
+          const grid = initial.graph?.querySelector('[data-js-debug-chart-grid]');
+          if (grid) grid.style.inlineSize = '21rem';
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const narrowCard = initial.graph?.querySelector('[data-js-debug-summary-group="costSummary"]');
+              const narrowCompact = narrowCard?.querySelector('.js-debug-cost-compact');
+              const narrowRect = narrowCard?.getBoundingClientRect();
+              const narrowCells = [...(narrowCompact?.children || [])].map(element => { const rect = element.getBoundingClientRect(); return {left: rect.left, top: rect.top}; });
+          const narrowControls = [...(narrowCard?.querySelectorAll('.js-debug-chart-heading-row > *') || [])]
+            .map(element => {
+              const rect = element.getBoundingClientRect();
+              return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom};
+            });
+
+              setDebugGraphRange(2 * 60);
+              refreshDebugGraphElement(document.querySelector('[data-js-debug-graph]'), {force: true});
+          const ranged = cardState();
+
+          const svg = ranged.model?.querySelector('.js-debug-line-chart');
+          const svgRect = svg?.getBoundingClientRect();
+          const eventInit = clientX => ({bubbles: true, cancelable: true, pointerId: 31, pointerType: 'mouse', button: 0, buttons: 1, clientX, clientY: svgRect.top + (svgRect.height / 2)});
+              if (svg && svgRect) {
+                const startX = svgRect.left + (svgRect.width * 0.2);
+                const endX = svgRect.left + (svgRect.width * 0.7);
+                svg.dispatchEvent(new PointerEvent('pointerdown', eventInit(startX)));
+                svg.dispatchEvent(new PointerEvent('pointermove', eventInit(endX)));
+                svg.dispatchEvent(new PointerEvent('pointerup', eventInit(endX)));
+              }
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              refreshDebugGraphElement(document.querySelector('[data-js-debug-graph]'), {force: true});
+              const zoomed = cardState();
+          const zoomGrid = document.querySelector('[data-js-debug-chart-grid]');
+          done({
+            initialOrder,
+            toggleOrder,
+            initial: {amount: initial.renderedAmount, tokens: initial.renderedTokens, expected: initial.expectedAmount, buckets: initial.buckets.length},
+            ranged: {amount: ranged.renderedAmount, tokens: ranged.renderedTokens, expected: ranged.expectedAmount, buckets: ranged.buckets.length},
+            zoomed: {amount: zoomed.renderedAmount, tokens: zoomed.renderedTokens, expected: zoomed.expectedAmount, buckets: zoomed.buckets.length, active: zoomGrid?.dataset.jsDebugZoomed === 'true'},
+            compact: {
+              columns: compactStyle?.gridTemplateColumns || '',
+              totalCount: initial.card?.querySelectorAll('.js-debug-cost-compact > div').length || 0,
+              hasChart: Boolean(initial.card?.querySelector('.js-debug-line-chart, [data-js-debug-axis], [data-js-debug-bar-series]')),
+              hasDirectLink: Boolean(initial.card?.querySelector(':scope > a, .js-debug-cost-compact a')),
+              moreInfo: initial.card?.querySelector('[data-js-debug-cost-details]')?.textContent || '',
+              moreInfoTag: initial.card?.querySelector('[data-js-debug-cost-details]')?.tagName || '',
+              moreInfoClasses: initial.card?.querySelector('[data-js-debug-cost-details]')?.className || '',
+              moreInfoBorder: detailsStyle?.borderTopWidth || '',
+              moreInfoPadding: detailsStyle?.paddingInlineStart || '',
+              moreInfoBackground: detailsStyle?.backgroundColor || '',
+              moreInfoHostBorder: detailsHostStyle?.borderTopWidth || '',
+              moreInfoHostMarginTop: detailsHostStyle?.marginTop || '',
+              moreInfoBelowTotal: Boolean(detailsRect && compactLastRect && detailsRect.top > compactLastRect.bottom),
+            },
+                narrow: {
+                  columns: narrowCompact ? getComputedStyle(narrowCompact).gridTemplateColumns : '',
+                      cells: narrowCells,
+              scrollWidth: narrowCard?.scrollWidth || 0,
+              clientWidth: narrowCard?.clientWidth || 0,
+              card: narrowRect ? {left: narrowRect.left, right: narrowRect.right, top: narrowRect.top, bottom: narrowRect.bottom} : null,
+              controls: narrowControls,
+            },
+            popover: popoverState,
+            yocostControls,
+            viewport: {width: innerWidth, height: innerHeight},
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    , str(transcript.resolve()))
+    assert "error" not in metrics, metrics
+    assert metrics["initialOrder"]["cost"] == metrics["initialOrder"]["model"] + 1, metrics
+    assert metrics["toggleOrder"].index("costSummary") == metrics["toggleOrder"].index("modelTokens") + 1, metrics
+    for state in (metrics["initial"], metrics["ranged"], metrics["zoomed"]):
+        assert state["buckets"] > 0, metrics
+    assert metrics["compact"]["totalCount"] == 4, metrics
+    assert metrics["compact"]["hasChart"] is False, metrics
+    assert metrics["compact"]["hasDirectLink"] is False and metrics["compact"]["moreInfo"] == "More Info", metrics
+    assert metrics["compact"]["moreInfoTag"] == "BUTTON" and "control-active-hover" in metrics["compact"]["moreInfoClasses"], metrics
+    assert metrics["compact"]["moreInfoBorder"] != "0px" and metrics["compact"]["moreInfoPadding"] != "0px", metrics
+    assert metrics["compact"]["moreInfoBackground"] not in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert metrics["popover"]["tabActive"] is True and metrics["popover"]["overlay"] is False, metrics
+    assert metrics["popover"]["costCalculation"] is True and metrics["popover"]["modelUsages"] is True and metrics["popover"]["sourceAttribution"] is True and metrics["popover"]["pricingSources"] is True and metrics["popover"]["agentTable"] is True, metrics
+    assert metrics["popover"]["agentRows"] == 1 and "root:0" in metrics["popover"]["agentTableText"] and "$0.0600" in metrics["popover"]["agentTableText"] and "Grand total" in metrics["popover"]["agentTableText"], metrics
+    assert metrics["popover"]["report"] is True and metrics["popover"]["hasTable"] is True, metrics
+    assert metrics["popover"]["tokenChartKeys"] == ["agentTokens", "modelTokens"], metrics
+    assert metrics["popover"]["chartsAboveReport"] is True and metrics["popover"]["rangeControl"] is True and metrics["popover"]["resolutionControl"] is True, metrics
+    assert metrics["popover"]["statsVisible"] is True and "Last refreshed" in metrics["popover"]["dataAge"] and metrics["popover"]["refreshButton"] == "Refresh", metrics
+    assert 895 <= metrics["yocostControls"]["rangeSeconds"] <= 905 and metrics["yocostControls"]["rangeSliderValue"] == "2", metrics
+    assert 895 <= metrics["yocostControls"]["statsRangeSeconds"] <= 905, metrics
+    assert metrics["yocostControls"]["resolutionChoice"] and metrics["yocostControls"]["resolutionValue"] == metrics["yocostControls"]["resolutionChoice"], metrics
+    assert metrics["yocostControls"]["providerSort"] == "descending" and metrics["yocostControls"]["providerAscending"] == sorted(metrics["yocostControls"]["providerAscending"]), metrics
+    assert metrics["yocostControls"]["providerDescending"] == sorted(metrics["yocostControls"]["providerDescending"], reverse=True), metrics
+    assert "Last refreshed 0s ago" in metrics["yocostControls"]["refreshAge"], metrics
+    assert metrics["yocostControls"]["scrollHeight"] > metrics["yocostControls"]["clientHeight"] and metrics["yocostControls"]["preservedScroll"] > 0, metrics
+    assert metrics["popover"]["headings"][0] == "Cost summary details" and "Model Usages" in metrics["popover"]["headings"] and metrics["popover"]["headings"][-1] == "Pricing sources", metrics
+    assert metrics["popover"]["pricingSourcesLast"] is True, metrics
+    assert sorted(metrics["popover"]["pricingSourceLinks"], key=lambda item: item["href"]) == sorted([
+        {"text": "https://platform.openai.com/pricing", "href": "https://platform.openai.com/pricing"},
+        {"text": "https://platform.claude.com/docs/en/about-claude/pricing", "href": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    ], key=lambda item: item["href"]), metrics
+    assert "javascript:alert" not in metrics["popover"]["pricingSourcesText"], metrics
+    assert metrics["popover"]["usageTitle"] == "Model Usages" and metrics["popover"]["usageRows"] == 1 and metrics["popover"]["usageGrandRows"] == 1, metrics
+    assert metrics["popover"]["usageHeaderLabels"] == ["Model", "Input", "Cached", "Output", "Other", "Total"], metrics
+    assert metrics["popover"]["usageMetricTexts"] == ["60 tokens$0.0120", "60 tokens$0.0180", "60 tokens$0.0300", "0$0", "180 tokens$0.0600"], metrics
+    assert all(label in metrics["popover"]["usageRowAria"] for label in ("gpt-5.6-terra", "Input 60 tokens $0.0120", "Cached 60 tokens $0.0180", "Output 60 tokens $0.0300", "Other 0 $0", "Total 180 tokens $0.0600")), metrics
+    assert len(metrics["popover"]["usageHeaderRects"]) == len(metrics["popover"]["usageMetricRects"]) == 6, metrics
+    for header_rect, row_rect in zip(metrics["popover"]["usageHeaderRects"], metrics["popover"]["usageMetricRects"]):
+        assert abs(header_rect["left"] - row_rect["left"]) <= 1 and abs(header_rect["right"] - row_rect["right"]) <= 1, metrics
+    assert metrics["popover"]["bodyOverflow"] == "auto", metrics
+    assert metrics["popover"]["scrollHeight"] > metrics["popover"]["clientHeight"] and metrics["popover"]["scrollTop"] > 0, metrics
+    assert metrics["popover"]["totalHeaderInside"] is True and metrics["popover"]["sourceLinkCount"] == 1, metrics
+
+    source_preview = browser.execute_async_script(
+        """
+        const transcriptPath = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const link = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-cost-transcript-path]');
+        link?.click();
+        window.__yolomuxTestWaitFor(
+          () => openFiles.has(transcriptPath) && !document.querySelector('[data-js-debug-cost-modal]'),
+          {timeoutMs: 2000, intervalMs: 20, description: 'Cost source transcript Preview open'},
+        ).then(() => done({
+          opened: openFiles.has(transcriptPath),
+          mode: editorViewModeFor(transcriptPath, fileEditorItemFor(transcriptPath)),
+        })).catch(error => done({error: String(error)}));
+        """,
+        str(transcript.resolve()),
+    )
+    assert source_preview == {"opened": True, "mode": "preview"}, source_preview
+
+
+def test_debug_graph_periodic_refresh_preserves_user_scroll(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          const now = Math.floor(Date.now() / 1000);
+          debugGraphApplyServerHistory({sequence: 1, records: [{
+            start: now - 1, duration: 1, sequence: 1,
+            cpu_total_percent: 5, cpu_count: 1,
+            system_cpu_total_percent: 12, system_cpu_count: 1,
+            ask_agent_total: 1, run_agent_total: 1, idle_agent_total: 1,
+            active_agent_total: 2, inactive_agent_total: 1, agent_activity_samples: 1,
+            clients: {[jsDebugStatsClientIdForRequest()]: {api_count: 2, sse_count: 1, latency_total_ms: 8, latency_count: 1, bandwidth_bytes: 4096}},
+          }]});
+          for (const key of ['memory', 'gpuUtil', 'gpuMemory', 'modelTokens', 'costSummary']) {
+            setDebugGraphChartVisible(key, true);
+          }
+          renderDebugPanels({force: true});
+          const scroller = document.querySelector('.js-debug-panel .js-debug-graph-view');
+          scroller.style.flex = 'none';
+          scroller.style.blockSize = '260px';
+          scroller.scrollTop = Math.max(1, Math.round((scroller.scrollHeight - scroller.clientHeight) * 0.62));
+          const before = scroller.scrollTop;
+          refreshDebugGraphElement(document.querySelector('[data-js-debug-graph]'), {force: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          done({
+            before,
+            after: scroller.scrollTop,
+            max: scroller.scrollHeight - scroller.clientHeight,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["before"] > 0 and metrics["max"] > metrics["before"], metrics
+    assert abs(metrics["after"] - metrics["before"]) <= 1, metrics
 
 
 def test_debug_graph_bad_connection_overlay_covers_full_graph_area(browser, tmp_path):
@@ -2318,14 +3084,15 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     assert metrics["memoryShown"] is True, metrics
     assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
     assert metrics["layoutLabel"] == "Size:", metrics
-    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
+    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
     assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["saved"] == {
         "subTab": "events",
         "rangeSeconds": 14400,
         "resolutionOverrideSeconds": 0,
-        "chartLayout": 0,
-        "hiddenCharts": ["gpuMemory", "gpuUtil"],
+            "chartLayout": 0,
+            "modelTokenDimension": "output",
+            "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil"],
         "visibleCharts": ["cpu", "memory"],
     }, metrics
 
@@ -2343,6 +3110,357 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
         )
     )
 
+
+def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollDebugSystemStatus === 'function' && document.querySelector('[data-js-debug-subtab=\"system\"]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const originalDateNow = Date.now;
+        let fakeNow = 2_000_000;
+        Date.now = () => fakeNow;
+        let requests = 0;
+        const payload = {
+          ok: true, generated_at: fakeNow / 1000, state_dir: '/tmp/yolomux',
+          server: {version: '0.6.0', pid: 8881, uptime_seconds: 125, cpu_percent: 3.5, system_cpu_percent: 20, rss_bytes: 104857600},
+          owner: {status: 'owner', owner: true, current_owner: {port: 8881, pid: 8881}, search_index: {mode: 'indexing-server'}, debug: {generation_count: 2}},
+          refresh: {roles: {'stats-sampler': {status: 'owner', owner: true, refresh_requests: 7}}, local_refreshing: {session_files: 1}, coalescing: {recent_pending_count: 2}, counters: {coalesced_refresh_requests: 7}},
+          search_index: {root_count: 3, build_count: 4, scanned_entries: 100, ignored_entries: 5, cache_bytes: 2048},
+          caches: {session_files: {files: 2, bytes: 1024}, activity: {files: 1, bytes: 512}},
+          client_events: {channel_counts: {files: 2, status: 1}, published_events: 9, delivered_events: 8},
+          chat: {subscribers: 1, store: {message_rows: 4, typing_leases: 0}},
+          local_services: {totals: {processes: 2, cpu_percent: 1.5, rss_bytes: 2048}, services: [
+            {service: 'indexd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
+            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0, normal: 0, background: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}},
+            {service: 'jobd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
+            {service: 'approvald', pid: 333, healthy: false, started_at: fakeNow / 1000 - 12, uptime_seconds: 12, resources: {cpu_percent: 1, rss_bytes: 1024}},
+          ]},
+          top_endpoints: [{surface: 'GET /api/session-files', count: 5, compute_ms_max: 12, payload_bytes_total: 4096}],
+          top_background_work: [{role: 'stats-sampler', surface: 'global-sample', count: 3, compute_ms_max: 8, payload_bytes_total: 1024}],
+        };
+        window.fetch = (url, options) => {
+          if (String(url) === '/api/system-status') {
+            requests += 1;
+            return Promise.resolve(new Response(JSON.stringify(payload), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          }
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-js-debug-subtab="system"]').click();
+        window.__yolomuxTestWaitFor(
+          () => document.querySelectorAll('.js-debug-system-card').length >= 9,
+          {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats System dashboard'},
+        ).then(() => {
+          const view = document.querySelector('[data-js-debug-system]');
+          view.style.width = '260px';
+          view.style.maxHeight = '180px';
+          view.scrollTop = 100;
+          const before = view.scrollTop;
+          refreshDebugSystemViews();
+          const after = view.scrollTop;
+          const grid = view.querySelector('.js-debug-system-grid');
+          const cards = [...view.querySelectorAll('.js-debug-system-card')];
+          const viewRect = view.getBoundingClientRect();
+          const columns = getComputedStyle(grid).gridTemplateColumns.trim().split(/\\s+/).filter(Boolean).length;
+          const table = view.querySelector('.js-debug-system-local-services-table');
+          const pidCell = table.querySelector('[data-service="statsd"][data-field="pid"]');
+          const pidBeforeText = pidCell?.textContent.trim();
+          const startedCell = table.querySelector('[data-service="statsd"][data-field="started"]');
+          const lastRanCell = table.querySelector('[data-service="statsd"][data-field="lastRan"]');
+          const queueCell = table.querySelector('[data-service="statsd"][data-field="queues"]');
+          const startedBeforeText = startedCell?.textContent.trim();
+          const lastRanBeforeText = lastRanCell?.textContent.trim();
+          const queueTextBefore = queueCell?.textContent.trim();
+          const statusCell = table.querySelector('[data-service="approvald"][data-field="status"]');
+          const headers = [...table.querySelectorAll('thead th:not(:first-child)')].map(node => ({
+            name: node.querySelector('.js-debug-system-service-name')?.textContent.trim(),
+            state: node.querySelector('.js-debug-system-state')?.textContent.trim(),
+            bad: node.querySelector('.js-debug-system-state')?.classList.contains('js-debug-system-state--bad'),
+          }));
+          const wrap = table.closest('.js-debug-system-local-services-wrap');
+          const labelCells = [...table.querySelectorAll('tbody th')];
+          const pidRect = pidCell.getBoundingClientRect();
+          const queueRect = queueCell.getBoundingClientRect();
+          const narrowMetrics = {
+            scrolls: wrap.scrollWidth > wrap.clientWidth + 1,
+            labelColumnWidth: labelCells[0].getBoundingClientRect().width,
+            labelsNowrap: labelCells.every(node => getComputedStyle(node).whiteSpace === 'nowrap'),
+            labelsSingleLine: labelCells.every(node => {
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              return range.getClientRects().length <= 1;
+            }),
+            serviceColumnWidth: pidRect.width,
+            queueWrapStyle: getComputedStyle(queueCell).whiteSpace,
+            queueSharesColumnWidth: Math.abs(queueRect.width - pidRect.width) <= 1,
+            queueCanWrapTaller: queueRect.height > pidRect.height + 2,
+          };
+          view.style.width = '920px';
+          refreshDebugSystemViews();
+          const wideTable = view.querySelector('.js-debug-system-local-services-table');
+          const wideServices = [...wideTable.querySelectorAll('thead th:not(:first-child)')].map(header => {
+            const name = header.getAttribute('data-js-debug-service-head');
+            const cells = [...wideTable.querySelectorAll(`td[data-service="${CSS.escape(name)}"]`)];
+            const headerRect = header.getBoundingClientRect();
+            return {
+              name,
+              textAlign: getComputedStyle(header).textAlign,
+              cellTextAligns: cells.map(cell => getComputedStyle(cell).textAlign),
+              aligned: cells.every(cell => {
+                const rect = cell.getBoundingClientRect();
+                return Math.abs(rect.left - headerRect.left) <= 1.5 && Math.abs(rect.right - headerRect.right) <= 1.5;
+              }),
+            };
+          });
+          const wasLight = document.body.classList.contains('theme-light');
+          const themeLayouts = ['dark', 'light'].map(theme => {
+            document.body.classList.toggle('theme-light', theme === 'light');
+            view.style.width = '260px';
+            const themedTable = view.querySelector('.js-debug-system-local-services-table');
+            const themedWrap = themedTable.closest('.js-debug-system-local-services-wrap');
+            return {
+              theme,
+              scrolls: themedWrap.scrollWidth > themedWrap.clientWidth + 1,
+              labelWidth: themedTable.querySelector('tbody th').getBoundingClientRect().width,
+              serviceWidth: themedTable.querySelector('td[data-service="statsd"]').getBoundingClientRect().width,
+            };
+          });
+          const paneHost = view.closest('[data-pane-role]') || view.parentElement;
+          const priorPaneRole = paneHost?.dataset?.paneRole || '';
+          const roleLayouts = [['generic', 920], ['side', 260]].map(([role, width]) => {
+            if (paneHost) paneHost.dataset.paneRole = role;
+            view.style.width = `${width}px`;
+            refreshDebugSystemViews();
+            const roleTable = view.querySelector('.js-debug-system-local-services-table');
+            const roleWrap = roleTable.closest('.js-debug-system-local-services-wrap');
+            return {
+              role,
+              scrolls: roleWrap.scrollWidth > roleWrap.clientWidth + 1,
+              labelWidth: roleTable.querySelector('tbody th').getBoundingClientRect().width,
+              serviceWidth: roleTable.querySelector('td[data-service="statsd"]').getBoundingClientRect().width,
+            };
+          });
+          if (paneHost) paneHost.dataset.paneRole = priorPaneRole;
+          document.body.classList.toggle('theme-light', wasLight);
+          view.style.width = '260px';
+          refreshDebugSystemViews();
+          jsDebugSystemState.payload.local_services.services[1] = {...jsDebugSystemState.payload.local_services.services[1], pid: 0, resources: {cpu_percent: null, rss_bytes: null}};
+          refreshDebugSystemViews();
+          const nextPidCell = view.querySelector('.js-debug-system-local-services-table [data-service="statsd"][data-field="pid"]');
+          const approvalPidCell = view.querySelector('.js-debug-system-local-services-table [data-service="approvald"][data-field="pid"]');
+          const approvalFresh = approvalPidCell?.classList.contains('js-debug-system-service-cell--fresh');
+          fakeNow += 61_000;
+          refreshDebugSystemViews();
+          const approvalPidCellAfter = view.querySelector('.js-debug-system-local-services-table [data-service="approvald"][data-field="pid"]');
+          const nextLastRanCell = view.querySelector('.js-debug-system-local-services-table [data-service="statsd"][data-field="lastRan"]');
+          done({
+            requests, before, after, columns,
+            headers,
+            narrowMetrics,
+            wideServices,
+            themeLayouts,
+            roleLayouts,
+            rows: [...table.querySelectorAll('tbody tr')].map(node => node.getAttribute('data-js-debug-service-row')),
+            fieldLabels: [...table.querySelectorAll('tbody th')].map(node => node.textContent.trim()),
+            pidBefore: pidBeforeText,
+            pidAfter: nextPidCell?.textContent.trim(),
+            pidPreserved: pidCell === nextPidCell,
+            pidPrev: nextPidCell?.classList.contains('js-debug-system-service-cell--prev'),
+            startedText: startedBeforeText,
+            lastRanText: lastRanBeforeText,
+            nextLastRanText: nextLastRanCell?.textContent.trim(),
+            queueText: queueTextBefore,
+            approvalFresh,
+            approvalStaleAfterClock: approvalPidCellAfter?.classList.contains('js-debug-system-service-cell--stale'),
+            approvalPidPreserved: approvalPidCell === approvalPidCellAfter,
+            approvalStatus: statusCell?.textContent.trim(),
+            cardsInside: cards.every(card => card.getBoundingClientRect().right <= viewRect.right + 1),
+            selected: document.querySelector('[data-js-debug-subtab="system"]').getAttribute('aria-selected'),
+          });
+        }).catch(error => done({error: String(error?.stack || error)})).finally(() => {
+          Date.now = originalDateNow;
+          window.fetch = originalFetch;
+          clearRuntimeInterval('debug-system');
+        });
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requests"] == 1, metrics
+    assert metrics["selected"] == "true", metrics
+    assert metrics["headers"] == [
+        {"name": "indexd", "state": "Idle", "bad": False},
+        {"name": "statsd", "state": "Running", "bad": False},
+        {"name": "jobd", "state": "Idle", "bad": False},
+        {"name": "approvald", "state": "Issue", "bad": True},
+    ], metrics
+    assert metrics["rows"][-1] == "queues", metrics
+    assert metrics["fieldLabels"][:4] == ["Status", "PID", "Started", "Last ran"], metrics
+    assert metrics["pidBefore"] == "222", metrics
+    assert metrics["pidAfter"] == "prev: 222", metrics
+    assert metrics["pidPreserved"] is True, metrics
+    assert metrics["pidPrev"] is True, metrics
+    assert "minute" in metrics["startedText"], metrics
+    assert "minute" in metrics["lastRanText"], metrics
+    assert metrics["nextLastRanText"].startswith("exited "), metrics
+    assert "interactive 1" in metrics["queueText"] and "maintenance 0" in metrics["queueText"], metrics
+    assert metrics["approvalFresh"] is True, metrics
+    assert metrics["approvalStaleAfterClock"] is True, metrics
+    assert metrics["approvalPidPreserved"] is True, metrics
+    assert metrics["approvalStatus"] == "Issue", metrics
+    assert metrics["columns"] == 1, metrics
+    assert metrics["cardsInside"] is True, metrics
+    assert metrics["before"] > 0 and metrics["after"] == metrics["before"], metrics
+    assert metrics["narrowMetrics"]["scrolls"] is True, metrics
+    assert metrics["narrowMetrics"]["labelColumnWidth"] >= 120, metrics
+    assert metrics["narrowMetrics"]["labelsNowrap"] is True, metrics
+    assert metrics["narrowMetrics"]["labelsSingleLine"] is True, metrics
+    assert metrics["narrowMetrics"]["serviceColumnWidth"] >= 120, metrics
+    assert metrics["narrowMetrics"]["queueWrapStyle"] == "normal", metrics
+    assert metrics["narrowMetrics"]["queueSharesColumnWidth"] is True, metrics
+    assert metrics["narrowMetrics"]["queueCanWrapTaller"] is True, metrics
+    assert all(service["textAlign"] in {"end", "right"} for service in metrics["wideServices"]), metrics
+    assert all(set(service["cellTextAligns"]) == {service["textAlign"]} for service in metrics["wideServices"]), metrics
+    assert all(service["aligned"] for service in metrics["wideServices"]), metrics
+    assert [layout["theme"] for layout in metrics["themeLayouts"]] == ["dark", "light"], metrics
+    assert all(layout["scrolls"] for layout in metrics["themeLayouts"]), metrics
+    assert all(layout["labelWidth"] >= 120 and layout["serviceWidth"] >= 120 for layout in metrics["themeLayouts"]), metrics
+    assert [item["role"] for item in metrics["roleLayouts"]] == ["generic", "side"], metrics
+    assert metrics["roleLayouts"][0]["scrolls"] is False, metrics
+    assert metrics["roleLayouts"][1]["scrolls"] is True, metrics
+    assert all(item["labelWidth"] >= 120 and item["serviceWidth"] >= 120 for item in metrics["roleLayouts"]), metrics
+
+
+def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollDebugLogs === 'function' && document.querySelector('[data-js-debug-subtab=\"logs\"]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const now = Date.now() / 1000;
+        let requests = 0;
+        window.fetch = (url, options = {}) => {
+          if (String(url) === '/api/logs') {
+            requests += 1;
+            return Promise.resolve(new Response(JSON.stringify({ok: true, capacity: 500, sequence: 4, logs: [
+              {id: 1, timestamp: now - 3, level: 'info', source: 'server', category: 'boot', message: 'server ready'},
+              {id: 2, timestamp: now - 2, level: 'warning', source: 'sessions', category: 'process-discovery', message: 'used lsof fallback'},
+              {id: 3, timestamp: now - 1, level: 'debug', source: 'statsd', category: 'history', message: 'cache hit'},
+            ]}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          }
+          return originalFetch(url, options);
+        };
+        jsDebugEvents.push({id: 999999, ts: new Date().toISOString(), type: 'error', message: 'client exploded', source: 'browser-test'});
+        document.querySelector('[data-js-debug-subtab="logs"]').click();
+        window.__yolomuxTestWaitFor(
+          () => {
+            const text = document.querySelector('[data-js-debug-subview="logs"]')?.textContent || '';
+            return text.includes('used lsof fallback') && text.includes('client exploded');
+          },
+          {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats leveled logs'},
+        ).then(() => {
+          const view = document.querySelector('[data-js-debug-subview="logs"]');
+          view.style.width = '240px';
+          view.style.height = '260px';
+          const list = view.querySelector('[data-js-debug-log-list]');
+          const initial = [...view.querySelectorAll('[data-js-debug-log-entry]')];
+          const themeColors = ['dark', 'light'].map(theme => {
+            document.body.classList.toggle('theme-light', theme === 'light');
+            const warning = view.querySelector('[data-level="warning"] .js-debug-log-chip');
+            const error = view.querySelector('[data-level="error"] .js-debug-log-chip');
+            return {theme, warning: getComputedStyle(warning).color, error: getComputedStyle(error).color};
+          });
+          document.body.classList.remove('theme-light');
+          view.querySelector('[data-js-debug-log-level="error"]').click();
+          const afterFilter = [...view.querySelectorAll('[data-js-debug-log-entry]')].map(node => node.dataset.level);
+          view.querySelector('[data-js-debug-logs-clear]').click();
+          const afterClear = view.querySelectorAll('[data-js-debug-log-entry]').length;
+          done({
+            requests,
+            selected: document.querySelector('[data-js-debug-subtab="logs"]').getAttribute('aria-selected'),
+            levels: initial.map(node => node.dataset.level).sort(),
+            hasFallback: initial.some(node => node.textContent.includes('used lsof fallback')),
+            hasClientError: initial.some(node => node.textContent.includes('client exploded')),
+            filters: view.querySelectorAll('[data-js-debug-log-level]').length,
+            afterFilter,
+            afterClear,
+            themeColors,
+            narrowContained: list.scrollWidth <= list.clientWidth + 1,
+          });
+        }).catch(error => done({error: String(error?.stack || error)})).finally(() => {
+          window.fetch = originalFetch;
+          clearRuntimeInterval('debug-logs');
+        });
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requests"] == 1, metrics
+    assert metrics["selected"] == "true", metrics
+    assert {"debug", "error", "info", "warning"} <= set(metrics["levels"]), metrics
+    assert metrics["hasFallback"] is True and metrics["hasClientError"] is True, metrics
+    assert metrics["filters"] == 4, metrics
+    assert "error" not in metrics["afterFilter"], metrics
+    assert metrics["afterClear"] == 0, metrics
+    assert metrics["narrowContained"] is True, metrics
+    assert [item["theme"] for item in metrics["themeColors"]] == ["dark", "light"], metrics
+    assert all(item["warning"] != item["error"] for item in metrics["themeColors"]), metrics
+
+
+def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphAgentStatusNoDataRuns === 'function' && typeof debugGraphApplyServerHistory === 'function' && document.querySelector('.js-debug-panel') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugGraphRangeSeconds = 15 * 60;
+        const base = Math.floor((Date.now() - 100_000) / 10_000) * 10;
+        debugGraphApplyServerHistory({sequence: 3, records: [
+          {start: base, duration: 10, sequence: 1, cpu_count: 1, system_cpu_total_percent: 0, system_cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
+          {start: base + 10, duration: 10, sequence: 2, cpu_count: 1, system_cpu_total_percent: 20, system_cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
+          {start: base + 30, duration: 10, sequence: 3, cpu_count: 1, system_cpu_total_percent: 40, system_cpu_count: 1, run_agent_total: 0, idle_agent_total: 2, agent_activity_samples: 1},
+        ]});
+        renderDebugPanels({force: true});
+        const chart = document.querySelector('[data-js-debug-chart="activity"]');
+        const working = [...chart.querySelectorAll('[data-js-debug-bar-series="workingAgents"]')]
+          .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width'))}))
+          .sort((a, b) => a.x - b.x);
+        const idle = [...chart.querySelectorAll('[data-js-debug-bar-series="idleAgents"]')]
+          .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width'))}))
+          .sort((a, b) => a.x - b.x);
+        const outages = [...chart.querySelectorAll('[data-js-debug-agent-status-no-data-range]')]
+          .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width')), title: node.textContent}));
+        const cpuChart = document.querySelector('[data-js-debug-chart="cpu"]');
+        return {
+          working,
+          idle,
+          outages,
+          workingGap: working.length >= 2 ? Math.abs((working[0].x + working[0].width) - working[1].x) : null,
+          transitionBoundary: idle.length >= 3 ? idle.at(-1).x : null,
+          cpuSegments: cpuChart?.querySelectorAll('[data-js-debug-series="systemCpu"]').length || 0,
+          cpuHasStatusOverlay: Boolean(cpuChart?.querySelector('[data-js-debug-agent-status-no-data-range]')),
+        };
+        """
+    )
+    assert len(metrics["working"]) == 2, metrics
+    assert metrics["workingGap"] <= 0.02, metrics
+    assert len(metrics["outages"]) == 2 and all(item["width"] > 0 for item in metrics["outages"]), metrics
+    assert all("sample" in item["title"].lower() for item in metrics["outages"]), metrics
+    assert metrics["transitionBoundary"] > metrics["working"][-1]["x"], metrics
+    assert metrics["cpuSegments"] == 2 and metrics["cpuHasStatusOverlay"] is False, metrics
 
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
@@ -2630,6 +3748,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           zoomed,
           zoomSeconds: (zoomEnd - zoomStart) / 1000,
           resetText: reset?.textContent || '',
+          sliderDisabledWhileZoomed: sliderAfterZoom?.disabled === true && sliderAfterZoom?.getAttribute('aria-disabled') === 'true',
           resetRightGap,
           sliderBeforeLabelGap,
           resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
@@ -2662,7 +3781,8 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert 235 <= metrics["selectionWidth"] <= 245, metrics
     assert metrics["zoomed"] is True, metrics
     assert 118 <= metrics["zoomSeconds"] <= 122, metrics
-    assert metrics["resetText"] == "Reset", metrics
+    assert metrics["resetText"] == "Reset Zoom", metrics
+    assert metrics["sliderDisabledWhileZoomed"] is True, metrics
     assert 0 <= metrics["resetRightGap"] <= 1.5, metrics
     assert metrics["sliderBeforeLabelGap"] >= 4, metrics
     assert metrics["resetZoomed"] is False, metrics
@@ -3067,13 +4187,13 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
             requests.push(url.toString());
             const nowSeconds = Math.floor(Date.now() / 1000);
             if (requests.length === 1) {
-              return response({history: {sequence: 100, records: [{
-                start: nowSeconds - 60,
+              return response({history: {sequence: 100, records: [60, 50, 40, 30].map((offset, index) => ({
+                start: nowSeconds - offset,
                 duration: 1,
-                sequence: 100,
-                system_cpu_total_percent: 20,
+                sequence: 100 - index,
+                system_cpu_total_percent: 20 + index,
                 system_cpu_count: 1,
-              }], coverage: coverageFor(url)}});
+              })), coverage: coverageFor(url)}});
             }
             if (requests.length === 2) {
               return new Promise(resolve => {
@@ -3142,6 +4262,10 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
               finalBusy: finalGraph?.getAttribute('aria-busy'),
               finalPhase: finalGraph?.dataset.jsDebugHistoryState,
               finalOverlayHidden: finalGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+              durableCpuStarts: [...jsDebugGraphRawBuckets.values()]
+                .filter(bucket => Number(bucket.systemCpuCount) > 0)
+                .map(bucket => Math.floor(Number(bucket.startMs) / 1000))
+                .sort((left, right) => left - right),
             };
           } finally {
             window.fetch = originalFetch;
@@ -3160,6 +4284,7 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
     assert metrics["minX"] is not None and metrics["minX"] < 200, metrics
     assert metrics["maxX"] is not None and metrics["maxX"] > 500, metrics
     assert metrics["retainedChartCount"] > 0, metrics
+    assert len(metrics["durableCpuStarts"]) >= 5, metrics
     assert metrics["beforeDelay"] == {
         "chartCount": metrics["retainedChartCount"],
         "busy": "true",
@@ -3225,10 +4350,10 @@ def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browse
                 mode: requestedEnd === 0 ? 'live' : 'older',
                 requested_start: requestedStart,
                 requested_end: requestedEnd,
-                covered_start: 0,
-                covered_end: 0,
+                    covered_start: requestedStart,
+                    covered_end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
-                complete: false,
+                    complete: true,
                 has_more_older: false,
                 next_older_end: 0,
               },
@@ -4544,6 +5669,7 @@ def test_status_balls_keep_pulse_cadence_under_reduced_motion(browser, tmp_path)
 
 def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(browser, tmp_path):
     page = tmp_path / "agent-status-split.html"
+    browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "no-preference"}]})
     load_static_html_fixture(
         browser,
         page.parent,
@@ -4629,13 +5755,12 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
         assert item["rootDisplay"] == "flex", (name, item)
         assert item["iconAnimation"] == "none", (name, item)
         if name == "base":
-            assert "attention-ring-fade" in item["dotAnimation"], (name, item)
-            assert item["dotDelay"] == item["rootDelayVar"], (name, item)
+            assert item["dotAnimation"] == "attention-ring-fade", (name, item)
         else:
             assert item["dotAnimation"] == "agent-status-opacity-pulse", (name, item)
             assert item["beforeAnimation"] == "none", (name, item)
-            assert item["dotDelay"] == item["rootDelayVar"], (name, item)
             assert item["dotBoxShadow"] in ("", "none"), (name, item)
+        assert item["dotDelay"] == item["rootDelayVar"], (name, item)
         assert item["leftGap"] >= -0.5, (name, item)
         assert item["centerDy"] <= 1, (name, item)
         assert item["dotWithinRoot"] is True, (name, item)
@@ -5999,11 +7124,43 @@ def test_pane_info_bar_repository_selector_cycles_opens_and_selects(browser, tmp
           dirty_count: index,
           primary: index === 1,
         }));
+        const graph = {
+          version: 1,
+          generation: 1,
+          tmux_sessions: {},
+          tmux_windows: {},
+          tmux_panes: {},
+          runtime_actors: {},
+          path_observations: {},
+          git_worktrees: {},
+          local_repositories: {},
+          hosted_repositories: {},
+          local_branches: {},
+          pull_requests: {},
+          linear_issues: {},
+          worktree_branch_activity: {},
+        };
+        const sessionId = 'tmux-session:1';
+        const windowId = 'tmux-window:1:0';
+        const paneId = 'tmux-pane:1:0.0';
+        const observationId = 'path-observation:1:0';
+        graph.tmux_sessions[sessionId] = {id: sessionId, name: '1', tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]};
+        graph.tmux_windows[windowId] = {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]};
+        graph.tmux_panes[paneId] = {id: paneId, tmux_window_id: windowId, target: '1:0.0', index: 0, current_path: repos[0].root, active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]};
+        repos.forEach((repo, index) => {
+          const worktreeId = `git-worktree:${repo.root}`;
+          const repositoryId = `local-repository:${repo.root}`;
+          const branchId = `local-branch:${repositoryId}:${repo.branch}`;
+          graph.local_branches[branchId] = {id: branchId, local_repository_id: repositoryId, name: repo.branch, current: true, pull_request_ids: [], linear_issue_ids: [], updated_ts: 0};
+          graph.local_repositories[repositoryId] = {id: repositoryId, common_git_dir: `${repo.root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: [branchId]};
+          graph.git_worktrees[worktreeId] = {id: worktreeId, root: repo.root, git_dir: `${repo.root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchId, path_observation_ids: index === 0 ? [observationId] : [], branch_activity_ids: [], git: repo};
+        });
+        graph.path_observations[observationId] = {id: observationId, path: repos[0].root, path_snapshot: repos[0].root, exists: true, source: 'fixture', priority: 1, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: `git-worktree:${repos[0].root}`};
         const info = {
           session: '1',
           selected_pane: {current_path: repos[0].root},
           panes: [],
-          project: {git: {...repos[0]}, repos},
+          work_graph: graph,
         };
         transcriptMetadataState.payload.sessions['1'] = info;
         cycleSessionRepoDisplay('1', info, 1);
@@ -6164,7 +7321,9 @@ def test_terminal_app_modified_arrows_route_to_tmux_scrollback_boundaries(browse
         const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
         const pageLines = Math.max(1, Math.floor(terminals.get('1').term.rows * terminalWheelPageFraction));
         const dispatch = key => {
-          const event = new KeyboardEvent('keydown', {key, code: key, ctrlKey: true, bubbles: true, cancelable: true});
+          const event = new KeyboardEvent('keydown', {
+            key, code: key, ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true,
+          });
           const accepted = screen.dispatchEvent(event);
           return {key, accepted, defaultPrevented: event.defaultPrevented};
         };
@@ -6206,7 +7365,7 @@ def test_keyboard_shortcuts_overlay_fits_narrow_viewport(browser, tmp_path):
           viewport: {width: innerWidth, height: innerHeight},
           bodyScrollsHorizontally: body.scrollWidth > body.clientWidth + 1,
           rowsOverflow: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.scrollWidth > row.clientWidth + 1),
-          pageBinding: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.textContent.includes('Page tmux scrollback') && row.textContent.includes('Ctrl+↑ / Ctrl+↓')),
+          pageBinding: Array.from(dialog.querySelectorAll('.keyboard-shortcut-row')).some(row => row.textContent.includes('Page tmux scrollback') && row.textContent.includes(`${appShortcutText('↑')} / ${appShortcutText('↓')}`)),
         };
         """
     )
@@ -6839,8 +7998,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <div id="terminal" class="terminal"><div class="xterm"></div></div>
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
-            <button class="mobile-terminal-key-drag">⠿</button>
-            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Esc</button><button class="mobile-terminal-key active">Ctrl</button><button class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
+            <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button><button id="smart-key-backspace" class="mobile-terminal-key">⌫</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
             <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
             <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
           </div>
@@ -6860,6 +8019,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const key = row.querySelector('.mobile-terminal-key');
         const hidden = bar.hidden;
         bar.hidden = false;
+        const initial = {bar: box(bar), launcher: box(document.getElementById('smart-key-launcher'))};
         bar.style.insetInlineStart = '12px';
         bar.style.insetInlineEnd = 'auto';
         bar.style.insetBlockStart = '12px';
@@ -6867,25 +8027,31 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const dpad = document.getElementById('smart-key-dpad');
         const shell = document.getElementById('smart-key-shell');
         const moreRow = document.getElementById('smart-key-more-row');
-        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        const side = document.getElementById('smart-key-side');
+        const sideButtons = [...side.querySelectorAll('.mobile-terminal-key')];
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
-        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, dpadDisplay: getComputedStyle(dpad).display};
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display};
         return {
           pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
           paneDisplay: getComputedStyle(pane).display,
           overflowX: getComputedStyle(row).overflowX,
-          activeBackground: getComputedStyle(row.querySelector('.active')).backgroundColor,
-          interruptColor: getComputedStyle(row.querySelector('.mobile-terminal-key--interrupt')).color,
+          activeBackground: getComputedStyle(document.getElementById('smart-key-ctrl')).backgroundColor,
+          launcherUserSelect: getComputedStyle(document.getElementById('smart-key-launcher')).userSelect,
+          barUserSelect: getComputedStyle(bar).userSelect,
+          interruptColor: getComputedStyle(document.getElementById('smart-key-interrupt')).color,
           primaryColumns: getComputedStyle(row).gridTemplateColumns,
           primaryLabels: [...row.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent),
           more: normal.more,
           shell: normal.shell,
           movedInsetEnd: bar.style.insetBlockEnd,
           initiallyHidden: hidden,
-              up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
-          normal, overflow,
+          hasClose: Boolean(document.querySelector('.mobile-terminal-key-close, [data-terminal-mobile-close]')),
+          hasDrag: Boolean(document.querySelector('.mobile-terminal-key-drag, [data-terminal-mobile-drag]')),
+          initial, normal, overflow,
         };
         """
     )
@@ -6893,23 +8059,30 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["initiallyHidden"] is True, metrics
     assert abs(metrics["terminal"]["height"] - metrics["pane"]["height"]) <= 1, metrics
     assert metrics["launcher"]["width"] >= 40 and metrics["launcher"]["height"] >= 40, metrics
+    assert metrics["launcherUserSelect"] == metrics["barUserSelect"] == "none", metrics
+    assert 0 <= metrics["initial"]["launcher"]["top"] - metrics["initial"]["bar"]["bottom"] <= 16, metrics
+    assert metrics["hasClose"] is False and metrics["hasDrag"] is False, metrics
     assert metrics["key"]["height"] >= 36, metrics
     assert metrics["overflowX"] == "visible", metrics
-    assert metrics["primaryColumns"].startswith("repeat(5,"), metrics
-    assert all(label in metrics["primaryLabels"] for label in ["Tab", "^B"]), metrics
+    assert metrics["primaryColumns"].startswith("repeat(3,") or len(metrics["primaryColumns"].split()) == 3, metrics
+    assert metrics["primaryLabels"] == ["Tab", "^B", "⌫"], metrics
+    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "^C", "Alt", "Cmd"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
     assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
     assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
     assert metrics["movedInsetEnd"] == "auto", metrics
     assert metrics["bar"]["height"] < metrics["pane"]["height"], metrics
-    assert metrics["normal"]["shellDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
+    assert metrics["normal"]["shellDisplay"] == metrics["normal"]["sideDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
     assert metrics["overflow"]["rowDisplay"] == "grid", metrics
-    assert metrics["overflow"]["shellDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
+    assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
     assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
     assert metrics["overflow"]["more"]["right"] <= metrics["overflow"]["row"]["right"] + 0.5, metrics
     assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
     assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
+    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(5)), metrics
+    assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["sideKeys"]), metrics
+    assert all(key["right"] <= metrics["dpad"]["left"] for key in metrics["sideKeys"]), metrics
     assert metrics["up"]["top"] < metrics["left"]["top"] and metrics["up"]["top"] < metrics["right"]["top"], metrics
     assert metrics["left"]["left"] < metrics["up"]["left"] < metrics["right"]["left"], metrics
     assert metrics["down"]["top"] > metrics["left"]["top"] and metrics["down"]["top"] > metrics["right"]["top"], metrics
@@ -6917,6 +8090,367 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["copy"]["top"] < metrics["left"]["top"] < metrics["paste"]["top"], metrics
     assert metrics["pgUp"]["left"] > metrics["up"]["left"] and metrics["pgDown"]["left"] > metrics["down"]["left"], metrics
     assert metrics["pgUp"]["top"] < metrics["right"]["top"] < metrics["pgDown"]["top"], metrics
+    light_metrics = browser.execute_script(
+        """
+        document.body.classList.add('theme-light');
+        const box = node => { const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height}; };
+        const side = document.getElementById('smart-key-side');
+        const primary = document.getElementById('smart-key-row');
+        const backspace = document.getElementById('smart-key-backspace');
+        return {bar: box(document.getElementById('smart-keys')), side: box(side), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent)};
+        """
+    )
+    assert light_metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "^C", "Alt", "Cmd"], light_metrics
+    assert light_metrics["backspace"]["left"] >= light_metrics["primary"]["left"] and light_metrics["backspace"]["right"] <= light_metrics["primary"]["right"], light_metrics
+    assert light_metrics["bar"]["height"] < metrics["pane"]["height"] and light_metrics["side"]["bottom"] <= light_metrics["bar"]["bottom"], light_metrics
+
+
+def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+    )
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1&layout=slot1&tabs=slot1:1",
+            sessions=["1"],
+            terminal_css=".terminal { width: 640px; height: 420px; }",
+            grid_width=760,
+            grid_height=560,
+        )
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return typeof terminalMobileAccessoryState === 'function' && document.querySelector('[data-terminal-mobile-toggle=\"1\"]') !== null"
+            )
+        )
+        metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const launcher = document.querySelector('[data-terminal-mobile-toggle="1"]');
+            const bar = document.querySelector('[data-terminal-mobile-keybar="1"]');
+            const pane = launcher?.closest('.tab-pane');
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height};
+            };
+            const stateSnapshot = () => ({...terminalMobileAccessoryState('1')});
+            const tap = node => {
+              const rect = node.getBoundingClientRect();
+              const x = rect.left + rect.width / 2;
+              const y = rect.top + rect.height / 2;
+              const init = {bubbles: true, cancelable: true, pointerId: 71, pointerType: 'touch', button: 0, buttons: 1, clientX: x, clientY: y, isPrimary: true};
+              node.dispatchEvent(new PointerEvent('pointerdown', init));
+              node.dispatchEvent(new PointerEvent('pointerup', {...init, buttons: 0}));
+              node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
+            };
+            const dragLauncherTo = (x, y, emitClick = true) => {
+              const rect = launcher.getBoundingClientRect();
+              const startX = rect.left + rect.width / 2;
+              const startY = rect.top + rect.height / 2;
+              const pointerId = 72;
+              const base = {bubbles: true, cancelable: true, pointerId, pointerType: 'touch', button: 0, buttons: 1, isPrimary: true};
+              launcher.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
+              launcher.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
+              launcher.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
+              if (emitClick) launcher.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
+            };
+            const dragPaletteTo = (x, y) => {
+              const rect = bar.getBoundingClientRect();
+              const startX = rect.left + Math.min(12, Math.max(4, rect.width / 4));
+              const startY = rect.top + Math.min(12, Math.max(4, rect.height / 4));
+              const pointerId = 73;
+              const base = {bubbles: true, cancelable: true, pointerId, pointerType: 'touch', button: 0, buttons: 1, isPrimary: true};
+              bar.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
+              bar.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
+              bar.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
+            };
+            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            (async () => {
+              const coarse = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+              launcher.setPointerCapture = () => {};
+              launcher.releasePointerCapture = () => {};
+              bar.setPointerCapture = () => {};
+              bar.releasePointerCapture = () => {};
+              const initial = {launcher: box(launcher), barHidden: bar.hidden, state: stateSnapshot()};
+              tap(launcher);
+              await settle();
+              const opened = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                label: launcher.getAttribute('aria-label'),
+                expanded: launcher.getAttribute('aria-expanded'),
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              const paneRect = pane.getBoundingClientRect();
+              const initialPane = box(pane);
+              dragLauncherTo(paneRect.left + 18, paneRect.top + 18);
+              await settle();
+              const dragged = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              tap(launcher);
+              await settle();
+              const closed = {
+                launcher: box(launcher),
+                text: launcher.textContent,
+                label: launcher.getAttribute('aria-label'),
+                expanded: launcher.getAttribute('aria-expanded'),
+                hidden: bar.hidden,
+                state: stateSnapshot(),
+              };
+              dragLauncherTo(paneRect.left + paneRect.width - 18, paneRect.top + paneRect.height - 18, false);
+              await settle();
+              const draggedClosedNoClick = {
+                launcher: box(launcher),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                state: stateSnapshot(),
+              };
+              const staleState = terminalMobileAccessoryState('1');
+              staleState.x = pane.clientWidth + 200;
+              staleState.y = pane.clientHeight + 200;
+              syncTerminalMobileAccessoryState('1');
+              await settle();
+              const staleClamped = {
+                pane: box(pane),
+                launcher: box(launcher),
+                state: stateSnapshot(),
+              };
+              pane.style.setProperty('width', `${Math.max(220, Math.floor(staleClamped.pane.width / 2))}px`, 'important');
+              pane.style.setProperty('height', `${Math.max(180, Math.floor(staleClamped.pane.height / 2))}px`, 'important');
+              window.dispatchEvent(new Event('resize'));
+              await new Promise(resolve => setTimeout(resolve, 80));
+              await settle();
+              const resized = {
+                pane: box(pane),
+                launcher: box(launcher),
+                state: stateSnapshot(),
+              };
+              tap(launcher);
+              await settle();
+              const reopened = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              const frames = [];
+              const item = terminals.get('1');
+              item.socket = {
+                readyState: WebSocket.OPEN,
+                send(frame) { frames.push(JSON.parse(frame)); },
+              };
+              dragPaletteTo(resized.pane.left + 24, resized.pane.bottom - 24);
+              await settle();
+              const paletteDragged = {
+                bar: box(bar),
+                launcher: box(launcher),
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              const edgeTargets = [
+                ['top-left', resized.pane.left + 8, resized.pane.top + 8],
+                ['top-right', resized.pane.right - 8, resized.pane.top + 8],
+                ['bottom-right', resized.pane.right - 8, resized.pane.bottom - 8],
+                ['bottom-left', resized.pane.left + 8, resized.pane.bottom - 8],
+              ];
+              const paletteEdgeDrags = [];
+              for (const [name, x, y] of edgeTargets) {
+                dragPaletteTo(x, y);
+                await settle();
+                paletteEdgeDrags.push({
+                  name,
+                  bar: box(bar),
+                  launcher: box(launcher),
+                  hidden: bar.hidden,
+                  placement: bar.dataset.terminalMobilePlacement,
+                  state: stateSnapshot(),
+                });
+              }
+              tap(launcher);
+              await settle();
+              const closedAfterPaletteDrag = {
+                launcher: box(launcher),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                state: stateSnapshot(),
+              };
+              tap(launcher);
+              await settle();
+              const reopenedAfterPaletteDrag = {
+                launcher: box(launcher),
+                bar: box(bar),
+                text: launcher.textContent,
+                hidden: bar.hidden,
+                placement: bar.dataset.terminalMobilePlacement,
+                state: stateSnapshot(),
+              };
+              const beforeKeyTapState = stateSnapshot();
+              tap(bar.querySelector('[data-terminal-mobile-key="tab"]'));
+              await settle();
+              const afterKeyTapState = stateSnapshot();
+              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+    assert metrics.get("error") is None, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["coarse"] is True, metrics
+    assert metrics["initial"]["barHidden"] is True and metrics["initial"]["state"]["x"] is None, metrics
+    assert metrics["opened"]["text"] == "×" and metrics["opened"]["expanded"] == "true", metrics
+    assert metrics["opened"]["hidden"] is False and metrics["opened"]["placement"] == "above", metrics
+    assert 0 <= metrics["opened"]["launcher"]["top"] - metrics["opened"]["bar"]["bottom"] <= 16, metrics
+    assert metrics["dragged"]["hidden"] is False and metrics["dragged"]["text"] == "×", metrics
+    assert metrics["dragged"]["placement"] == "below", metrics
+    assert metrics["dragged"]["state"]["x"] <= 5 and metrics["dragged"]["state"]["y"] <= 5, metrics
+    assert metrics["dragged"]["bar"]["top"] >= metrics["dragged"]["launcher"]["bottom"], metrics
+    assert metrics["dragged"]["bar"]["left"] >= metrics["pane"]["left"] - 0.5 and metrics["dragged"]["bar"]["right"] <= metrics["pane"]["right"] + 0.5, metrics
+    assert metrics["closed"]["hidden"] is True and metrics["closed"]["text"] == "⌨" and metrics["closed"]["expanded"] == "false", metrics
+    assert metrics["closed"]["state"]["x"] == metrics["dragged"]["state"]["x"], metrics
+    assert metrics["closed"]["state"]["y"] == metrics["dragged"]["state"]["y"], metrics
+    assert metrics["draggedClosedNoClick"]["hidden"] is True and metrics["draggedClosedNoClick"]["text"] == "⌨", metrics
+    assert metrics["draggedClosedNoClick"]["state"]["x"] >= metrics["closed"]["state"]["x"], metrics
+    assert metrics["draggedClosedNoClick"]["state"]["y"] >= metrics["closed"]["state"]["y"], metrics
+    assert metrics["staleClamped"]["launcher"]["right"] <= metrics["staleClamped"]["pane"]["right"] + 0.5, metrics
+    assert metrics["staleClamped"]["launcher"]["bottom"] <= metrics["staleClamped"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["resized"]["pane"]["width"] < metrics["staleClamped"]["pane"]["width"], metrics
+    assert metrics["resized"]["pane"]["height"] < metrics["staleClamped"]["pane"]["height"], metrics
+    assert metrics["resized"]["launcher"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["resized"]["launcher"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["resized"]["launcher"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["resized"]["launcher"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["reopened"]["hidden"] is False and metrics["reopened"]["text"] == "×", metrics
+    assert metrics["reopened"]["placement"] in ("above", "below", "left", "right"), metrics
+    assert metrics["reopened"]["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5 and metrics["reopened"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["reopened"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5 and metrics["reopened"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["reopened"]["state"]["x"] == metrics["resized"]["state"]["x"], metrics
+    assert metrics["reopened"]["state"]["y"] == metrics["resized"]["state"]["y"], metrics
+    assert metrics["paletteDragged"]["hidden"] is False and metrics["paletteDragged"]["placement"] in ("above", "below", "left", "right"), metrics
+    assert metrics["paletteDragged"]["state"]["x"] != metrics["reopened"]["state"]["x"] or metrics["paletteDragged"]["state"]["y"] != metrics["reopened"]["state"]["y"], metrics
+    assert "paletteX" not in metrics["paletteDragged"]["state"] and "paletteY" not in metrics["paletteDragged"]["state"], metrics
+    assert metrics["paletteDragged"]["launcher"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["paletteDragged"]["launcher"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["paletteDragged"]["launcher"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["paletteDragged"]["launcher"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["paletteDragged"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    palette = metrics["paletteDragged"]["bar"]
+    launcher = metrics["paletteDragged"]["launcher"]
+    inline_gap = min(abs(palette["right"] - launcher["left"]), abs(launcher["right"] - palette["left"]))
+    block_gap = min(abs(palette["bottom"] - launcher["top"]), abs(launcher["bottom"] - palette["top"]))
+    assert inline_gap <= 16 or block_gap <= 16, metrics
+    for edge_drag in metrics["paletteEdgeDrags"]:
+        assert edge_drag["hidden"] is False and edge_drag["placement"] in ("above", "below", "left", "right"), metrics
+        assert edge_drag["launcher"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+        assert edge_drag["launcher"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+        assert edge_drag["launcher"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+        assert edge_drag["launcher"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+        assert edge_drag["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+        assert edge_drag["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+        assert edge_drag["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+        assert edge_drag["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+        palette = edge_drag["bar"]
+        launcher = edge_drag["launcher"]
+        inline_gap = min(abs(palette["right"] - launcher["left"]), abs(launcher["right"] - palette["left"]))
+        block_gap = min(abs(palette["bottom"] - launcher["top"]), abs(launcher["bottom"] - palette["top"]))
+        assert inline_gap <= 16 or block_gap <= 16, metrics
+    assert metrics["closedAfterPaletteDrag"]["hidden"] is True and metrics["closedAfterPaletteDrag"]["text"] == "⌨", metrics
+    assert metrics["closedAfterPaletteDrag"]["state"]["x"] == metrics["paletteEdgeDrags"][-1]["state"]["x"], metrics
+    assert metrics["closedAfterPaletteDrag"]["state"]["y"] == metrics["paletteEdgeDrags"][-1]["state"]["y"], metrics
+    assert metrics["reopenedAfterPaletteDrag"]["hidden"] is False and metrics["reopenedAfterPaletteDrag"]["text"] == "×", metrics
+    assert metrics["reopenedAfterPaletteDrag"]["state"]["x"] == metrics["closedAfterPaletteDrag"]["state"]["x"], metrics
+    assert metrics["reopenedAfterPaletteDrag"]["state"]["y"] == metrics["closedAfterPaletteDrag"]["state"]["y"], metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5, metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
+    assert metrics["reopenedAfterPaletteDrag"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert metrics["beforeKeyTapState"]["x"] == metrics["afterKeyTapState"]["x"], metrics
+    assert metrics["beforeKeyTapState"]["y"] == metrics["afterKeyTapState"]["y"], metrics
+    assert {"type": "input", "data": "\t"} in metrics["keyFrames"], metrics
+
+
+def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+    )
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1&layout=slot1&tabs=slot1:1",
+            sessions=["1"],
+        )
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return typeof sendTerminalMobileAccessoryInput === 'function' && typeof handleTerminalData === 'function' && terminals.get('1')"
+            )
+        )
+        metrics = browser.execute_script(
+            """
+            window.__mobileModifierFrames = [];
+            const item = terminals.get('1');
+            item.socket = {
+              readyState: WebSocket.OPEN,
+              send(frame) { window.__mobileModifierFrames.push(JSON.parse(frame)); },
+            };
+            item.term = item.term || {modes: {}, focus() {}};
+            const firstTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
+            const secondTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
+            const lockedHtml = terminalMobileAccessoryHtml('1');
+            const lockedBefore = {...terminalMobileAccessoryState('1')};
+            const firstKey = handleTerminalData('1', 'a');
+            const secondKey = handleTerminalData('1', 'b');
+            const lockedAfterKeys = {...terminalMobileAccessoryState('1')};
+            const offTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
+            const offState = {...terminalMobileAccessoryState('1')};
+            return {firstTap, secondTap, firstKey, secondKey, offTap, lockedBefore, lockedAfterKeys, offState, lockedHtml, frames: window.__mobileModifierFrames, errors: window.__bootErrors || []};
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+    assert metrics["errors"] == [], metrics
+    assert metrics["firstTap"] is True and metrics["secondTap"] is True, metrics
+    assert metrics["lockedBefore"]["ctrl"] is True and metrics["lockedBefore"]["ctrlLocked"] is True, metrics
+    assert re.search(r'class="[^"]*\bactive\b[^"]*\blocked\b[^"]*\bmobile-terminal-key--ctrl\b[^"]*"[^>]*data-terminal-mobile-key="ctrl"', metrics["lockedHtml"]), metrics
+    assert metrics["firstKey"] is True and metrics["secondKey"] is True, metrics
+    assert metrics["frames"] == [{"type": "input", "data": "\x01"}, {"type": "input", "data": "\x02"}], metrics
+    assert metrics["lockedAfterKeys"]["ctrl"] is True and metrics["lockedAfterKeys"]["ctrlLocked"] is True, metrics
+    assert metrics["offTap"] is True, metrics
+    assert metrics["offState"]["ctrl"] is False and metrics["offState"]["ctrlLocked"] is False, metrics
 
 
 def test_phone_single_pane_uses_one_pixel_active_ring_without_changing_tablets(browser, tmp_path):
@@ -7208,8 +8742,16 @@ def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
     assert metrics["languageBeforeOwner"] is True
     assert metrics["ownerBeforeActivity"] is True
     assert metrics["ownerRect"]["right"] <= metrics["activityRect"]["left"] + 1
+    assert "IDX = Index: Search / Quick Open index owner; builds the file index." in metrics["title"]
+    assert "STATS = Stats: Stats sampler (statsd / YO!stats); samples usage and metrics history." in metrics["title"]
+    assert "SESS = Session files: Session-file owner; stores session-file state." in metrics["title"]
+    assert "Leader means this server owns the role; follower means another connected server owns it." in metrics["title"]
     assert "STATS leader: devhost:8002" in metrics["title"]
     assert "SESS leader: devhost:8002" in metrics["title"]
+    assert "IDX state: leader" in metrics["title"]
+    assert "STATS state: follower" in metrics["title"]
+    assert "SESS state: follower" in metrics["title"]
+    assert "Right-click this status to take over as leader." in metrics["title"]
 
 @pytest.mark.e2e
 def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):
@@ -8048,6 +9590,40 @@ def test_light_agent_status_chart_uses_vibrant_shared_status_tokens(browser, tmp
     assert metrics["askBarOpacity"] == "0.82", metrics
 
 
+def test_agent_status_idle_gray_is_brighter_only_in_dark_mode(browser, tmp_path):
+    values = {}
+    for theme_class in ("theme-dark", "theme-light"):
+        page = tmp_path / f"agent-status-idle-{theme_class}.html"
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
+            page_html(
+                f"""
+                <script>document.body.className = {json.dumps(theme_class)};</script>
+                <section class="js-debug-graph-view">
+                  <svg><path id="idle-line" class="js-debug-line--idleAgents"></path><rect id="idle-bar" class="js-debug-bar--idleAgents"></rect></svg>
+                  <span id="idle-legend" class="js-debug-legend-swatch js-debug-legend-swatch--idleAgents"></span>
+                  <span id="idle-light-owner" style="color:var(--editor-line-number)"></span>
+                </section>
+                """,
+                extra_css="body { margin: 0; background: var(--bg); }",
+            ),
+        )
+        values[theme_class] = browser.execute_script(
+            """
+            const line = getComputedStyle(document.getElementById('idle-line'));
+            const bar = getComputedStyle(document.getElementById('idle-bar'));
+            const legend = getComputedStyle(document.getElementById('idle-legend'));
+            const lightOwner = getComputedStyle(document.getElementById('idle-light-owner')).color;
+            return {line: line.stroke, bar: bar.fill, legend: legend.color, lightOwner};
+            """
+        )
+    assert values["theme-dark"]["line"] == values["theme-dark"]["bar"] == values["theme-dark"]["legend"] == "rgb(89, 98, 115)", values
+    assert values["theme-light"]["line"] == values["theme-light"]["bar"] == values["theme-light"]["legend"], values
+    assert values["theme-light"]["line"] == values["theme-light"]["lightOwner"], values
+
+
 def test_subwindow_pid_and_recency_use_shared_subtle_color_in_each_theme(browser, tmp_path):
     for theme_class in ("theme-dark", "theme-light"):
         page = tmp_path / f"subwindow-metadata-{theme_class}.html"
@@ -8365,27 +9941,154 @@ def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrappi
             extra_css="body { margin: 0; background: var(--bg); }",
         ),
     )
-    metrics = browser.execute_script(
-        """
-        const rect = id => document.getElementById(id).getBoundingClientRect();
+    metrics = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+        const {rect} = window.__yolomuxTestHelpers;
         const fieldStyle = getComputedStyle(document.getElementById('branch-field'));
         const textStyle = getComputedStyle(document.getElementById('branch-text'));
-        return {
+        const metrics = {
           columns: fieldStyle.gridTemplateColumns,
-          labelBottom: rect('branch-label').bottom,
-          valueTop: rect('branch-value').top,
-          valueWidth: rect('branch-value').width,
-          textWidth: rect('branch-text').width,
-          textHeight: rect('branch-text').height,
+          labelBottom: rect('#branch-label').bottom,
+          valueTop: rect('#branch-value').top,
+          valueWidth: rect('#branch-value').width,
+          textWidth: rect('#branch-text').width,
+          textHeight: rect('#branch-text').height,
           lineHeight: parseFloat(textStyle.lineHeight),
         };
+        return !metrics.columns.trim().includes(' ') ? metrics : false;
         """
+        )
     )
     assert " " not in metrics["columns"].strip(), metrics
     assert metrics["valueTop"] >= metrics["labelBottom"], metrics
     assert metrics["valueWidth"] >= 220, metrics
     assert metrics["textWidth"] >= 180, metrics
     assert metrics["textHeight"] <= metrics["lineHeight"] * 4.5, metrics
+
+
+def test_yoinfo_relationship_projection_paints_current_path_branch_distinctly(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    metrics = browser.execute_script(
+        """
+        const rows = [
+          {
+            path: '/repo/worktree', pathLabel: '/repo/worktree', pathTitle: '/repo/worktree',
+            branch: 'feature/current', branchState: 'current',
+            tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}],
+          },
+          {
+            path: '/repo/worktree', pathLabel: '/repo/worktree', pathTitle: '/repo/worktree',
+            branch: 'feature/other', branchState: 'available',
+            tabAgents: [{session: '1', label: '1 / 0:codex', tabLabel: '1', aiLabel: '0:codex', kind: 'codex'}],
+          },
+        ];
+        const records = infoRelationshipRecords(rows);
+        const host = document.createElement('div');
+        host.className = 'info-tree';
+        host.style.width = '720px';
+        host.innerHTML = records.map(record => infoRecordHtml(record)).join('');
+        document.body.append(host);
+        const badges = [...host.querySelectorAll('.info-tree-branch-state')];
+        const result = {
+          states: records.map(record => record.branchState),
+          labels: badges.map(badge => badge.textContent.trim()),
+          classes: badges.map(badge => badge.className),
+          colors: badges.map(badge => getComputedStyle(badge).color),
+          borders: badges.map(badge => getComputedStyle(badge).borderColor),
+          branchNames: [...host.querySelectorAll('.info-tree-value-text')].map(node => node.textContent.trim()),
+        };
+        host.remove();
+        return result;
+        """
+    )
+    assert metrics["states"] == ["current", "available"], metrics
+    assert metrics["labels"] == ["current", "available"], metrics
+    assert "info-tree-branch-state-current" in metrics["classes"][0], metrics
+    assert "info-tree-branch-state-available" in metrics["classes"][1], metrics
+    assert metrics["colors"][0] != metrics["colors"][1], metrics
+    assert metrics["borders"][0] != metrics["borders"][1], metrics
+    assert metrics["branchNames"] == ["feature/current", "feature/other"], metrics
+
+
+def test_yoinfo_deep_narrow_record_and_toolbar_use_container_responsive_layout(browser, tmp_path):
+    page = tmp_path / "yoinfo-deep-narrow-responsive-layout.html"
+    nested_open = '<div class="info-tree-group-children">' * 6
+    nested_close = "</div>" * 6
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            f"""
+            <div style="width: 940px">
+              <div id="toolbar" class="info-actions-bar info-tree-actions-bar">
+                <div id="selects" class="info-tree-group-selects">
+                  <span id="order-label" class="info-tree-order-label">Order by:</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>Tab</option></select></label>
+                  <span class="info-tree-order-separator">&gt;</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>tmux sub-window</option></select></label>
+                  <span class="info-tree-order-separator">&gt;</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>Path</option></select></label>
+                  <span class="info-tree-order-separator">&gt;</span>
+                  <label class="info-tree-group-select info-tree-order-select"><select><option>None</option></select></label>
+                </div>
+              </div>
+              <div class="info-tree">{nested_open}
+                <div id="record" class="info-tree-record"><div class="info-tree-record-main">
+                  <div id="branch-field" class="info-tree-field info-tree-field-branch">
+                    <span id="branch-label" class="info-tree-field-label">Git branch:</span>
+                    <span id="branch-value" class="info-tree-field-value"><span id="branch-text" class="info-tree-value-text">yolomux.dev8881</span><span id="branch-state" class="info-tree-branch-state">available</span><span id="branch-time" class="info-tree-meta-updated">Git commit 48 minutes ago</span></span>
+                  </div>
+                </div></div>
+              {nested_close}</div>
+            </div>
+            """,
+            extra_css="body { margin: 0; background: var(--bg); }",
+        ),
+    )
+    browser.execute_script("document.body.className = 'theme-dark';")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return ['record', 'branch-field', 'branch-label', 'branch-value', 'branch-text', 'branch-state', 'branch-time', 'order-label'].every(id => document.getElementById(id));"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const {rect} = window.__yolomuxTestHelpers;
+        const selects = [...document.querySelectorAll('.info-tree-order-select')];
+        const separators = [...document.querySelectorAll('.info-tree-order-separator')];
+        const textStyle = getComputedStyle(document.getElementById('branch-text'));
+        return {
+          recordWidth: rect('#record').width,
+          columns: getComputedStyle(document.getElementById('branch-field')).gridTemplateColumns,
+          labelBottom: rect('#branch-label').bottom,
+          valueTop: rect('#branch-value').top,
+          textWidth: rect('#branch-text').width,
+          textHeight: rect('#branch-text').height,
+          textLineHeight: Number.parseFloat(textStyle.lineHeight),
+          stateWidth: rect('#branch-state').width,
+          stateHeight: rect('#branch-state').height,
+          timeTop: rect('#branch-time').top,
+          valueTopEdge: rect('#branch-value').top,
+          separatorDisplays: separators.map(node => getComputedStyle(node).display),
+          selectWidths: selects.map(node => rect(node).width),
+          selectTops: selects.map(node => Math.round(rect(node).top)),
+          labelTop: rect('#order-label').top,
+        };
+        """
+    )
+    assert metrics["recordWidth"] <= 768, metrics
+    assert " " not in metrics["columns"].strip(), metrics
+    assert metrics["valueTop"] >= metrics["labelBottom"], metrics
+    assert metrics["textWidth"] >= 180, metrics
+    assert metrics["textHeight"] <= metrics["textLineHeight"] * 2.5, metrics
+    assert metrics["stateWidth"] >= 60 and metrics["stateHeight"] <= metrics["textLineHeight"] * 2, metrics
+    assert metrics["timeTop"] > metrics["valueTopEdge"], metrics
+    assert metrics["separatorDisplays"] == ["none", "none", "none"], metrics
+    assert max(metrics["selectWidths"]) - min(metrics["selectWidths"]) <= 1, metrics
+    assert len(set(metrics["selectTops"])) == 2, metrics
+    assert min(metrics["selectTops"]) > metrics["labelTop"], metrics
 
 
 def test_yoinfo_path_activity_is_dim_right_aligned_trailing_metadata(browser, tmp_path):
@@ -8462,12 +10165,35 @@ def test_yoinfo_tab_values_match_shared_tab_detail(browser, tmp_path):
     )
     metrics = browser.execute_script(
         """
+        const root = '/home/test/shared-tab-detail';
+        const sessionId = 'tmux-session:8003';
+        const windowId = 'tmux-window:8003:0';
+        const paneId = 'tmux-pane:8003:0.0';
+        const observationId = 'path-observation:8003:0';
+        const worktreeId = `git-worktree:${root}`;
+        const repositoryId = `local-repository:${root}`;
+        const branchId = `local-branch:${repositoryId}:feature/shared-tab-detail`;
+        const pullRequestId = 'pull-request:11112';
+        const graph = {
+          version: 1,
+          generation: 1,
+          tmux_sessions: {[sessionId]: {id: sessionId, name: '8003', tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]}},
+          tmux_windows: {[windowId]: {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]}},
+          tmux_panes: {[paneId]: {id: paneId, tmux_window_id: windowId, target: '8003:0.0', index: 0, current_path: root, active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]}},
+          runtime_actors: {},
+          path_observations: {[observationId]: {id: observationId, path: root, path_snapshot: root, exists: true, source: 'fixture', priority: 1, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: worktreeId}},
+          git_worktrees: {[worktreeId]: {id: worktreeId, root, git_dir: `${root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchId, path_observation_ids: [observationId], branch_activity_ids: [], git: {root, cwd: root, branch: 'feature/shared-tab-detail'}}},
+          local_repositories: {[repositoryId]: {id: repositoryId, common_git_dir: `${root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: [branchId]}},
+          hosted_repositories: {},
+          local_branches: {[branchId]: {id: branchId, local_repository_id: repositoryId, name: 'feature/shared-tab-detail', current: true, pull_request_ids: [pullRequestId], linear_issue_ids: [], updated_ts: 0}},
+          pull_requests: {[pullRequestId]: {id: pullRequestId, number: 11112, draft: true, title: 'Refactor agent status ownership'}},
+          linear_issues: {},
+          worktree_branch_activity: {},
+        };
         transcriptMetadataState.payload = {sessions: {
           '8003': {
-            project: {
-              git: {branch: 'feature/shared-tab-detail'},
-              pull_request: {number: 11112, draft: true, title: 'Refactor agent status ownership'},
-            },
+            selected_pane: {target: '8003:0.0', current_path: root},
+            work_graph: graph,
           },
         }};
         const record = {
@@ -10315,6 +12041,10 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
               commandCount: commands.length,
               activeCommandCount: activeCommands.length,
               firstCommand: commands[0]?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+              commands: commands.map(command => ({
+                label: command.querySelector('.app-menu-label')?.textContent?.trim() || '',
+                iconClass: command.querySelector('.app-menu-ui-icon')?.className || '',
+              })),
               errors: window.__bootErrors || [],
               rejections: window.__bootRejections || [],
             };
@@ -10366,6 +12096,20 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         assert metrics["errors"] == [], metrics
         assert metrics["rejections"] == [], metrics
 
+        if menu_id == "file":
+            yo_commands = [command for command in metrics["commands"] if command["label"].startswith("YO!")]
+            assert [command["label"] for command in yo_commands] == [
+                "YO!agent",
+                "YO!chat",
+                "YO!info",
+                "YO!share...",
+                "YO!stats",
+            ], metrics
+            icons = {command["label"]: command["iconClass"] for command in yo_commands}
+            assert "app-menu-ui-icon-robot" in icons["YO!agent"], metrics
+            assert "app-menu-ui-icon-chat-bubble" in icons["YO!chat"], metrics
+            assert "app-menu-ui-icon-chart" in icons["YO!stats"], metrics
+
         first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
         fast_pointer_actions(browser).move_to_element(first_command).perform()
         hover = WebDriverWait(browser, 5).until(
@@ -10411,6 +12155,80 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         lambda _driver: (state if not (state := menu_metrics("file"))["open"] else False)
     )
     assert terminal_closed["openIds"] == [], terminal_closed
+
+
+def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return transcriptMetadataState.loaded && !transcriptMetadataState.request && document.querySelector('.app-menu[data-app-menu=\"tabs\"] > .app-menu-button');"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        let resolveMetadata = null;
+        window.fetch = (input, options) => {
+          const url = new URL(String(input), window.location.href);
+          if (url.pathname === '/api/session-metadata' && url.searchParams.get('force') === '1') {
+            return new Promise(resolve => { resolveMetadata = resolve; });
+          }
+          return originalFetch(input, options);
+        };
+        const wrapper = document.querySelector('.app-menu[data-app-menu="tabs"]');
+        const button = wrapper?.querySelector(':scope > .app-menu-button');
+        button?.click();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const popover = wrapper?.querySelector(':scope > .app-menu-popover');
+          const cached = {
+            open: wrapper?.classList.contains('open') || false,
+            rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
+            text: popover?.textContent || '',
+            requested: typeof resolveMetadata === 'function',
+          };
+          const workGraph = {
+            version: 1,
+            generation: 1,
+            tmux_sessions: {'tmux-session:1': {id: 'tmux-session:1', name: '1', tmux_window_ids: ['tmux-window:1:0'], tmux_pane_ids: ['tmux-pane:1:0.0'], runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
+            tmux_windows: {'tmux-window:1:0': {id: 'tmux-window:1:0', tmux_session_id: 'tmux-session:1', index: '0', name: '', tmux_pane_ids: ['tmux-pane:1:0.0']}},
+            tmux_panes: {'tmux-pane:1:0.0': {id: 'tmux-pane:1:0.0', tmux_window_id: 'tmux-window:1:0', target: '%1-0', index: '0', current_path: '/tmp/menu-live-branch', active: true, window_active: true, runtime_actor_ids: ['actor:1:0'], path_observation_ids: ['observation:1:0']}},
+            runtime_actors: {'actor:1:0': {id: 'actor:1:0', tmux_pane_id: 'tmux-pane:1:0.0', kind: 'shell', cwd: '/tmp/menu-live-branch', status: '', path_observation_ids: ['observation:1:0']}},
+            path_observations: {'observation:1:0': {id: 'observation:1:0', tmux_pane_id: 'tmux-pane:1:0.0', runtime_actor_id: 'actor:1:0', git_worktree_id: 'worktree:/tmp/menu-live-branch', path: '/tmp/menu-live-branch', source: 'fixture', priority: 0, last_observed_at: 1}},
+            git_worktrees: {'worktree:/tmp/menu-live-branch': {id: 'worktree:/tmp/menu-live-branch', root: '/tmp/menu-live-branch', git_dir: '/tmp/menu-live-branch/.git', kind: 'primary', parent_root: '', local_repository_id: 'local:/tmp/menu-live-branch', hosted_repository_id: null, current_branch_id: 'branch:local:/tmp/menu-live-branch:menu-live-branch', branch_activity_ids: [], path_observation_ids: ['observation:1:0'], git: {root: '/tmp/menu-live-branch', branch: 'menu-live-branch'}}},
+            local_repositories: {'local:/tmp/menu-live-branch': {id: 'local:/tmp/menu-live-branch', common_git_dir: '/tmp/menu-live-branch/.git', git_worktree_ids: ['worktree:/tmp/menu-live-branch'], local_branch_ids: ['branch:local:/tmp/menu-live-branch:menu-live-branch'], hosted_repository_id: null}},
+            hosted_repositories: {},
+            local_branches: {'branch:local:/tmp/menu-live-branch:menu-live-branch': {id: 'branch:local:/tmp/menu-live-branch:menu-live-branch', local_repository_id: 'local:/tmp/menu-live-branch', name: 'menu-live-branch', current: true, pull_request_ids: [], linear_issue_ids: []}},
+            pull_requests: {},
+            linear_issues: {},
+            worktree_branch_activity: {},
+          };
+          resolveMetadata?.(new Response(JSON.stringify({
+            session_order: ['1'],
+            sessions: {'1': {panes: [], agents: [], work_graph: workGraph}},
+          }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          window.__yolomuxTestWaitFor(
+            () => (popover?.textContent || '').includes('menu-live-branch'),
+            {description: 'live Tabs menu metadata'},
+          ).then(() => done({
+            cached,
+            final: {
+              open: wrapper?.classList.contains('open') || false,
+              text: popover?.textContent || '',
+              rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
+            },
+            errors: window.__bootErrors || [],
+          }), error => done({error: String(error?.stack || error)}));
+        }));
+        """
+    )
+    assert result.get("error") is None, result
+    assert result["cached"]["open"] is True and result["cached"]["rows"] >= 1, result
+    assert "menu-live-branch" not in result["cached"]["text"], result
+    assert result["cached"]["requested"] is True, result
+    assert result["final"]["open"] is True and result["final"]["rows"] >= 1, result
+    assert "menu-live-branch" in result["final"]["text"], result
+    assert result["errors"] == [], result
 
 
 def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path):
@@ -12806,20 +14624,44 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
             current: index === 0,
             linear_ids: [`YOLO-${index + 1}`],
           }));
+          const root = '/home/test/repo';
+          const sessionId = 'tmux-session:1';
+          const windowId = 'tmux-window:1:0';
+          const paneId = 'tmux-pane:1:0.0';
+          const observationId = 'path-observation:1:0';
+          const worktreeId = `git-worktree:${root}`;
+          const repositoryId = `local-repository:${root}`;
+          const branchIds = branches.map(branch => `local-branch:${repositoryId}:${branch.name}`);
+          const linearIssues = {};
+          const localBranches = Object.fromEntries(branches.map((branch, index) => {
+            const issueId = `linear-issue:${branch.linear_ids[0]}`;
+            linearIssues[issueId] = {id: issueId, identifier: branch.linear_ids[0], title: '', state: '', url: ''};
+            const branchId = branchIds[index];
+            return [branchId, {id: branchId, local_repository_id: repositoryId, name: branch.name, subject: branch.subject, updated: branch.updated, updated_ts: branch.updated_ts, current: branch.current === true, pull_request_ids: [], linear_issue_ids: [issueId]}];
+          }));
+          const graph = {
+            version: 1,
+            generation: 1,
+            tmux_sessions: {[sessionId]: {id: sessionId, name: '1', tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]}},
+            tmux_windows: {[windowId]: {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]}},
+            tmux_panes: {[paneId]: {id: paneId, tmux_window_id: windowId, target: '1:0.0', index: 0, current_path: root, active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]}},
+            runtime_actors: {},
+            path_observations: {[observationId]: {id: observationId, path: root, path_snapshot: root, exists: true, source: 'fixture', priority: 1, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: worktreeId}},
+            git_worktrees: {[worktreeId]: {id: worktreeId, root, git_dir: `${root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchIds[0], path_observation_ids: [observationId], branch_activity_ids: [], git: {root, cwd: root, branch: branches[0].name}}},
+            local_repositories: {[repositoryId]: {id: repositoryId, common_git_dir: `${root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: branchIds}},
+            hosted_repositories: {},
+            local_branches: localBranches,
+            pull_requests: {},
+            linear_issues: linearIssues,
+            worktree_branch_activity: {},
+          };
           transcriptMetadataState.payload = {
             session_order: ['1'],
             sessions: {
               '1': {
                 session: '1',
-                project: {
-                  git: {
-                    root: '/home/test/repo',
-                    cwd: '/home/test/repo',
-                    branch: 'feature/long-info-row-1',
-                    other_branches: {branches},
-                  },
-                  linear: [],
-                },
+                selected_pane: {target: '1:0.0', current_path: root},
+                work_graph: graph,
               },
             },
           };
@@ -12923,6 +14765,115 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
     )
     assert restored["active"] == setup["item"], restored
     assert abs(restored["restoredTop"] - setup["savedTop"]) < 32, {**setup, **after_other, **restored}
+
+
+def test_yoinfo_canonical_work_graph_refresh_keeps_session3_rows_and_scroll(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applySessionMetadataPayload === 'function' && typeof renderInfoPanel === 'function';"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const branches = {};
+          const branchIds = [];
+          for (let index = 0; index < 120; index += 1) {
+            const id = `branch:frontend:${index}`;
+            branchIds.push(id);
+            branches[id] = {
+              id,
+              local_repository_id: 'local:frontend',
+              name: `feature/session-3-${String(index).padStart(3, '0')}`,
+              current: index === 0,
+              pull_request_ids: index === 0 ? ['pr:80'] : [],
+              linear_issue_ids: [],
+            };
+          }
+          branches['branch:vortex'] = {
+            id: 'branch:vortex', local_repository_id: 'local:vortex', name: 'feature/vortex-history',
+            pull_request_ids: ['pr:11251'], linear_issue_ids: [],
+          };
+          const graph = generation => ({
+            version: 1,
+            generation,
+            tmux_sessions: {'tmux-session:3': {id: 'tmux-session:3', name: '3', tmux_window_ids: ['tmux-window:3:0', 'tmux-window:3:1'], tmux_pane_ids: ['tmux-pane:3:0.0', 'tmux-pane:3:1.0'], runtime_actor_ids: ['actor:claude', 'actor:shell'], path_observation_ids: ['observation:frontend', 'observation:vortex']}},
+            tmux_windows: {
+              'tmux-window:3:0': {id: 'tmux-window:3:0', tmux_session_id: 'tmux-session:3', index: '0', name: 'claude', tmux_pane_ids: ['tmux-pane:3:0.0']},
+              'tmux-window:3:1': {id: 'tmux-window:3:1', tmux_session_id: 'tmux-session:3', index: '1', name: 'bash', tmux_pane_ids: ['tmux-pane:3:1.0']},
+            },
+            tmux_panes: {
+              'tmux-pane:3:0.0': {id: 'tmux-pane:3:0.0', tmux_window_id: 'tmux-window:3:0', index: '0', target: '%claude', active: true, window_active: true, runtime_actor_ids: ['actor:claude'], path_observation_ids: ['observation:frontend']},
+              'tmux-pane:3:1.0': {id: 'tmux-pane:3:1.0', tmux_window_id: 'tmux-window:3:1', index: '0', target: '%shell', active: true, window_active: false, runtime_actor_ids: ['actor:shell'], path_observation_ids: ['observation:vortex']},
+            },
+            runtime_actors: {
+              'actor:claude': {id: 'actor:claude', tmux_pane_id: 'tmux-pane:3:0.0', kind: 'claude', cwd: '/home/test/parser-toolkits3', status: 'working', path_observation_ids: ['observation:frontend']},
+              'actor:shell': {id: 'actor:shell', tmux_pane_id: 'tmux-pane:3:1.0', kind: 'shell', cwd: '/home/test/vortex', status: 'running', path_observation_ids: ['observation:vortex']},
+            },
+            path_observations: {
+              'observation:frontend': {id: 'observation:frontend', tmux_pane_id: 'tmux-pane:3:0.0', runtime_actor_id: 'actor:claude', git_worktree_id: 'worktree:frontend', path: '/home/test/parser-toolkits3/src', source: 'edit', last_observed_at: 2},
+              'observation:vortex': {id: 'observation:vortex', tmux_pane_id: 'tmux-pane:3:1.0', runtime_actor_id: 'actor:shell', git_worktree_id: 'worktree:vortex', path: '/home/test/vortex', source: 'cwd', last_observed_at: 1},
+            },
+            git_worktrees: {
+              'worktree:frontend': {id: 'worktree:frontend', root: '/home/test/parser-toolkits3', local_repository_id: 'local:frontend', hosted_repository_id: 'hosted:frontend', current_branch_id: 'branch:frontend:0'},
+              'worktree:vortex': {id: 'worktree:vortex', root: '/home/test/vortex', local_repository_id: 'local:vortex', hosted_repository_id: 'hosted:vortex', current_branch_id: 'branch:vortex'},
+            },
+            local_repositories: {
+              'local:frontend': {id: 'local:frontend', local_branch_ids: branchIds},
+              'local:vortex': {id: 'local:vortex', local_branch_ids: ['branch:vortex']},
+            },
+            hosted_repositories: {
+              'hosted:frontend': {id: 'hosted:frontend', url: 'https://github.com/ai-vortex/parser-toolkits', pull_request_ids: ['pr:80']},
+              'hosted:vortex': {id: 'hosted:vortex', url: 'https://github.com/ai-vortex/vortex', pull_request_ids: ['pr:11251']},
+            },
+            local_branches: branches,
+            pull_requests: {
+              'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:frontend', number: 80, title: 'parser-toolkits draft'},
+              'pr:11251': {id: 'pr:11251', hosted_repository_id: 'hosted:vortex', number: 11251, title: 'Vortex history'},
+            },
+            linear_issues: {},
+            worktree_branch_activity: {},
+          });
+          autoFocusEnabled = false;
+          infoPanelSubTab = 'info';
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([infoItemId], infoItemId);
+          applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
+          await applySessionMetadataPayload({session_order: ['3'], sessions: {'3': {session: '3', work_graph: graph(1), selected_pane: {target: '%claude'}, panes: [{target: '%claude', window: '0', pane: '0', active: true, window_active: true}]}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+          setInfoGrouping(['git-worktree', 'branch']);
+          renderInfoPanel({force: true});
+          const waitFor = window.__yolomuxTestWaitFor;
+          const scroller = await waitFor(() => {
+            const candidate = document.getElementById('info-content');
+            return candidate?.textContent.includes('#80') && candidate.textContent.includes('#11251') && candidate.scrollHeight > candidate.clientHeight * 2 ? candidate : null;
+          }, {description: 'canonical Session 3 YO!info graph'});
+          const details = scroller.querySelector('details[data-info-group-key]');
+          const groupKey = details?.dataset.infoGroupKey || '';
+          setInfoTreeGroupCollapsed(groupKey, true);
+          renderInfoPanel({force: true});
+          scroller.scrollTop = Math.min(scroller.scrollHeight - scroller.clientHeight - 8, 1100);
+          const savedTop = scroller.scrollTop;
+          await applySessionMetadataPayload({session_order: ['3'], sessions: {'3': {session: '3', work_graph: graph(2), selected_pane: {target: '%claude'}, panes: [{target: '%claude', window: '0', pane: '0', active: true, window_active: true}]}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+          const refreshed = await waitFor(() => {
+            const candidate = document.getElementById('info-content');
+            const collapsed = candidate?.querySelector(`details[data-info-group-key="${CSS.escape(groupKey)}"]`);
+            return candidate?.textContent.includes('#80')
+              && candidate.textContent.includes('#11251')
+              && candidate.textContent.includes('feature/session-3-119')
+              && collapsed && !collapsed.open
+              && Math.abs(candidate.scrollTop - savedTop) < 40
+              ? {top: candidate.scrollTop, text: candidate.textContent, collapsed: !collapsed.open} : null;
+          }, {description: 'canonical Session 3 refresh without tree jump'});
+          return {savedTop, ...refreshed};
+        })().then(done, error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["collapsed"] is True, result
+    assert abs(result["top"] - result["savedTop"]) < 40, result
 
 
 def test_yoinfo_external_links_survive_panel_focus_pointerdown(browser, tmp_path):
@@ -13800,7 +15751,7 @@ def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
           changesHeight: changesRect.height,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
-          visibleSortSelects: visible('[data-session-files-sort]').length,
+          visibleSortSelects: visible('[data-file-explorer-tree-sort]').length,
           visibleDateButtons: visible('[data-file-explorer-tree-dates]').length,
           visibleReloadButtons: visible('[data-session-files-refresh], [data-file-explorer-refresh]').length,
         };
@@ -14092,7 +16043,7 @@ def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tm
         openFiles.set(path, {kind: 'text'});
         fileEditorViewModesForPath(path, true).set(item, 'preview');
         focusedPanelItem = item;
-        const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        const event = new KeyboardEvent('keydown', {key: 'f', ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true});
         host.dispatchEvent(event);
         return new Promise(resolve => setTimeout(() => {
           const find = host.querySelector('.file-editor-preview-find-panel');
@@ -14123,7 +16074,7 @@ def test_focused_panel_search_shortcut_routes_to_each_registered_search(browser,
           focusedPanelItem = item;
           const input = panel.querySelector(selector);
           input.value = 'existing query';
-          const event = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+          const event = new KeyboardEvent('keydown', {key: 'f', ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true});
           panel.dispatchEvent(event);
           return {
             prevented: event.defaultPrevented,
@@ -14141,7 +16092,7 @@ def test_focused_panel_search_shortcut_routes_to_each_registered_search(browser,
         };
         const unsupported = makePanel('debug-panel', debugPaneItemId, '<input>');
         focusedPanelItem = debugPaneItemId;
-        const unsupportedEvent = new KeyboardEvent('keydown', {key: 'f', ctrlKey: true, bubbles: true, cancelable: true});
+        const unsupportedEvent = new KeyboardEvent('keydown', {key: 'f', ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true});
         unsupported.dispatchEvent(unsupportedEvent);
         results.unsupportedPrevented = unsupportedEvent.defaultPrevented;
         info.remove();

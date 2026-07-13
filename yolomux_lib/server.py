@@ -41,7 +41,6 @@ from .app import TmuxWebtermApp
 from .common import DEFAULT_COLS
 from .common import DEFAULT_ROWS
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
-from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import PROJECT_ROOT
 from .common import PACIFIC_TIME
 from .common import UPLOAD_MAX_BYTES
@@ -67,7 +66,6 @@ from .tmux_utils import tmux_command
 from .tmux_utils import tmux_session_client_rows
 from .tmux_utils import tmux_session_target
 from .transcripts import codex_event_text
-from .transcripts import compact_transcript_items
 from .transcripts import strip_terminal_query_responses
 from .transcripts import transcript_items_from_raw_line
 from .uploads import parse_multipart_upload
@@ -1261,7 +1259,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if download:
             self.send_header("Content-Disposition", content_disposition_attachment(raw_path))
         self.send_auth_cookie_if_needed()
-        if self.close_connection:
+        if getattr(self, "close_connection", False):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
@@ -1863,14 +1861,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
-        payload, status = self.server.app.transcript_tail(session, MAX_TRANSCRIPT_TAIL_LINES)
+        payload, status = self.server.app.context_items(session, message_limit)
         if status != HTTPStatus.OK:
             self.write_json(payload, status=status)
             return
         path_text = payload.get("path")
-        text = payload.get("text")
-        if not isinstance(path_text, str) or not isinstance(text, str):
-            diagnostic = "missing transcript text"
+        items = payload.get("items")
+        if not isinstance(path_text, str) or not isinstance(items, list):
+            diagnostic = "missing transcript items"
             self.write_json(
                 {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)},
                 status=HTTPStatus.NOT_FOUND,
@@ -1892,7 +1890,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 {
                     "session": session,
                     "path": str(path),
-                    "items": compact_transcript_items(text, message_limit),
+                    "items": items,
+                    "pending": bool(payload.get("pending")),
                     "agent": payload.get("agent"),
                     "errors": payload.get("errors", []),
                 },
@@ -2005,6 +2004,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         )
         env = codex_runtime_env()
         process: subprocess.Popen[bytes] | None = None
+        previous_usage_context = getattr(self, "_codex_summary_usage_context", None)
+        self._codex_summary_usage_context = {
+            "model": str(summary_settings.get("codex_model") or "").strip(),
+            "effort": str(summary_settings.get("codex_effort") or "").strip() or "unknown",
+            "service_tier": str(summary_settings.get("codex_service_tier") or "").strip() or "default",
+        }
         try:
             process = subprocess.Popen(
                 args,
@@ -2026,6 +2031,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             diagnostic = str(exc)
             self.write_sse_json("summary_error", user_message_payload("summary.error.runtime", diagnostic, error=diagnostic))
         finally:
+            if previous_usage_context is None:
+                self.__dict__.pop("_codex_summary_usage_context", None)
+            else:
+                self._codex_summary_usage_context = previous_usage_context
             if process is not None:
                 terminate_process_group(process)
 
@@ -2090,6 +2099,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_sse_json("log", {"text": str(event.get("type") or "").replace(".", " ")})
             return
         if event_kind == "completed":
+            self.record_codex_summary_usage(event)
             return
         if event_kind == "error":
             diagnostic = json.dumps(event, ensure_ascii=False)
@@ -2099,6 +2109,35 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         text = codex_event_text(event)
         if text:
             self.write_sse_json("delta", {"text": text})
+
+    def record_codex_summary_usage(self, event: dict[str, Any]) -> None:
+        """Submit only direct structured completion usage, never summary text."""
+        context = getattr(self, "_codex_summary_usage_context", None)
+        if not isinstance(context, dict):
+            return
+        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+        if not usage:
+            response = event.get("response") if isinstance(event.get("response"), dict) else {}
+            usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        if not usage:
+            return
+        event_identity = str(event.get("id") or event.get("turn_id") or event.get("turnId") or "summary")
+        digest = hashlib.sha256(json.dumps(usage, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+        try:
+            self.server.app.record_owned_usage_atoms(
+                provider="openai",
+                model=str(context.get("model") or ""),
+                usage=usage,
+                source="AI Summary",
+                event_id=f"ai-summary:{event_identity}:{digest}",
+                effort=str(context.get("effort") or "unknown"),
+                service_tier=str(context.get("service_tier") or "default"),
+                endpoint="codex-exec",
+            )
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            # Cost telemetry must not turn a successfully generated summary
+            # into a failed user-visible summary response.
+            return
 
     def follow_transcript_file(self, path: Path) -> None:
         last_ping = time.monotonic()
@@ -2224,8 +2263,20 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         encode_started = time.perf_counter()
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         json_encode_ms = (time.perf_counter() - encode_started) * 1000
+        self.write_json_bytes(data, status=status, json_encode_ms=json_encode_ms)
+
+    def write_json_bytes(self, data: bytes, status: HTTPStatus = HTTPStatus.OK, *, json_encode_ms: float = 0.0) -> None:
+        """Write already-validated JSON bytes without decoding/re-encoding them.
+
+        Local services use this for bounded cached representations; ordinary
+        routes continue through ``write_json`` so response semantics stay one
+        owner (gzip, HEAD, Vary, response metrics, and auth cookies).
+        """
         compression_started = time.perf_counter()
-        body, content_encoding = gzip_response_body(data, content_type, self.headers.get("Accept-Encoding"))
+        content_type = "application/json; charset=utf-8"
+        headers = getattr(self, "headers", {})
+        accept_encoding = headers.get("Accept-Encoding") if hasattr(headers, "get") else None
+        body, content_encoding = gzip_response_body(data, content_type, accept_encoding)
         compression_ms = (time.perf_counter() - compression_started) * 1000 if content_encoding else 0.0
         head_only = str(getattr(self, "command", "GET") or "GET").upper() == "HEAD"
         self.send_response(status)
@@ -2817,8 +2868,6 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             self.app.start_input_heartbeat_worker()
         if hasattr(self.app, "start_tabber_activity_cache_warmer"):
             self.app.start_tabber_activity_cache_warmer()
-        if hasattr(self.app, "start_stats_history_sampler"):
-            self.app.start_stats_history_sampler()
         if hasattr(self.app, "start_update_check_thread"):
             self.app.start_update_check_thread()
         start_agent_auth_status_refresh(force=True)
@@ -2826,8 +2875,6 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         if hasattr(self, "share_pointer_stop"):
             self.share_pointer_stop.set()
-        if hasattr(self, "app") and hasattr(self.app, "stop_stats_history_sampler"):
-            self.app.stop_stats_history_sampler()
         if hasattr(self, "app") and hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
         if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):

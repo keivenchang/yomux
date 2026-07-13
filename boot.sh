@@ -2,12 +2,14 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$repo_root/tools/startup_common.sh"
 if [[ "$(uname -s)" == "Darwin" ]]; then
   platform_default_port=8880
 else
   platform_default_port=7770
 fi
 primary_port="${YOLOMUX_PORT:-$platform_default_port}"
+background_owner_primary_port="${YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT:-$primary_port}"
 default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
@@ -15,6 +17,7 @@ dev_mode="auto"
 print_command=0
 ports=()
 python_bin="${PYTHON:-python3}"
+server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
@@ -129,6 +132,7 @@ except Exception:
 fi
 
 extra_env=()
+extra_env+=("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=${background_owner_primary_port}")
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
 fi
@@ -162,6 +166,16 @@ print_launch_command() {
   local log_path
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
+    printf 'launchctl submit -l %q -- /usr/bin/env YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=%q MALLOC_ARENA_MAX=2 TMUX= TMUX_PANE= PATH=%q %q -u %q' \
+      "local.yolomux.$port" "$background_owner_primary_port" "$PATH" "$python_bin" "$repo_root/yolomux.py"
+    for item in "${server_args[@]}"; do
+      printf ' %q' "$item"
+    done
+    printf '\n'
+    return
+  fi
   printf 'PATH=%s\n' "$PATH"
   printf 'cd %q\n' "$repo_root"
   if supports_setsid_f; then
@@ -423,13 +437,20 @@ restart_port() {
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
 
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    yolomux_bootout_macos_server "$port"
+  fi
   stop_port_listener "$port"
 
   printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
-  (
-    cd "$repo_root"
-    launch_server "$log_path"
-  )
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    yolomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "$background_owner_primary_port" "${server_args[@]}"
+  else
+    (
+      cd "$repo_root"
+      launch_server "$log_path"
+    )
+  fi
   printf 'restarted port %s from %s; log: %s\n' "$port" "$repo_root" "$log_path"
   wait_for_port "$port"
   verify_port_stable "$port"
@@ -481,8 +502,12 @@ if [[ "$print_command" -eq 1 ]]; then
   exit 0
 fi
 
+yolomux_acquire_start_lock || die "startup lock unavailable"
+trap yolomux_release_start_lock EXIT
+yolomux_wait_for_system_capacity "$python_bin"
 ensure_xterm_assets
 
 for port in "${ports[@]}"; do
+  yolomux_wait_for_system_capacity "$python_bin"
   restart_port "$port"
 done

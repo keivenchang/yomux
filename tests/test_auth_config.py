@@ -192,19 +192,22 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     assert web.server_string("en", "menu.help.about.commits", count="1234") in page
 
 
-def test_setup_auth_page_recommends_https(monkeypatch):
+def test_setup_auth_page_recommends_https_only_for_http(monkeypatch):
     monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
     monkeypatch.setattr(web, "login_username", lambda: "keivenc")
 
-    setup_html = web.setup_auth_html()
+    secure_setup_html = web.setup_auth_html()
+    setup_html = web.setup_auth_html(secure=False)
 
     recommendation = web.server_string(
         "en",
         "setup.httpsRecommended",
-        command="<code>python3 yolomux.py --port 9998 --self-signed</code>",
+        command="<code>python3 yolomux.py --port 9998</code>",
     )
+    assert recommendation not in secure_setup_html
+    assert "setupSecurity" not in secure_setup_html
     assert recommendation in setup_html
-    assert "--self-signed" in setup_html
+    assert "--self-signed" not in setup_html
     assert "--host 0.0.0.0" not in setup_html
     edit_label = web.server_string("en", "common.edit")
     assert setup_html.index(recommendation) < setup_html.index(f"{edit_label} <code>")

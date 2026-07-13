@@ -39,7 +39,7 @@ async function runShareThemeSuite() {
   test('cross-surface host state survives layout, share, and terminal transitions', () => {
     const api = loadYolomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
-    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,image-viewer,file-editor');
+    assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,yocost,image-viewer,file-editor');
     const virtualItems = {
       info: api.infoItemId,
       yoagent: api.yoagentItemId,
@@ -51,6 +51,7 @@ async function runShareThemeSuite() {
       'search-history': api.searchHistoryItemId,
       preferences: api.prefsItemId,
       debug: api.debugPaneItemId,
+      yocost: api.yocostItemId,
     };
     const virtualTypes = api.TAB_TYPES.filter(type => Object.hasOwn(virtualItems, type.key));
     assert.equal(virtualTypes.length, Object.keys(virtualItems).length, 'all virtual panels are registered through the one descriptor factory');
@@ -284,7 +285,7 @@ async function runShareThemeSuite() {
     assert.equal(changesHtml.includes('touched-only.py'), false, 'Differ hides transcript-only T rows that have no real diff');
     const fullToolbarSlice = changesHtml.slice(changesHtml.indexOf('changes-toolbar'), changesHtml.indexOf('</div>', changesHtml.indexOf('changes-toolbar')));
     assert.equal(fullToolbarSlice.includes('data-session-files-session'), false, 'full Differ body toolbar no longer repeats the Session dropdown');
-    assert.ok(/data-session-files-sort[\s\S]*data-file-explorer-tree-dates[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar keeps Sort, date mode, and Reload');
+    assert.ok(/data-file-explorer-tree-sort[\s\S]*data-file-explorer-tree-dates[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar keeps Sort, date mode, and Reload');
     assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar orders Date, Expand all, Collapse all, Reload');
     assert.ok(changesHtml.includes('Behind 0 commits'), 'Finder diff shows behind count');
     assert.ok(changesHtml.includes('Ahead 2 commits'), 'Finder diff shows ahead count');
@@ -667,9 +668,9 @@ async function runShareThemeSuite() {
       assert.equal(hoverApi.activeTmuxDirectoryPath(), '/home/test/yolomux.dev/src', 'hover/autofocus does not become the Finder tmux-directory source');
       assert.deepStrictEqual(canonical(hoverApi.fileExplorerSyncPlanForTest()), {
         session: '5',
-        root: '/home/test/yolomux.dev',
-        affectedDirs: ['/home/test/yolomux.dev'],
-        expandPaths: [],
+        root: '/home/test',
+        affectedDirs: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/src'],
+        expandPaths: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/src'],
       }, 'hover/autofocus keeps Finder Sync planned from the explicit session');
       hoverApi.setFocusedTerminal('6');
       assert.equal(hoverApi.activeTmuxDirectoryPath(), '/home/test/yolomux.dev/src', 'passive xterm focus does not become the Finder tmux-directory source');
@@ -776,7 +777,7 @@ async function runShareThemeSuite() {
     // C8/C13 follow-up: Finder embedded Differ now uses the same compact select control pattern as Finder's
     // own A-Z/Z-A/recent/oldest sort control, defaulting to recent.
     const finderSortPanel = api.fileExplorerChangesPanelHtml({view: 'finder'});
-    assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
+    assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-file-explorer-tree-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
     assert.ok(/data-file-explorer-tree-dates[\s\S]*data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"[\s\S]*data-session-files-refresh/.test(finderSortPanel), 'Finder embedded Differ header orders Date, Expand all, Collapse all, Reload');
     const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'common.sort.recent', oldest: 'finder.sort.oldest'};
     for (const [value, key] of Object.entries(sortLabels)) {
@@ -849,7 +850,8 @@ async function runShareThemeSuite() {
     // C9: the per-session detail bar shows a repo carousel when the session touches more than one repo,
     // starts on the backend-provided first repo, and no control appears for a single-repo session.
     const multiRepoInfo = {
-      agents: [], selected_pane: {current_path: '/repo/app'},
+      agents: [{kind: 'shell', pane_target: '%repo-cycle'}], selected_pane: {target: '%repo-cycle', window: '0', pane: '0', current_path: '/repo/lib'},
+      panes: [{target: '%repo-cycle', window: '0', pane: '0', active: true, window_active: true, current_path: '/repo/lib'}],
       project: {
         git: {root: '/repo/app', branch: 'main', dirty_count: 0}, pull_request: null, linear: [],
         repos: [
@@ -861,16 +863,18 @@ async function runShareThemeSuite() {
     const multiMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
     assert.ok(/data-repo-cycle="repo-cycle"/.test(multiMetaHtml), 'C9: a multi-repo session shows repo cycle arrows');
     assert.ok(/data-repo-chip="repo-cycle"/.test(multiMetaHtml), 'C9: the repo count still opens the repo menu');
-    assert.ok(multiMetaHtml.includes('/repo/lib'), 'C9: the first displayed repo is the first backend-ordered repo');
-    assert.ok(multiMetaHtml.includes('>1/2</button>'), 'C9: the repo control shows only the current repo position');
+    assert.ok(multiMetaHtml.includes('/repo/lib'), 'C9: the active TmuxPane selects its observed checkout');
+    assert.ok(multiMetaHtml.includes('>2/2</button>'), 'C9: the repo control shows the active checkout position in backend order');
     assert.equal(multiMetaHtml.includes('1/2 repos'), false, 'C9: the repo control omits the repo label');
     assert.ok(multiMetaHtml.indexOf('data-repo-cycle="repo-cycle"') < multiMetaHtml.indexOf('/repo/lib'), 'C9: the repo carousel is the leftmost metadata control before path/description text');
     api.cycleSessionRepoDisplayForTest('repo-cycle', multiRepoInfo, 1);
     const cycledMetaHtml = api.projectMetaHtml('repo-cycle', multiRepoInfo);
-    assert.ok(cycledMetaHtml.includes('/repo/app'), 'C9: the next arrow cycles the informational row to the next repo');
+    assert.ok(cycledMetaHtml.includes('/repo/lib'), 'C9: the next arrow cycles from the active checkout to the next backend-ordered repo');
     assert.ok(cycledMetaHtml.includes('>2/2</button>'), 'C9: the repo control updates the current repo position');
     const secondaryPrInfo = {
-      selected_pane: {current_path: '/home/test/vortex/vortex4'},
+      agents: [{kind: 'shell', pane_target: '%secondary-pr'}],
+      selected_pane: {target: '%secondary-pr', window: '0', pane: '0', current_path: '/home/test/vortex/vortex4'},
+      panes: [{target: '%secondary-pr', window: '0', pane: '0', active: true, window_active: true, current_path: '/home/test/vortex/vortex4'}],
       project: {
         git: {root: '/home/test/ai-config', cwd: '/home/test/ai-config', branch: 'master', dirty_count: 1},
         pull_request: null,
@@ -900,13 +904,16 @@ async function runShareThemeSuite() {
     assert.ok(secondaryPrHtml.includes('#10853'), 'Info Bar shows a current-branch PR from the selected secondary repo');
     assert.ok(secondaryPrHtml.includes('feat: gate Lark3-Coder tool calls'), 'Info Bar uses the selected secondary repo PR title');
     assert.equal(secondaryPrHtml.includes('CFG-1'), false, 'secondary repo Info Bar does not inherit primary repo Linear metadata');
-    const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, repos: [multiRepoInfo.project.repos[0]]}};
+    const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, git: multiRepoInfo.project.repos[0], repos: [multiRepoInfo.project.repos[0]]}};
     assert.equal(api.projectMetaHtml('single-repo-cycle', singleRepoInfo).includes('meta-repo-switch'), false, 'C9: a single-repo session shows no carousel');
     const windowScopedInfo = {
       agents: [{kind: 'codex', pane_target: '5:0.0'}],
-      selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/home/u'},
+      // The active TmuxPane and its RuntimeActor observe the same checkout.  Keeping this
+      // fixture internally consistent is important: a pane CWD outside the checkout must not
+      // inherit a different actor's repository merely because that actor is in the session.
+      selected_pane: {target: '5:0.0', window: '0', pane: '0', current_path: '/repo/agent/src'},
       panes: [
-        {target: '5:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/home/u'},
+        {target: '5:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/agent/src'},
         {target: '5:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'bash', command: 'bash', current_path: '/tmp/shell'},
       ],
       project: {
@@ -921,7 +928,7 @@ async function runShareThemeSuite() {
       panes: windowScopedInfo.panes.map(pane => ({...pane, window_active: pane.window === '1'})),
     };
     const bashMetaHtml = api.projectMetaHtml('window-scope', bashWindowInfo);
-    assert.ok(codexMetaHtml.includes('/repo/agent/src') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps transcript-derived repo metadata');
+    assert.ok(codexMetaHtml.includes('/repo/agent') && codexMetaHtml.includes('8 dirty'), 'active agent window keeps its canonical checkout metadata');
     assert.equal(bashMetaHtml.includes('/repo/agent'), false, 'non-agent active window outside the repo does not inherit the agent touched repo');
     assert.ok(bashMetaHtml.includes('/tmp/shell'), 'non-agent active window shows its own cwd in the Info Bar');
     const transcriptPrGit = {
@@ -940,8 +947,12 @@ async function runShareThemeSuite() {
     };
     const transcriptPrInfo = {
       agents: [{kind: 'claude', pane_target: '3:0.0'}],
-      selected_pane: {target: '3:0.0', window: '0', pane: '0', current_path: staleWindowGit.root},
-      panes: [{target: '3:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: staleWindowGit.root}],
+      // A TmuxPane's canonical PathObservation owns its repository context.  The historical
+      // fixture used a stale Tabber CWD to contradict the actor's transcript checkout; model
+      // the real, coherent observation instead and keep the stale value only in auto-approve
+      // presentation data below.
+      selected_pane: {target: '3:0.0', window: '0', pane: '0', current_path: transcriptPrGit.cwd},
+      panes: [{target: '3:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude', current_path: transcriptPrGit.cwd}],
       project: {
         git: transcriptPrGit,
         pull_request: {number: 11251, title: 'reasoning: force nonempty content', url: 'https://github.com/ai-vortex/vortex/pull/11251'},
@@ -1644,7 +1655,9 @@ async function runShareThemeSuite() {
     assert.ok(api.menuTabCommand(api.finderItemId).html.includes('app-menu-ui-icon-finder'));
     assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
     assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
-    assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-yoagent'), 'YO!agent has its own tab/menu icon');
+    assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-robot'), 'YO!agent uses the shared robot icon');
+    assert.ok(api.menuTabCommand('__chat__').html.includes('app-menu-ui-icon-chat-bubble'), 'YO!chat uses the shared speech-bubble icon');
+    assert.ok(api.menuTabCommand('__debug__').html.includes('app-menu-ui-icon-chart'), 'YO!stats uses the shared chart icon');
     assert.equal(api.menuTabCommand('__changes__').html.includes('app-menu-ui-icon-changes'), false, 'retired standalone Differ no longer has a menu/tab icon');
     assert.ok(api.menuTabCommand('file:/home/test/README.md').html.includes('app-menu-ui-icon-document'));
     assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
@@ -1945,13 +1958,13 @@ async function runShareThemeSuite() {
     assert.ok(finderPanelSource.includes('title="${esc(t(\'finder.toolbar.syncTitle\'))}"') && finderPanelSource.includes('${esc(t(\'finder.toolbar.syncLabel\'))}</button>'), 'Finder Sync panel button uses the full tooltip while keeping the compact visible label');
     assert.equal(finderPanelBundle.includes('fileExplorerQuickAccess'), false, 'legacy Finder quick-root code is removed instead of left inactive');
     assert.ok(/const fileExplorerTripletRegistry = Object\.freeze\([\s\S]*\[finderItemId\][\s\S]*\[differItemId\][\s\S]*\[tabberItemId\]/.test(finderPanelBundle) && /function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(finderPanelBundle), 'Finder, Differ, and Tabber use the fixed-identity registry with no duplicate in-panel mode switcher');
-    assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
-    assert.ok(/fileExplorerTreeSortSelectHtml\(\)[\s\S]*file-explorer-date-controls[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)/.test(finderPanelSource), 'Finder Date, Expand all, and Collapse all form a trailing action-row cluster while Reload stays in the primary row');
+    assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle', 'finder')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
+    assert.ok(/fileExplorerTreeSortSelectHtml\('', 'finder'\)[\s\S]*file-explorer-date-controls[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle', 'finder'\)[\s\S]*fileTreeExpandCollapseAllButtonsHtml\('changes-date-toggle'\)/.test(finderPanelSource), 'Finder Date, Expand all, and Collapse all form a trailing action-row cluster while Reload stays in the primary row');
     assert.equal(finderPanelSource.includes('file-explorer-repo-summary'), false, 'Finder files-only action row no longer prints repo/path text between sort and date display');
     const finderActionsRowStart = finderPanelSource.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
     const finderActionsRowSource = finderPanelSource.slice(finderActionsRowStart, finderPanelSource.indexOf('</div>', finderActionsRowStart));
     assert.ok(/data-file-explorer-new-file[\s\S]*data-file-explorer-new-folder[\s\S]*file-explorer-folder-icon/.test(finderActionsRowSource), 'Finder files-only action row renders new file, then a folder-icon new-folder button');
-    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\(\)/.test(finderActionsRowSource), 'Finder action row puts .* before the sort selector');
+    assert.ok(/file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*fileExplorerTreeSortSelectHtml\('', 'finder'\)/.test(finderActionsRowSource), 'Finder action row puts .* before the sort selector');
     assert.equal(finderActionsRowSource.includes('data-file-explorer-collapse'), false, 'Finder files-only action row no longer renders the old standalone left-side collapse button');
     const treeExpandCollapseButtons = api.fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle');
     assert.ok(/data-file-tree-expand-collapse-all="expand"[\s\S]*data-file-tree-expand-collapse-all="collapse"/.test(treeExpandCollapseButtons), 'shared tree expand/collapse helper renders Expand all before Collapse all');
@@ -2988,11 +3001,13 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
     assert.equal(fileMenu.items[0].primary.label, 'new Claude', 'File starts with session creation instead of putting it under Tabs');
     assert.equal(fileMenu.items[1].primary.label, 'new Codex');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(0, 9)), ['Shell:', 'Open file', api.t('yoagent.capability.finderDifferTabber.name'), 'Search & Runs', 'YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File starts with explicit Shell choices, then Open file/triplet/Search/data/YO commands');
-    const firstYoIndex = fileMenuLabels.indexOf('YO!info');
-    assert.deepStrictEqual(canonical(fileMenuLabels.slice(firstYoIndex, firstYoIndex + 5)), ['YO!info', 'YO!agent', 'YO!stats', 'YO!chat', 'YO!share...'], 'File menu keeps the YO!* selections adjacent with YO!chat immediately after YO!stats');
-    assert.ok(fileMenuLabels.indexOf('YO!share...') < fileMenuLabels.indexOf('Preferences'), 'YO!share stays before Preferences');
-    assert.deepStrictEqual(canonical(fileMenu.items.slice(-4).map(item => item.type === 'separator' ? '---' : item.label)), ['YO!share...', 'Preferences', '---', 'Log out']);
+    const destinationLabels = fileMenu.items
+      .slice(fileMenu.items.findIndex(item => item.type === 'separator') + 1, fileMenu.items.findLastIndex(item => item.type === 'separator'))
+      .map(item => item.label);
+    assert.deepStrictEqual(canonical(destinationLabels), [api.t('yoagent.capability.finderDifferTabber.name'), 'Open file', 'Preferences', 'Search & Runs', 'YO!agent', 'YO!chat', 'YO!info', 'YO!share...', 'YO!stats'], 'File navigation destinations are alphabetized by their localized visible labels');
+    const yoLabels = destinationLabels.filter(label => label.startsWith('YO!'));
+    assert.deepStrictEqual(canonical(yoLabels), ['YO!agent', 'YO!chat', 'YO!info', 'YO!share...', 'YO!stats'], 'File menu keeps the YO!* destinations in alphabetical order');
+    assert.deepStrictEqual(canonical(fileMenu.items.slice(-2).map(item => item.type === 'separator' ? '---' : item.label)), ['---', 'Log out'], 'Log out remains in its own final group');
     const tripletLabel = api.t('yoagent.capability.finderDifferTabber.name');
     for (const label of [tripletLabel, 'YO!info', 'Search & Runs', 'YO!agent', 'Open file', 'YO!share...', 'Preferences', 'YO!stats', 'Log out']) {
       const item = fileMenu.items.find(candidate => candidate.label === label);
@@ -3006,6 +3021,9 @@ async function runShareThemeSuite() {
     assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
     const shareMenuItem = fileMenu.items.find(candidate => candidate.label === 'YO!share...');
     assert.equal(shareMenuItem.detail, 'sharing', 'YO!share menu row avoids target/session counts');
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!agent').iconHtml.includes('app-menu-ui-icon-robot'));
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!chat').iconHtml.includes('app-menu-ui-icon-chat-bubble'));
+    assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!stats').iconHtml.includes('app-menu-ui-icon-chart'));
     const shareCommandItem = api.commandPaletteCommandItems().find(candidate => candidate.label === 'File / YO!share...');
     assert.equal(shareCommandItem?.keybinding, 'Ctrl+K', 'YO!share is discoverable from the command surface with the direct share shortcut');
     const shareCreateHtml = api.shareCreateFormHtmlForTest();
@@ -4382,7 +4400,7 @@ async function runShareThemeSuite() {
     assert.ok(/const syncItem = fileSyncPath \? preferredItem : \(isTmuxSession\(preferredItem\) \? preferredItem : explicitSession\);[\s\S]*if \(!syncItem \|\| \(!fileSyncPath && syncItem !== explicitSession\)\) return/.test(finderSyncBody), 'Finder Sync accepts clicked editor files without requiring a tmux target');
     assert.ok(finderSyncBody.includes('fileExplorerSyncPlanForFile(fileSyncPath)'), 'Finder Sync can plan from an explicit editor file');
     assert.ok(finderSyncBody.includes('syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})'), 'Finder Sync can move the root to a clicked editor file and explicit sync forces a re-apply');
-    assert.ok(/openFileExplorerAt\(plan\.root, \{[\s\S]*preserveExpanded: false,[\s\S]*preserveScroll: false,[\s\S]*syncSelection: true,[\s\S]*user: options\.force === true,[\s\S]*showPending: options\.force === true,/.test(source), 'sync-driven Finder root opens do not cancel newer pending explicit pane syncs and explicit opens are user-owned');
+    assert.ok(/fetchFileExplorerSyncListings\(listingDirectories, \{force: true, user: options\.force === true\}\)/.test(source), 'cold sync-driven Finder loads bypass background suppression without entering the destructive root-open owner');
     assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#automatic Finder Sync skips a repeated already-applied plan');
     const openFileExplorerAtStart = source.indexOf('async function openFileExplorerAt(');
     const openFileExplorerAtEnd = source.indexOf('function resetFileExplorerAppliedSyncPlan(', openFileExplorerAtStart);
@@ -4390,7 +4408,7 @@ async function runShareThemeSuite() {
     assert.ok(/async function openFileExplorerAt\([\s\S]*const openGeneration = \+\+fileExplorerOpenGeneration;[\s\S]*const openStillCurrent = \(\) => openGeneration === fileExplorerOpenGeneration;[\s\S]*const entries = await fetchDirectory\(root,[\s\S]*if \(!openStillCurrent\(\)\) return false;/.test(source), 'stale Finder root fetches are dropped before they can render');
     assert.ok(source.slice(openFileExplorerAtStart, openFileExplorerAtEnd).includes("if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});"), 'completed manual Finder opens cancel pending sync without invalidating their own open generation');
     assert.ok(/const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*if \(showPendingRoot\) \{[\s\S]*fileExplorerManualSelectionActive = options\.manualSelection === true;[\s\S]*renderFileExplorerTreeSearching\(root\);/.test(source), 'manual and explicit Sync opens claim the Finder UI with a searching row before listing resolves');
-    assert.ok(/openFileExplorerAt\(plan\.root, \{[\s\S]*syncSelection: true,[\s\S]*user: options\.force === true,[\s\S]*showPending: options\.force === true,/.test(source), 'explicit Finder Sync opens bypass live push background suppression and show pending state');
+    assert.equal(source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab(')).includes('openFileExplorerAt('), false, 'cache-first Finder Sync never tears down the root through the manual-open transaction');
     assert.ok(/async function openFileExplorerAt\([\s\S]*if \(options\.manualSelection === true\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*fileExplorerManualSelectionActive = options\.manualSelection === true;[\s\S]*setFileExplorerPathDisplay\(root\);[\s\S]*renderFileExplorerRootModeControls\(\);[\s\S]*renderFileExplorerTreeSearching\(root\);[\s\S]*const entries = await fetchDirectory\(root,/.test(source), 'typed/manual Finder opens disable Sync, clears stale rows, and shows searching before slow directory listing resolves');
     assert.ok(source.includes("textWithMovingEllipsisHtml('searching...', 'file-tree-searching-dots')"), 'Finder searching row reuses the shared moving ellipsis helper');
     assert.ok(/\.file-tree-status-row\s*\{[\s\S]*cursor:\s*default/.test(css), 'Finder searching row is styled as passive status, not an interactive path');
@@ -4411,7 +4429,8 @@ async function runShareThemeSuite() {
     assert.ok(source.includes('fileExplorerSyncManualCollapsedPaths'), 'Finder Sync tracks manually collapsed auto-expanded paths');
     assert.ok(/function fileExplorerSyncExpansionPaths\(plan\)[\s\S]*filter\(path => !fileExplorerSyncPathSuppressed\(path\)\)/.test(source), 'Finder Sync filters manually collapsed paths out of future auto-expansion');
     assert.ok(source.includes('function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [])'), 'Finder Sync expansion targets are centralized');
-    assert.ok(source.includes('const candidates = repoTargets.length ? repoTargets : affectedTargets;'), 'Finder Sync expands direct repo roots when available, otherwise direct affected path children');
+    assert.ok(source.includes('function ancestorPathsUnderRoot(root, path)') && source.includes('const candidates = [...repoTargets, ...affectedTargets];'), 'Finder Sync expands full ancestor chains for repo roots and affected paths');
+    assert.ok(source.includes('const expansionPaths = fileExplorerSyncExpansionPaths(plan);'), 'explicit Finder Sync expansion shares manual-collapse suppression with automatic sync');
     assert.ok(source.includes('function commonAncestorPath(paths)') && source.includes('function focusedRepoRootForSync(focusedDir, repoRoots = sessionFilesRepoRoots())'), 'Finder Sync root selection is centralized through common-ancestor and focused-repo helpers');
     const viewMenu = menus.find(menu => menu.id === 'view');
     assert.equal(viewMenu.items.find(item => item.label === 'Hide tab metadata').iconHtml.includes('app-menu-ui-icon-tab-meta active'), true);
@@ -5033,6 +5052,9 @@ async function runShareThemeSuite() {
     assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
     assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy').includes('<mark class="fuzzy-match">X</mark>'), 'palette results highlight matched characters');
     assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy', {markClass: 'info-tree-search-match'}).includes('<mark class="info-tree-search-match">X</mark>'), 'shared fuzzy highlighter supports the Info tree mark class without a second matcher');
+    const w5kPath = '~/vortex/notes/w5k/2026.md';
+    assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('w5k', w5kPath).indexes), [15, 16, 17], 'fuzzy matcher selects the actual contiguous path occurrence instead of an earlier scattered subsequence');
+    assert.ok(api.fuzzyHighlightHtml('w5k', w5kPath).includes('notes/<mark class="fuzzy-match">w5k</mark>/2026.md'), 'Quick Open highlights the contiguous w5k directory match rather than the t in notes');
     const stableId = api.sessionScopedIdForTest('test.stable-id', () => 'created-id');
     assert.equal(stableId, 'created-id', 'shared ID helper creates a missing session ID');
     assert.equal(api.sessionScopedIdForTest('test.stable-id', () => 'other-id'), 'created-id', 'shared ID helper preserves the existing ID');
@@ -5694,11 +5716,11 @@ async function runShareThemeSuite() {
     });
     assert.equal(api.fileExplorerRootModeValue(), 'sync');
     assert.equal(api.activeTmuxDirectoryPath('1'), '/home/test/yolomux.dev');
-    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test/yolomux.dev');
+    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test');
     api.setSessionFilesPayloadForTest({session: '1', repos: [{repo: '/repo/app'}], files: []});
     api.setFileExplorerRootMode('sync', {sync: false});
     assert.equal(api.fileExplorerRootModeValue(), 'sync');
-    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test/yolomux.dev');
+    assert.equal(api.fileExplorerRootForOpen('1'), '/home/test');
     api.setTranscriptInfoForTest('1', {
       project: {git: {cwd: '/home/test/yolomux.dev/static_src/js', root: '/home/test/yolomux.dev'}},
       selected_pane: {current_path: '/home/test/yolomux.dev/static_src/js'},
@@ -5706,9 +5728,13 @@ async function runShareThemeSuite() {
     api.setSessionFilesPayloadForTest({session: '1', repos: [], files: []});
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/yolomux.dev',
-      affectedDirs: ['/home/test/yolomux.dev'],
-      expandPaths: [],
+      root: '/home/test',
+      affectedDirs: ['/home/test/yolomux.dev', '/home/test/yolomux.dev/static_src/js'],
+      expandPaths: [
+        '/home/test/yolomux.dev',
+        '/home/test/yolomux.dev/static_src',
+        '/home/test/yolomux.dev/static_src/js',
+      ],
     });
     assert.equal(api.finderDirectoryForItem('1'), '');
     assert.equal(api.activeFinderDirectoryPath('1'), '');
@@ -5737,14 +5763,30 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/vortex',
+      root: '/home/test',
       affectedDirs: ['/home/test/vortex/repo-a', '/home/test/vortex/repo-b', '/home/test/vortex/repo-a/src', '/home/test/vortex/repo-b/lib'],
-      expandPaths: ['/home/test/vortex/repo-a', '/home/test/vortex/repo-b'],
+      expandPaths: [
+        '/home/test/vortex',
+        '/home/test/vortex/repo-a',
+        '/home/test/vortex/repo-b',
+        '/home/test/vortex/repo-a/src',
+        '/home/test/vortex/repo-b/lib',
+      ],
     });
     const highlightSets = api.fileExplorerSessionHighlightSetsForTest('1');
     assert.deepStrictEqual(canonical(highlightSets.repoRoots), []);
     assert.deepStrictEqual(canonical(highlightSets.touchedDirs), []);
     assert.deepStrictEqual(canonical(highlightSets.expandedDirs), ['/home/test/vortex/repo-a', '/home/test/vortex/repo-b']);
+    assert.deepStrictEqual(canonical(highlightSets.syncTargetDirs), [
+      '/home/test/vortex/repo-a',
+      '/home/test/vortex/repo-b',
+      '/home/test/vortex/repo-a/src',
+      '/home/test/vortex/repo-b/lib',
+    ], 'every touched repo/working/file directory is starred, including touched ancestors; home-chain pass-through directories are not');
+    assert.deepStrictEqual(canonical(api.fileExplorerSyncTargetDirsForTest({
+      root: '/tmp/outside',
+      affectedDirs: ['/tmp/outside', '/tmp/outside/src'],
+    })), ['/tmp/outside', '/tmp/outside/src'], 'the working directory remains a star target even when it is the Finder root');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/vortex/repo-a', 'dir', '1'), 'file-tree-row--sync-expanded');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/vortex/repo-a/src', 'dir', '1'), '');
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/vortex/repo-a/src/a.js', 'file', '1'), '');
@@ -5757,6 +5799,10 @@ async function runShareThemeSuite() {
       files: [{repo: '/home/test/vortex/repo-a', path: 'src/a.js', abs_path: '/home/test/vortex/repo-a/src/a.js'}],
     });
     assert.equal(api.fileExplorerSessionHighlightClassForTest('/home/test/vortex/repo-a', 'dir', '1'), '');
+    assert.deepStrictEqual(canonical(api.fileExplorerSessionHighlightSetsForTest('2').syncTargetDirs), [
+      '/home/test/vortex/repo-a',
+      '/home/test/vortex/repo-a/src',
+    ], 'changing selected sessions removes the previous star set and derives the new session set');
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/vortex1/src'}});
     api.setSessionFilesPayloadForTest({
       session: '1',
@@ -5768,9 +5814,9 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/vortex1',
+      root: '/home/test',
       affectedDirs: ['/home/test/vortex1', '/tmp/x', '/home/test/vortex1/src'],
-      expandPaths: ['/home/test/vortex1/src'],
+      expandPaths: ['/home/test/vortex1', '/home/test/vortex1/src'],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/ai-config/claude/skills'}});
     api.setSessionFilesPayloadForTest({
@@ -5783,9 +5829,21 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/ai-config',
-      affectedDirs: ['/home/test/ai-config', '/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks'],
-      expandPaths: ['/home/test/ai-config/claude', '/home/test/ai-config/hooks'],
+      root: '/home/test',
+      affectedDirs: [
+        '/home/test/ai-config',
+        '/home/test/ai-config/claude',
+        '/home/test/ai-config/claude/skills',
+        '/home/test/ai-config/claude/skills/a',
+        '/home/test/ai-config/hooks',
+      ],
+      expandPaths: [
+        '/home/test/ai-config',
+        '/home/test/ai-config/claude',
+        '/home/test/ai-config/hooks',
+        '/home/test/ai-config/claude/skills',
+        '/home/test/ai-config/claude/skills/a',
+      ],
     });
     api.setSessionFilesPayloadForTest({
       session: '1',
@@ -5797,9 +5855,15 @@ async function runShareThemeSuite() {
     });
     assert.deepStrictEqual(canonical(api.fileExplorerSyncPlanForTest('1')), {
       session: '1',
-      root: '/home/test/ai-config',
-      affectedDirs: ['/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks'],
-      expandPaths: ['/home/test/ai-config/claude', '/home/test/ai-config/hooks'],
+      root: '/home/test',
+      affectedDirs: ['/home/test/ai-config/claude/skills/a', '/home/test/ai-config/hooks', '/home/test/ai-config/claude/skills'],
+      expandPaths: [
+        '/home/test/ai-config',
+        '/home/test/ai-config/claude',
+        '/home/test/ai-config/hooks',
+        '/home/test/ai-config/claude/skills',
+        '/home/test/ai-config/claude/skills/a',
+      ],
     });
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: ''}});
     api.setSessionFilesPayloadForTest({session: '1', repos: [], files: []});

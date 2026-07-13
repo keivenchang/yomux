@@ -261,6 +261,9 @@ const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.
 const fileExplorerTreeDateModeStorageKey = 'yolomux.fileExplorer.treeDateMode.v1';
 const fileExplorerTreeDateModes = ['none', 'date', 'relative'];
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
+// v2 keeps one common schema while each fixed file surface owns its own choices. The v1
+// Finder keys remain read-only migration inputs so existing browser preferences survive.
+const fileExplorerViewSettingsStorageKey = 'yolomux.fileExplorer.viewSettings.v2';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
@@ -435,10 +438,9 @@ const PREVIEW_RENDERERS = Object.freeze([
   }},
   {id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, mimeByExtension: {'.pdf': 'application/pdf'}},
   {id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid'},
-  {id: 'structured', kind: 'structured', extensions: ['.json', '.jsonl', '.ndjson', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  {id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json'},
+  {id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
     '.json': 'json',
-    '.jsonl': 'json',
-    '.ndjson': 'json',
     '.geojson': 'json',
     '.ipynb': 'json',
     '.yaml': 'yaml',
@@ -700,9 +702,7 @@ let fileExplorerRefreshDeferred = false;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
 let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
-let sessionFilesSortMode = 'newest';
-let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
-let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
+let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'
@@ -973,6 +973,8 @@ const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
+const yocostItemId = '__yocost__';
+function yocostTabLabel() { return 'YO!cost'; }
 const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
   {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
   {itemId: searchHistoryItemId},
@@ -1045,8 +1047,7 @@ function browserUsesTabletViewport() {
 function tabletUsesDesktopLayout(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
-  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
-  return width >= tabletDesktopLayoutMinWidthPx && width > height;
+  return width >= tabletDesktopLayoutMinWidthPx;
 }
 
 function fileExplorerUsesNormalTabMovement() {
@@ -1068,9 +1069,10 @@ function mobileSinglePaneMode(viewport = nativeViewport()) {
 function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const tablet = browserUsesTabletViewport();
   return phoneLikeMobileViewport(viewport)
-    || (browserUsesTabletViewport() && !tabletUsesDesktopLayout(viewport))
-    || width <= narrowTouchSingleColumnMaxWidthPx;
+    || (tablet && width < minSplitPaneWidthPx() * 2)
+    || (!tablet && width <= narrowTouchSingleColumnMaxWidthPx);
 }
 
 function narrowSingleColumnMode(viewport = nativeViewport()) {
@@ -1291,7 +1293,7 @@ const TAB_TYPES = [
       relocalizeYoagentPanelChrome(panel);
     },
     className: () => 'yoagent',
-    icon: 'yoagent',
+    icon: 'robot',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1308,7 +1310,7 @@ const TAB_TYPES = [
     relocalize: (_item, panel) => relocalizeChatPanel(panel),
     focusSearch: (_item, panel) => openChatSearch(panel),
     className: () => 'chat',
-    icon: 'chat',
+    icon: 'chat-bubble',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1424,9 +1426,27 @@ const TAB_TYPES = [
       relocalizeDebugPanelChrome(panel);
     },
     className: () => 'debug-item',
-    icon: 'tab-meta',
+    icon: 'chart',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'yocost',
+    id: yocostItemId,
+    aliases: ['yocost', 'yo!cost', 'yo-cost', yocostItemId],
+    label: () => yocostTabLabel(),
+    sortRank: 0.71,
+    detail: () => debugGraphCostText('debug.cost.details', 'Cost summary details'),
+    createPanel: () => createYoCostPanel(),
+    renderAttached: () => renderYoCostPanels(),
+    relocalize: (_item, panel) => {
+      renderYoCostPanels({force: true});
+      relocalizeYoCostPanelChrome(panel);
+    },
+    className: () => 'yocost-item',
+    icon: 'chart',
+    panePlacement: panePlacementSideAllowed,
+    minWidth: () => minSplitPaneWidthPx(),
   }),
   filePanelTabType({
     key: 'image-viewer',
@@ -1478,6 +1498,7 @@ function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
+function isYoCostItem(item) { return tabTypeForItem(item)?.key === 'yocost'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -1588,7 +1609,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId];
   if (!shareViewMode) items.splice(2, 0, chatItemId);
   return [...items, ...dynamicVirtualLayoutItems];
 }

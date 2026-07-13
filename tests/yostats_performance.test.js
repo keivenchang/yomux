@@ -9,6 +9,75 @@ const {
 } = require('./layout_test_helper');
 
 function runYostatsPerformanceSuite() {
+  test('YO!cost reuses the selected big-range cost aggregate instead of recomputing every render', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const makeComponent = (bucketIndex, rowIndex) => ({
+      key: `class-${rowIndex}`,
+      provider: 'openai',
+      model: rowIndex % 2 ? 'gpt-5.6-terra' : 'gpt-5.6-sol',
+      effort: rowIndex % 3 ? 'high' : 'low',
+      pricing_profile: '',
+      service_tier: '',
+      direction: rowIndex % 2 ? 'input' : 'output',
+      modality: 'text',
+      cache_role: rowIndex === 1 ? 'read' : 'none',
+      unit: 'tokens',
+      catalog_revision: 7,
+      source_url: 'https://platform.openai.com/pricing',
+      effective_from: '2026-07-01T00:00:00Z',
+      rate_usd: String(rowIndex + 1),
+      rate_scale: 1_000_000,
+      quantity: 100 + bucketIndex + rowIndex,
+      token_quantity: 100 + bucketIndex + rowIndex,
+      micro_usd: 1000 + rowIndex,
+      lower_micro_usd: 1000 + rowIndex,
+      upper_micro_usd: 1000 + rowIndex,
+      input_micro_usd: rowIndex % 2 ? 1000 + rowIndex : 0,
+      cache_micro_usd: rowIndex === 1 ? 1000 + rowIndex : 0,
+      output_micro_usd: rowIndex % 2 ? 0 : 1000 + rowIndex,
+      other_micro_usd: 0,
+    });
+    const buckets = Array.from({length: 2700}, (_unused, bucketIndex) => {
+      const components = Array.from({length: 12}, (_component, rowIndex) => makeComponent(bucketIndex, rowIndex));
+      return {
+        start: bucketIndex * 60,
+        duration: 60,
+        sequence: bucketIndex + 1,
+        costSummary: {
+          totalMicroUsd: 12000,
+          knownMicroUsd: 12000,
+          lowerMicroUsd: 12000,
+          upperMicroUsd: 12000,
+          pricedCount: components.length,
+          complete: true,
+          unpricedCount: 0,
+          components,
+          models: components,
+          sources: components.map((component, rowIndex) => ({
+            ...component,
+            tmux_key: 'build|0|codex',
+            tmux_label: 'build:0',
+            tmux_session: 'build',
+            tmux_window: '0',
+            root_thread_id: 'root',
+            agent_thread_id: `agent-${rowIndex}`,
+          })),
+          tmuxWindows: [],
+        },
+      };
+    });
+    const coldStarted = performance.now();
+    const cold = api.debugGraphCostSummaryForTest(buckets);
+    const coldMs = performance.now() - coldStarted;
+    const warmStarted = performance.now();
+    const warm = api.debugGraphCostSummaryForTest(buckets);
+    const warmMs = performance.now() - warmStarted;
+    assert.equal(cold.totalMicroUsd, 2700 * 12000, 'cold aggregate still sums the full selected cost range');
+    assert.equal(warm, cold, 'warm aggregate reuses the cached selected-range summary object');
+    assert.ok(coldMs < 1200, `cold 24h-style YO!cost aggregate took ${coldMs.toFixed(1)}ms`);
+    assert.ok(warmMs < 80, `warm 24h-style YO!cost aggregate recomputed instead of using the cache (${warmMs.toFixed(1)}ms)`);
+  });
+
   test('YO!stats median render stays under 300ms for a full 24-hour mixed-resolution fixture', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const tenMinuteMs = 10 * 60_000;

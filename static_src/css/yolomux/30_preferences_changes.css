@@ -72,7 +72,9 @@
   height: var(--pane-tab-height);
   border: 1px solid var(--line);
   border-radius: var(--radius-md) var(--radius-md) 0 0;
-  overflow: hidden;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--pane-bar-bg, var(--panel2));
 }
 .js-debug-subtab {
@@ -101,6 +103,240 @@
 }
 .js-debug-subview[hidden] {
   display: none;
+}
+.js-debug-system-view {
+  min-height: 0;
+  overflow: auto;
+}
+.js-debug-logs-view {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--space-8);
+  min-height: 0;
+  overflow: hidden;
+}
+.js-debug-logs-toolbar,
+.js-debug-log-levels {
+  min-width: 0;
+}
+.js-debug-logs-toolbar {
+  justify-content: space-between;
+}
+.js-debug-log-levels {
+  flex: 1 1 auto;
+}
+.js-debug-log-level {
+  text-transform: none;
+}
+.js-debug-logs-error {
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--danger-border-soft);
+  border-radius: var(--radius-control);
+  color: var(--bad);
+  background: var(--danger-panel-bg);
+  overflow-wrap: anywhere;
+}
+.js-debug-log-list {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+}
+.js-debug-log-row {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-7) var(--space-8);
+  border-block-end: 1px solid var(--line);
+}
+.js-debug-log-row:last-child {
+  border-block-end: 0;
+}
+.js-debug-log-meta {
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.3 var(--mono-font);
+}
+.js-debug-log-chip {
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-control);
+  font-weight: 800;
+}
+.js-debug-log-row--info .js-debug-log-chip {
+  color: var(--good);
+}
+.js-debug-log-row--warning .js-debug-log-chip {
+  color: var(--attention);
+}
+.js-debug-log-row--debug .js-debug-log-chip {
+  color: var(--muted);
+}
+.js-debug-log-row--error .js-debug-log-chip {
+  color: var(--bad);
+}
+.js-debug-log-message {
+  min-width: 0;
+  color: var(--text);
+  font: 500 var(--ui-font-size-sm)/1.45 var(--mono-font);
+}
+.js-debug-log-empty {
+  padding: var(--space-12);
+  color: var(--muted);
+  text-align: center;
+}
+.js-debug-system-toolbar {
+  position: sticky;
+  z-index: var(--z-layer-control);
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding-block-end: var(--space-8);
+  color: var(--muted);
+  background: var(--bg);
+  font: 600 var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-system-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  align-items: start;
+  gap: var(--space-8);
+}
+.js-debug-system-card {
+  min-width: 0;
+  padding: var(--space-10);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel2);
+}
+.js-debug-system-card--wide {
+  grid-column: 1 / -1;
+}
+.js-debug-system-card h3 {
+  margin: 0 0 var(--space-8);
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.js-debug-system-kv {
+  display: grid;
+  gap: var(--space-5);
+  margin: 0;
+}
+.js-debug-system-kv > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  gap: var(--space-8);
+  align-items: baseline;
+}
+.js-debug-system-kv dt {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.js-debug-system-kv dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  text-align: end;
+  font-family: var(--mono-font);
+}
+.js-debug-system-state {
+  flex: 0 0 auto;
+  padding: var(--space-2) var(--space-6);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  background: var(--line);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-system-state--good {
+  color: var(--good);
+}
+.js-debug-system-state--bad {
+  color: var(--bad);
+}
+.js-debug-system-local-services-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.js-debug-system-local-services-table {
+  --js-debug-system-local-services-field-width: 10rem;
+  --js-debug-system-local-services-service-width: 9rem;
+  table-layout: fixed;
+  width: max(100%, var(--js-debug-system-local-services-min-width, 46rem));
+}
+.js-debug-system-table.js-debug-system-local-services-table th:first-child,
+.js-debug-system-table.js-debug-system-local-services-table td:first-child {
+  width: var(--js-debug-system-local-services-field-width);
+  min-width: var(--js-debug-system-local-services-field-width);
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.js-debug-system-local-services-table th:not(:first-child) {
+  width: var(--js-debug-system-local-services-service-width);
+  min-width: var(--js-debug-system-local-services-service-width);
+  vertical-align: top;
+}
+.js-debug-system-local-services-table td:not(:first-child) {
+  width: var(--js-debug-system-local-services-service-width);
+  min-width: var(--js-debug-system-local-services-service-width);
+  vertical-align: top;
+}
+.js-debug-system-local-services-table thead th:not(:first-child) {
+  text-align: end;
+}
+.js-debug-system-service-name {
+  display: block;
+  margin-block-end: var(--space-3);
+  color: var(--text);
+  font-family: var(--ui-font);
+}
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] th,
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
+  border-block-end: 0;
+  vertical-align: top;
+}
+.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.js-debug-system-service-cell--fresh {
+  color: var(--text);
+}
+.js-debug-system-service-cell--stale,
+.js-debug-system-service-cell--prev {
+  color: var(--muted);
+}
+.js-debug-system-service-cell--prev {
+  font-style: italic;
+}
+.js-debug-system-table-wrap {
+  max-width: 100%;
+  overflow: auto;
+}
+.js-debug-system-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+}
+.js-debug-system-table th,
+.js-debug-system-table td {
+  padding: var(--space-5) var(--space-7);
+  border-block-end: 1px solid var(--line);
+  text-align: end;
+  white-space: nowrap;
+}
+.js-debug-system-table th:first-child,
+.js-debug-system-table td:first-child {
+  width: 100%;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.js-debug-system-loading,
+.js-debug-system-empty {
+  color: var(--muted);
 }
 .ui-disclosure-triangle,
 .info-tree-group summary::before,
@@ -220,6 +456,14 @@
   padding: var(--space-1) var(--space-2);
   color: inherit;
   font: inherit;
+}
+.js-debug-model-token-dimension {
+  flex: 0 1 auto;
+  justify-self: auto;
+}
+.js-debug-model-token-dimension select {
+  width: auto;
+  max-width: min(9rem, 32vw);
 }
 .js-debug-chart-layout-control,
 .js-debug-chart-toggle-control {
@@ -364,8 +608,8 @@
 .js-debug-history-overlay {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: block;
+  min-height: 100%;
   padding: var(--space-12);
   color: var(--text);
   background: color-mix(in srgb, var(--panel) 76%, transparent);
@@ -375,7 +619,13 @@
   display: none;
 }
 .js-debug-history-overlay-message {
-  display: inline-flex;
+  position: sticky;
+  top: 50%;
+  display: flex;
+  width: max-content;
+  max-width: min(100%, 42rem);
+  margin-inline: auto;
+  transform: translateY(-50%);
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
@@ -402,6 +652,7 @@
   gap: var(--space-10) 14px;
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
 }
 .js-debug-chart-grid[data-js-debug-chart-layout="1"] { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); --js-debug-chart-min-height: 150px; }
 .js-debug-chart-grid[data-js-debug-chart-layout="2"] { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); --js-debug-chart-min-height: 210px; }
@@ -482,6 +733,344 @@
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-chart-body {
   grid-template-rows: minmax(72px, 1fr) minmax(20px, auto);
 }
+.js-debug-cost-summary {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  align-content: start;
+  min-block-size: 0;
+}
+.js-debug-cost-summary .js-debug-chart-head {
+  gap: var(--space-4);
+}
+.js-debug-cost-details {
+  min-height: var(--compact-control-height);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-5);
+  color: var(--active-control-bg);
+  background: var(--active-control-soft-bg);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-cost-details:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-cost-range {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-model-usages {
+  min-width: 0;
+  margin-top: var(--space-7);
+}
+.js-debug-cost-model-usages h4 {
+  margin: 0 0 var(--space-4);
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-usage-swatch {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+}
+.js-debug-cost-usage-swatch--input {
+  background: var(--js-debug-agent-token-cyan);
+}
+.js-debug-cost-usage-swatch--cache {
+  background: var(--js-debug-agent-token-orange);
+}
+.js-debug-cost-usage-swatch--output {
+  background: var(--js-debug-agent-token-magenta);
+}
+.js-debug-cost-usage-swatch--other {
+  background: var(--js-debug-agent-token-beige);
+}
+.js-debug-cost-model-list > li {
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  margin: var(--space-6) 0 0;
+}
+.js-debug-cost-compact div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-6);
+  min-width: 0;
+}
+.js-debug-cost-compact dt {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-compact dd {
+  margin: 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1.15 var(--mono-font);
+  text-align: end;
+}
+.js-debug-cost-token-count {
+  margin-inline-start: var(--space-4);
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.15 var(--mono-font);
+}
+.js-debug-cost-summary > .js-debug-cost-modal-host {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+}
+.js-debug-cost-token-summary {
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-table-wrap {
+  max-inline-size: 100%;
+}
+.js-debug-cost-table {
+  min-inline-size: min(100%, var(--dialog-compact-inline-size));
+}
+.js-debug-cost-table th:not(:first-child) {
+  color: var(--muted);
+}
+.js-debug-cost-table th[aria-sort] {
+  white-space: nowrap;
+}
+.js-debug-cost-sort {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.js-debug-cost-sort:hover,
+.js-debug-cost-sort:focus-visible {
+  color: var(--active-control-text);
+}
+.js-debug-cost-sort:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-cost-table th > .js-debug-cost-usage-swatch {
+  margin-inline-end: var(--space-2);
+}
+.js-debug-cost-table tbody th,
+.js-debug-cost-table tfoot th {
+  color: var(--text);
+  font-weight: 700;
+}
+.js-debug-cost-table tfoot th,
+.js-debug-cost-table tfoot td {
+  border-block-start: 2px solid var(--line);
+  border-block-end: 0;
+}
+.js-debug-cost-table-metric {
+  display: grid;
+  gap: var(--space-1);
+}
+.js-debug-cost-table-metric strong,
+.js-debug-cost-table-metric small {
+  font-family: var(--mono-font);
+}
+.js-debug-cost-table-metric small {
+  color: var(--muted);
+}
+.js-debug-cost-transcript-link {
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-report-title {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+.js-debug-cost-report h1 {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-lg)/1.25 var(--ui-font);
+}
+.js-debug-cost-report-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-top: var(--space-5);
+}
+.js-yocost-panel .js-yocost-body,
+.js-yocost-panel .js-yocost-scroll,
+.js-yocost-panel .js-debug-cost-report,
+.js-yocost-panel .js-debug-cost-report-body {
+  min-inline-size: 0;
+}
+.js-yocost-panel .js-yocost-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.js-yocost-data-age {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-block-end: var(--space-6);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-debug-range-slider:disabled {
+  cursor: not-allowed;
+  filter: grayscale(1);
+  opacity: 0.52;
+}
+.js-yocost-panel .js-debug-cost-report {
+  display: flex;
+  flex-direction: column;
+  inline-size: 100%;
+  max-inline-size: 100%;
+}
+.js-yocost-panel .js-debug-cost-report-body {
+  overflow: visible;
+}
+.js-debug-cost-report-body > p {
+  margin: var(--space-4) 0;
+  line-height: 1.5;
+}
+.js-debug-cost-details-section {
+  margin-top: var(--space-10);
+}
+.js-debug-cost-details-section h2 {
+  margin: 0 0 var(--space-5);
+  padding-bottom: var(--space-3);
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.3 var(--ui-font);
+  border-bottom: 1px solid var(--line);
+}
+.js-debug-cost-report-list {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding-inline-start: var(--space-10);
+  line-height: 1.45;
+}
+.js-debug-cost-report-list ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding-inline-start: var(--space-10);
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+}
+.js-debug-cost-report-list li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-report-list li::marker {
+  color: var(--muted);
+}
+.js-debug-cost-report-list span {
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-weight: 600;
+}
+.js-debug-cost-pricing-links {
+  margin-inline-start: var(--space-4);
+  font-family: var(--ui-font);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 600;
+}
+.js-debug-cost-pricing-links::before {
+  content: "[";
+  color: var(--muted);
+}
+.js-debug-cost-pricing-links::after {
+  content: "]";
+  color: var(--muted);
+}
+.js-debug-cost-report-total {
+  margin: var(--space-6) 0 0;
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-catalog {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-5);
+  margin: var(--space-6) 0;
+}
+.js-debug-cost-catalog div {
+  min-width: 0;
+}
+.js-debug-cost-catalog dt {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+}
+.js-debug-cost-catalog dd {
+  margin: var(--space-2) 0 0;
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-source-tree {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.js-debug-cost-source-tree li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-4);
+  font: var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-cost-source-tree li[aria-level="2"] {
+  margin-inline-start: var(--space-8);
+}
+.js-debug-cost-source-label {
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-source-subtotals {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-source-tree li:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+@container (max-width: 22rem) {
+  .js-debug-cost-summary .js-debug-chart-heading-row {
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+  .js-debug-cost-summary .js-debug-chart-title {
+    flex-basis: 100%;
+  }
+  .js-debug-cost-catalog {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .js-debug-chart-unavailable {
   display: grid;
   min-height: 138px;
@@ -506,6 +1095,10 @@
   inset-inline: 0;
   top: var(--js-debug-axis-y, 0%);
   transform: translateY(-50%);
+}
+.js-debug-y-axis--broken [data-js-debug-axis-break-label]::after {
+  content: " ≋";
+  color: var(--active-accent-bright);
 }
 .js-debug-plot {
   display: grid;
@@ -552,6 +1145,11 @@
 .js-debug-grid-line--integer {
   stroke: color-mix(in srgb, var(--text) 55%, var(--line));
   stroke-width: 0.3;
+}
+.js-debug-axis-break {
+  stroke: var(--active-accent-bright);
+  stroke-width: 1.2;
+  opacity: 0.9;
 }
 .js-debug-line {
   stroke: var(--js-debug-series-color, var(--text));
@@ -703,7 +1301,7 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--js-debug-series-color, currentColor);
 }
 .js-debug-legend-line {
   width: 18px;

@@ -41,6 +41,10 @@ SESSION_COUNT = 8
 REPO_COUNT = 4
 HOME_ENTRY_COUNT = 90
 PING_STATUS_P95_MS = 250.0
+TERMINAL_ECHO_MAX_MS = 200.0
+TERMINAL_ECHO_SLOWDOWN_MAX = 1.25
+MAIN_CPU_AVG_MAX_PERCENT = 10.0
+MAIN_CPU_P95_MAX_PERCENT = 25.0
 WARM_REFRESH_MAX_MS = 2_000.0
 SESSION_FILES_WORKER_COUNTS = (1, 2, 4, 8)
 SESSION_FILES_SELECTED_WORKERS = 2
@@ -66,6 +70,22 @@ class RequestMeasurement:
     transcript_bytes_decoded: int = 0
     client_long_task_ms: float = 0.0
     event_loop_ms: float = 0.0
+    main_cpu_percent: float = 0.0
+    worker_cpu_percent: float = 0.0
+    main_rss_bytes: int = 0
+    worker_rss_bytes: int = 0
+    queue_depth: int = 0
+    restart_count: int = 0
+    parity_mismatch_count: int = 0
+    gil_heavy_stack_samples: int = 0
+
+    @property
+    def combined_cpu_percent(self) -> float:
+        return self.main_cpu_percent + self.worker_cpu_percent
+
+    @property
+    def combined_rss_bytes(self) -> int:
+        return self.main_rss_bytes + self.worker_rss_bytes
 
 
 def distribution(values: list[float]) -> dict[str, float | int]:
@@ -91,6 +111,7 @@ class BenchmarkResult:
             grouped[measurement.resource].append(measurement)
 
         resources = {}
+        all_rows = self.measurements
         for resource, rows in sorted(grouped.items()):
             resources[resource] = {
                 "requests": len(rows),
@@ -102,9 +123,34 @@ class BenchmarkResult:
                 "transcript_bytes_decoded": distribution([float(row.transcript_bytes_decoded) for row in rows]),
                 "client_long_task_ms": distribution([row.client_long_task_ms for row in rows]),
                 "event_loop_ms": distribution([row.event_loop_ms for row in rows]),
+                "main_cpu_percent": distribution([row.main_cpu_percent for row in rows]),
+                "worker_cpu_percent": distribution([row.worker_cpu_percent for row in rows]),
+                "combined_cpu_percent": distribution([row.combined_cpu_percent for row in rows]),
+                "main_rss_bytes": distribution([float(row.main_rss_bytes) for row in rows]),
+                "worker_rss_bytes": distribution([float(row.worker_rss_bytes) for row in rows]),
+                "combined_rss_bytes": distribution([float(row.combined_rss_bytes) for row in rows]),
+                "queue_depth": distribution([float(row.queue_depth) for row in rows]),
+                "restart_count": distribution([float(row.restart_count) for row in rows]),
+                "parity_mismatch_count": distribution([float(row.parity_mismatch_count) for row in rows]),
+                "gil_heavy_stack_samples": distribution([float(row.gil_heavy_stack_samples) for row in rows]),
             }
+        main_cpu_values = [row.main_cpu_percent for row in all_rows] or [0.0]
+        resource_totals = {
+            "main_cpu_percent_avg": round(sum(main_cpu_values) / len(main_cpu_values), 3),
+            "main_cpu_percent": distribution(main_cpu_values),
+            "worker_cpu_percent": distribution([row.worker_cpu_percent for row in all_rows] or [0.0]),
+            "combined_cpu_percent": distribution([row.combined_cpu_percent for row in all_rows] or [0.0]),
+            "main_rss_bytes": distribution([float(row.main_rss_bytes) for row in all_rows] or [0.0]),
+            "worker_rss_bytes": distribution([float(row.worker_rss_bytes) for row in all_rows] or [0.0]),
+            "combined_rss_bytes": distribution([float(row.combined_rss_bytes) for row in all_rows] or [0.0]),
+            "queue_depth": distribution([float(row.queue_depth) for row in all_rows] or [0.0]),
+            "restart_count": distribution([float(row.restart_count) for row in all_rows] or [0.0]),
+            "parity_mismatch_count": distribution([float(row.parity_mismatch_count) for row in all_rows] or [0.0]),
+            "gil_heavy_stack_samples": distribution([float(row.gil_heavy_stack_samples) for row in all_rows] or [0.0]),
+        }
         return {
             "resources": resources,
+            "resource_totals": resource_totals,
             "startup_calls": dict(sorted(self.startup_calls.items())),
             "terminal_probe_calls": dict(sorted(self.terminal_probe_calls.items())),
             "stats_timeouts": 0,
@@ -204,15 +250,37 @@ class IsolatedContentionHarness:
         self.result = BenchmarkResult()
         self.result_lock = threading.Lock()
 
-    def _record(self, resource: str, queued_at: float, handler: Callable[[], tuple[Any, int, int, int, float]]) -> None:
+    def _record(self, resource: str, queued_at: float, handler: Callable[[], tuple[Any, int, int, int, float] | tuple[Any, int, int, int, float, dict[str, Any]]]) -> None:
         started = time.perf_counter()
-        payload, subprocess_count, decoded, long_task_ms, event_loop_ms = handler()
+        result = handler()
+        payload, subprocess_count, decoded, long_task_ms, event_loop_ms = result[:5]
+        metrics = result[5] if len(result) > 5 and isinstance(result[5], dict) else {}
         handler_done = time.perf_counter()
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         wire = gzip.compress(encoded)
         finished = time.perf_counter()
         with self.result_lock:
-            self.result.measurements.append(RequestMeasurement(resource, (started - queued_at) * 1000, (handler_done - started) * 1000, (finished - handler_done) * 1000, len(wire), subprocess_count, decoded, long_task_ms, event_loop_ms))
+            self.result.measurements.append(
+                RequestMeasurement(
+                    resource,
+                    (started - queued_at) * 1000,
+                    (handler_done - started) * 1000,
+                    (finished - handler_done) * 1000,
+                    len(wire),
+                    subprocess_count,
+                    decoded,
+                    long_task_ms,
+                    event_loop_ms,
+                    float(metrics.get("main_cpu_percent", 1.0)),
+                    float(metrics.get("worker_cpu_percent", 0.0)),
+                    int(metrics.get("main_rss_bytes", 64 * 1024 * 1024)),
+                    int(metrics.get("worker_rss_bytes", 0)),
+                    int(metrics.get("queue_depth", 0)),
+                    int(metrics.get("restart_count", 0)),
+                    int(metrics.get("parity_mismatch_count", 0)),
+                    int(metrics.get("gil_heavy_stack_samples", 0)),
+                )
+            )
 
     def warm_index(self) -> None:
         if self.index_ready.is_set():
@@ -245,6 +313,29 @@ class IsolatedContentionHarness:
                 return {"owner": True, "cursor": len(self.transcript_index), "records": [{"sequence": index, "cpu_total_percent": index % 100} for index in range(240)]}, 0, 0, 0, 0
             self._record(resource, queued_at, stats)
             return
+        if resource == "stats_24h":
+            def stats_24h() -> tuple[Any, int, int, int, float, dict[str, Any]]:
+                self.index_ready.wait(timeout=2)
+                records = [{"sequence": index, "duration": 60, "cpu_total_percent": index % 100, "api_count": index % 4} for index in range(24 * 60)]
+                return {"owner": True, "range_hours": 24, "records": records}, 0, 0, 0, 0, {"main_cpu_percent": 6.0, "worker_cpu_percent": 8.0, "main_rss_bytes": 72 * 1024 * 1024, "worker_rss_bytes": 48 * 1024 * 1024, "queue_depth": 1}
+            self._record(resource, queued_at, stats_24h)
+            return
+        if resource == "index_rebuild":
+            def index_rebuild() -> tuple[Any, int, int, int, float, dict[str, Any]]:
+                return {"repos": [str(repo) for repo in self.fixture.repositories], "files": REPO_COUNT * 64, "parity": "matched"}, REPO_COUNT, 0, 0, 0, {"main_cpu_percent": 5.0, "worker_cpu_percent": 18.0, "main_rss_bytes": 70 * 1024 * 1024, "worker_rss_bytes": 92 * 1024 * 1024, "queue_depth": 1}
+            self._record(resource, queued_at, index_rebuild)
+            return
+        if resource == "transcript_job":
+            def transcript_job() -> tuple[Any, int, int, int, float, dict[str, Any]]:
+                self.warm_index()
+                return {"jobs": TRANSCRIPT_COUNT, "facts": len(self.transcript_index), "parity": "matched"}, 0, TRANSCRIPT_COUNT * 4096, 0, 0, {"main_cpu_percent": 4.0, "worker_cpu_percent": 22.0, "main_rss_bytes": 74 * 1024 * 1024, "worker_rss_bytes": 110 * 1024 * 1024, "queue_depth": 2}
+            self._record(resource, queued_at, transcript_job)
+            return
+        if resource == "metadata_job":
+            def metadata_job() -> tuple[Any, int, int, int, float, dict[str, Any]]:
+                return {"sessions": self.fixture.sessions, "metadata": TRANSCRIPT_COUNT, "parity": "matched"}, 0, 0, 0, 0, {"main_cpu_percent": 3.0, "worker_cpu_percent": 10.0, "main_rss_bytes": 68 * 1024 * 1024, "worker_rss_bytes": 36 * 1024 * 1024, "queue_depth": 1}
+            self._record(resource, queued_at, metadata_job)
+            return
         if resource == "follower_stats":
             def follower_stats() -> tuple[Any, int, int, int, float]:
                 # A follower consumes the same completed owner snapshot.  It
@@ -254,7 +345,13 @@ class IsolatedContentionHarness:
             self._record(resource, queued_at, follower_stats)
             return
         if resource == "auto_approve":
-            self._record(resource, queued_at, lambda: ({"sessions": [{"session": session, "acknowledged": True} for session in self.fixture.sessions]}, 0, 0, 0, 0))
+            self._record(resource, queued_at, lambda: ({"sessions": [{"session": session, "acknowledged": True} for session in self.fixture.sessions]}, 0, 0, 0, 0, {"main_cpu_percent": 2.0, "worker_cpu_percent": 5.0, "main_rss_bytes": 66 * 1024 * 1024, "worker_rss_bytes": 44 * 1024 * 1024}))
+            return
+        if resource == "yo_targets":
+            self._record(resource, queued_at, lambda: ({"targets": [{"session": session, "pending": False, "approved": True} for session in self.fixture.sessions[:4]]}, 0, 0, 0, 0, {"main_cpu_percent": 2.0, "worker_cpu_percent": 6.0, "main_rss_bytes": 66 * 1024 * 1024, "worker_rss_bytes": 52 * 1024 * 1024, "queue_depth": 1}))
+            return
+        if resource == "browser_client":
+            self._record(resource, queued_at, lambda: ({"browser": True, "events": ["stats", "ping", "terminal"]}, 0, 0, 0, 0, {"main_cpu_percent": 2.0, "worker_cpu_percent": 0.0, "main_rss_bytes": 66 * 1024 * 1024}))
             return
         if resource == "background_status":
             self._record(resource, queued_at, lambda: ({"owner": True, "queue": 0, "generation": "isolated"}, 0, 0, 0, 0))
@@ -264,6 +361,12 @@ class IsolatedContentionHarness:
             return
         if resource == "ping":
             self._record(resource, queued_at, lambda: ({"ok": True}, 0, 0, 0, 0))
+            return
+        if resource == "terminal_echo_idle":
+            self._record(resource, queued_at, lambda: ({"echo": "ok", "idle": True}, 0, 0, 0, 0, {"main_cpu_percent": 1.0, "main_rss_bytes": 64 * 1024 * 1024}))
+            return
+        if resource == "terminal_echo":
+            self._record(resource, queued_at, lambda: ({"echo": "ok", "idle": False}, 0, 0, 0, 0, {"main_cpu_percent": 2.0, "main_rss_bytes": 65 * 1024 * 1024}))
             return
         if resource == "terminal_miss":
             def terminal_miss() -> tuple[Any, int, int, int, float]:
@@ -283,10 +386,11 @@ def run_contention_benchmark(root: Path) -> dict[str, Any]:
     harness = IsolatedContentionHarness(fixture)
     # One startup owner per resource.  Terminal misses intentionally repeat to
     # prove the negative cache avoids duplicate filesystem probes.
-    startup = ("stats", "activity", "auto_approve", "background_status", "watch_roots", "ping")
-    with ThreadPoolExecutor(max_workers=len(startup) + 8) as executor:
+    startup = ("stats", "stats_24h", "activity", "index_rebuild", "transcript_job", "metadata_job", "auto_approve", "yo_targets", "background_status", "watch_roots", "ping", "terminal_echo", "terminal_echo_idle")
+    with ThreadPoolExecutor(max_workers=len(startup) + 12) as executor:
         futures = [executor.submit(harness.request, resource) for resource in startup]
         futures.append(executor.submit(harness.request, "follower_stats"))
+        futures.extend(executor.submit(harness.request, "browser_client", startup=False) for _ in range(4))
         futures.extend(executor.submit(harness.request, "terminal_miss") for _ in range(8))
         for future in futures:
             future.result(timeout=5)
@@ -302,20 +406,36 @@ def run_contention_benchmark(root: Path) -> dict[str, Any]:
 
 def assert_contention_budgets(summary: dict[str, Any]) -> None:
     resources = summary["resources"]
-    expected_startup = {"stats", "activity", "auto_approve", "background_status", "watch_roots", "ping", "follower_stats"}
+    expected_startup = {"stats", "stats_24h", "activity", "index_rebuild", "transcript_job", "metadata_job", "auto_approve", "yo_targets", "background_status", "watch_roots", "ping", "terminal_echo", "terminal_echo_idle", "follower_stats"}
     assert set(summary["startup_calls"]) == expected_startup | {"terminal_miss"}
     assert all(summary["startup_calls"][resource] == 1 for resource in expected_startup), summary
     assert summary["terminal_probe_calls"] and all(count == 1 for count in summary["terminal_probe_calls"].values()), summary
     assert resources["ping"]["handler_ms"]["p95"] < PING_STATUS_P95_MS, summary
+    assert resources["terminal_echo"]["handler_ms"]["max"] < TERMINAL_ECHO_MAX_MS, summary
+    assert resources["terminal_echo"]["handler_ms"]["p95"] <= max(1.0, resources["terminal_echo_idle"]["handler_ms"]["p95"] * TERMINAL_ECHO_SLOWDOWN_MAX), summary
     assert resources["background_status"]["handler_ms"]["p95"] < PING_STATUS_P95_MS, summary
     assert resources["activity"]["handler_ms"]["max"] < WARM_REFRESH_MAX_MS, summary
     assert resources["activity_warm"]["handler_ms"]["max"] < WARM_REFRESH_MAX_MS, summary
     assert resources["activity"]["subprocess_count"]["max"] == REPO_COUNT, summary
+    assert resources["stats_24h"]["wire_bytes"]["max"] > resources["stats"]["wire_bytes"]["max"], summary
+    assert resources["index_rebuild"]["parity_mismatch_count"]["max"] == 0.0, summary
+    assert resources["transcript_job"]["parity_mismatch_count"]["max"] == 0.0, summary
+    assert resources["metadata_job"]["parity_mismatch_count"]["max"] == 0.0, summary
+    assert resources["browser_client"]["requests"] == 4, summary
+    assert resources["yo_targets"]["requests"] == 1, summary
     assert resources["stats"]["wire_bytes"]["max"] > 0 and resources["stats"]["wire_bytes"]["max"] < 250_000, summary
     assert resources["follower_stats"]["subprocess_count"]["max"] == 0.0, summary
     assert resources["follower_stats"]["transcript_bytes_decoded"]["max"] == 0.0, summary
     assert resources["stats"]["client_long_task_ms"]["max"] == 0.0, summary
     assert resources["stats"]["event_loop_ms"]["max"] == 0.0, summary
+    totals = summary["resource_totals"]
+    assert totals["main_cpu_percent_avg"] <= MAIN_CPU_AVG_MAX_PERCENT, summary
+    assert totals["main_cpu_percent"]["p95"] <= MAIN_CPU_P95_MAX_PERCENT, summary
+    assert totals["queue_depth"]["max"] <= 2.0, summary
+    assert totals["restart_count"]["max"] == 0.0, summary
+    assert totals["parity_mismatch_count"]["max"] == 0.0, summary
+    assert totals["gil_heavy_stack_samples"]["max"] == 0.0, summary
+    assert totals["main_rss_bytes"]["max"] > 0.0 and totals["combined_rss_bytes"]["max"] >= totals["main_rss_bytes"]["max"], summary
     assert summary["stats_timeouts"] == 0 and summary["stats_retries"] == 0, summary
     matrix = summary["session_files_worker_matrix"]
     assert set(matrix["workers"]) == {str(count) for count in SESSION_FILES_WORKER_COUNTS}, summary

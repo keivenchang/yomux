@@ -1,16 +1,16 @@
 # YOLOmux
 
-Browser tools for watching, driving, and summarizing tmux sessions.
+Lightweight, powerful browser workspace for managing AI work.
 
-`yolomux.py` serves an interactive UI that attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them. Two companion tools ship alongside it: `auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tmux_wall.py` (a read-only snapshot wall).
+`yolomux.py` brings AI management, editing and viewing, collaboration, file and Git context, and observability into one interactive UI. It integrates with local tmux sessions through browser xterm.js terminals while keeping the workspace focused on directing, reviewing, and completing AI-assisted work. Two companion tools ship alongside it: `auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tmux_wall.py` (a read-only snapshot wall).
 
-Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), and detailed product behavior lives under [`docs/specs/`](docs/specs/).
+Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), detailed product behavior lives under [`docs/specs/`](docs/specs/), and peer findings live in [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
 ## Requirements
 
 - Python 3.10+
 - tmux
-- `openssl` on `PATH` (only needed for `--self-signed` HTTPS)
+- `openssl` on `PATH` for the default self-signed HTTPS certificate (not needed with `--cert`/`--key` or `--http`)
 
 ## Quickstart
 
@@ -21,73 +21,90 @@ git clone https://github.com/keivenchang/yolomux.git
 cd yolomux
 make setup          # pip install -e ".[yoagent]" + xterm.js assets + build the bundle  (run `make help` for more)
 tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
-python3 yolomux.py --self-signed --dang   # or: make run
+python3 yolomux.py --dang   # or: make run
 ```
 
 `make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Not using `make`? `pip install -e ".[yoagent]"` installs the dependencies + the `yolomux` command (pip also enforces Python 3.10+), then `npm install` for local xterm.js assets.
 
 Native filesystem watching is validated on macOS and Linux. Other Unix-like systems are not a support guarantee: if their `watchfiles` backend cannot start, YOLOmux automatically retains its bounded polling fallback.
 
-Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. `--self-signed` creates a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
+Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. By default YOLOmux creates and reuses a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
 
 ## Runtime architecture
 
-YOLOmux is one Python server process per listening port, not a Python process pool. It uses short-lived request threads and named background threads inside each server. Quick Open is the exception: a lazy, persistent local indexer child is the sole SQLite writer; servers submit work over a Unix socket and query committed snapshots read-only.
+YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one `statsd`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, and zero or one `approvald` while YO targets are enabled. A normal stats + Quick Open session has three Python processes (`yolomux.py`, `statsd`, `indexd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
 
 ```mermaid
 flowchart TB
   browser["Browser UI"]
 
-  subgraph server["One YOLOmux process"]
+  subgraph server["One yolomux.py web process per port"]
     direction TB
-    http["HTTP server"]
-    app["App"]
+    http["HTTPS/auth/SSE\nrequest threads"]
+    app["TmuxWebtermApp\ncoordination only"]
+    bridge["WebSocket PTY bridge\none request thread"]
+    control["Control RPC\nSTATE_DIR/control/yolomux-<pid>-<token>.sock\nmode 0600"]
 
-    subgraph worker["Background threads"]
+    subgraph schedulers["Small in-process schedulers"]
       direction LR
-      events["Events"]
-      native["FS watch"]
-      signals["tmux watch"]
-      owner["Owner"]
-      work["Caches"]
+      events["SSE/event fanout"]
+      native["watchfiles or bounded poll"]
+      signals["tmux control watcher"]
+      owner["background-owner election"]
+      caches["Tabber/session cache refresh"]
     end
-
-    bridge["WS handler"]
-    control["Control sock"]
   end
 
-  subgraph children["OS / tmux children"]
+  subgraph services["Shared local services per YOLOMUX_STATE_DIR"]
+    direction TB
+    statsd["statsd\nSTATE_DIR/services/statsd.sock\nowns stats-history.sqlite3\nsampler stays alive; otherwise 300s idle"]
+    indexd["indexd\nSTATE_DIR/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
+    jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\n60s idle when queue empty"]
+    execs["jobd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
+    approvald["approvald\nSTATE_DIR/services/approvald.sock\ntarget AutoApproveWorker threads\n60s idle after targets stop"]
+    jobd --> execs
+  end
+
+  subgraph tmuxsys["OS / tmux children"]
     direction LR
-    attach["tmux client"]
-    tmuxctl["tmux -C"]
+    attach["tmux attach-session\nPTY child"]
+    tmuxctl["tmux -C attach-session\ncontrol-mode child"]
     tmuxd["tmux server"]
     pane["tmux pane"]
     fs["OS events"]
   end
 
-  subgraph durable["Local index service"]
-    indexer["Indexer"]
-    db["SQLite"]
+  subgraph durable["Durable state"]
+    direction TB
+    statsdb["STATE_DIR/stats-history.sqlite3\nstatsd is sole writer"]
+    indexdb["STATE_DIR/search_index/<digest>.sqlite3\nindexd is sole writer"]
+    locks["STATE_DIR/background-owner/*\nSTATE_DIR/services/*.service.json\nSTATE_DIR/locks/auto-approve-*.lock"]
+    caches_state["STATE_DIR/session-files-cache\nSTATE_DIR/activity-cache\nSTATE_DIR/watch-index.json"]
   end
 
-  browser -->|"HTTPS JSON / SSE"| http
-  browser <-->|"WebSocket frames"| bridge
+  browser --> http
+  browser <--> bridge
   http --> app
   app --> events
-  events --> native
-  events --> signals
+  app --> native
+  app --> signals
   app --> owner
-  app --> work
-  app -->|"Unix socket"| indexer
-  indexer -->|"row deltas"| db
-  app -->|"read-only"| db
-  bridge <-->|"PTY I/O · attach-session"| attach
-  attach <-->|"tmux Unix socket"| tmuxd
-  signals <-->|"stdio · tmux -C attach"| tmuxctl
-  tmuxctl <-->|"tmux Unix socket"| tmuxd
-  tmuxd <-->|"pane I/O"| pane
-  native <-->|"watchfiles events"| fs
-  app --> control
+  app --> caches
+  app <--> control
+  app <--> statsd
+  app <--> indexd
+  app <--> jobd
+  app <--> approvald
+  statsd --> statsdb
+  indexd --> indexdb
+  app --> locks
+  app --> caches_state
+  bridge <--> attach
+  attach <--> tmuxd
+  signals <--> tmuxctl
+  tmuxctl <--> tmuxd
+  tmuxd <--> pane
+  native <--> fs
 
   classDef client fill:#0e7490,stroke:#67e8f9,color:#ecfeff
   classDef core fill:#1d4ed8,stroke:#93c5fd,color:#eff6ff
@@ -98,15 +115,14 @@ flowchart TB
   classDef database fill:#7e22ce,stroke:#d8b4fe,color:#faf5ff
   class browser client
   class http,app core
-  class events,native,signals,owner,work worker
+  class events,native,signals,owner,caches worker
   class bridge request
   class attach,tmuxctl,tmuxd,pane,fs child
-  class control local
-  class indexer child
-  class db database
+  class control,statsd,indexd,jobd,execs,approvald local
+  class statsdb,indexdb,locks,caches_state database
 ```
 
-Activity/session-file cache refreshes, stats sampling, and watch-root handling remain thread-based within the elected server. Visible Finder/Differ paths are watched eagerly; the lazy Quick Open indexer batches their dirty paths for two seconds and writes only changed SQLite rows. The visible terminal is different: each browser WebSocket occupies one `ThreadingHTTPServer` request-handler thread and gets a `tmux attach-session` child connected through a pseudo-terminal, so terminal I/O never shares the HTTP request body path.
+The web process accepts browser traffic, forwards tmux bytes, coordinates auth/settings/SSE, and serves cached or worker-encoded bytes. It does not own the YO!stats database, Quick Open database, CPU job executor, or YO auto-approval target workers. If a service is missing, stale, incompatible, or in crash backoff, the request path returns last-known-good data, pending/unavailable status, or a bounded error; it does not run the retired heavy implementation in the web PID.
 
 ```mermaid
 sequenceDiagram
@@ -134,40 +150,50 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-  subgraph p1["Server :8880"]
-    app1["App"]
-    sock1["Control"]
+  subgraph p1["yolomux.py :8880"]
+    app1["web app"]
+    sock1["control sock\nSTATE_DIR/control/yolomux-<pid>-*.sock"]
   end
-  subgraph p2["Server :7770"]
-    app2["App"]
-    sock2["Control"]
+  subgraph p2["yolomux.py :7770"]
+    app2["web app"]
+    sock2["control sock\nSTATE_DIR/control/yolomux-<pid>-*.sock"]
   end
 
-  subgraph state["User state directory"]
-    lock["Lock"]
-    ownerjson["Owner data"]
-    indexes["SQLite"]
-    caches["Caches"]
+  subgraph state["Shared state directory"]
+    ownerlock["background-owner/owner.lock"]
+    ownerjson["background-owner/owner.json\ngenerations/*.json"]
+    records["services/*.service.json\nservices/*.service.lock"]
+    statsdb["stats-history.sqlite3\none statsd writer"]
+    indexes["search_index/<digest>.sqlite3\none indexd writer"]
+    caches["session-files-cache\nactivity-cache\nwatch-index.json"]
   end
-  subgraph child["One local child"]
-    indexer["Indexer"]
-    isock["Index sock"]
+  subgraph svc["Shared service PIDs"]
+    statsd2["statsd\nservices/statsd.sock\nsampler stays alive; otherwise 300s idle"]
+    indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
+    jobd2["jobd\nservices/jobd.sock\n60s empty-queue idle"]
+    approvald2["approvald\nservices/approvald.sock\nexits when no targets"]
   end
 
   app1 <--> sock1
   app2 <--> sock2
-  app2 -. "owner RPC" .-> sock1
-  app1 -. "owner RPC" .-> sock2
-  app1 <-->|"claim"| lock
-  app1 <-->|"I/O"| ownerjson
-  app2 <-->|"claim"| lock
-  app2 <-->|"I/O"| ownerjson
-  app1 -->|"read-only"| indexes
-  app2 -->|"read-only"| indexes
-  app1 -->|"dirty paths"| isock
-  app2 -->|"dirty paths"| isock
-  isock <--> indexer
-  indexer -->|"writes"| indexes
+  app2 -.-> sock1
+  app1 -.-> sock2
+  app1 <--> ownerlock
+  app1 <--> ownerjson
+  app2 <--> ownerlock
+  app2 <--> ownerjson
+  app1 --> records
+  app2 --> records
+  app1 --> statsd2
+  app2 --> statsd2
+  app1 --> indexer
+  app2 --> indexer
+  app1 --> jobd2
+  app2 --> jobd2
+  app1 --> approvald2
+  app2 --> approvald2
+  statsd2 --> statsdb
+  indexer --> indexes
   app1 <--> caches
   app2 <--> caches
 
@@ -177,8 +203,8 @@ flowchart TB
   classDef localChild fill:#b45309,stroke:#fcd34d,color:#fffbeb
   class app1,app2 process
   class sock1,sock2 socket
-  class lock,ownerjson,indexes,caches durable
-  class indexer,isock localChild
+  class ownerlock,ownerjson,records,statsdb,indexes,caches durable
+  class statsd2,indexer,jobd2,approvald2 localChild
 ```
 
 | Communication path | Used for | Transport |
@@ -186,10 +212,13 @@ flowchart TB
 | Browser ↔ server | API requests, SSE notifications, terminal I/O | HTTPS JSON, SSE, WebSocket frames |
 | WebSocket bridge ↔ tmux | One interactive terminal attachment per browser session | PTY plus a `tmux attach-session` child; that tmux client connects to the tmux server over tmux’s Unix socket |
 | tmux signal watcher ↔ tmux | Pane/window/client lifecycle changes | Long-lived `tmux -C attach-session` control-mode child over stdin/stdout; its tmux client uses the tmux Unix socket |
-| Server ↔ server | Owner refresh requests, status, runtime profiling, release/takeover | Local Unix-domain socket; newline-delimited JSON, mode `0600` |
+| Server ↔ server | Owner refresh requests, status, runtime profiling, release/takeover | Local Unix-domain socket; versioned length-framed JSON with legacy newline compatibility, mode `0600` |
 | Server ↔ server election | One owner for expensive cross-process work | `flock` plus atomic JSON generation records under the state directory |
-| Indexer ↔ Quick Open index | One writer, row-level index updates | Local Unix socket; indexer writes SQLite WAL, servers use read-only SQLite |
-| Owner ↔ durable caches | Stats, activity, session-file state | Atomic JSON/files and locks for shared state |
+| Server ↔ `statsd` | YO!stats one-second sampling, retained history, token/process/host rows, pre-encoded stats responses | Local Unix RPC; `statsd` writes `STATE_DIR/stats-history.sqlite3` in SQLite WAL mode |
+| Server ↔ `indexd` | Quick Open enqueue/search/unindex and index diagnostics | Local Unix RPC; `indexd` writes `STATE_DIR/search_index/<digest>.sqlite3` row deltas, servers read committed snapshots |
+| Server ↔ `jobd` | Stateless bounded CPU tasks such as `transcript_view` | Local Unix RPC to the broker; broker supervises 1-2 spawned executors and bounded queues |
+| Server ↔ `approvald` | YO auto-approval start/status/stop/pending-prompt checks | Local Unix RPC; `approvald` owns target locks and target-keyed `AutoApproveWorker` threads |
+| Server ↔ durable caches | Activity, session-file, watch-root, chat, and ownership state | Atomic JSON/files, SQLite stores, and `flock` locks under the state directory |
 | Native watcher ↔ OS | Filesystem changes for watched client roots | `watchfiles` backend; macOS/Linux validated, bounded polling fallback otherwise |
 
 ### Concrete transports
@@ -199,11 +228,11 @@ flowchart TB
 | Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener—`:8880` in the local macOS launch agent, or the port passed to `yolomux.py` (the setup example uses `:9998`). |
 | Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. `YOLOMUX_TMUX_SOCKET` adds `tmux -S <socket>` when a non-default tmux socket is required. |
 | Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOLOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
-| Server → elected server | Newline-delimited JSON request/response over a mode-`0600` Unix socket. Normally: `$YOLOMUX_STATE_DIR/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, and `runtime_profile`. |
-| Server → Quick Open indexer | Newline-delimited JSON over a mode-`0600` Unix socket. Normally: `$YOLOMUX_STATE_DIR/search_index/indexer.sock`; a deterministic short temporary path is used on systems with a Unix-socket pathname limit. Actions: `ping`, `status`, `enqueue`, and `unindex`. Requests are coalesced for two seconds; only the indexer writes SQLite. |
+| Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_STATE_DIR/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, `statsd_sample`, and release/disable operations. |
+| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Service sockets are `$YOLOMUX_STATE_DIR/services/statsd.sock`, `$YOLOMUX_STATE_DIR/search_index/indexer.sock`, `$YOLOMUX_STATE_DIR/services/jobd.sock`, and `$YOLOMUX_STATE_DIR/services/approvald.sock`; `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include stats history/merge/encoded responses, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. |
 | Markdown → visual preview | Browser-local rendering; there is no SVG server or preview port. A changed Markdown content generation replaces its derived DOM, reruns Mermaid to a sanitized SVG/blob image, recreates inline media nodes, and rejects any late render from an older generation. |
 
-The owner role is deliberately narrow: every server still accepts browser traffic and owns its own WebSocket/PTy children, while only the elected process runs the shared expensive roles and supervises the lazy indexer. If the owner becomes stale, another process can take over after the heartbeat/lock checks.
+The owner role is deliberately narrow: every server still accepts browser traffic and owns its own WebSocket/PTy children, while the elected process coordinates shared refresh demand and service leases. A configured preferred port has higher election priority than later-started followers, while followers still take over if it dies. Lower-priority processes cannot force the preferred live owner to release its lock. Service startup is serialized by `services/<name>.service.lock`; stale records are cleaned only after PID checks, incompatible protocol peers are retired, and repeated spawn failures back off from 0.25 seconds up to 8 seconds. Singleton service locks and one-writer SQLite ownership prevent split writers; idle shutdown only happens after leases and queued work drain.
 
 ## First launch
 
@@ -249,16 +278,17 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
 - With a mouse, trackpad, or Pencil, hover a tab for details; right-click, Control-click, or press the keyboard Menu key/Shift-F10 for actions without switching to that tab. On pure-touch screens, long-press a tab for the same bottom action sheet; drag instead to cancel it. Split actions place that tab on the named side and retain a useful `Drop a tab here` peer pane. `Expand pane` temporarily fills the workspace and restores the exact prior layout when used again.
 - Press `?` for the responsive Keyboard Shortcuts and Legends dialog, including the green play, yellow pause, and red stop status glyph meanings.
-- Drag a tab between same-role pane tab bars, drop near a Generic Pane edge to split it, or drop on the outer root edge for a full-span pane. A generic tab moved to the far right creates another Generic Pane, not a Side Pane. No tab can move or swap between Side and Generic roles. Pane roles, edges, splits, and percentages encode into the shareable page URL.
+- Drag a tab between same-role pane tab bars, drop near a Generic Pane edge to split it, or drop on the outer root edge for a full-span pane. A generic tab moved to the far right creates another Generic Pane, not a Side Pane. No tab can move or swap between Side and Generic roles. Pane roles, edges, splits, and percentages encode into the shareable page URL. Pinned tabs stay in their pane, are never minimized or auto-evicted, and a full pane with no evictable unpinned/clean tab refuses incoming tabs with a visible status message instead of silently exceeding the per-pane tab cap.
 - Drag a Finder or Differ file row into a pane to open that file there; dropping near a pane edge opens it in a new split.
 - Upload or paste files with drag-drop, clipboard paste, or the `+` button. Dropping a file on a terminal offers actions suited to an AI or shell pane.
 - Use the pane Info Bar to switch tmux sub-windows (`0:bash`, `1:codex`, ...), cycle among a session's repositories with `< N/M >` or pick one from the `N/M` menu, open transcripts (`Tx`), request an AI summary (`AI`), or inspect the event log (`Log`).
 - File -> `Search & Runs` opens a data pane that searches captured session events and summaries, then lists compact run history rows with prompt, cwd, agent, timing, final state, PR, and latest summary.
-- File -> `YO!info` opens a grouped relationship tree over tabs, agents, paths, branches, pull requests, and Linear work.
-- File -> `YO!stats` opens API/SSE events and performance graphs for host CPU/memory, GPU or macOS GPU activity/memory, client traffic, agent status, and agent tokens. CPU shows system average plus YOLOmux servers; memory reports actual host/device bytes. Its first graph request shows only `Waiting for server stats...` until the server accepts a sample. Thereafter it loads retained history incrementally: widening a range preserves visible data while the missing interval loads, and one Retry action replaces the same loading slot if that request fails. The server compresses large JSON responses when the browser accepts gzip, and owner/follower servers expose the same durable global history while keeping each browser's client metrics private. Startup callers share one request per resource, so boot, SSE-ready, visibility, and Tabber rendering do not duplicate background-status, auto-approve, or activity reads. Client communication charts tolerate event-driven empty buckets and distinguish shared all-client bad-connection intervals from actual API/SSE, latency, and bandwidth samples, including after 24-hour history compaction; one stale client cannot shade a live peer, and zero labels align with the shared plot baseline. The detailed behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md).
+- File -> `YO!info` opens a grouped relationship tree over `TmuxSession`, `TmuxWindow`, `TmuxPane`, `RuntimeActor`, observed paths, Git worktrees, local/hosted repositories, branches, pull requests, and Linear work. One worktree and branch inventory is shared by all observed paths and actors that use it; search accepts combinations such as a tmux target plus a branch or PR. A tab with exactly one focused PR shows that PR; when several focused PRs apply it shows an explicit count instead of choosing one arbitrarily.
+- File -> `YO!stats` opens API/SSE events and performance graphs for host CPU/memory, GPU or macOS GPU activity/memory, client traffic, agent status, and agent tokens. Its `System` view shows the serving process, distributed background owner, local service lifecycles, queues and refresh work, index/cache state, event/chat transport, and top API/background timings; its `Logs` view shows bounded leveled server/service diagnostics and warns when macOS process discovery falls back from libproc to `lsof`. These views refresh only while selected and provide a manual Refresh action. Local services render as one transposed live table with services as columns, Queues last, fresh/stale value coloring, `prev:` values after exit, and Started/Last ran relative ages. CPU shows system average plus YOLOmux servers; memory reports actual host/device bytes. Its first graph request shows only `Waiting for server stats...` until the server accepts a sample. Thereafter it loads retained history incrementally: widening a range preserves visible data while the missing interval loads, and one Retry action replaces the same loading slot if that request fails. The server compresses large JSON responses when the browser accepts gzip, and owner/follower servers expose the same durable global history while keeping each browser's client metrics private. Startup callers share one request per resource, so boot, SSE-ready, visibility, and Tabber rendering do not duplicate background-status, auto-approve, or activity reads. Client communication charts tolerate event-driven empty buckets and distinguish shared all-client bad-connection intervals from actual API/SSE, latency, and bandwidth samples, including after 24-hour history compaction; one stale client cannot shade a live peer, and zero labels align with the shared plot baseline. When priced usage is available, the `Cost` toggle immediately after `Model tokens` opens the default-off compact `Cost summary`, pairing Input, Cache, Output, and Total estimated cost with token counts. Its explicit `More Info` button opens or activates the normal `YO!cost` tab with token charts, synced Range/Resolution, freshness/Refresh, sortable stretchable By Agent/By Model/calculation/source tables, known-vs-unpriced accounting, and transcript-source links; JSONL sources open in the file Preview as a rendered event table. Non-token units remain separate and the result is an API list-price estimate, not an invoice. `est. $…` means the displayed components are priced, retained usage is backfilled, and telemetry is complete; `est. ≥$…` is a lower bound when usage is unpriced or incomplete, or while retained usage is still backfilling. The detailed behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md).
+- Operators can rebuild retained YO!stats token/cost components from all discoverable Claude/Codex JSONL transcripts with `python3 tools/rebuild_stats_tokens.py --apply --stop-services`. The offline tool stops every server sharing the state directory, proves exclusive DB ownership, creates a timestamped backup, preserves generated-output and live metrics, and reports transcriptless output-only buckets; see [Offline token/cost history rebuild](docs/DEVELOPMENT.md#offline-tokencost-history-rebuild).
 - The pane header pop-out button opens supported file previews, YO!info, and YO!stats in a detached browser window.
 - File -> `YO!share...` creates short live magic URLs for the current YOLOmux layout. Defaults are short-lived, read-only, http links; write access requires https. The host can extend active shares and see connected users with duration, IP, and browser type. Replay details live in [`docs/specs/SHARE_MIRRORING.md`](docs/specs/SHARE_MIRRORING.md).
-- File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. At 900px and wider they live in an explicit narrow left Side Pane; a missing one recreates that Side Pane, and Side tabs never enter Generic Panes. Below 900px there is no Side Pane and File opens only the selected surface in the sole full-width Generic Pane. Widening restores Finder/Differ/Tabber to the left while leaving YO!* tabs generic. Filesystem permission failures are reported in Finder instead of terminating the request. Quick Search is `Mod+P`; it hides clean deleted file tabs, keeps dirty buffers reachable when their backing path is missing, and restores clean tabs when the file reappears.
+- File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. At 900px and wider they live in an explicit narrow left Side Pane; a missing one recreates that Side Pane, and Side tabs never enter Generic Panes. Below 900px there is no Side Pane and File opens only the selected surface in the sole full-width Generic Pane. Widening restores Finder/Differ/Tabber to the left while leaving YO!* tabs generic. Finder Sync remembers each session's root, expansion, selection, and every touched path; touched ancestors carry that session's `★`. Switching sessions paints the shared bounded cache immediately, then revalidates visible directories in the background. Filesystem permission failures are reported in Finder instead of terminating the request. Quick Search is `Mod+P`; it hides clean deleted file tabs, keeps dirty buffers reachable when their backing path is missing, and restores clean tabs when the file reappears.
 - Quick Open indexes are bounded accelerators. The default keeps at most 100,000 entries per root, starts one lazy local indexer on demand, and excludes common dependency/build directories. Paths displayed by Finder or Differ are batched at two seconds; hidden paths rely on the long safety refresh. The indexer incrementally replaces only changed subtrees and writes row deltas to SQLite. In Finder/File Explorer, right-click any directory and choose **Allow index** to add its root or **Disallow index** to remove it; Preferences -> Finder/File Explorer shows the same indexed-root list. That section also exposes **Quick Open exclusions** for descendants inside those roots. Add one rule per line: a plain absolute or home-relative subtree, `glob:<root-relative glob>` such as `glob:**/.uploads/**`, or `regex:<regular expression>` matched against a root-relative POSIX path such as `regex:(^|/)target(?:/|$)`. Advanced operators can also tune `file_explorer.index_max_files`, `index_refresh_seconds`, `index_persist`, `index_persist_max_files`, `index_persist_max_mb`, and `index_exclude_paths` in `~/.config/yolomux/settings.yaml`.
 - Tabber lists open tabs and tmux sub-windows by recent activity. `Mod+B` hides Finder/Differ/Tabber or restores the default left Side Pane on wide layouts. The top-bar language picker changes the live UI language.
 - YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) for setup and examples.
@@ -285,35 +315,36 @@ The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permis
 All tmux sessions, default behavior:
 
 ```bash
-python3 yolomux.py --self-signed --dang
+python3 yolomux.py --dang
 ```
 
 Custom port (default is `9998`, host defaults to `0.0.0.0`):
 
 ```bash
-python3 yolomux.py --port 8080 --self-signed --dang
+python3 yolomux.py --port 8080 --dang
 ```
 
 Background server:
 
 ```bash
-setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 python3 yolomux.py --self-signed --dang > /tmp/yolomux.log 2>&1 < /dev/null &
+setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 python3 yolomux.py --dang > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
 Specific tmux sessions only, optional filter:
 
 ```bash
-python3 yolomux.py --sessions project1,project2 --self-signed --dang
+python3 yolomux.py --sessions project1,project2 --dang
 ```
 
 ## HTTPS / TLS
 
 ```bash
-python3 yolomux.py --self-signed          # auto-generated cert, stored in ~/.local/state/yolomux/tls/
+python3 yolomux.py                         # default: auto-generated cert under ~/.local/state/yolomux/tls/
 python3 yolomux.py --cert fullchain.pem --key privkey.pem   # bring your own
+python3 yolomux.py --http                  # explicit plain-HTTP opt-out
 ```
 
-`--self-signed` requires `openssl` on `PATH`. Browsers warn because the certificate is self-signed; proceed past the warning.
+HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOLOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; proceed past the warning only when it matches the server you intended to reach. `--http` cannot be combined with `--cert`/`--key`.
 
 ## Authentication & roles
 
@@ -343,7 +374,7 @@ codex --dangerously-bypass-hook-trust             # hook trust bypass
 **`--dang` / `--dangerously-yolo` (server flag).** Makes `+ Claude` / `+ Codex` buttons launch with the dangerous bypass flags:
 
 ```bash
-python3 yolomux.py --self-signed --dang
+python3 yolomux.py --dang
 ```
 
 With `--dang`, `+ Claude` launches `claude --dangerously-skip-permissions`, so permission prompts are bypassed for new Claude sessions (hooks and OAuth login are left intact — see the note above on why `--bare` is not used). `+ Codex` launches `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`, so both command approval/sandbox checks and hook trust checks are bypassed for new Codex sessions.
@@ -382,7 +413,7 @@ sudo ufw allow from <client-ip> to any port 9998 proto tcp
 To keep YOLOmux local-only instead, bind loopback and tunnel from your client:
 
 ```bash
-python3 yolomux.py --host 127.0.0.1 --port 9998 --self-signed --dang
+python3 yolomux.py --host 127.0.0.1 --port 9998 --dang
 autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
 ```
 

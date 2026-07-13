@@ -262,6 +262,9 @@ const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.
 const fileExplorerTreeDateModeStorageKey = 'yolomux.fileExplorer.treeDateMode.v1';
 const fileExplorerTreeDateModes = ['none', 'date', 'relative'];
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
+// v2 keeps one common schema while each fixed file surface owns its own choices. The v1
+// Finder keys remain read-only migration inputs so existing browser preferences survive.
+const fileExplorerViewSettingsStorageKey = 'yolomux.fileExplorer.viewSettings.v2';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
@@ -436,10 +439,9 @@ const PREVIEW_RENDERERS = Object.freeze([
   }},
   {id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, mimeByExtension: {'.pdf': 'application/pdf'}},
   {id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid'},
-  {id: 'structured', kind: 'structured', extensions: ['.json', '.jsonl', '.ndjson', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  {id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json'},
+  {id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
     '.json': 'json',
-    '.jsonl': 'json',
-    '.ndjson': 'json',
     '.geojson': 'json',
     '.ipynb': 'json',
     '.yaml': 'yaml',
@@ -701,9 +703,7 @@ let fileExplorerRefreshDeferred = false;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
 let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead" item); arrows move it, Shift+arrow extends anchor->lead
-let sessionFilesSortMode = 'newest';
-let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
-let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
+let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'
@@ -974,6 +974,8 @@ const searchHistoryItemId = '__search_history__';
 function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
+const yocostItemId = '__yocost__';
+function yocostTabLabel() { return 'YO!cost'; }
 const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
   {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
   {itemId: searchHistoryItemId},
@@ -1046,8 +1048,7 @@ function browserUsesTabletViewport() {
 function tabletUsesDesktopLayout(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
-  const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
-  return width >= tabletDesktopLayoutMinWidthPx && width > height;
+  return width >= tabletDesktopLayoutMinWidthPx;
 }
 
 function fileExplorerUsesNormalTabMovement() {
@@ -1069,9 +1070,10 @@ function mobileSinglePaneMode(viewport = nativeViewport()) {
 function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
   if (!browserUsesCoarsePointer()) return false;
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
+  const tablet = browserUsesTabletViewport();
   return phoneLikeMobileViewport(viewport)
-    || (browserUsesTabletViewport() && !tabletUsesDesktopLayout(viewport))
-    || width <= narrowTouchSingleColumnMaxWidthPx;
+    || (tablet && width < minSplitPaneWidthPx() * 2)
+    || (!tablet && width <= narrowTouchSingleColumnMaxWidthPx);
 }
 
 function narrowSingleColumnMode(viewport = nativeViewport()) {
@@ -1292,7 +1294,7 @@ const TAB_TYPES = [
       relocalizeYoagentPanelChrome(panel);
     },
     className: () => 'yoagent',
-    icon: 'yoagent',
+    icon: 'robot',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1309,7 +1311,7 @@ const TAB_TYPES = [
     relocalize: (_item, panel) => relocalizeChatPanel(panel),
     focusSearch: (_item, panel) => openChatSearch(panel),
     className: () => 'chat',
-    icon: 'chat',
+    icon: 'chat-bubble',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
@@ -1425,9 +1427,27 @@ const TAB_TYPES = [
       relocalizeDebugPanelChrome(panel);
     },
     className: () => 'debug-item',
-    icon: 'tab-meta',
+    icon: 'chart',
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
+  virtualPanelTabType({
+    key: 'yocost',
+    id: yocostItemId,
+    aliases: ['yocost', 'yo!cost', 'yo-cost', yocostItemId],
+    label: () => yocostTabLabel(),
+    sortRank: 0.71,
+    detail: () => debugGraphCostText('debug.cost.details', 'Cost summary details'),
+    createPanel: () => createYoCostPanel(),
+    renderAttached: () => renderYoCostPanels(),
+    relocalize: (_item, panel) => {
+      renderYoCostPanels({force: true});
+      relocalizeYoCostPanelChrome(panel);
+    },
+    className: () => 'yocost-item',
+    icon: 'chart',
+    panePlacement: panePlacementSideAllowed,
+    minWidth: () => minSplitPaneWidthPx(),
   }),
   filePanelTabType({
     key: 'image-viewer',
@@ -1479,6 +1499,7 @@ function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
+function isYoCostItem(item) { return tabTypeForItem(item)?.key === 'yocost'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -1589,7 +1610,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId];
+  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId];
   if (!shareViewMode) items.splice(2, 0, chatItemId);
   return [...items, ...dynamicVirtualLayoutItems];
 }
@@ -3531,28 +3552,166 @@ function setFileConflictDialogOpen(path, open) {
   if (state) state.conflictDialogOpen = open === true;
 }
 
-// Normalized view of a session's transcript metadata — prevents each call site from re-implementing
-// the same `?.[session]?.project?.git?.root` chain differently.
-function sessionTranscriptInfo(session) {
-  const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const git = info.project?.git || {};
-  return {
-    gitRoot: git.root || '',
-    gitCwd: git.cwd || '',
-    gitBranch: git.branch || '',
-    selectedPath: info.selected_pane?.current_path || '',
-    info,
-  };
-}
-
 function repoRootKey(value) {
   return String(value || '').replace(/\/+$/, '');
 }
 
+// `work_graph` owns repository identity. These selectors are deliberately shared by the tab,
+// popover, layout, Finder/Differ, and command-palette paths so every surface chooses the same
+// canonical branch and PR edges.
+function sessionWorkGraph(info = {}) {
+  const graph = info?.work_graph;
+  const required = ['git_worktrees', 'local_repositories', 'local_branches', 'hosted_repositories', 'pull_requests', 'linear_issues', 'path_observations', 'runtime_actors', 'tmux_sessions', 'tmux_windows', 'tmux_panes', 'worktree_branch_activity'];
+  return graph?.version === 1 && required.every(key => graph[key] && typeof graph[key] === 'object') ? graph : null;
+}
+
+function graphEntityValues(graph, key, ids = []) {
+  return (ids || []).map(id => graph?.[key]?.[id]).filter(Boolean);
+}
+
+function graphTmuxPaneIdsForTarget(graph, tmuxTarget = '') {
+  const target = String(tmuxTarget || '').trim();
+  const panes = Object.values(graph?.tmux_panes || {});
+  if (target) {
+    const match = panes.find(pane => String(pane?.target || '') === target || String(pane?.id || '') === target);
+    if (match?.id) return [match.id];
+  }
+  const active = panes.filter(pane => pane?.active === true || pane?.window_active === true).map(pane => pane.id).filter(Boolean);
+  return active.length ? active : panes.map(pane => pane?.id).filter(Boolean);
+}
+
+function graphObservationIdsForTmuxPaneIds(graph, tmuxPaneIds = []) {
+  const ids = new Set();
+  for (const pane of graphEntityValues(graph, 'tmux_panes', tmuxPaneIds)) {
+    for (const id of pane.path_observation_ids || []) ids.add(id);
+    for (const actor of graphEntityValues(graph, 'runtime_actors', pane.runtime_actor_ids)) {
+      for (const id of actor.path_observation_ids || []) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+function focusedRepositoryIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
+    const worktree = graph.git_worktrees?.[observation.git_worktree_id];
+    if (worktree?.local_repository_id) ids.add(worktree.local_repository_id);
+  }
+  return [...ids];
+}
+
+function focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
+    if (observation.git_worktree_id) ids.add(observation.git_worktree_id);
+  }
+  return [...ids];
+}
+
+function branchIdsForGitWorktree(info, gitWorktreeId) {
+  const graph = sessionWorkGraph(info);
+  const worktree = graph?.git_worktrees?.[gitWorktreeId];
+  const repository = graph?.local_repositories?.[worktree?.local_repository_id];
+  return repository?.local_branch_ids ? [...repository.local_branch_ids] : [];
+}
+
+function focusedBranchIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const worktreeId of focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget)) {
+    const branchId = graph.git_worktrees?.[worktreeId]?.current_branch_id;
+    if (branchId) ids.add(branchId);
+  }
+  return [...ids];
+}
+
+function pullRequestIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const branch of graphEntityValues(graph, 'local_branches', focusedBranchIdsForTmuxTarget(info, tmuxTarget))) {
+    for (const prId of branch.pull_request_ids || []) ids.add(prId);
+  }
+  return [...ids];
+}
+
+function graphBranchSummary(graph, branchId, currentBranchId = '') {
+  const branch = graph?.local_branches?.[branchId];
+  if (!branch) return null;
+  const pullRequests = graphEntityValues(graph, 'pull_requests', branch.pull_request_ids);
+  const linear = graphEntityValues(graph, 'linear_issues', branch.linear_issue_ids);
+  return {...branch, current: String(branch.id) === String(currentBranchId), pull_requests: pullRequests, pull_request: pullRequests[0] || null, linear};
+}
+
+function graphRepoSummary(graph, worktree) {
+  const repository = graph?.local_repositories?.[worktree?.local_repository_id] || {};
+  const hostedRepository = graph?.hosted_repositories?.[worktree?.hosted_repository_id || repository?.hosted_repository_id] || null;
+  const branches = (repository.local_branch_ids || []).map(branchId => graphBranchSummary(graph, branchId, worktree?.current_branch_id)).filter(Boolean);
+  const currentBranch = branches.find(branch => branch.current) || null;
+  const root = repoRootKey(worktree?.root || '');
+  return {
+    id: String(worktree?.id || ''),
+    worktree_id: String(worktree?.id || ''),
+    local_repository_id: String(repository?.id || ''),
+    hosted_repository_id: String(hostedRepository?.id || ''),
+    root,
+    cwd: root,
+    branch: String(currentBranch?.name || ''),
+    // Branch identity belongs to the LocalGitRepository, while checkout state belongs to this
+    // GitWorktree. Repositories can share branches across linked worktrees with different dirty
+    // and ahead/behind state, so never project those worktree fields from the branch record.
+    ahead: worktree?.git?.ahead,
+    behind: worktree?.git?.behind,
+    dirty_count: worktree?.git?.dirty_count,
+    head: worktree?.git?.head || '',
+    upstream: worktree?.git?.upstream || '',
+    activity_ts: worktree?.activity_ts ?? currentBranch?.updated_ts,
+    activity_source: worktree?.activity_source || '',
+    github_repo: hostedRepository,
+    other_branches: {branches, hidden_count: 0},
+    worktree: {path: root, kind: worktree?.kind || '', parent_root: worktree?.parent_root || ''},
+  };
+}
+
+function sessionWorkSummary(session, info = {}, options = {}) {
+  const graph = sessionWorkGraph(info);
+  const target = String(options.tmuxTarget || options.target || info?.selected_pane?.target || '');
+  if (graph) {
+    const repositories = Object.values(graph.git_worktrees || {}).map(worktree => graphRepoSummary(graph, worktree)).filter(repo => repo.root);
+    const focusedWorktreeIds = focusedGitWorktreeIdsForTmuxTarget(info, target);
+    const focusedRepositoryIds = focusedRepositoryIdsForTmuxTarget(info, target);
+    const focusedBranchIds = focusedBranchIdsForTmuxTarget(info, target);
+    const pullRequestIds = pullRequestIdsForTmuxTarget(info, target);
+    const focusedRepo = repositories.find(repo => focusedRepositoryIds.includes(repo.local_repository_id)) || repositories.find(repo => focusedWorktreeIds.includes(repo.worktree_id)) || repositories[0] || null;
+    const observations = graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, target)));
+    const selectedPath = observations.sort((left, right) => Number(right?.last_observed_at || 0) - Number(left?.last_observed_at || 0)).find(observation => observation?.path)?.path || focusedRepo?.cwd || '';
+    const pullRequests = graphEntityValues(graph, 'pull_requests', pullRequestIds)
+      .sort((left, right) => Number(right?.updated_at || right?.updated_ts || 0) - Number(left?.updated_at || left?.updated_ts || 0) || Number(left?.number || 0) - Number(right?.number || 0));
+    const linearIssues = graphEntityValues(graph, 'linear_issues', [...new Set(graphEntityValues(graph, 'local_branches', focusedBranchIds).flatMap(branch => branch.linear_issue_ids || []))]);
+    const focusedPullRequest = pullRequests.length === 1 ? pullRequests[0] : null;
+    return {graph, graphBacked: true, repositories, focusedWorktreeIds, focusedRepositoryIds, focusedBranchIds, pullRequestIds, pullRequests, focusedPullRequest, linearIssues, selectedRepo: focusedRepo, git: focusedRepo ? gitFromRepoSummary(focusedRepo) : null, selectedPath};
+  }
+  return {graph: null, graphBacked: false, repositories: [], focusedWorktreeIds: [], focusedRepositoryIds: [], focusedBranchIds: [], pullRequestIds: [], pullRequests: [], focusedPullRequest: null, linearIssues: [], selectedRepo: null, git: null, selectedPath: info?.selected_pane?.current_path || ''};
+}
+
+// Normalized view of a session's transcript metadata. A schema-valid graph is authoritative even
+// when empty; metadata without one has no Git work rather than a hidden compatibility path.
+function sessionTranscriptInfo(session) {
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git || {};
+  return {gitRoot: git.root || '', gitCwd: git.cwd || '', gitBranch: git.branch || '', selectedPath: summary.selectedPath || '', info};
+}
+
 function sessionRepoSummaries(info) {
-  return (Array.isArray(info?.project?.repos) ? info.project.repos : [])
-    .filter(repo => repo && repo.root)
-    .map(repo => ({...repo, root: repoRootKey(repo.root), cwd: repo.cwd || repo.root}));
+  const summary = sessionWorkSummary('', info);
+  if (summary.graphBacked) return summary.repositories;
+  return summary.repositories;
 }
 
 function selectedSessionRepoIndex(session, info) {
@@ -3578,6 +3737,8 @@ function gitFromRepoSummary(repo) {
     ahead: repo.ahead,
     behind: repo.behind,
     dirty_count: repo.dirty_count,
+    head: repo.head || '',
+    upstream: repo.upstream || '',
     activity_ts: repo.activity_ts,
     activity_source: repo.activity_source || '',
     github_repo: repo.github_repo || null,
@@ -3587,8 +3748,8 @@ function gitFromRepoSummary(repo) {
 }
 
 function displayedSessionGit(session, info) {
-  const project = info?.project || {};
-  const git = project.git || null;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const repo = selectedSessionRepo(session, info);
   if (!repo) return git;
   if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
@@ -3607,12 +3768,30 @@ function cycleSessionRepoDisplay(session, info, direction) {
 
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
+function resetLayoutStatusSurface() {
+  statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
+  statusEl.removeAttribute('data-layout-status-kind');
+  delete statusEl.dataset.layoutStatusKind;
+}
+
 function statusErr(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="err">${html}</span>`;
 }
 
 function statusOk(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="ok">${html}</span>`;
+}
+
+function showLayoutStatus(message, kind = '') {
+  const tone = kind === 'danger' || kind === 'advisory' ? kind : '';
+  statusEl.textContent = String(message || '');
+  resetLayoutStatusSurface();
+  if (tone && statusEl.textContent.trim()) {
+    statusEl.classList.add('layout-status-visible', `layout-status-${tone}`);
+    statusEl.dataset.layoutStatusKind = tone;
+  }
 }
 
 function localizedHtml(key, params) {
@@ -3777,6 +3956,82 @@ function readStoredFileExplorerTreeSortMode() {
 
 function writeStoredFileExplorerTreeSortMode(value) {
   storageSet(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
+}
+
+function normalizeFileExplorerView(view) {
+  return ['finder', 'tabber', 'differ'].includes(view) ? view : 'finder';
+}
+
+function normalizeFileExplorerViewSettings(value, fallback = {}) {
+  const settings = value && typeof value === 'object' ? value : {};
+  return {
+    treeDateMode: normalizeFileExplorerTreeDateMode(settings.treeDateMode ?? fallback.treeDateMode),
+    treeSortMode: normalizeSessionFilesSortMode(settings.treeSortMode ?? fallback.treeSortMode),
+  };
+}
+
+function readStoredFileExplorerViewSettings() {
+  const legacyFinder = {
+    treeDateMode: readStoredFileExplorerTreeDateMode(),
+    treeSortMode: readStoredFileExplorerTreeSortMode(),
+  };
+  const stored = readStoredJson(fileExplorerViewSettingsStorageKey, null);
+  const tabberFallback = legacyFinder;
+  const differFallback = {treeDateMode: legacyFinder.treeDateMode, treeSortMode: 'newest'};
+  return {
+    finder: normalizeFileExplorerViewSettings(stored?.finder, legacyFinder),
+    tabber: normalizeFileExplorerViewSettings(stored?.tabber, tabberFallback),
+    differ: normalizeFileExplorerViewSettings(stored?.differ, differFallback),
+  };
+}
+
+function fileExplorerViewSettingsFor(view = 'finder') {
+  const key = normalizeFileExplorerView(view);
+  const fallback = key === 'differ' ? {treeDateMode: 'none', treeSortMode: 'newest'} : {treeDateMode: 'none', treeSortMode: 'az'};
+  const settings = normalizeFileExplorerViewSettings(fileExplorerViewSettings?.[key], fallback);
+  if (!fileExplorerViewSettings || fileExplorerViewSettings[key] !== settings) {
+    fileExplorerViewSettings = {...(fileExplorerViewSettings || {}), [key]: settings};
+  }
+  return settings;
+}
+
+function fileExplorerTreeDateModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeDateMode;
+}
+
+function fileExplorerTreeSortModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeSortMode;
+}
+
+function writeStoredFileExplorerViewSettings() {
+  storageSet(fileExplorerViewSettingsStorageKey, JSON.stringify(fileExplorerViewSettings));
+}
+
+function setFileExplorerViewSetting(view, key, value, options = {}) {
+  const surface = normalizeFileExplorerView(view);
+  const current = fileExplorerViewSettingsFor(surface);
+  const next = normalizeFileExplorerViewSettings({...current, [key]: value}, current);
+  if (next.treeDateMode === current.treeDateMode && next.treeSortMode === current.treeSortMode) return false;
+  fileExplorerViewSettings = {...fileExplorerViewSettings, [surface]: next};
+  writeStoredFileExplorerViewSettings();
+  if (options.refresh !== false) refreshFileExplorerViewSettingsSurface(surface);
+  if (options.publish !== false) scheduleShareUiStatePublish();
+  return true;
+}
+
+// URL state and YO!share use the same payload shape. Keep legacy-field migration here so a
+// restored URL and a replayed frame can never teach the three fixed surfaces different rules.
+function applyFileExplorerViewSettingsSeed(seed = {}) {
+  if (!seed || typeof seed !== 'object') return;
+  if (seed.viewSettings && typeof seed.viewSettings === 'object') {
+    for (const view of ['finder', 'tabber', 'differ']) {
+      if (seed.viewSettings[view]) fileExplorerViewSettings = {...fileExplorerViewSettings, [view]: normalizeFileExplorerViewSettings(seed.viewSettings[view], fileExplorerViewSettingsFor(view))};
+    }
+    return;
+  }
+  if ('treeDateMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeDateMode: normalizeFileExplorerTreeDateMode(seed.treeDateMode)}};
+  if ('treeSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeSortMode: normalizeSessionFilesSortMode(seed.treeSortMode)}};
+  if ('sessionFilesSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, differ: {...fileExplorerViewSettingsFor('differ'), treeSortMode: normalizeSessionFilesSortMode(seed.sessionFilesSortMode)}};
 }
 
 function normalizeStoredFileExplorerIndexedDir(path) {
@@ -4033,17 +4288,17 @@ function syncFileExplorerHiddenButton(button) {
   });
 }
 
-function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return t(`finder.dateMode.${normalized}`);
 }
 
-function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return normalized === 'none' ? t('finder.dateMode.date') : fileExplorerTreeDateModeLabel(normalized);
 }
 
-function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateModeForView('finder')) {
   return t('finder.dateMode.title', {
     mode: fileExplorerTreeDateModeLabel(mode),
     none: fileExplorerTreeDateModeLabel('none'),
@@ -4054,7 +4309,8 @@ function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
 
 function syncFileExplorerTreeDateButton(button) {
   if (!button) return;
-  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const view = normalizeFileExplorerView(button.dataset.fileExplorerView || fileExplorerViewForItem(button.closest?.('.file-explorer-panel')?.dataset?.panelItem));
+  const mode = fileExplorerTreeDateModeForView(view);
   const active = mode !== 'none';
   button.classList.toggle(CLS.active, active);
   button.dataset.dateMode = mode;
@@ -4071,31 +4327,28 @@ function syncFileExplorerTreeDateButtons(scope = document) {
   }
 }
 
-function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateMode) {
+function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   const index = fileExplorerTreeDateModes.indexOf(normalized);
   return fileExplorerTreeDateModes[(index + 1) % fileExplorerTreeDateModes.length];
 }
 
-function refreshFileExplorerTreeDateModeSurfaces() {
-  syncFileExplorerTreeDateButtons();
-  if (typeof refreshFileExplorerTrees === 'function') {
-    void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+function refreshFileExplorerViewSettingsSurface(view) {
+  const surface = normalizeFileExplorerView(view);
+  if (surface === 'finder') {
+    if (typeof refreshFileExplorerTrees === 'function') void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  } else if (typeof renderFileExplorerChangesPanels === 'function') {
+    renderFileExplorerChangesPanels({force: true, view: surface});
   }
-  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+  syncFileExplorerTreeDateButtons();
 }
 
-function setFileExplorerTreeDateMode(mode) {
-  const next = normalizeFileExplorerTreeDateMode(mode);
-  if (next === fileExplorerTreeDateMode) return;
-  fileExplorerTreeDateMode = next;
-  writeStoredFileExplorerTreeDateMode(fileExplorerTreeDateMode);
-  refreshFileExplorerTreeDateModeSurfaces();
-  scheduleShareUiStatePublish();
+function setFileExplorerTreeDateMode(mode, view = 'finder') {
+  setFileExplorerViewSetting(view, 'treeDateMode', mode);
 }
 
-function cycleFileExplorerTreeDateMode() {
-  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode());
+function cycleFileExplorerTreeDateMode(view = 'finder') {
+  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode(fileExplorerTreeDateModeForView(view)), view);
 }
 
 function renderTabMetaToggle() {
@@ -4475,6 +4728,26 @@ function fuzzySubsequenceMatch(query, text) {
   const needle = String(query || '').toLowerCase().replace(/\s+/g, '');
   const haystack = String(text || '').toLowerCase();
   if (!needle) return {score: 0, indexes: []};
+  // A contiguous occurrence is the strongest fuzzy match. Select its actual indexes
+  // before the greedy subsequence walk so result highlighting points at the same
+  // evidence that receives the contiguous-substring rank bonus. Without this, a
+  // query such as "w5k" could rank a path for `/w5k/` but highlight the earlier
+  // `t` in `/notes/` plus `5t` in the matching directory.
+  const contiguousStart = haystack.indexOf(needle);
+  if (contiguousStart >= 0) {
+    const indexes = Array.from({length: needle.length}, (_, offset) => contiguousStart + offset);
+    let score = needle.length * searchRankWeights.perChar;
+    for (const index of indexes) {
+      const previousChar = haystack[index - 1] || '';
+      if (index === contiguousStart && (index === 0 || /[\s/_:.-]/.test(previousChar))) {
+        score += searchRankWeights.wordStart;
+      } else if (index > contiguousStart) {
+        score += searchRankWeights.contiguous;
+      }
+    }
+    score += searchRankWeights.contiguousSubstring;
+    return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
+  }
   let position = 0;
   let previousIndex = -1;
   let score = 0;
@@ -4493,7 +4766,6 @@ function fuzzySubsequenceMatch(query, text) {
     position = index + 1;
     indexes.push(index);
   }
-  if (needle.length >= 3 && haystack.includes(needle)) score += searchRankWeights.contiguousSubstring;
   return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
 }
 
@@ -7040,8 +7312,18 @@ function nextAvailableLayoutSlot(slots, preferred = null) {
 
 function canonicalizeSidePaneLayout(slots, options = {}) {
   if (!slots?.[layoutTreeKey]) return slots;
-  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return narrowSingleColumnLayoutSlots(slots, {focusSession: options.focusSession});
+  }
+  if (options.allowSidePanes === false || sidePaneConstrainedMode()) {
+    const generic = cloneLayoutSlots(slots);
+    for (const slot of sidePaneSlots(generic)) {
+      const tabs = paneTabs(slot, generic);
+      generic[slot] = tabs.length
+        ? paneStateWithTabs(tabs, activeItemForSide(slot, generic), paneRoleDefinition(paneRoleGeneric))
+        : emptyPlaceholderPaneState(paneRoleDefinition(paneRoleGeneric));
+    }
+    return compactLayoutSlots(generic, {preservePlaceholderSlots: options.preservePlaceholderSlots === true});
   }
 
   const original = cloneLayoutSlots(slots);
@@ -7332,7 +7614,9 @@ function layoutFromSessionList(values) {
     items.push(item);
     seen.add(item);
   }
-  return layoutWithDefaultLeftSidePane(layoutSlotsForItems(items, configuredDefaultLayoutMode()));
+  const content = layoutSlotsForItems(items, configuredDefaultLayoutMode());
+  if (!sidePaneConstrainedMode()) return layoutWithDefaultLeftSidePane(content);
+  return layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0]);
 }
 
 function layoutFromParam(raw, tabsRaw = '', options = {}) {
@@ -7602,7 +7886,7 @@ function legacyFileSurfaceSelection(params) {
 function migrateLegacyFileSurfaceLayout(slots, params) {
   const selected = legacyFileSurfaceSelection(params);
   if (!selected) return slots;
-  if (sidePaneConstrainedMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
+  if (narrowSingleColumnMode()) return narrowSingleColumnLayoutSlots(slots, {focusSession: selected});
   const legacySlot = slotForItem(finderItemId, slots) || slotForItem(differItemId, slots) || slotForItem(tabberItemId, slots);
   if (!legacySlot) return layoutWithSidePaneItems(slots, fileSurfaceItems, {
     side: paneSideLeft,
@@ -7658,9 +7942,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
     setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
-  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
-  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
-  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
   if ('diffRefsByRepo' in finder) {
@@ -7876,22 +8158,26 @@ function narrowSingleColumnLayoutSlots(slots = null, options = {}) {
 }
 
 function normalizeLayoutSlotsForViewport(value, options = {}) {
-  const constrained = sidePaneConstrainedMode();
-  let source = constrained
+  const singleColumn = narrowSingleColumnMode();
+  const sideConstrained = sidePaneConstrainedMode();
+  // Side-pane capacity controls the special narrow Finder/Differ/Tabber role, not whether the
+  // viewport can hold ordinary Generic Pane splits. A portrait tablet can fit two generic panes
+  // even when it cannot reserve the Side Pane's capped one-third column.
+  let source = singleColumn
     ? narrowSingleColumnLayoutSlots(value, {focusSession: options.focusSession})
     : value;
-  if (!constrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
+  if (!sideConstrained && sidePaneLayoutWasConstrained && !layoutHasSidePane(paneSideLeft, source)) {
     const hasFileSurface = layoutFileSurfaceItems().some(item => itemInLayout(item, source));
     if (hasFileSurface) {
       source = canonicalizeSidePaneLayout(source, {...options, allowSidePanes: true});
       source = layoutWithDefaultLeftSidePane(source);
     }
   }
-  sidePaneLayoutWasConstrained = constrained;
+  sidePaneLayoutWasConstrained = sideConstrained;
   return normalizeLayoutSlots(source, {
     ...options,
-    allowSidePanes: !constrained,
-    preserveMissingSidePane: constrained || options.preserveMissingSidePane === true,
+    allowSidePanes: !sideConstrained,
+    preserveMissingSidePane: sideConstrained || options.preserveMissingSidePane === true,
   });
 }
 
@@ -7901,7 +8187,7 @@ function rememberInitialConstrainedLayout(value) {
 }
 
 function availableLayoutModes() {
-  return sidePaneConstrainedMode() ? ['single'] : layoutModeValues;
+  return narrowSingleColumnMode() ? ['single'] : layoutModeValues;
 }
 
 function initialLayoutSlots() {
@@ -7925,7 +8211,9 @@ function initialLayoutSlots() {
   }
   if (selected.length) {
     const selectedLayout = layoutFromSessionList(selected);
-    return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout)) : selectedLayout;
+    return narrowSingleColumnMode()
+      ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(selectedLayout))
+      : normalizeLayoutSlotsForViewport(selectedLayout);
   }
   return defaultLayoutSlots();
 }
@@ -7933,8 +8221,13 @@ function initialLayoutSlots() {
 function defaultLayoutSlots() {
   if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  const standard = layoutWithDefaultLeftSidePane(layoutSlotsForItems(sorted, configuredDefaultLayoutMode()));
-  return sidePaneConstrainedMode() ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard)) : standard;
+  const content = layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
+  const standard = sidePaneConstrainedMode()
+    ? layoutWithItems(content, [finderItemId], layoutLeafSlots(content[layoutTreeKey])[0])
+    : layoutWithDefaultLeftSidePane(content);
+  return narrowSingleColumnMode()
+    ? rememberInitialConstrainedLayout(narrowSingleColumnLayoutSlots(standard))
+    : normalizeLayoutSlotsForViewport(standard);
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -8070,6 +8363,13 @@ function setTabPinned(item, pinned) {
     next[slot] = paneStateWithTabsForSlot(slot, paneTabs(slot, next), activeItemForSide(slot, next), next);
   }
   applyLayoutSlots(next, {focusSession: resolved, prune: false, forceFull: dockviewLayoutActive()});
+  const slot = slotForItem(resolved, layoutSlots);
+  const pinnedInSlot = slot ? paneTabs(slot, layoutSlots).filter(tabIsPinned) : [];
+  if (pinned && pinnedInSlot.length >= maxTabsPerPane() && typeof showLayoutStatus === 'function') {
+    showLayoutStatus(pinnedPaneAtCapStatus(pinnedInSlot, maxTabsPerPane()), 'advisory');
+    return true;
+  }
+  if (typeof resetLayoutStatusSurface === 'function') resetLayoutStatusSurface();
   statusEl.textContent = pinned ? t('tab.pinnedStatus', {name: itemLabel(resolved)}) : t('tab.unpinnedStatus', {name: itemLabel(resolved)});
   return true;
 }
@@ -8741,7 +9041,7 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
     .map(pane => `${pane.command || ''} ${pane.title || ''}`)
     .join(' ')
     .toLowerCase();
-  const pr = info?.project?.pull_request;
+  const pr = displayPullRequest(info);
   const prStatus = pullRequestStatusLabel(pr).toLowerCase();
   const checksState = pullRequestCiState(pr);
 
@@ -9455,14 +9755,33 @@ function topbarOwnerStatusCombinedHtml(summaries = []) {
 }
 
 function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
+  const roleExplainers = [
+    {abbr: 'IDX', role: t('backgroundOwner.index'), description: t('backgroundOwner.desc.index'), summary: indexSummary},
+    {abbr: 'STATS', role: t('tab.debug.short'), description: t('backgroundOwner.desc.stats'), summary: statsSummary},
+    {abbr: 'SESS', role: t('backgroundOwner.sessionFiles'), description: t('backgroundOwner.desc.sessionFiles'), summary: sessionSummary},
+  ];
+  const roleDefinitionLines = roleExplainers.map(item => t('backgroundOwner.summaryRole', {
+    abbr: item.abbr,
+    role: item.role,
+    description: item.description,
+  }));
+  const roleStateLines = roleExplainers.map(item => {
+    const state = item.summary?.mode;
+    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
+    return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
+  });
   const lines = [
     t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
+    ...roleDefinitionLines,
+    t('backgroundOwner.desc.leaderFollower'),
     indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
     statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
     sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
+    ...roleStateLines,
     indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
     statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
     sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
+    t('backgroundOwner.desc.takeOver'),
     indexSummary.error || statsSummary.error || sessionSummary.error || '',
   ];
   return lines.filter(Boolean).join('\n');
@@ -10001,7 +10320,7 @@ function keyboardLegendCatalog() {
     ]},
     {section: t('legend.section.icons'), items: [
       {sampleHtml: appMenuUiIcon('branch-info'), label: infoTabLabel(), detail: t('legend.icon.info.detail')},
-      {sampleHtml: appMenuUiIcon('yoagent'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
+      {sampleHtml: appMenuUiIcon('robot'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
       {sampleHtml: appMenuUiIcon('gear'), label: t('legend.icon.gear.label'), detail: t('legend.icon.gear.detail')},
       {sampleHtml: appMenuUiIcon('tab-meta'), label: t('legend.icon.tabMetadata.label'), detail: t('legend.icon.tabMetadata.detail')},
       {sampleHtml: appMenuUiIcon('share'), label: t('legend.icon.share.label'), detail: t('legend.icon.share.detail')},
@@ -12446,8 +12765,9 @@ function applyLayoutSlots(nextSlots, options = {}) {
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
-    statusEl.textContent = options.message;
+    showLayoutStatus(options.message, options.messageKind || '');
   } else {
+    resetLayoutStatusSurface();
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
@@ -12587,6 +12907,17 @@ function menuGroups(...groups) {
     items.push(...commands);
   }
   return items;
+}
+
+function compareLocalizedMenuLabels(left, right) {
+  return String(left || '').localeCompare(String(right || ''), undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function sortMenuCommandsByLabel(commands) {
+  return [...commands].sort((left, right) => compareLocalizedMenuLabels(left?.label, right?.label));
 }
 
 function layoutMenuCommand(mode) {
@@ -12743,7 +13074,13 @@ function menuTabDetail(item) {
 
 function commandPaletteTabDetail(item) {
   const detail = menuTabDetail(item);
-  const pr = displayPullRequest(transcriptMetadataState.payload.sessions?.[item]);
+  const info = transcriptMetadataState.payload.sessions?.[item];
+  const summary = sessionWorkSummary(item, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) {
+    const aggregate = pullRequestAggregateLabel(summary.pullRequests);
+    return detail.includes(aggregate) ? detail : [aggregate, detail].filter(Boolean).join(' · ');
+  }
+  const pr = displayPullRequest(info);
   if (!pr?.number) return detail;
   const bareNumber = `#${pr.number}`;
   const visibleNumber = `PR ${bareNumber}`;
@@ -12766,7 +13103,7 @@ function menuTabRowHtml(item, options = {}) {
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
   return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestSummaryBadgesHtml(item, info)}${detailHtml}</span></span>`;
 }
 
 function menuTabCommand(item, options = {}) {
@@ -13147,7 +13484,11 @@ function pullRequestSearchFields(pr) {
     pr.author_login,
     pr.number ? 'PR' : '',
     ...prNumberSearchForms(pr.number),
-    ...linearSearchFields(pr.linear_ids),
+    // Normalized graph PRs own canonical `linear_issue_ids`; older view models exposed the
+    // same relationship as `linear_ids`. Search must index both shapes while metadata is
+    // rendered directly from the graph, otherwise an other-branch PR becomes invisible to
+    // Cmd-P despite being visible in YO!info.
+    ...linearSearchFields(pr.linear_issue_ids || pr.linear_ids),
   ].filter(Boolean);
 }
 
@@ -13161,17 +13502,19 @@ function finderSearchAliases(item) {
 
 function tabSearchFields(item) {
   const info = transcriptMetadataState.payload.sessions?.[item] || {};
+  const summary = sessionWorkSummary(item, info);
   const filePath = fileItemPath(item) || '';
   // Also index the touched repos' branch/PR/Linear metadata (the same data YO!info shows), so a
   // session is findable by any related branch even when it is not the currently checked-out branch.
-  const primaryRoot = info.project?.git?.root || info.project?.git?.cwd || '';
+  const primaryRoot = summary.git?.root || summary.git?.cwd || '';
+  const repositories = summary.graphBacked ? summary.repositories : [
+    ...(summary.git ? [{...summary.git, root: summary.git.root || summary.git.cwd || ''}] : []),
+    ...summary.repositories,
+  ];
   const branchSources = [
-    ...(info.project?.git?.other_branches?.branches || []),
-    ...(Array.isArray(info.project?.repos)
-      ? info.project.repos
-        .filter(repo => (repo?.root || repo?.cwd || '') !== primaryRoot)
-        .flatMap(repo => repo?.other_branches?.branches || [])
-      : []),
+    ...repositories
+      .filter(repo => (repo?.root || repo?.cwd || '') === primaryRoot || !primaryRoot || summary.graphBacked)
+      .flatMap(repo => repo?.other_branches?.branches || []),
   ];
   const pr = displayPullRequest(info);
   return [
@@ -13189,12 +13532,14 @@ function tabSearchFields(item) {
     ...finderSearchAliases(item),
     ...pullRequestSearchFields(pr),
     ...linearSearchFields(info.linear),
-    ...linearSearchFields(info.project?.linear),
+    ...linearSearchFields(summary.linearIssues),
     ...branchSources.flatMap(branch => [
       branch.name,
       branch.subject,
-      ...pullRequestSearchFields(branch.pull_request),
+      ...pullRequestSearchFields(branch.pull_request || branch.pull_requests?.[0]),
+      ...(branch.pull_requests || []).flatMap(pullRequestSearchFields),
       ...linearSearchFields(branch.linear_ids),
+      ...linearSearchFields(branch.linear),
     ]),
   ].filter(Boolean);
 }
@@ -13233,10 +13578,8 @@ function inactiveTabMenuItems() {
 
 function sortTabItemsForMenu(items) {
   const unique = Array.from(new Set(items.filter(isLayoutItem)));
-  const compare = (left, right) => String(itemLabel(left)).localeCompare(String(itemLabel(right)), undefined, {
-    numeric: true,
-    sensitivity: 'base',
-  }) || String(left).localeCompare(String(right));
+  const compare = (left, right) => compareLocalizedMenuLabels(itemLabel(left), itemLabel(right))
+    || compareLocalizedMenuLabels(left, right);
   // Tabs is a navigator, not a status dashboard: tmux sessions always form the first simple,
   // naturally sorted group; every YOLOmux-owned/file tab follows in the same stable label order.
   return [
@@ -13257,6 +13600,28 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   );
   const resultItems = groupedItems.length ? groupedItems : [menuCommand(t('menu.tabs.noMatch'), null, {disabled: true})];
   return resultItems;
+}
+
+function refreshOpenTabsMenuRows() {
+  const wrapper = Array.from(sessionButtons?.querySelectorAll?.('.app-menu') || [])
+    .find(menu => menu.dataset.appMenu === 'tabs' && menu.classList.contains(CLS.open));
+  if (!wrapper) return false;
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (!popover) return false;
+  const tabsMenu = appMenuTree().find(menu => menu.id === 'tabs');
+  if (!tabsMenu) return false;
+  popover.replaceChildren(...tabsMenu.items.map(createAppMenuItem));
+  fitAppMenuPopover(popover);
+  scheduleSharePopupLayerPublish({immediate: true});
+  return true;
+}
+
+function refreshTabsMenuMetadataOnOpen() {
+  // Opening Tabs must be instant: render the last accepted metadata snapshot first. A fresh
+  // forced request then performs tmux list-sessions in the background and refreshes only this
+  // open menu when names/descriptions arrive. The metadata request record coalesces repeats.
+  if (typeof refreshSessionMetadata !== 'function') return;
+  void refreshSessionMetadata({force: true, refreshAuto: false, refreshActivity: false, refreshContext: false});
 }
 
 function fileMenuVirtualCommand(item, detail) {
@@ -13322,30 +13687,31 @@ function appMenuTree() {
   const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
   const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
+  const fileDestinationCommands = sortMenuCommandsByLabel([
+    menuCommand(t('common.openFile'), openFileQuickOpen, {
+      detail: appShortcutText('P'),
+      iconHtml: appMenuUiIcon('document'),
+    }),
+    ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
+    menuCommand(t('menu.file.share'), () => showShareModal(), {
+      disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
+      detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
+      iconHtml: appMenuUiIcon('share', shareMenuActive),
+    }),
+    menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
+      checked: itemInLayout(prefsItemId),
+      detail: compactHomePath(settingsConfigPath()),
+      iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
+      targetItem: prefsItemId,
+    }),
+  ]);
   return [
     {
       id: 'file',
       label: t('menu.file'),
       items: menuGroups(
         newTmuxSessionItems(),
-        [
-          menuCommand(t('common.openFile'), openFileQuickOpen, {
-            detail: appShortcutText('P'),
-            iconHtml: appMenuUiIcon('document'),
-          }),
-          ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
-          menuCommand(t('menu.file.share'), () => showShareModal(), {
-            disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
-            detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
-            iconHtml: appMenuUiIcon('share', shareMenuActive),
-          }),
-          menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
-            checked: itemInLayout(prefsItemId),
-            detail: compactHomePath(settingsConfigPath()),
-            iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
-            targetItem: prefsItemId,
-          }),
-        ],
+        fileDestinationCommands,
         [
           menuCommand(t('menu.file.logout'), logOut, {
             detail: t('menu.file.logout.detail'),
@@ -14460,6 +14826,7 @@ function openAppMenu(wrapper, options = {}) {
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   scheduleSharePopupLayerPublish({immediate: true});
   scheduleShareTopologySnapshot('popup-open');
+  if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
 
@@ -14537,7 +14904,7 @@ async function openFileExplorerAt(path, options = {}) {
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
-    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0);
+    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder'});
   }
   if (options.refreshPanels !== false) {
     await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false});
@@ -14677,6 +15044,15 @@ function setFileExplorerFsResourceValue(type, path, value) {
 function fileExplorerFsResourceHasValue(type, path) {
   const record = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey(type, path));
   return record?.value !== undefined;
+}
+
+function cachedFileExplorerFsResourceValue(type, path) {
+  const key = fileExplorerFsBatchKey(type, path);
+  const record = fileExplorerFsResourceRecords.get(key);
+  if (!record || record.value === undefined) return undefined;
+  // Cache reads on the session-switch hot path count as use for the existing bounded LRU.
+  setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
+  return record.value;
 }
 
 function invalidateFileExplorerFsResourceRecord(key, record) {
@@ -15244,7 +15620,8 @@ function tmuxDirectoryForItem(item) {
 
 function tmuxGitRootForItem(item) {
   if (!isTmuxSession(item)) return '';
-  const root = transcriptMetadataState.payload.sessions?.[item]?.project?.git?.root || '';
+  const info = transcriptMetadataState.payload.sessions?.[item] || {};
+  const root = sessionWorkSummary(item, info).git?.root || '';
   return root ? normalizeDirectoryPath(root) : '';
 }
 
@@ -15330,7 +15707,13 @@ function fileExplorerSyncTargetRecord(targetKey, create = false, touch = false) 
   if (!key) return null;
   let record = fileExplorerSyncTargetRecords.get(key) || null;
   if (!record && create) {
-    record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    record = {
+      expandedPaths: [],
+      manualCollapsedPaths: new Set(),
+      cursorPath: '',
+      selectedPaths: [],
+      anchorPath: '',
+    };
   }
   if (record && (touch || !fileExplorerSyncTargetRecords.has(key))) {
     setLimitedMapEntry(fileExplorerSyncTargetRecords, key, record, fileExplorerMemoryCacheLimit);
@@ -15344,12 +15727,85 @@ function rememberFileExplorerSyncExpandedState(session = fileExplorerVisibleSync
   if (!key) return;
   const record = fileExplorerSyncTargetRecord(key, true, true);
   record.expandedPaths = fileExplorerExpandedPathsForRoot(root);
+  // This is deliberately one target record with disclosure state: a same-root session must retain
+  // its own keyboard cursor rather than borrowing the other session's global Finder selection.
+  record.cursorPath = fileExplorerSyncCursorPathForRoot(root, fileExplorerSelectionLead);
+  record.selectedPaths = fileExplorerSyncPathsForRoot(root, fileExplorerSelectedPaths);
+  record.anchorPath = fileExplorerSyncCursorPathForRoot(root, fileExplorerSelectionAnchor);
 }
 
 function rememberedFileExplorerSyncExpandedPaths(session, root) {
   const key = fileExplorerSyncTargetKey(session, root);
   const paths = fileExplorerSyncTargetRecord(key)?.expandedPaths;
   return Array.isArray(paths) ? fileExplorerExpandedPathsForRoot(root, paths) : [];
+}
+
+function fileExplorerSyncCursorPathForRoot(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const normalizedPath = normalizeDirectoryPath(path || '');
+  return normalizedRoot && normalizedPath && normalizedPath !== normalizedRoot
+    && pathIsInsideDirectory(normalizedPath, normalizedRoot) ? normalizedPath : '';
+}
+
+function fileExplorerSyncPathsForRoot(root, paths) {
+  return Array.from(new Set(Array.from(paths || [])
+    .map(path => fileExplorerSyncCursorPathForRoot(root, path))
+    .filter(Boolean))).sort();
+}
+
+function fileExplorerVisibleSyncCursorPath(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  let candidate = fileExplorerSyncCursorPathForRoot(normalizedRoot, path);
+  while (candidate) {
+    for (const container of fileExplorerTreeContainers()) {
+      if (selectableFileTreeRows(container).some(row => row.dataset.path === candidate)) return candidate;
+    }
+    const parent = normalizeDirectoryPath(dirnameOf(candidate));
+    candidate = parent && parent !== candidate && parent !== normalizedRoot ? parent : '';
+  }
+  return '';
+}
+
+function fileExplorerTreeActiveDescendantId(container, path) {
+  const containers = fileExplorerTreeContainers();
+  const index = Math.max(0, containers.indexOf(container));
+  return `file-explorer-tree-${index}-${encodeURIComponent(path)}`;
+}
+
+function syncFileExplorerTreeActiveDescendant(cursorPath = '') {
+  for (const container of fileExplorerTreeContainers()) {
+    const row = selectableFileTreeRows(container).find(item => item.dataset.path === cursorPath) || null;
+    if (!row) {
+      container.removeAttribute?.('aria-activedescendant');
+      continue;
+    }
+    const id = fileExplorerTreeActiveDescendantId(container, cursorPath);
+    if (row.id !== id) row.id = id;
+    container.setAttribute?.('aria-activedescendant', id);
+    // Deliberately do not call focus(): Finder Sync must not take keyboard ownership away from a terminal.
+    if (!scrollFileTreeRowIntoView(container, row)) row.scrollIntoView?.({block: 'nearest'});
+  }
+}
+
+function restoreFileExplorerSyncCursorState(session, root) {
+  const key = fileExplorerSyncTargetKey(session, root);
+  const record = fileExplorerSyncTargetRecord(key, false, true);
+  const rememberedSelection = fileExplorerSyncPathsForRoot(root, record?.selectedPaths);
+  const requestedCursor = fileExplorerSyncCursorPathForRoot(root, record?.cursorPath);
+  let cursorPath = fileExplorerVisibleSyncCursorPath(root, requestedCursor);
+  if (!cursorPath) {
+    cursorPath = rememberedSelection.map(path => fileExplorerVisibleSyncCursorPath(root, path)).find(Boolean) || '';
+  }
+  const visibleSelection = rememberedSelection.filter(path => fileExplorerVisibleSyncCursorPath(root, path) === path);
+  fileExplorerSelectedPaths.clear();
+  for (const path of visibleSelection) fileExplorerSelectedPaths.add(path);
+  if (cursorPath) fileExplorerSelectedPaths.add(cursorPath);
+  fileExplorerSelectionLead = cursorPath || null;
+  const anchorPath = fileExplorerVisibleSyncCursorPath(root, record?.anchorPath);
+  fileExplorerSelectionAnchor = anchorPath || cursorPath || null;
+  updateFileExplorerCurrentFileHighlight();
+  syncFileExplorerTreeActiveDescendant(cursorPath);
+  return cursorPath;
 }
 
 function setFileExplorerVisibleSyncTarget(session, root) {
@@ -15379,7 +15835,15 @@ function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payloa
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
-    if (dir) dirs.add(dir);
+    if (!dir) continue;
+    const rawRepo = String(file?.repo || '').trim();
+    const repo = rawRepo ? normalizeDirectoryPath(rawRepo) : '';
+    if (repo && pathIsInsideDirectory(dir, repo)) {
+      dirs.add(repo);
+      for (const ancestor of ancestorPathsUnderRoot(repo, dir)) dirs.add(ancestor);
+    } else {
+      dirs.add(dir);
+    }
   }
   return Array.from(dirs);
 }
@@ -15430,6 +15894,18 @@ function firstChildPathUnderRoot(root, path) {
   return parts.length ? childPath(root, parts[0]) : '';
 }
 
+function ancestorPathsUnderRoot(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const normalizedPath = normalizeDirectoryPath(path || '');
+  if (!normalizedRoot || !normalizedPath || normalizedPath === normalizedRoot || !pathIsInsideDirectory(normalizedPath, normalizedRoot)) return [];
+  const parts = childPathParts(normalizedRoot, normalizedPath);
+  const result = [];
+  for (let index = 1; index <= parts.length; index += 1) {
+    result.push(childPath(normalizedRoot, parts.slice(0, index).join('/')));
+  }
+  return result;
+}
+
 function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = []) {
   const normalizedRoot = normalizeDirectoryPath(root || '');
   if (!normalizedRoot) return [];
@@ -15439,11 +15915,9 @@ function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [
   const normalizedAffectedDirs = Array.from(new Set(affectedDirs
     .map(path => normalizeDirectoryPath(path))
     .filter(Boolean)));
-  const repoTargets = normalizedRepoRoots.filter(path => path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const affectedTargets = normalizedAffectedDirs
-    .map(path => firstChildPathUnderRoot(normalizedRoot, path))
-    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot));
-  const candidates = repoTargets.length ? repoTargets : affectedTargets;
+  const repoTargets = normalizedRepoRoots.flatMap(path => ancestorPathsUnderRoot(normalizedRoot, path));
+  const affectedTargets = normalizedAffectedDirs.flatMap(path => ancestorPathsUnderRoot(normalizedRoot, path));
+  const candidates = [...repoTargets, ...affectedTargets];
   return Array.from(new Set(candidates
     .map(path => normalizeDirectoryPath(path))
     .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
@@ -15464,12 +15938,24 @@ function fileExplorerSyncPlan(preferredItem = null) {
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
   if (!affectedDirs.length && focusedGitRoot && (!focusedDir || pathIsInsideDirectory(focusedDir, focusedGitRoot))) affectedDirs.push(focusedGitRoot);
   if (!affectedDirs.length && focusedDir) affectedDirs.push(focusedDir);
+  if (
+    focusedDir
+    && (!focusedGitRoot || pathIsInsideDirectory(focusedDir, focusedGitRoot))
+    && !affectedDirs.includes(focusedDir)
+  ) {
+    affectedDirs.push(focusedDir);
+  }
   const repoRoots = payloadUsable ? sessionFilesRepoRoots(payload) : [];
   if (focusedGitRoot && !repoRoots.includes(focusedGitRoot)) repoRoots.push(focusedGitRoot);
   let root = commonAncestorPath(affectedDirs);
   if (!root) root = normalizeDirectoryPath(homePath || '/');
   if (root && pathIsShallowerThanHome(root)) {
     root = focusedRepoRootForSync(focusedDir, repoRoots) || normalizeDirectoryPath(homePath || '/');
+  }
+  const normalizedHome = normalizeDirectoryPath(homePath || '');
+  const rootBeforeHomeLift = normalizeDirectoryPath(root || '');
+  if (normalizedHome && rootBeforeHomeLift && rootBeforeHomeLift !== normalizedHome && pathIsInsideDirectory(rootBeforeHomeLift, normalizedHome)) {
+    root = normalizedHome;
   }
   const normalizedRoot = normalizeDirectoryPath(root || '');
   const expandPaths = fileExplorerSyncExpansionTargets(normalizedRoot, affectedDirs, repoRoots);
@@ -15485,6 +15971,11 @@ function fileExplorerSyncPlanForFile(path) {
   let root = repo && pathIsInsideDirectory(target, repo) ? repo : '';
   if (!root && currentRoot && pathIsInsideDirectory(target, currentRoot) && target !== currentRoot) root = currentRoot;
   if (!root) root = targetDir;
+  const normalizedHome = normalizeDirectoryPath(homePath || '');
+  const rootBeforeHomeLift = normalizeDirectoryPath(root || '');
+  if (normalizedHome && rootBeforeHomeLift && rootBeforeHomeLift !== normalizedHome && pathIsInsideDirectory(rootBeforeHomeLift, normalizedHome)) {
+    root = normalizedHome;
+  }
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
   const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
   return {
@@ -15536,7 +16027,7 @@ function resetFileExplorerSyncManualCollapsesIfNeeded(plan) {
     let record = fileExplorerSyncTargetRecord(targetKey);
     rememberFileExplorerSyncManualCollapseState();
     fileExplorerSyncManualCollapseTargetKey = targetKey;
-    if (!record && targetKey) record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    if (!record && targetKey) record = fileExplorerSyncTargetRecord(targetKey, true, false);
     if (record) setLimitedMapEntry(fileExplorerSyncTargetRecords, targetKey, record, fileExplorerMemoryCacheLimit);
     fileExplorerSyncManualCollapsedPaths = record?.manualCollapsedPaths || new Set();
   }
@@ -15582,12 +16073,18 @@ function fileExplorerSyncExpansionPaths(plan) {
 function fileExplorerSyncExplicitExpansionTargets(plan, root = plan?.root || currentFileExplorerRoot()) {
   const normalizedRoot = normalizeDirectoryPath(root || '');
   if (!normalizedRoot) return [];
+  const expansionPaths = fileExplorerSyncExpansionPaths(plan);
   return Array.from(new Set([
-    ...(plan?.expandPaths || []),
+    ...expansionPaths,
     ...(plan?.affectedDirs || []),
   ]
     .map(path => normalizeDirectoryPath(path))
-    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
+    .filter(path => (
+      path
+      && path !== normalizedRoot
+      && pathIsInsideDirectory(path, normalizedRoot)
+      && !fileExplorerSyncPathSuppressed(path)
+    ))))
     .sort((left, right) => (
       childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
       || left.localeCompare(right)
@@ -15631,7 +16128,14 @@ function forgetFileExplorerSyncManualCollapse(path) {
 }
 
 function emptyFileExplorerSessionHighlightSets() {
-  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs: new Set()};
+  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs: new Set(), syncTargetDirs: new Set(), syncTargetTitle: ''};
+}
+
+function fileExplorerSyncTargetDirs(plan) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  return Array.from(new Set((plan?.affectedDirs || [])
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && root && pathIsInsideDirectory(path, root))));
 }
 
 function fileExplorerSessionHighlightSets(preferredItem = null) {
@@ -15648,8 +16152,17 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
     return emptyFileExplorerSessionHighlightSets();
   }
   const repoRoots = new Set(sessionFilesRepoRoots(payload));
-  const expandedDirs = new Set(fileExplorerSyncHighlightedRepoRoots(fileExplorerSyncPlan(targetSession), repoRoots));
-  return {repoRoots: new Set(), touchedDirs: new Set(), expandedDirs};
+  const plan = fileExplorerSyncPlan(targetSession);
+  const expandedDirs = new Set(fileExplorerSyncHighlightedRepoRoots(plan, repoRoots));
+  const syncTargetDirs = new Set(fileExplorerSyncTargetDirs(plan));
+  const sessionLabel = targetSession || plan.session || '';
+  return {
+    repoRoots: new Set(),
+    touchedDirs: new Set(),
+    expandedDirs,
+    syncTargetDirs,
+    syncTargetTitle: t('finder.syncTarget.title', {session: sessionLabel}),
+  };
 }
 
 function fileExplorerSessionHighlightClassForPath(path, kind = 'dir', options = {}) {
@@ -15665,8 +16178,15 @@ function fileExplorerSessionHighlightClassForPath(path, kind = 'dir', options = 
 
 function applyFileExplorerSessionHighlightRow(row, sets = fileExplorerSessionHighlightSets()) {
   if (!row) return;
-  const highlightClass = fileExplorerSessionHighlightClassForPath(row.dataset?.path || '', row.dataset?.kind || '', {sessionHighlightSets: sets});
+  const path = normalizeDirectoryPath(row.dataset?.path || '');
+  const kind = row.dataset?.kind || '';
+  const highlightClass = fileExplorerSessionHighlightClassForPath(path, kind, {sessionHighlightSets: sets});
   applySessionHighlightRowClass(row, highlightClass);
+  const isSyncTarget = kind === 'dir' && Boolean(path && sets.syncTargetDirs?.has(path));
+  row.classList.toggle('file-tree-row--sync-target', isSyncTarget);
+  if (isSyncTarget) row.dataset.syncTargetTitle = sets.syncTargetTitle || '';
+  else delete row.dataset.syncTargetTitle;
+  updateFileTreeSyncTargetMarker(row, isSyncTarget, sets.syncTargetTitle);
 }
 
 function updateFileExplorerSessionHighlightRows(preferredItem = null) {
@@ -15685,8 +16205,9 @@ function fileExplorerPathInputs() {
 
 function setFileExplorerPathElementValue(node, path) {
   if (!node) return;
-  if ('value' in node) node.value = path;
-  else node.textContent = path;
+  const display = typeof compactHomePath === 'function' ? (compactHomePath(path) || path) : path;
+  if ('value' in node) node.value = display;
+  else node.textContent = display;
 }
 
 function setFileExplorerPathError(node, message = '') {
@@ -15802,6 +16323,11 @@ function repoInfoPopoverHtml(repo) {
   return rows.join('');
 }
 
+function fileTreeSyncTargetPopoverHtml(row) {
+  const title = String(row?.dataset?.syncTargetTitle || '').trim();
+  return title ? `<div class="file-tree-repo-popover-title">★ ${esc(title)}</div>` : '';
+}
+
 function fileTreeRepoPopoverNode() {
   let node = document.getElementById('fileTreeRepoPopover');
   if (!node) {
@@ -15815,9 +16341,10 @@ function fileTreeRepoPopoverNode() {
 }
 
 function showFileTreeRepoPopover(row, repo) {
-  if (!repo?.root) return;
+  const content = repo?.root ? repoInfoPopoverHtml(repo) : fileTreeSyncTargetPopoverHtml(row);
+  if (!content) return;
   const node = fileTreeRepoPopoverNode();
-  node.innerHTML = repoInfoPopoverHtml(repo);
+  node.innerHTML = content;
   node.hidden = false;
   const popRect = node.getBoundingClientRect?.(), pos = clampToViewport(
     Math.round(Number(row.dataset.repoPopoverX || 0) + 14), Math.round(Number(row.dataset.repoPopoverY || 0) + 4),
@@ -15852,14 +16379,14 @@ function fileTreeRepoHoverController(row, path) {
     anchor: row,
     popover: fileTreeRepoPopoverNode,
     stateClass: null,
-    canOpen: () => row.dataset.isRepo === 'true',
+    canOpen: () => row.dataset.isRepo === 'true' || Boolean(row.dataset.syncTargetTitle),
     position: event => {
       updatePointer(event);
       const repo = fileExplorerRepoInfoCache.get(normalizeDirectoryPath(path));
-      if (repo) showFileTreeRepoPopover(row, repo);
+      showFileTreeRepoPopover(row, repo);
     },
     onPointerMove: updatePointer,
-    onOpen: () => { void showRepoRowHoverPopover(row, path); },
+    onOpen: () => { if (row.dataset.isRepo === 'true') void showRepoRowHoverPopover(row, path); },
     onClose: hideFileTreeRepoPopover,
   });
 }
@@ -16036,10 +16563,97 @@ async function syncFileExplorerRootToActiveFile(path, options = {}) {
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
+function fileExplorerSyncRenderPaths(plan, rememberedExpandedPaths = []) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  if (!root) return [];
+  return fileExplorerExpandedPathsForRoot(root, [
+    ...rememberedExpandedPaths,
+    ...fileExplorerSyncExpansionPaths(plan),
+  ]).filter(path => !fileExplorerSyncPathSuppressed(path));
+}
+
+function fileExplorerSyncListingDirectories(plan, renderPaths = []) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const directories = new Set(root ? [root] : []);
+  for (const path of renderPaths) {
+    for (const ancestor of ancestorPathsUnderRoot(root, path)) directories.add(ancestor);
+  }
+  return Array.from(directories);
+}
+
+function cachedFileExplorerSyncListings(directories = []) {
+  const entriesByDir = new Map();
+  for (const directory of directories) {
+    const entries = cachedFileExplorerFsResourceValue('list', directory);
+    if (!Array.isArray(entries)) return null;
+    entriesByDir.set(normalizeDirectoryPath(directory), entries);
+  }
+  return entriesByDir;
+}
+
+function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir) {
+  const root = normalizeDirectoryPath(plan?.root || '');
+  const rootEntries = entriesByDir?.get(root);
+  if (!root || !Array.isArray(rootEntries)) return false;
+  fileExplorerRoot = root;
+  pruneFileExplorerSelectionForRoot(root);
+  fileExplorerManualSelectionActive = false;
+  setFileExplorerPathDisplay(root);
+  renderFileExplorerRootModeControls();
+  fileExplorerExpanded.clear();
+  for (const path of renderPaths) fileExplorerExpanded.add(path);
+  if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
+    const tree = panel.querySelector?.('.file-explorer-tree-panel');
+    if (tree) renderTreeChildren(tree, root, rootEntries, 0, {view: 'finder', entriesByDir});
+  }
+  updateFileExplorerCurrentFileHighlight();
+  scheduleShareTopologySnapshot('finder-root');
+  return true;
+}
+
+async function fetchFileExplorerSyncListings(directories = [], options = {}) {
+  const entriesByDir = new Map();
+  const queue = [...directories];
+  const workerCount = Math.min(8, queue.length);
+  await Promise.all(Array.from({length: workerCount}, async () => {
+    while (queue.length) {
+      const directory = queue.shift();
+      const entries = await fetchDirectory(directory, options);
+      if (Array.isArray(entries)) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+    }
+  }));
+  return entriesByDir;
+}
+
+function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
+  requestAnimationFrame(() => {
+    const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
+    const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
+    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true}).then(entriesByDir => {
+      if (
+        fileExplorerSyncPlanSignature(plan) !== signature
+        || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
+        || !fileExplorerSyncPlanTargetStillCurrent(plan)
+      ) return;
+      const changed = directories.some(path => previousSignatures.get(path) !== fileExplorerDirectoryRecord(path)?.signature);
+      if (!changed) return;
+      const currentRenderPaths = fileExplorerSyncRenderPaths(
+        plan,
+        rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root),
+      );
+      const currentDirectories = fileExplorerSyncListingDirectories(plan, currentRenderPaths);
+      const completeEntriesByDir = cachedFileExplorerSyncListings(currentDirectories) || entriesByDir;
+      renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir);
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
+      updateFileExplorerSessionHighlightRows(plan.session);
+    }).catch(error => console.warn('Finder sync background revalidation failed', error));
+  });
+}
+
 async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
-  const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncState.inFlightSignature === signature) return false;
   if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
   if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
@@ -16056,41 +16670,32 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (targetChanged) {
       rememberFileExplorerSyncExpandedState();
     }
-    if (plan.root !== currentFileExplorerRoot()) {
-      changed = await openFileExplorerAt(plan.root, {
-        preserveExpanded: false,
-        preserveScroll: false,
-        syncSelection: true,
-        user: options.force === true,
-        showPending: options.force === true,
-      });
-      if (!changed) return false;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    } else if (targetChanged) {
-      fileExplorerExpanded.clear();
-      await refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: false});
-      changed = true;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    }
-    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
-    if (rememberedExpandedPaths.length) {
-      changed = await restoreFileExplorerExpandedPaths(rememberedExpandedPaths, plan.root) || changed;
-      if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
+    const renderPaths = fileExplorerSyncRenderPaths(plan, rememberedExpandedPaths);
+    const listingDirectories = fileExplorerSyncListingDirectories(plan, renderPaths);
+    const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
+    if (cachedListings) {
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings) || changed;
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
+      setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+      rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+      markFileExplorerSyncPlanApplied(plan);
+      updateFileExplorerSessionHighlightRows(preferredItem);
+      scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature);
+      return changed;
     }
-    if (expandPaths.length) {
-      const generation = ++fileExplorerSyncState.generation;
-      for (const path of expandPaths) {
-        if (generation !== fileExplorerSyncState.generation) return changed;
-        changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true}) || changed;
-        if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-      }
-    }
+    const fetchedListings = await fetchFileExplorerSyncListings(listingDirectories, {force: true, user: options.force === true});
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    rememberFileExplorerSyncExpandedState(plan.session, plan.root);
-    markFileExplorerSyncPlanApplied(plan);
-    updateFileExplorerSessionHighlightRows(preferredItem);
-    return changed;
+    if (fetchedListings.has(normalizeDirectoryPath(plan.root))) {
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings) || changed;
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
+      setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+      rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+      markFileExplorerSyncPlanApplied(plan);
+      updateFileExplorerSessionHighlightRows(preferredItem);
+      return changed;
+    }
+    return false;
   } finally {
     if (fileExplorerSyncState.inFlightSignature === signature) fileExplorerSyncState.inFlightSignature = '';
   }
@@ -16236,17 +16841,17 @@ function createFileTreeChildContainer(fullPath) {
   return children;
 }
 
-async function ensureFileTreeRootRendered(container, root) {
+async function ensureFileTreeRootRendered(container, root, options = {}) {
   if (!container) return false;
   const firstRow = container.querySelector?.('.file-tree-row[data-path]');
   if (firstRow) {
     if (pathIsInsideDirectory(firstRow.dataset.path, root) && childPathParts(root, firstRow.dataset.path).length === 1) return true;
     container.replaceChildren();
   }
-  const entries = await fetchDirectory(root);
+  const entries = await fetchDirectory(root, {user: options.user === true});
   if (!entries) return false;
   container.replaceChildren();
-  renderTreeChildren(container, root, entries, 0);
+  renderTreeChildren(container, root, entries, 0, {view: 'finder'});
   return true;
 }
 
@@ -16287,7 +16892,7 @@ function scrollFileTreeRowIntoView(container, row) {
 async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncState.generation, options = {}) {
   const parts = childPathParts(root, path);
   if (!parts.length) return false;
-  const rendered = await ensureFileTreeRootRendered(container, root);
+  const rendered = await ensureFileTreeRootRendered(container, root, options);
   if (!rendered) return false;
   if (generation !== fileExplorerSyncState.generation) return false;
   let scope = container;
@@ -16307,7 +16912,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
       if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
         return false;
       }
-      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true});
+      const childScope = await ensureDirectoryRowExpanded(row, fullPath, {auto: options.auto === true, user: options.user === true});
       if (generation !== fileExplorerSyncState.generation) return false;
       if (fullPath !== path) {
         if (!childScope) return false;
@@ -16479,8 +17084,8 @@ function fileTreeDisplayParts(path, entry) {
   return {text: baseText, html: ''};
 }
 
-function fileTreeMtimeText(entry) {
-  return sessionFileDisplayTimeTextForEntry(entry);
+function fileTreeMtimeText(entry, options = {}) {
+  return sessionFileDisplayTimeTextForEntry(entry, options);
 }
 
 const FILE_TREE_RECENCY_THRESHOLDS = Object.freeze([
@@ -16581,7 +17186,7 @@ function clearFileTreeRowRecency(row) {
 }
 
 function applyFileTreeRowRecency(row, entry, options = {}) {
-  if (!row || fileExplorerTreeDateMode === 'none') {
+  if (!row || fileExplorerTreeDateModeForView(options.view || (options.differMode ? 'differ' : 'finder')) === 'none') {
     clearFileTreeRowRecency(row);
     return;
   }
@@ -16613,7 +17218,7 @@ function applyFileTreeRowRecency(row, entry, options = {}) {
   else clearFileTreeRecencyAttentionTimer(row);
 }
 
-function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, options = {}) {
+function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForView('finder'), options = {}) {
   const includeHidden = options.includeHidden === true;
   const visible = entries.filter(entry => includeHidden || fileExplorerShowHidden || !entry.name.startsWith('.'));
   if (options.tabberWindowOrder === true) {
@@ -16650,6 +17255,29 @@ const GIT_STATUS_ROW_CLASSES = Object.freeze(['git-modified', 'git-untracked', '
 // The session-highlight row classes (sync-expanded / session-repo / session-touched), likewise toggled in
 // two places (applyFileExplorerSessionHighlightRow + updateFileTreeRow).
 const SESSION_HIGHLIGHT_ROW_CLASSES = Object.freeze(['file-tree-row--sync-expanded', 'file-tree-row--session-repo', 'file-tree-row--session-touched']);
+
+function updateFileTreeSyncTargetMarker(row, active, title = '') {
+  if (!row) return;
+  const enabled = active === true;
+  let marker = row.querySelector(':scope > .file-tree-sync-target');
+  if (!enabled) {
+    marker?.remove();
+    return;
+  }
+  if (!marker) {
+    marker = document.createElement('span');
+    marker.className = 'file-tree-sync-target';
+  }
+  const anchor = row.querySelector(':scope > .file-tree-agent') || row.querySelector(':scope > .file-tree-name');
+  const before = anchor?.nextElementSibling || null;
+  if (marker.parentElement !== row || marker.previousElementSibling !== anchor) {
+    row.insertBefore(marker, before);
+  }
+  marker.hidden = false;
+  if (marker.textContent !== '★') marker.textContent = '★';
+  marker.setAttribute('aria-label', title);
+  marker.setAttribute('title', title);
+}
 
 function applyGitStatusRowClass(row, gitClass) {
   for (const className of GIT_STATUS_ROW_CLASSES) {
@@ -16791,6 +17419,8 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     row.appendChild(date);
   }
   // Keep DOM order: icon → name → agent → diff → dir-count → status → date.
+  // updateFileTreeSyncTargetMarker inserts a star only for starred sync rows, so ordinary rows
+  // keep the established Finder/Differ column ownership with no hidden spacer.
   if (name.nextElementSibling !== agent) row.insertBefore(agent, name.nextElementSibling);
   if (agent.nextElementSibling !== diff) row.insertBefore(diff, agent.nextElementSibling);
   if (diff.nextElementSibling !== dirCount) row.insertBefore(dirCount, diff.nextElementSibling);
@@ -16948,7 +17578,7 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const derivedState = fileTreeRowDerivedState(fullPath, entry, {
     ...options,
     expanded,
-    dateText: fileTreeMtimeText(entry),
+    dateText: fileTreeMtimeText(entry, options),
   });
   const changedFile = derivedState.changedFile;
   const changedFileStatus = derivedState.changedFileStatus;
@@ -17021,7 +17651,7 @@ function applyFileTreeRowDataset(row, state) {
 
 function bindFinderRowHandlers(row, state) {
   const {entry, fullPath, differMode} = state;
-  if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
+  if (!differMode && entry.kind === 'dir' && (entry.is_repo === true || Boolean(row.dataset.syncTargetTitle))) {
     row.removeAttribute('title');
     fileTreeRepoHoverController(row, fullPath);
   } else if (!differMode) {
@@ -17154,7 +17784,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   applyFileTreeRowDataset(row, rowState);
   applyFileTreeRowDerivedState(row, rowState.derivedState);
-  applyFileTreeRowRecency(row, entry, {differMode: rowState.differMode});
+  applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
+  applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
   bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);
   return fullPath;
@@ -18252,9 +18883,9 @@ function tabberWindowRecency(row) {
 }
 
 function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Date.now() / 1000) {
-  if (fileExplorerTreeDateMode === 'none') return {text: '', html: ''};
+  if (fileExplorerTreeDateModeForView('tabber') === 'none') return {text: '', html: ''};
   const state = String(agentStatus?.state || STATE_KEY.idle);
-  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds});
+  const text = sessionFileDisplayTimeText(recencyTs, {nowSeconds, view: 'tabber'});
   if (!text) return {text: '', html: ''};
   if (agentWindowIsAttentionState(state)) {
     return {text: '', html: statusIndicatorLabelHtml(text, 'attention', 'tabber-agent-status', 'agent-status-attention')};
@@ -18510,7 +19141,7 @@ function buildTabberTree() {
     const info = transcriptMetadataState.payload.sessions?.[session] || {};
     const sessionName = `s_${tabberPathToken(session)}`;
     const sessionPath = `/${sessionName}`;
-    const git = info?.project?.git;
+    const git = sessionWorkSummary(session, info).git;
     const branch = git?.branch ? shortBranch(git.branch) : '';
     const fallbackSessionRecency = tabberRecency(session);
     const sessionWork = sessionWorkDescription(session, info, 0);
@@ -18563,7 +19194,7 @@ function buildTabberTree() {
 }
 
 function tabberSortMode() {
-  return ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'newest';
+  return fileExplorerTreeSortModeForView('tabber');
 }
 
 function renderTabberTree(groupsEl) {
@@ -18589,6 +19220,7 @@ function renderTabberTree(groupsEl) {
     collapsedSet,
     entriesByDir,
     treeSortMode: tabberSortMode(),
+    view: 'tabber',
     includeHidden: true,
   });
   syncTabberTreeLayoutState(container, {force: true});
@@ -18885,7 +19517,7 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
     disclosureExpanded: expandable ? expanded : undefined,
     nameHtml,
-    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry) : '')),
+    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
     dateHtml: data.dateHtml || '',
   });
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
@@ -20735,7 +21367,7 @@ async function fileExplorerDirectoryPathsForRoot(root = currentFileExplorerRoot(
     const directory = queue.shift();
     const entries = await fetchDirectory(directory);
     if (!Array.isArray(entries)) continue;
-    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortMode, {includeHidden: fileExplorerShowHidden})) {
+    for (const entry of sortedFileTreeEntries(entries, fileExplorerTreeSortModeForView('finder'), {includeHidden: fileExplorerShowHidden})) {
       if (entry?.kind !== 'dir') continue;
       const child = childPath(directory, entry.name);
       if (seen.has(child)) continue;
@@ -20770,7 +21402,6 @@ async function expandSyncFileExplorerAffectedDirectories() {
   if (!root) return false;
   resetFileExplorerSyncManualCollapsesIfNeeded(plan);
   const paths = fileExplorerSyncExplicitExpansionTargets(plan, root);
-  for (const path of paths) forgetFileExplorerSyncManualCollapse(path);
   resetFileExplorerAppliedSyncPlan();
   if (root !== currentFileExplorerRoot()) {
     const opened = await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});
@@ -20851,7 +21482,7 @@ function handleFileExplorerTreeToolbarAction(container, event) {
     setAllFileTreeDirectoriesExpanded(action, action.dataset.fileTreeExpandCollapseAll === 'expand', {view})
       .catch(error => statusErr(localizedHtml('status.treeActionFailed', {error})));
   } else {
-    cycleFileExplorerTreeDateMode();
+    cycleFileExplorerTreeDateMode(view);
   }
   return true;
 }
@@ -20861,11 +21492,7 @@ function handleFileExplorerTreeToolbarChange(container, event) {
   if (!select || !container?.contains(select)) return false;
   event.preventDefault();
   event.stopPropagation();
-  fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
-  writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
-  if (fileExplorerToolbarView(container) === 'tabber') refreshTabberPanels();
-  else refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-  scheduleShareUiStatePublish();
+  setFileExplorerViewSetting(fileExplorerToolbarView(container), 'treeSortMode', select.value);
   return true;
 }
 
@@ -20881,11 +21508,12 @@ function bindFileExplorerHeaderActions(container = document) {
     if (action.matches('[data-file-explorer-new-file]')) createFileExplorerFile();
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
-      if (fileExplorerMode === 'tabber') {
-        clearTabberSessionFilesStates();
-        fetchTabberActivity();
-        refreshTabberPanels();
-      } else if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+    const view = fileExplorerToolbarView(container);
+    if (view === 'tabber') {
+      clearTabberSessionFilesStates();
+      fetchTabberActivity();
+      refreshTabberPanels();
+    } else if (view === 'differ') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         refreshFileExplorerTrees();
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -25826,7 +26454,7 @@ function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
 async function expandDirectoryRow(row, fullPath, options = {}) {
   fileExplorerPendingExpansions.add(fullPath);
   syncDirectoryRowExpansionVisual(row, true, true);
-  const entries = await fetchDirectory(fullPath);
+  const entries = await fetchDirectory(fullPath, {user: options.user === true});
   fileExplorerPendingExpansions.delete(fullPath);
   if (!entries) {
     if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
@@ -26548,23 +27176,18 @@ function pullRequestWithUrl(git, pr) {
 }
 
 function defaultBranchHeadPullRequestForGit(info, git) {
-  const project = info?.project || {};
   if (!isDefaultBranch(git)) return null;
   const subject = gitHeadSubject(git);
   const number = pullRequestNumberFromSubject(subject);
   if (!number) return null;
-  const projectGitRoot = repoRootKey(project.git?.root);
-  const showingPrimaryGit = !projectGitRoot || projectGitRoot === repoRootKey(git?.root);
-  const existing = showingPrimaryGit && project.pull_request?.number === number ? project.pull_request : {};
-  const title = subjectWithoutPullRequestNumber(existing.title || subject);
-  const description = subjectWithoutPullRequestNumber(existing.description || subject);
+  const title = subjectWithoutPullRequestNumber(subject);
+  const description = subjectWithoutPullRequestNumber(subject);
   return {
-    ...existing,
     number,
     title,
     description,
-    url: existing.url || githubPullRequestUrlFromGit(git, number),
-    checks: existing.checks || {state: 'unknown'},
+    url: githubPullRequestUrlFromGit(git, number),
+    checks: {state: 'unknown'},
     // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
     // (it is in main's history). Keep that fact semantic; shared lifecycle rendering localizes it.
     merged: true,
@@ -26573,7 +27196,7 @@ function defaultBranchHeadPullRequestForGit(info, git) {
 }
 
 function defaultBranchHeadPullRequest(info) {
-  return defaultBranchHeadPullRequestForGit(info, info?.project?.git);
+  return defaultBranchHeadPullRequestForGit(info, sessionWorkSummary('', info).git);
 }
 
 function currentBranchInventoryPullRequestForGit(git) {
@@ -26582,21 +27205,37 @@ function currentBranchInventoryPullRequestForGit(git) {
 }
 
 function currentBranchInventoryPullRequest(info) {
-  return currentBranchInventoryPullRequestForGit(info?.project?.git);
+  return currentBranchInventoryPullRequestForGit(sessionWorkSummary('', info).git);
 }
 
 function displayPullRequestForGit(info, git) {
-  const project = info?.project || {};
-  const targetGit = git || project.git;
-  const projectGitRoot = repoRootKey(project.git?.root);
-  const showingPrimaryGit = !targetGit || !projectGitRoot || projectGitRoot === repoRootKey(targetGit.root);
-  return defaultBranchHeadPullRequestForGit(info, targetGit)
-    || (showingPrimaryGit ? project.pull_request : null)
-    || currentBranchInventoryPullRequestForGit(targetGit);
+  const summary = sessionWorkSummary('', info);
+  if (summary.graphBacked) {
+    const root = repoRootKey(git?.root);
+    const repo = summary.repositories.find(item => repoRootKey(item.root) === root) || summary.selectedRepo;
+    const branch = repo?.other_branches?.branches?.find(item => item.current) || null;
+    return branch?.pull_requests?.[0] || null;
+  }
+  return null;
 }
 
 function displayPullRequest(info) {
-  return displayPullRequestForGit(info, info?.project?.git);
+  const summary = sessionWorkSummary('', info);
+  return summary.graphBacked ? summary.focusedPullRequest : displayPullRequestForGit(info, summary.git);
+}
+
+function pullRequestAggregateLabel(pullRequests = []) {
+  const count = Array.isArray(pullRequests) ? pullRequests.length : 0;
+  return count > 1 ? tPlural('info.count.pr', count) : '';
+}
+
+function pullRequestSummaryBadgesHtml(session, info) {
+  const summary = sessionWorkSummary(session, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) {
+    return `<span class="${metadataBadgeClasses(session, 'pr', 'pr-number-indicator tab-symbol pr-aggregate-indicator')}">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`;
+  }
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
+  return pullRequestCompactBadgesHtml(session, pr);
 }
 
 function metadataBadgePulseClass(session, badge) {
@@ -26631,20 +27270,21 @@ function updateMetadataBadgePulses(meta) {
 }
 
 function defaultBranchBadgeHtml(session, info) {
-  if (!isDefaultBranch(info?.project?.git)) return '';
+  if (!isDefaultBranch(sessionWorkSummary(session, info).git)) return '';
   return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
 }
 
 function sessionWorkDescriptionSource(session, info) {
-  const project = info?.project || {};
-  const git = project.git;
-  const pr = displayPullRequest(info);
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
+  if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, git)) : displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     const prefix = pullRequestLinkLabel(pr);
     return title ? `${prefix}: ${title}` : prefix;
   }
-  const linear = project.linear || [];
+  const linear = summary.linearIssues;
   const issue = linear.find(item => item.title);
   if (issue) return `${issue.identifier}: ${issue.title}`;
   const subject = currentBranchSubject(git);
@@ -26663,7 +27303,9 @@ function sessionTabDescription(session, info) {
   // already identifies the session and tmux window, so a generic "Loading..." description implies
   // the terminal itself is blocked. Omit only this tab-local metadata until a real description arrives.
   if (!info) return '';
-  const pr = displayPullRequest(info);
+  const summary = sessionWorkSummary(session, info);
+  if (summary.graphBacked && summary.pullRequests.length > 1) return pullRequestAggregateLabel(summary.pullRequests);
+  const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     if (title) return shortText(title, 72);
@@ -26673,16 +27315,17 @@ function sessionTabDescription(session, info) {
 
 function tabMenuDetailText(item, info = transcriptMetadataState.payload.sessions?.[item]) {
   if (isInfoItem(item)) return t('tab.info.detail');
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(item, info);
+  const git = summary.git;
   const parts = [];
   if (git?.branch) parts.push(git.branch);
   const path = panelFullPath(item, info);
   if (path) parts.push(compactHomePath(path));
   const pr = displayPullRequest(info);
-  const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
+  const linear = summary.linearIssues.map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
-  if (pr?.number) {
+  if (summary.graphBacked && summary.pullRequests.length > 1) parts.push(pullRequestAggregateLabel(summary.pullRequests));
+  else if (pr?.number) {
     parts.push(pullRequestLinkLabel(pr));
   }
   const desc = sessionWorkDescription(item, info, 180);
@@ -26753,12 +27396,13 @@ function filePopoverPathHtml(path) {
 }
 
 function sessionPopoverSubtitleHtml(session, info, fallback = '') {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const pr = pullRequestWithUrl(git, displayPullRequest(info));
   const chips = [];
   if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
-  if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
+  if (summary.graphBacked && summary.pullRequests.length > 1) chips.push(`<span class="popover-chip">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`);
+  else if (pr?.number) chips.push(pullRequestNumberChipLinkHtml(session, pr));
   const text = pr?.number
     ? shortText(pr.title || pr.description || '', 220)
     : String(fallback || '');
@@ -26767,7 +27411,7 @@ function sessionPopoverSubtitleHtml(session, info, fallback = '') {
 }
 
 function sessionBranchValueHtml(session, info) {
-  const git = info?.project?.git;
+  const git = sessionWorkSummary(session, info).git;
   if (!git?.branch) return '';
   const branchHtml = isDefaultBranch(git)
     ? defaultBranchBadgeHtml(session, info)
@@ -26998,10 +27642,10 @@ function agentTranscriptRowsHtml(agent) {
 }
 
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const pr = pullRequestWithUrl(git, displayPullRequest(info));
-  const linear = project.linear || [];
+  const linear = summary.linearIssues;
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
   const title = `${tmuxSessionDescriptorLabel(sessionLabel(session))} · ${projectDirName(session, info)}`;
@@ -27165,7 +27809,13 @@ function branchListSubjectHtml(branch, pr) {
   const subject = subjectWithoutPullRequestNumber(branch?.subject || '');
   if (!subject) return '';
   if (branch?.current) {
-    const currentTitles = [pr?.title, pr?.description].map(normalizeBranchSubjectText).filter(Boolean);
+    // A default-branch merge commit title retains its SHA in canonical PR data while the local
+    // branch subject does not. Treat the SHA-free title as the same description.
+    const currentTitles = [pr?.title, pr?.description]
+      .flatMap(value => {
+        const normalized = normalizeBranchSubjectText(value);
+        return [normalized, normalized.replace(/^[0-9a-f]{7,40}\s+/i, '')].filter(Boolean);
+      });
     if (currentTitles.includes(normalizeBranchSubjectText(subject))) return '';
   }
   return `<div class="branch-subject">${esc(shortText(subject, 240))}</div>`;
@@ -27194,7 +27844,7 @@ function branchUpdatedText(branch) {
 }
 
 function otherBranchesHtml(session, info) {
-  const git = info?.project?.git;
+  const git = sessionWorkSummary(session, info).git;
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
   if (!branches.length) {
@@ -27785,10 +28435,22 @@ function maxTabsPerPane() {
   return Math.max(2, Math.min(30, raw));
 }
 
-// A tab may be auto-evicted unless it is the one being kept active, pinned, the Finder dock,
+function capKeepItemSet(keepItem, keepItems = []) {
+  const result = new Set();
+  if (keepItem instanceof Set) {
+    for (const item of keepItem) if (isLayoutItem(item)) result.add(item);
+  } else if (isLayoutItem(keepItem)) {
+    result.add(keepItem);
+  }
+  for (const item of keepItems || []) if (isLayoutItem(item)) result.add(item);
+  return result;
+}
+
+// A tab may be auto-evicted unless it is being kept active, pinned, the Finder dock,
 // or a dirty/unsaved editor (never silently drop unsaved edits).
 function tabIsEvictableForCap(item, keepItem) {
-  if (item === keepItem || tabIsPinned(item) || isFileExplorerItem(item)) return false;
+  const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
+  if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
     const state = openFiles.get(fileItemPath(item));
     if (state && state.dirty) return false;
@@ -27796,16 +28458,81 @@ function tabIsEvictableForCap(item, keepItem) {
   return true;
 }
 
+function capRefusalReason(tabs, keep) {
+  const protectedTabs = tabs.filter(item => !keep.has(item));
+  return protectedTabs.length > 0 && protectedTabs.every(item => tabIsPinned(item)) ? 'all-pinned' : 'nothing-evictable';
+}
+
+function paneCapacityCheckForInsert(slot, incomingTabs = [], keepItem = null, slots = layoutSlots, options = {}) {
+  const keep = capKeepItemSet(keepItem, options.keepItems);
+  const baseTabs = Array.isArray(options.tabs) ? [...options.tabs] : paneTabs(slot, slots);
+  const tabs = appendUniqueItems([...baseTabs], Array.isArray(incomingTabs) ? incomingTabs : [incomingTabs]);
+  const cap = maxTabsPerPane();
+  const overflow = tabs.length - cap;
+  if (overflow <= 0) return {ok: true, cap, overflow: 0, evicted: [], finalTabs: tabs, reason: ''};
+  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keep));
+  if (!evictable.length) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
+  const originalIndex = new Map(tabs.map((item, index) => [item, index]));
+  const byLeastRecent = [...evictable].sort((a, b) => {
+    const delta = (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0);
+    return delta || ((originalIndex.get(a) || 0) - (originalIndex.get(b) || 0));
+  });
+  const evicted = byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+  if (evicted.length < overflow) return {ok: false, cap, overflow, evicted: [], finalTabs: tabs, reason: capRefusalReason(tabs, keep)};
+  return {ok: true, cap, overflow, evicted, finalTabs: tabs.filter(item => !evicted.includes(item)), reason: ''};
+}
+
 // Given a pane's tab list (newest tab already inserted) return the least-recently-used evictable
 // tabs to drop so the pane fits the cap. Keeps keepItem, dirty editors, and the Finder.
 function tabsToEvictForCap(tabs, keepItem) {
-  const cap = maxTabsPerPane();
-  const overflow = tabs.length - cap;
-  if (overflow <= 0) return [];
-  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keepItem));
-  if (!evictable.length) return [];
-  const byLeastRecent = [...evictable].sort((a, b) => (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0));
-  return byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+  return paneCapacityCheckForInsert('', [], keepItem, layoutSlots, {tabs}).evicted;
+}
+
+function paneCapacityRefusalStatus(item, capacity, targetSlot = '') {
+  return paneCapacityRefusalStatusForItems([item], capacity, targetSlot);
+}
+
+function layoutItemLabels(items = []) {
+  return (Array.isArray(items) ? items : [items]).filter(isLayoutItem).map(itemLabel).join(', ');
+}
+
+function paneCapacityRefusalStatusForItems(items, capacity, targetSlot = '') {
+  const statusKey = capacity?.reason === 'all-pinned'
+    ? 'layout.status.paneFullPinned'
+    : 'layout.status.nothingEvictable';
+  return t(statusKey, {
+    item: layoutItemLabels(items) || targetSlot || t('layout.zone.middle'),
+    pane: targetSlot || t('layout.zone.middle'),
+    limit: capacity?.cap || maxTabsPerPane(),
+  });
+}
+
+function pinnedPaneAtCapStatus(items, cap = maxTabsPerPane()) {
+  return t('layout.status.pinnedPaneAtCap', {items: layoutItemLabels(items) || t('tab.pinned'), limit: cap});
+}
+
+function pinnedTabsInSlot(slot, slots = layoutSlots) {
+  return paneTabs(slot, slots).filter(tabIsPinned);
+}
+
+function unpinnedTabsInSlot(slot, slots = layoutSlots) {
+  return paneTabs(slot, slots).filter(item => !tabIsPinned(item));
+}
+
+function dropIntentCapacityCheckForSession(session, intent, sourceSlot = null) {
+  if (!intent?.targetSlot || intent.zone !== 'middle' || intent.boundary) return null;
+  if (sourceSlot && sourceSlot === intent.targetSlot) return null;
+  return paneCapacityCheckForInsert(intent.targetSlot, [session], session, layoutSlots);
+}
+
+function dropIntentCapacityAllowsSession(session, intent, sourceSlot = null) {
+  const capacity = dropIntentCapacityCheckForSession(session, intent, sourceSlot);
+  return !capacity || capacity.ok;
+}
+
+function dropIntentCapacityRefusalStatus(session, intent, sourceSlot = null) {
+  const capacity = dropIntentCapacityCheckForSession(session, intent, sourceSlot);
+  return capacity && !capacity.ok ? paneCapacityRefusalStatus(session, capacity, intent.targetSlot) : '';
 }
 
 function paneTabsForGenericActions(slot, slots = layoutSlots) {
@@ -27816,7 +28543,7 @@ function paneTabsForGenericActions(slot, slots = layoutSlots) {
 // therefore operate on the selected tab; removing the only pane would make the control appear to
 // do nothing (or blank the whole view). Keep one remaining tab as the stable single-column view.
 function narrowPaneFrameActionTargetsTab(item, slots = layoutSlots) {
-  if (!sidePaneConstrainedMode()) return false;
+  if (!narrowSingleColumnMode()) return false;
   const slot = slotForItem(item, slots);
   return Boolean(slot && paneTabs(slot, slots).length > 1);
 }
@@ -27835,7 +28562,7 @@ function canPaneExpand(item, slots = layoutSlots) {
   return layoutSlotKeys(slots).some(slot => (
     slot !== targetSlot
     && !slotIsSidePane(slot, slots)
-    && paneTabsForGenericActions(slot, slots).length > 0
+    && unpinnedTabsInSlot(slot, slots).length > 0
   ));
 }
 
@@ -27846,25 +28573,33 @@ function minimizePaneFromLayout(item) {
     removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
     return;
   }
-  if (sidePaneConstrainedMode()) return;
+  if (narrowSingleColumnMode()) return;
   if (slotIsSidePane(sourceSlot)) {
     removePaneFromLayout(item);
     return;
   }
-  const minimizedTabs = paneTabsForGenericActions(sourceSlot);
+  const sourceTabs = paneTabsForGenericActions(sourceSlot);
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
-  if (!targetSlot || !minimizedTabs.length) {
+  if (!targetSlot || !sourceTabs.length) {
     removePaneFromLayout(item);
     return;
   }
   const targetActive = activeItemForSide(targetSlot);
   const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  const targetTabs = appendUniqueItems(paneTabsForGenericActions(targetSlot, next), minimizedTabs);
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, targetTabs, targetActive, next);
+  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems: sourceTabs});
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(sourceTabs, capacity, targetSlot), 'danger');
+    return;
+  }
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive, next);
+  const messages = [t('layout.status.minimized', {items: sourceTabs.map(itemLabel).join(', ')})];
+  if (capacity.evicted.length) {
+    messages.push(t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}));
+  }
   applyLayoutSlots(next, {
-    focusSession: targetActive || targetTabs[0],
+    focusSession: targetActive || capacity.finalTabs[0],
     prune: false,
-    message: t('layout.status.minimized', {items: minimizedTabs.map(itemLabel).join(', ')}),
+    message: messages.filter(Boolean).join('; '),
   });
 }
 
@@ -27873,18 +28608,39 @@ function expandPaneFromLayout(item) {
   if (!targetSlot || !canPaneExpand(item)) return;
   const active = activeItemForSide(targetSlot);
   if (!active) return;
-  const targetTabs = appendUniqueItems([], paneTabsForGenericActions(targetSlot));
+  const incomingTabs = [];
   for (const slot of layoutSlotKeys()) {
     if (slot === targetSlot) continue;
-    appendUniqueItems(targetTabs, paneTabsForGenericActions(slot));
+    appendUniqueItems(incomingTabs, unpinnedTabsInSlot(slot));
   }
-  const content = emptyLayoutSlots();
-  content[targetSlot] = paneStateWithTabs(targetTabs, active, paneRoleDefinition(paneRoleGeneric));
-  content[layoutTreeKey] = leafNode(targetSlot);
-  const next = layoutWithPreservedSidePanes(content);
+  if (!incomingTabs.length) return;
+  const capacity = paneCapacityCheckForInsert(targetSlot, incomingTabs, active, layoutSlots);
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(incomingTabs, capacity, targetSlot), 'danger');
+    return;
+  }
+  if (!incomingTabs.some(tab => capacity.finalTabs.includes(tab))) {
+    showLayoutStatus(paneCapacityRefusalStatusForItems(incomingTabs, {
+      ...capacity,
+      ok: false,
+      reason: 'nothing-evictable',
+    }, targetSlot), 'danger');
+    return;
+  }
+  const next = cloneLayoutSlots(layoutSlots);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, active, next);
+  for (const slot of layoutSlotKeys(next)) {
+    if (slot === targetSlot || slotIsSidePane(slot, next)) continue;
+    const pinnedTabs = pinnedTabsInSlot(slot, next);
+    next[slot] = pinnedTabs.length
+      ? paneStateWithTabsForSlot(slot, pinnedTabs, pinnedTabs[0], next)
+      : emptyPaneState(paneRoleForSlot(slot, next));
+  }
   applyLayoutSlots(next, {
     focusSession: active,
     prune: false,
+    preserveMissingSidePane: sidePaneSlots(next).length > 0,
+    preservePlaceholderSlots: true,
     message: t('layout.status.expanded', {item: itemLabel(active)}),
   });
 }
@@ -27924,7 +28680,7 @@ function applyNonFinderLayoutMode(mode) {
 }
 
 function applyLayoutMode(mode) {
-  applyNonFinderLayoutMode(sidePaneConstrainedMode() ? 'single' : normalizeLayoutMode(mode));
+  applyNonFinderLayoutMode(narrowSingleColumnMode() ? 'single' : normalizeLayoutMode(mode));
 }
 
 function setLayoutToSinglePane() {
@@ -28081,8 +28837,10 @@ async function openFileSurfacePane(item) {
   }
   if (sidePaneConstrainedMode()) {
     const next = layoutWithItems(layoutSlots, [resolved], slotForNewSession());
-    const narrowed = narrowSingleColumnLayoutSlots(next, {focusSession: resolved});
-    applyLayoutSlots(narrowed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
+    const placed = narrowSingleColumnMode()
+      ? narrowSingleColumnLayoutSlots(next, {focusSession: resolved})
+      : next;
+    applyLayoutSlots(placed, {focusSession: resolved, prune: false, preserveMissingSidePane: true});
     return true;
   }
   const next = layoutWithSidePaneItems(layoutSlots, [resolved], {side: paneSideLeft});
@@ -28212,16 +28970,19 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   const index = Math.max(0, Math.min(Number.isFinite(insertIndex) ? insertIndex : 0, tabs.length));
   tabs.splice(index, 0, session);
   recordTabActivation(session);
-  // Enforce the per-pane tab cap: if this pane is now over the limit, auto-close the least-recently
-  // used tabs (keeping the new active tab, the Finder, and any dirty editors).
-  const evicted = tabsToEvictForCap(tabs, session);
-  const keptTabs = evicted.length ? tabs.filter(item => !evicted.includes(item)) : tabs;
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, keptTabs, session, next);
+  // Enforce the per-pane tab cap through the shared capacity owner. Later pinned/cap items reuse
+  // the same result shape for visible refusals, preview parity, minimize, and expand.
+  const capacity = paneCapacityCheckForInsert(targetSlot, [], session, next, {tabs});
+  if (!capacity.ok) {
+    showLayoutStatus(paneCapacityRefusalStatus(session, capacity, targetSlot), 'danger');
+    return false;
+  }
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, session, next);
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
     preservePlaceholderSlots: options.preserveSourcePlaceholder === true,
-    message: evicted.length ? t('layout.status.autoClosed', {items: evicted.map(itemLabel).join(', '), limit: maxTabsPerPane()}) : '',
+    message: capacity.evicted.length ? t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}) : '',
   });
   return true;
 }
@@ -28465,7 +29226,7 @@ function tabDirectionalActionCapabilities(item, sourceSlot = slotForItem(item), 
   const allowed = Boolean(
     isLayoutItem(item)
       && sourceSlot
-      && !sidePaneConstrainedMode()
+      && !narrowSingleColumnMode()
       && !tabIsPinned(item)
       && sourceRect,
   );
@@ -29214,109 +29975,49 @@ function repoSummaryAsGit(repo) {
   return gitFromRepoSummary(repo);
 }
 
-function activeAgentWindowMetadataItemForProjectMeta(session, info) {
-  if (typeof tmuxWindowCurrentActiveIndex !== 'function' || typeof windowViewModel !== 'function') return null;
-  const activeWindowIndex = tmuxWindowCurrentActiveIndex(session, info);
-  if (activeWindowIndex === null) return null;
-  const agent = windowViewModel(session, activeWindowIndex, info, autoApproveStates.get(session));
-  const kind = typeof agentWindowKind === 'function' ? agentWindowKind(agent?.kind) : String(agent?.kind || '').trim().toLowerCase();
-  if (!['claude', 'codex'].includes(kind)) return null;
-  const pathEntries = typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : [];
-  const paths = pathEntries.map(item => item.path).filter(Boolean);
-  const meta = {
-    window: String(agent?.window ?? ''),
-    window_index: tmuxWindowIndexKey(agent?.window_index ?? agent?.window),
-    window_name: String(agent?.window_name || ''),
-    path: paths[0] || (typeof agentWindowPrimaryPath === 'function' ? agentWindowPrimaryPath(agent) : String(agent?.path || '')),
-    paths,
-    path_entries: pathEntries,
-    git: typeof agentWindowPrimaryGit === 'function' ? agentWindowPrimaryGit(agent) : (agent?.git || null),
-  };
-  return {agent, meta};
-}
-
-function projectMetaPathFromWindowMetadata(meta) {
-  const pathEntries = Array.isArray(meta?.path_entries) ? meta.path_entries.map(item => String(item?.path || '').trim()).filter(Boolean) : [];
-  if (pathEntries.length) return pathEntries[0];
-  const paths = Array.isArray(meta?.paths) ? meta.paths.map(path => String(path || '').trim()).filter(Boolean) : [];
-  if (paths.length) return paths[0];
-  const path = String(meta?.path || '').trim();
-  if (path) return path;
-  return String(meta?.git?.root || '').trim();
-}
-
 function projectMetaContextOverridesPrimaryPullRequest(info, contextGit) {
-  const projectGit = info?.project?.git;
-  const primaryPullRequest = displayPullRequest(info);
-  if (!primaryPullRequest?.number) return true;
-  const primaryRoot = repoRootKey(projectGit?.root);
-  const contextRoot = repoRootKey(contextGit?.root);
-  // The selected project is transcript-derived and carries an open PR. A raw pane cwd or a
-  // Tabber activity-cache path is weaker evidence, so it must not hide that PR. A different
-  // active window with its own resolved PR remains an equally strong, more local context.
-  if (!primaryRoot || !contextRoot || primaryRoot === contextRoot) return contextRoot === primaryRoot;
   return Boolean(displayPullRequestForGit(info, contextGit)?.number);
 }
 
 function projectMetaSelection(session, info) {
-  const project = info?.project || {};
-  const repos = sessionRepoSummaries(info);
   const explicitRoot = repoRootKey(sessionRepoDisplayRoot.get(session));
-  const primaryRoot = repoRootKey(project.git?.root);
-  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   const activePane = activeWindowPaneForProjectMeta(session, info);
-  const activePath = normalizeDirectoryPath(activePane?.current_path || '');
-  const activeAgent = activePane ? agentForPane(info, activePane) : null;
-  const activeAgentKind = String(activeAgent?.kind || activePane?.process_label || activePane?.command || '').toLowerCase();
-  const activeWindowUsesTranscript = ['claude', 'codex'].includes(typeof agentWindowKind === 'function' ? agentWindowKind(activeAgentKind) : activeAgentKind);
-  const activeWindowMetadataItem = !explicitRoot ? activeAgentWindowMetadataItemForProjectMeta(session, info) : null;
-  const activeWindowMeta = activeWindowMetadataItem?.meta || null;
-  const activeWindowMetaHasSharedData = Boolean(activeWindowMeta?.git) || Boolean(projectMetaPathFromWindowMetadata(activeWindowMeta));
-  const activeWindowMetaPath = projectMetaPathFromWindowMetadata(activeWindowMeta);
+  const activeTarget = String(activePane?.target || '');
+  // The active TmuxWindow's PathObservation owns the Info Bar context. Browser-selected terminal
+  // state and auto-approve status are presentation inputs only; neither may recreate a parallel
+  // per-window Git owner or displace the active tmux window's canonical worktree.
+  const workSummary = sessionWorkSummary(session, info, {tmuxTarget: explicitRoot ? '' : activeTarget});
+  const repos = workSummary.repositories;
+  const activePath = normalizeDirectoryPath(activePane?.current_path || workSummary.selectedPath || '');
+  const hasActiveTmuxTarget = Boolean(activeTarget);
+  const primaryRoot = repoRootKey(workSummary.git?.root);
+  const primaryRepoIndex = primaryRoot ? repos.findIndex(repo => repoRootKey(repo.root) === primaryRoot) : -1;
   let repoIndex = selectedSessionRepoIndex(session, info);
-  if (!explicitRoot && activePath && repos.length) {
+  const hasPinnedRepoSelection = selectedSessionRepoIndex(session, info) >= 0 && Boolean(sessionRepoDisplayRoot.get(session));
+  if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && primaryRepoIndex >= 0) {
+    repoIndex = primaryRepoIndex;
+  } else if (!explicitRoot && !hasPinnedRepoSelection && hasActiveTmuxTarget && activePath && repos.length) {
     const activeRepoIndex = repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activePath, repo.root));
     const activeRepoGit = activeRepoIndex >= 0 ? repoSummaryAsGit(repos[activeRepoIndex]) : null;
     if (activeRepoIndex >= 0 && projectMetaContextOverridesPrimaryPullRequest(info, activeRepoGit)) repoIndex = activeRepoIndex;
-  }
-  if (!explicitRoot && primaryRepoIndex >= 0 && !projectMetaContextOverridesPrimaryPullRequest(info, repoSummaryAsGit(repos[repoIndex]))) {
-    repoIndex = primaryRepoIndex;
   }
   let selectedRepo = repoIndex >= 0 ? repos[repoIndex] : null;
   let git = selectedRepo ? repoSummaryAsGit(selectedRepo) : displayedSessionGit(session, info);
   let repoSwitchRepos = repos;
   let fullPath = selectedRepo?.cwd || selectedRepo?.root || panelFullPath(session, info);
-  if (!explicitRoot && activeWindowMetaHasSharedData) {
-    const activeMetaRoot = repoRootKey(activeWindowMeta.git?.root || '');
-    const activeMetaRepoIndex = activeMetaRoot
-      ? repos.findIndex(repo => repoRootKey(repo.root) === activeMetaRoot)
-      : activeWindowMetaPath
-        ? repos.findIndex(repo => repo?.root && pathIsInsideDirectory(activeWindowMetaPath, repo.root))
-        : -1;
-    const activeMetaGit = activeWindowMeta.git || (activeMetaRepoIndex >= 0 ? repoSummaryAsGit(repos[activeMetaRepoIndex]) : null);
-    if (projectMetaContextOverridesPrimaryPullRequest(info, activeMetaGit)) {
-      if (activeMetaRepoIndex >= 0) {
-        repoIndex = activeMetaRepoIndex;
-        selectedRepo = repos[repoIndex];
-      }
-      if (activeWindowMeta.git) git = activeWindowMeta.git;
-      else if (selectedRepo) git = repoSummaryAsGit(selectedRepo);
-      if (activeWindowMetaPath) fullPath = activeWindowMetaPath;
-    }
-  }
-  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root) && !activeWindowUsesTranscript) {
+  if (!explicitRoot && activePane && git?.root && activePath && !pathIsInsideDirectory(activePath, git.root)) {
     git = null;
     selectedRepo = null;
     repoIndex = -1;
     repoSwitchRepos = [];
     fullPath = activePath;
   }
-  return {project, repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
+  return {repos: repoSwitchRepos, repoIndex, selectedRepo, git, fullPath};
 }
 
 function panelFullPath(session, info) {
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const activePane = activeWindowPaneForProjectMeta(session, info);
   if (activePane?.current_path) return activePane.current_path;
   const panes = Array.isArray(info?.panes) ? info.panes : [];
@@ -29324,6 +30025,7 @@ function panelFullPath(session, info) {
   if (nonHomePane?.current_path) return nonHomePane.current_path;
   if (git?.cwd) return git.cwd;
   if (git?.root) return git.root;
+  if (summary.selectedPath) return summary.selectedPath;
   if (info?.selected_pane?.current_path) return info.selected_pane.current_path;
   return '';
 }
@@ -29338,8 +30040,9 @@ function compactHomePath(path) {
 }
 
 function projectMetaParts(session, info, options = {}) {
-  const {project, repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
-  const showingPrimaryGit = !selectedRepo || repoRootKey(project.git?.root) === repoRootKey(selectedRepo.root);
+  const summary = sessionWorkSummary(session, info);
+  const {repos, repoIndex, selectedRepo, git, fullPath} = projectMetaSelection(session, info);
+  const showingPrimaryGit = !selectedRepo || repoRootKey(git?.root) === repoRootKey(selectedRepo.root);
   const metadataParts = [];
   const fullText = options.fullText === true;
   const repoSwitchHtml = repos.length > 1 ? (() => {
@@ -29356,11 +30059,11 @@ function projectMetaParts(session, info, options = {}) {
     metadataParts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return {repoSwitchHtml, metadataParts};
   }
-  const prGit = showingPrimaryGit ? (project.git || git) : (selectedRepo ? gitFromRepoSummary(selectedRepo) : git);
+  const prGit = selectedRepo ? gitFromRepoSummary(selectedRepo) : git;
   const pr = displayPullRequestForGit(info, prGit);
   if (pr?.number) metadataParts.push(pullRequestLinkHtml(pr));
-  if (showingPrimaryGit) {
-    for (const issue of project.linear || []) {
+  if (showingPrimaryGit && (!selectedRepo || repoRootKey(selectedRepo.root) === repoRootKey(summary.git?.root))) {
+    for (const issue of summary.linearIssues) {
       const state = issue.state ? ` ${issue.state}` : '';
       metadataParts.push(linkHtml(issue.url, `${issue.identifier}${state}`, issue.title || ''));
     }
@@ -29374,7 +30077,7 @@ function projectMetaParts(session, info, options = {}) {
     const ci = pullRequestCiStatus(pr);
     if (ci) metadataParts.push(pullRequestStatusBadgeHtml('', ci.text, ci.className, {variant: 'meta'}));
   }
-  const desc = pr?.title || pr?.description || (showingPrimaryGit ? (project.linear || []).find(issue => issue.title)?.title : '');
+  const desc = pr?.title || pr?.description || (showingPrimaryGit ? summary.linearIssues.find(issue => issue.title)?.title : '');
   if (desc) {
     const descText = fullText ? String(desc || '').replace(/\s+/g, ' ').trim() : shortText(desc, 160);
     if (descText) metadataParts.push(`<span class="meta-desc">${esc(descText)}</span>`);
@@ -29488,8 +30191,8 @@ function summaryContextHtml(session, info, agent) {
     })));
   }
 
-  const project = info?.project || {};
-  const git = project.git;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   if (git) {
     lines.push(summaryContextLine(t('common.field.branch'), `${repoBranchDisplayText(git)}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine(t('popover.repo'), git.root));
@@ -29504,7 +30207,7 @@ function summaryContextHtml(session, info, agent) {
     const label = pullRequestLinkLabel(pr);
     lines.push(summaryContextLine(t('pref.section.github'), `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
   }
-  for (const issue of project.linear || []) {
+  for (const issue of summary.linearIssues) {
     const label = `${issue.identifier}${issue.state ? ` ${issue.state}` : ''}`;
     lines.push(summaryContextLine(t('info.field.linear'), `${label} ${issue.title || ''}`, issue.url, issue.identifier));
   }
@@ -30999,7 +31702,7 @@ function dropZoneForRect(event, rect) {
 }
 
 function dropIntentForEvent(event, options = {}) {
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     const slotNode = event.target?.closest?.('.drop-slot');
     const targetSlot = slotNode?.dataset.slot || firstNonFinderPaneSlot() || layoutSlotKeys()[0] || slotForNewSession();
     const targetRect = slotNode?.getBoundingClientRect?.() || grid.getBoundingClientRect();
@@ -31157,7 +31860,7 @@ function itemCanSplitSinglePurposePane(item, intent) {
 function dropIntentAllowsSession(session, intent, options = {}) {
   if (!dropItemCanBeDragged(session, options)) return false;
   const sourceSlot = options.sourceSlot || slotForItem(session);
-  if (sidePaneConstrainedMode()) {
+  if (narrowSingleColumnMode()) {
     return Boolean(intent?.targetSlot)
       && intent.zone === 'middle'
       && paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
@@ -31191,6 +31894,7 @@ function dropIntentAllowsSession(session, intent, options = {}) {
   if (!paneRoleAllowsItemTransfer(session, sourceSlot, intent.targetSlot, layoutSlots, {
     allowCandidate: options.allowCandidate === true,
   })) return false;
+  if (!dropIntentCapacityAllowsSession(session, intent, sourceSlot)) return false;
   if (slotIsSidePane(intent.targetSlot)) {
     return intent.zone === 'middle'
       || (['top', 'bottom'].includes(intent.zone) && dropIntentHasRoomForItem(session, intent));
@@ -31351,7 +32055,7 @@ function classifyLayoutDrag(event, {intentForFile, intentForSession, suppressSes
   const intent = intentForSession?.(event) || null;
   if (intent) intent.item = session.session;
   if (ignoreMissingIntent && !intent) return null;
-  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent), dropEffect: 'move'};
+  return {kind: 'session', payload: session, intent, allowed: dropIntentAllowsSession(session.session, intent, {sourceSlot: session.sourceSlot}), dropEffect: 'move'};
 }
 
 function applyLayoutDragIntent(event, drag, {phase = 'over'} = {}) {
@@ -31524,10 +32228,16 @@ function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host
 
 function dockviewRootBoundaryDropIntent(event) {
   if (narrowSingleColumnMode()) return null;
-  const pointerIntent = event?.nativeEvent
-    ? dockviewTabPointerRootBoundaryIntent(event.nativeEvent, dockviewLayoutState.tabPointerDrag)
-    : null;
-  if (pointerIntent) return pointerIntent;
+  const tabPointerDrag = dockviewLayoutState.tabPointerDrag;
+  if (event?.nativeEvent && tabPointerDrag?.item) {
+    // Dockview labels the tab strip at the top of an outermost pane as a `top` edge. That is
+    // useful for a deliberate root drop, but wrong for an ordinary tab move across that strip.
+    // The pointer gesture owns the decision while it is live: it only returns a root intent when
+    // the drag actually reaches an eligible root boundary. Falling through to Dockview's broad
+    // overlay here would recreate the false top-root drop after the shared pointer resolver
+    // rejected it.
+    return dockviewTabPointerRootBoundaryIntentWithMemory(event.nativeEvent, tabPointerDrag);
+  }
   if (!['content', 'edge', 'tab'].includes(event?.kind) || !layoutSplitZone(event.position)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
@@ -31693,8 +32403,12 @@ function dockviewShowRootBoundaryPreview(intent) {
 
 function dockviewTrackRootBoundaryOverlay(event) {
   const invalidTabDrop = dockviewTabDropViolatesPinnedPartition(event);
-  dockviewSetInvalidTabDropPreview(invalidTabDrop);
-  if (invalidTabDrop) {
+  const paneInfo = dockviewPaneContentDropInfo(event);
+  const capacityRefusal = dockviewTabCapacityRefusalStatus(event) || (paneInfo?.intent?.zone === 'middle'
+    ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+    : '');
+  dockviewSetInvalidTabDropPreview(invalidTabDrop || Boolean(capacityRefusal));
+  if (invalidTabDrop || capacityRefusal) {
     dockviewLayoutState.pendingRootBoundaryDrop = null;
     dockviewClearRootBoundaryPreview();
     return;
@@ -31901,6 +32615,12 @@ function dockviewTabDropViolatesPinnedPartition(event) {
     : info.adjustedIndex < info.pinnedBoundary;
 }
 
+function dockviewTabCapacityRefusalStatus(event) {
+  const info = dockviewTabStripEndDropInfoForEvent(event) || dockviewTabInsertionInfo(event);
+  if (!info || !info.targetSlot) return '';
+  return dropIntentCapacityRefusalStatus(info.item, {targetSlot: info.targetSlot, zone: 'middle'}, info.sourceSlot);
+}
+
 function dockviewPinnedTabCrossPaneViolation(info) {
   if (!info?.item || !tabIsPinned(info.item) || !info.sourceSlot) return false;
   if (info.createsPane === true) return true;
@@ -31968,6 +32688,9 @@ function dockviewBeginTabPointerDrag(event, item) {
     slot,
     x: Number(event.clientX) || 0,
     y: Number(event.clientY) || 0,
+    rootBoundaryStartEdges: dockviewRootBoundaryEdgesAtPoint(event),
+    rootBoundaryExitedEdges: {},
+    lastRootBoundaryIntent: null,
   };
 }
 
@@ -31978,11 +32701,38 @@ function dockviewTabContentInteractionSuppressed() {
   );
 }
 
+function dockviewRootBoundaryEdgesAtPoint(event, rect = null) {
+  const targetRect = rect || rootBoundaryLayoutTarget()?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
+  if (!targetRect?.width || !targetRect?.height) return {};
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return {};
+  const xBand = layoutBoundaryDropBandPx(targetRect.width);
+  const yBand = layoutBoundaryDropBandPx(targetRect.height);
+  return {
+    left: x >= targetRect.left && x <= targetRect.left + xBand,
+    right: x <= targetRect.right && x >= targetRect.right - xBand,
+    top: y >= targetRect.top && y <= targetRect.top + yBand,
+    bottom: y <= targetRect.bottom && y >= targetRect.bottom - yBand,
+  };
+}
+
+function dockviewUpdateRootBoundaryExitEdges(event, state, rect) {
+  if (!state) return;
+  const startEdges = state.rootBoundaryStartEdges || {};
+  const currentEdges = dockviewRootBoundaryEdgesAtPoint(event, rect);
+  const exitedEdges = state.rootBoundaryExitedEdges || (state.rootBoundaryExitedEdges = {});
+  for (const zone of ['left', 'right', 'top', 'bottom']) {
+    if (startEdges[zone] && !currentEdges[zone]) exitedEdges[zone] = true;
+  }
+}
+
 function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState.tabPointerDrag) {
   if (!state?.item || narrowSingleColumnMode()) return null;
   const target = rootBoundaryLayoutTarget();
   const rect = target?.rect || dockviewLayoutState.host?.getBoundingClientRect?.();
   if (!rect) return null;
+  dockviewUpdateRootBoundaryExitEdges(event, state, rect);
   const dx = (Number(event.clientX) || 0) - state.x;
   const dy = (Number(event.clientY) || 0) - state.y;
   const horizontalZone = Math.abs(dx) >= DRAG_HYSTERESIS_PX
@@ -31991,9 +32741,23 @@ function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState
   const verticalZone = Math.abs(dy) >= DRAG_HYSTERESIS_PX
     ? rootBoundaryDropZoneForEvent(event, rect, dy >= 0 ? 'bottom' : 'top')
     : null;
-  const zone = horizontalZone && verticalZone
+  let zone = horizontalZone && verticalZone
     ? (Math.abs(dx) >= Math.abs(dy) ? horizontalZone : verticalZone)
     : (horizontalZone || verticalZone);
+  // A deliberate edge gesture can return to the tab's original root band, making its final
+  // start-to-end delta too small to identify an axis. The tracked exit proves it was not merely
+  // released in the header; use the current boundary only for that re-entry case.
+  if (!zone) {
+    const reenteredZone = rootBoundaryDropZoneForEvent(event, rect);
+    if (reenteredZone && state.rootBoundaryStartEdges?.[reenteredZone] && state.rootBoundaryExitedEdges?.[reenteredZone]) {
+      zone = reenteredZone;
+    }
+  }
+  // A tab header can itself live inside an outer root band's top/left/right/bottom hit area.
+  // Require the pointer to leave that same band once before it can create a new outer pane there.
+  // That preserves ordinary tab movement from the outermost pane while retaining an explicit,
+  // intentional root-edge gesture: move into the content area, then back to the desired edge.
+  if (zone && state.rootBoundaryStartEdges?.[zone] && !state.rootBoundaryExitedEdges?.[zone]) return null;
   if (!layoutSplitZone(zone) || !dockviewSplitLayoutHasMinimumSize(zone, rect)) return null;
   return {
     item: state.item,
@@ -32004,13 +32768,27 @@ function dockviewTabPointerRootBoundaryIntent(event, state = dockviewLayoutState
   };
 }
 
+function dockviewTabPointerRootBoundaryIntentWithMemory(event, state = dockviewLayoutState.tabPointerDrag) {
+  if (!state) return null;
+  const intent = dockviewTabPointerRootBoundaryIntent(event, state);
+  if (intent) {
+    state.lastRootBoundaryIntent = intent;
+    return intent;
+  }
+  const x = Number(event?.clientX);
+  const y = Number(event?.clientY);
+  const hasUsableCoordinates = Number.isFinite(x) && Number.isFinite(y) && (x !== 0 || y !== 0);
+  if (hasUsableCoordinates) state.lastRootBoundaryIntent = null;
+  return hasUsableCoordinates ? null : state.lastRootBoundaryIntent;
+}
+
 function dockviewTrackTabPointerDrag(event) {
   const state = dockviewLayoutState.tabPointerDrag;
   if (!state?.item) return;
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
-  const intent = dockviewTabPointerRootBoundaryIntent(event, state);
+  const intent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) dockviewShowRootBoundaryPreview(intent);
   else dockviewClearRootBoundaryPreview();
 }
@@ -32036,14 +32814,13 @@ function dockviewFinishTabPointerDrag(event) {
     void dockviewCommitSideVerticalDrop(sideIntent);
     return;
   }
-  const rootIntent = dockviewTabPointerRootBoundaryIntent(event, state);
+  const rootIntent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
   if (rootIntent && !dockviewPinnedTabRootBoundaryViolation(rootIntent)) {
-    const signature = layoutSlotsSignature(layoutSlots);
-    window.setTimeout(() => {
-      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
-      if (layoutSlotsSignature(layoutSlots) !== signature || !itemInLayout(rootIntent.item)) return;
-      void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
-    }, 0);
+    // The app owns the visible root-edge preview. Commit it before Dockview's generic tab-drop
+    // stamp can make the pointer fallback stand down without producing the requested root split.
+    event.preventDefault?.();
+    dockviewLayoutState.tabDropHandledAt = Date.now();
+    void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
     return;
   }
   const stripEnd = dockviewTabStripEndDropInfoForPointer(event, state);
@@ -32234,20 +33011,45 @@ function dockviewFileDropIntentForEvent(event) {
   return dockviewGroupDropIntentForEvent(event);
 }
 
+function dockviewCapacityRefusalForDrag(drag) {
+  if (drag?.kind !== 'session' || !drag.intent) return '';
+  return dropIntentCapacityRefusalStatus(drag.payload?.session, drag.intent, drag.payload?.sourceSlot || slotForItem(drag.payload?.session));
+}
+
 function dockviewHandleFileDragOver(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }));
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'none';
+    dockviewSetInvalidTabDropPreview(true);
+    showDropPreview(drag.intent);
+    return;
+  }
+  applyLayoutDragIntent(event, drag);
 }
 
 function dockviewHandleFileDrop(event) {
-  applyLayoutDragIntent(event, classifyLayoutDrag(event, {
+  const drag = classifyLayoutDrag(event, {
     intentForFile: dockviewFileDropIntentForEvent,
     intentForSession: dockviewGroupDropIntentForEvent,
     ignoreMissingIntent: true,
-  }), {phase: 'drop'});
+  });
+  const capacityRefusal = dockviewCapacityRefusalForDrag(drag);
+  if (capacityRefusal) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
+    showLayoutStatus(capacityRefusal, 'danger');
+    return;
+  }
+  applyLayoutDragIntent(event, drag, {phase: 'drop'});
 }
 
 function dockviewInstallFileDropBridge(host) {
@@ -32256,6 +33058,7 @@ function dockviewInstallFileDropBridge(host) {
   const dragLeave = event => {
     if (host?.contains?.(event.relatedTarget)) return;
     clearDropPreview();
+    dockviewSetInvalidTabDropPreview(false);
   };
   host.addEventListener('dragover', dragOver, true);
   host.addEventListener('drop', drop, true);
@@ -32578,6 +33381,14 @@ function dockviewInit() {
         event.preventDefault();
         return;
       }
+      const tabCapacityRefusal = dockviewTabCapacityRefusalStatus(event);
+      if (tabCapacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(tabCapacityRefusal, 'danger');
+        return;
+      }
       const tabInsertion = dockviewTabInsertionInfo(event);
       // A tab-header drop is `kind: tab`, not `kind: content`. Dockview otherwise owns that move
       // internally and its later adoption path rejects the protected home group. A triplet item
@@ -32603,6 +33414,16 @@ function dockviewInit() {
         return;
       }
       const paneInfo = dockviewPaneContentDropInfo(event);
+      const capacityRefusal = paneInfo?.intent?.zone === 'middle'
+        ? dropIntentCapacityRefusalStatus(paneInfo.item, paneInfo.intent, paneInfo.intent.sourceSlot)
+        : '';
+      if (capacityRefusal) {
+        dockviewLayoutState.pendingRootBoundaryDrop = null;
+        dockviewClearRootBoundaryPreview();
+        event.preventDefault();
+        showLayoutStatus(capacityRefusal, 'danger');
+        return;
+      }
       // Dockview's default center-drop mutates its private group first and relies on a later
       // adoption pass. That lost center drops into the protected triplet home column. Apply every
       // allowed center move through the same layout transaction as the rest of the app instead.
@@ -33299,6 +34120,7 @@ function createDockviewTabRenderer() {
     }
     syncDockviewTabShell(element, item, api);
     if (paneTabShouldPreserve(element)) {
+      syncPaneTabPinnedIcon(element, item);
       const popover = paneTabPopoverForAnchor(element);
       if (popover) positionPaneTabPopover(element, popover);
       if (isFileEditorItem(item)) refreshFileTabPopover(element, item);
@@ -34206,6 +35028,16 @@ function syncClassListPreserving(node, freshClassName, preservedNames = []) {
   }
 }
 
+function syncPaneTabPinnedIcon(tab, item) {
+  const existing = tab.querySelector(':scope > .pane-tab-pin-icon');
+  if (!tabIsPinned(item)) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  tab.insertAdjacentHTML('afterbegin', pinnedTabIconHtml(item));
+}
+
 function syncPreservedPaneTab(tab, fresh) {
   const hoverState = tab.dataset.popoverHoverState || '';
   syncClassListPreserving(tab, fresh.className, ['popover-open', 'dragging']);
@@ -34218,6 +35050,7 @@ function syncPreservedPaneTab(tab, fresh) {
   const label = fresh.getAttribute('aria-label');
   if (label) tab.setAttribute('aria-label', label);
   else tab.removeAttribute('aria-label');
+  syncPaneTabPinnedIcon(tab, fresh.dataset.paneTab);
 }
 
 function paneTabPopoverItemToRestore(strip) {
@@ -34620,7 +35453,13 @@ function fileEditorPaneTabHtml(item, options = {}) {
 }
 
 function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
-  const pr = options.showBadges === false ? null : displayPullRequest(info);
+  // Callers such as tests and layout previews can pass a fresh metadata payload before it has
+  // entered transcriptMetadataState. Always use the same graph-backed input for badges and detail
+  // instead of silently reading an unrelated cached session record.
+  const summary = sessionWorkSummary(session, info);
+  const pr = options.showBadges === false
+    ? null
+    : (summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info));
   const desc = options.showDetail === false
     ? ''
     : (options.detail !== undefined ? String(options.detail || '') : sessionTabDescription(session, info));
@@ -34631,7 +35470,7 @@ function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
     ? ''
     : sessionTabLeadingActivityHtml(session, info, auto, {enabledOnly: false, toggle: options.toggleYolo !== false, state});
   const stateHtml = options.showState === false || !state ? '' : sessionStateHtml(state);
-  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}`;
+  const badgeHtml = options.showBadges === false ? '' : `${defaultBranchBadgeHtml(session, info)}${pullRequestSummaryBadgesHtml(session, info)}`;
   return `<span class="pane-tab-core"><span class="session-tab-leading-activity">${leadingHtml}</span><span class="session-button-prefix">${sessionNumberNameHtml(session, {labelHtml: options.sessionLabelHtml})}</span>
     <span class="session-button-text">${stateHtml}${badgeHtml}${detailHtml}</span></span>`;
 }
@@ -35378,18 +36217,15 @@ function applyTmuxWindowActiveIndexToTranscriptInfo(session, windowIndex, option
 function sessionMetadataIsLightweight(info) {
   if (!info || typeof info !== 'object') return false;
   if (info.metadata_loading === true) return true;
-  const project = info.project;
-  return Boolean(project && typeof project === 'object' && project.loading === true);
+  const workGraph = info.work_graph;
+  return Boolean(workGraph && typeof workGraph === 'object' && workGraph.loading === true);
 }
 
 function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
   if (!sessionMetadataIsLightweight(nextInfo) || !previousInfo || typeof previousInfo !== 'object') return nextInfo;
   return {
     ...nextInfo,
-    project: previousInfo.project || nextInfo.project,
-    window_metadata: Array.isArray(previousInfo.window_metadata) && previousInfo.window_metadata.length
-      ? previousInfo.window_metadata
-      : nextInfo.window_metadata,
+    work_graph: previousInfo.work_graph || nextInfo.work_graph,
     metadata_loading: true,
   };
 }
@@ -40671,6 +41507,8 @@ const jsDebugGraphGeometry = (() => {
 const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
 const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
 const jsDebugHistoryOlderOverlayDelayMs = 120;
+const jsDebugHistoryRetryInitialDelayMs = 10_000;
+const jsDebugHistoryRetryMaxDelayMs = 5 * 60_000;
 const jsDebugHistoryReadiness = {
   phase: 'idle',
   requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
@@ -40687,10 +41525,28 @@ const jsDebugHistoryReadiness = {
   error: '',
   generation: 0,
   loadingStartedAtMs: 0,
+  nextAutoRetryAtMs: 0,
   overlayVisible: false,
   overlayTimer: null,
 };
 let jsDebugSubTab = 'graph';
+const jsDebugSystemPollMs = 5000;
+const jsDebugLogsPollMs = 5000;
+const jsDebugSystemState = {
+  payload: null,
+  error: '',
+  inFlight: false,
+  updatedAt: 0,
+};
+const jsDebugLogLevels = Object.freeze(['info', 'warning', 'debug', 'error']);
+const jsDebugLogsState = {
+  payload: [],
+  error: '',
+  inFlight: false,
+  updatedAt: 0,
+  clearedAt: 0,
+  levels: new Set(jsDebugLogLevels),
+};
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugGraphResolutionOverrideSeconds = 0;
 let jsDebugGraphChartLayout = 0;
@@ -40699,6 +41555,7 @@ const jsDebugStatsPollState = {
   pending: false,
   pendingForceGraphRefresh: false,
   firstSampleReceived: false,
+  lastSampleAtMs: 0,
 };
 const jsDebugStatsUploadState = {
   timer: null,
@@ -40722,6 +41579,19 @@ let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
+// Output is the compatibility view: before component-level accounting existed,
+// Model tokens/min was a projection of generated (output) transcript tokens.
+const jsDebugGraphModelTokenDimensions = Object.freeze([
+  Object.freeze({key: 'output', labelKey: 'debug.cost.output', fallback: 'Output'}),
+  Object.freeze({key: 'all', labelKey: 'debug.modelTokens.allBillable', fallback: 'All billable'}),
+  Object.freeze({key: 'input', labelKey: 'debug.cost.input', fallback: 'Input'}),
+  Object.freeze({key: 'cacheRead', labelKey: 'debug.modelTokens.cacheRead', fallback: 'Cache read'}),
+  Object.freeze({key: 'cacheWrite', labelKey: 'debug.modelTokens.cacheWrite', fallback: 'Cache write'}),
+]);
+let jsDebugGraphModelTokenDimension = 'output';
+const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
+const jsDebugCostComponentSortState = {key: 'cost', direction: 'desc'};
+const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 60, label: '1m'},
   {seconds: 5 * 60, label: '5m'},
@@ -40753,7 +41623,8 @@ const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
-const jsDebugStatsPollTimeoutMs = 5000;
+const jsDebugStatsPollTimeoutMs = 8000;
+const jsDebugStatsHistoryMaxTimeoutMs = 30000;
 const jsDebugStatsHistoryFlushMs = 30000;
 const jsDebugGraphRefreshMs = 30001;
 // A request-driven client can be quiet between normal polls. Only mark the portion
@@ -40762,10 +41633,11 @@ const jsDebugGraphRefreshMs = 30001;
 const jsDebugGraphNoDataOverlayDelayMs = 30000;
 const jsDebugStatsHistoryMaxPoints = 6000;
 const jsDebugStatsHistoryPostMaxRecords = 1000;
+const jsDebugStatsHistoryPostMaxBytes = 96 * 1024;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphThisClientId = 'this-client';
@@ -40778,27 +41650,59 @@ const jsDebugGraphDisplayedSummarySpecs = Object.freeze({
   clientRequests: {
     attribute: 'displayed-client-request-sum',
     labelKey: 'debug.graph.sumDisplayedClientRequests',
+    descKey: 'debug.graph.sumDisplayedClientRequests.desc',
     value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['apiCount', 'sseCount']),
     format: debugGraphTokenNumberText,
   },
   bandwidth: {
     attribute: 'displayed-bandwidth-sum',
     labelKey: 'debug.graph.sumDisplayed',
+    descKey: 'debug.graph.sumDisplayed.desc',
     value: buckets => debugGraphDisplayedClientFieldSum(buckets, ['bandwidthBytes']),
     format: value => debugGraphValueText(value, 'bytes'),
   },
   agentTokens: {
     attribute: 'displayed-token-sum',
     labelKey: 'debug.graph.sumDisplayed',
+    descKey: 'debug.graph.sumDisplayed.desc',
     value: debugGraphAgentTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
   modelTokens: {
     attribute: 'displayed-token-sum',
     labelKey: 'debug.graph.sumDisplayed',
-    value: debugGraphAgentTokenDisplayedSum,
+    descKey: 'debug.graph.sumDisplayed.desc',
+    value: debugGraphModelTokenDisplayedSum,
     format: debugGraphTokenNumberText,
   },
+});
+const jsDebugGraphDescriptionKeyByLabelKey = Object.freeze({
+  'debug.graph.metric.api': 'debug.graph.metric.api.desc',
+  'debug.graph.metric.sse': 'debug.graph.metric.sse.desc',
+  'debug.graph.metric.bandwidth': 'debug.graph.metric.bandwidth.desc',
+  'debug.graph.meta.removal': 'debug.graph.meta.removal.desc',
+  'debug.graph.meta.rss': 'debug.graph.meta.rss.desc',
+  'debug.graph.meta.serverSequence': 'debug.graph.meta.serverSequence.desc',
+  'debug.graph.meta.totalTraffic': 'debug.graph.meta.totalTraffic.desc',
+  'debug.graph.meta.uptime': 'debug.graph.meta.uptime.desc',
+  'debug.graph.status.attention': 'debug.graph.status.attention.desc',
+  'debug.graph.status.transition': 'debug.graph.status.transition.desc',
+  'debug.graph.series.allAgentsTotal': 'debug.graph.series.allAgentsTotal.desc',
+  'debug.graph.series.allClientsApiSseTotal': 'debug.graph.series.allClientsApiSseTotal.desc',
+  'debug.graph.series.defaultProcessCpu': 'debug.graph.series.defaultProcessCpu.desc',
+  'debug.graph.series.otherClientsAverage': 'debug.graph.series.otherClientsAverage.desc',
+  'debug.graph.series.processCpu': 'debug.graph.series.processCpu.desc',
+  'debug.graph.series.systemCpu': 'debug.graph.series.systemCpu.desc',
+  'debug.graph.series.systemMemory': 'debug.graph.series.systemMemory.desc',
+  'debug.graph.series.thisClient': 'debug.graph.series.thisClient.desc',
+  'debug.graph.series.tokensPerAgent': 'debug.graph.series.tokensPerAgent.desc',
+  'debug.graph.sumDisplayed': 'debug.graph.sumDisplayed.desc',
+  'debug.graph.sumDisplayedClientRequests': 'debug.graph.sumDisplayedClientRequests.desc',
+  'debug.modelTokens.allBillable': 'debug.modelTokens.allBillable.desc',
+  'debug.modelTokens.cacheRead': 'debug.modelTokens.cacheRead.desc',
+  'debug.modelTokens.cacheWrite': 'debug.modelTokens.cacheWrite.desc',
+  'state.idle': 'debug.graph.status.idle.desc',
+  'state.working': 'debug.graph.status.working.desc',
 });
 const jsDebugGraphClientMetrics = Object.freeze([
   {key: 'api', labelKey: 'debug.graph.metric.api', unit: 'countPerSecond', value: bucket => debugGraphBucketRate(bucket, bucket.apiCount), hasData: bucket => Number(bucket.apiCount || 0) > 0},
@@ -40879,17 +41783,20 @@ const jsDebugGraphSeries = Object.freeze([
   {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'memory', labelKey: 'debug.graph.chart.memory', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10},
-  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
-  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
-  {key: 'latency', labelKey: 'common.clientLatency', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10, statusNoDataOverlay: true},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
+  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
+  {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
+const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
+  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title', toggleLabelEn: 'Cost'})]
+  : [group]));
 
 function debugGraphLocalizedLabel(item = {}) {
   if (!item.labelKey) return String(item.label || '');
@@ -40898,8 +41805,23 @@ function debugGraphLocalizedLabel(item = {}) {
   return t(item.labelKey, params);
 }
 
+function debugGraphLocalizedDescription(item = {}) {
+  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
+  if (!descKey) return '';
+  const params = {...(item.descParams || item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(descKey, params);
+}
+
+function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
+  if (!descKey) return '';
+  const text = desc || t(descKey, params);
+  if (!text || text === descKey) return '';
+  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
+}
+
 function normalizedJsDebugSubTab(value) {
-  return value === 'events' ? 'events' : 'graph';
+  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
 }
 
 function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
@@ -40930,6 +41852,9 @@ function loadJsDebugStatsUiPreferences() {
     : jsDebugGraphDefaultRangeSeconds;
   jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
+  jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === String(saved.modelTokenDimension || ''))
+    ? String(saved.modelTokenDimension)
+    : 'output';
   const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
   const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
   for (const key of visible) hidden.delete(key);
@@ -40946,6 +41871,7 @@ function saveJsDebugStatsUiPreferences() {
       rangeSeconds: jsDebugGraphRangeSeconds,
       resolutionOverrideSeconds: jsDebugGraphResolutionOverrideSeconds,
       chartLayout: jsDebugGraphChartLayout,
+      modelTokenDimension: jsDebugGraphModelTokenDimension,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
     }));
@@ -41014,9 +41940,20 @@ function jsDebugHistoryReadinessSnapshot() {
     attemptCount: state.attemptCount,
     error: state.error,
     generation: state.generation,
+    nextAutoRetryAtMs: state.nextAutoRetryAtMs,
     overlayVisible: state.overlayVisible,
     busy: jsDebugHistoryReadinessBusy(state),
   };
+}
+
+function jsDebugHistoryRetryDelayMs(attemptCount = jsDebugHistoryReadiness.attemptCount) {
+  const attempts = Math.max(1, Number(attemptCount) || 1);
+  const multiplier = 2 ** Math.min(8, attempts - 1);
+  return Math.min(jsDebugHistoryRetryMaxDelayMs, jsDebugHistoryRetryInitialDelayMs * multiplier);
+}
+
+function jsDebugHistoryAutoRetryDue(state = jsDebugHistoryReadiness, nowMs = performanceNow()) {
+  return state.phase !== 'error' || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
 }
 
 function clearJsDebugHistoryOverlayTimer() {
@@ -41052,7 +41989,7 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
   const wasBusy = jsDebugHistoryReadinessBusy(state);
   const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
   clearJsDebugHistoryOverlayTimer();
-  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs']) {
+  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs', 'nextAutoRetryAtMs']) {
     if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
   }
   state.phase = nextPhase;
@@ -41090,6 +42027,7 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
     error: '',
     generation,
     loadingStartedAtMs: performanceNow(),
+    nextAutoRetryAtMs: 0,
   });
 }
 
@@ -41158,13 +42096,16 @@ function applyJsDebugHistoryCoverage(coverage) {
   }
   if (coverage.coveredEnd > 0) state.loadedEndSeconds = Math.max(Number(state.loadedEndSeconds) || 0, coverage.coveredEnd);
   state.resolutionSeconds = coverage.resolutionSeconds;
-  const satisfiedStart = coverage.hasMoreOlder
-    ? coverage.coveredStart
-    : Math.max(0, Number(state.targetStartSeconds) || coverage.requestedStart || coverage.coveredStart);
-  const satisfiedEnd = coverage.mode === 'live'
+  // A live cursor response is only a delta, not proof that the older prefix is
+  // present.  Keep the server's exact durable interval: marking it through
+  // Infinity was what let a later partial response erase visible CPU points.
+  const satisfiedStart = coverage.coveredStart;
+  // Only an explicitly complete live response can satisfy the moving tail.
+  // A partial live delta retains its exact durable interval above.
+  const satisfiedEnd = coverage.complete && coverage.mode === 'live'
     ? Infinity
-    : Math.max(satisfiedStart, coverage.coveredEnd, Number(state.targetEndSeconds) || coverage.requestedEnd || 0);
-  if (satisfiedEnd > satisfiedStart) {
+    : coverage.coveredEnd;
+  if (coverage.complete && satisfiedEnd > satisfiedStart) {
     state.coverageIntervals = mergeJsDebugHistoryCoverageIntervals([
       ...state.coverageIntervals,
       {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds, sourceResolutionSeconds: coverage.sourceResolutionSeconds},
@@ -41248,6 +42189,7 @@ function resetJsDebugHistoryReadiness() {
     error: '',
     generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
     loadingStartedAtMs: 0,
+    nextAutoRetryAtMs: 0,
   });
 }
 
@@ -41296,6 +42238,8 @@ function debugSubTabsHtml() {
   return `<div class="js-debug-subtabs" role="tablist" aria-label="${esc(t('tab.debug'))}">
     ${debugSubTabButtonHtml('graph', t('debug.tab.graph'))}
     ${debugSubTabButtonHtml('events', t('debug.tab.events'))}
+    ${debugSubTabButtonHtml('system', t('common.theme.system'))}
+    ${debugSubTabButtonHtml('logs', t('debug.tab.logs'))}
   </div>`;
 }
 
@@ -41334,6 +42278,74 @@ function debugEventDetailText(event) {
     event.key ? `key=${event.key}` : '',
   ].filter(Boolean).join(' ');
   return event.message || event.reason || event.source || '';
+}
+
+function debugClientLogLevel(event) {
+  if (event?.type === 'error' || event?.type === 'unhandledrejection' || event?.error || Number(event?.status || 0) >= 500) return 'error';
+  if (Number(event?.status || 0) >= 400 || event?.ok === false) return 'warning';
+  if (event?.type === 'sse') return 'debug';
+  return 'info';
+}
+
+function debugClientLogRecord(event, index = 0) {
+  const timestampMs = Date.parse(event?.ts || '');
+  return {
+    id: `client:${event?.id ?? index}`,
+    timestamp: Number.isFinite(timestampMs) ? timestampMs / 1000 : 0,
+    level: debugClientLogLevel(event),
+    source: 'browser',
+    category: String(event?.type || 'client'),
+    message: [debugEventDetailText(event), debugEventStatusText(event), debugPhaseTimingText(event)].filter(Boolean).join(' | '),
+  };
+}
+
+function debugMergedLogRecords() {
+  const server = jsDebugLogsState.payload.filter(entry => entry && typeof entry === 'object');
+  const client = jsDebugEvents.map(debugClientLogRecord);
+  return [...server, ...client]
+    .filter(entry => Number(entry.timestamp || 0) * 1000 > jsDebugLogsState.clearedAt)
+    .sort((a, b) => (Number(b.timestamp || 0) - Number(a.timestamp || 0)) || String(b.id || '').localeCompare(String(a.id || '')))
+    .slice(0, 500);
+}
+
+function debugVisibleLogRecords() {
+  return debugMergedLogRecords().filter(entry => jsDebugLogsState.levels.has(String(entry.level || 'info')));
+}
+
+function debugLogTimeText(timestamp) {
+  const date = new Date(Number(timestamp || 0) * 1000);
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : '';
+}
+
+function debugLogsTextForClipboard() {
+  return debugVisibleLogRecords().map(entry => [
+    debugLogTimeText(entry.timestamp),
+    String(entry.level || 'info').toUpperCase().padEnd(7),
+    `[${entry.source || 'server'}${entry.category ? `/${entry.category}` : ''}]`,
+    entry.message || '',
+  ].filter(Boolean).join(' ')).join('\n');
+}
+
+function debugLogsInnerHtml() {
+  const records = debugVisibleLogRecords();
+  return `<div class="js-debug-logs-toolbar">
+    <div class="js-debug-log-levels" role="group" aria-label="${esc(t('debug.logs.levels'))}">${jsDebugLogLevels.map(level => {
+      const active = jsDebugLogsState.levels.has(level);
+      return `<button type="button" class="preferences-inline-action js-debug-log-level js-debug-log-level--${esc(level)}${active ? ' active' : ''}" data-js-debug-log-level="${esc(level)}" aria-pressed="${active ? 'true' : 'false'}">${esc(t(`debug.logs.level.${level}`))}</button>`;
+    }).join('')}</div>
+    <div class="js-debug-actions">
+      <button type="button" class="preferences-inline-action" data-js-debug-logs-copy>${esc(t('common.copy'))}</button>
+      <button type="button" class="preferences-inline-action" data-js-debug-logs-clear>${esc(t('common.clear'))}</button>
+    </div>
+  </div>
+  ${jsDebugLogsState.error ? `<div class="js-debug-logs-error" role="status">${esc(t('debug.logs.loadFailed', {error: jsDebugLogsState.error}))}</div>` : ''}
+  <div class="js-debug-log-list" data-js-debug-log-list aria-label="${esc(t('debug.logs.recent'))}" aria-busy="${jsDebugLogsState.inFlight ? 'true' : 'false'}">${records.length ? records.map(entry => {
+    const level = jsDebugLogLevels.includes(entry.level) ? entry.level : 'info';
+    return `<article class="js-debug-log-row js-debug-log-row--${esc(level)}" data-js-debug-log-entry data-level="${esc(level)}">
+      <div class="js-debug-log-meta"><time>${esc(debugLogTimeText(entry.timestamp))}</time><span class="js-debug-log-chip">${esc(t(`debug.logs.level.${level}`))}</span><span>${esc(entry.source || 'server')}</span>${entry.category ? `<span>${esc(entry.category)}</span>` : ''}</div>
+      <div class="js-debug-log-message">${esc(entry.message || '')}</div>
+    </article>`;
+  }).join('') : `<div class="js-debug-log-empty">${esc(t('debug.logs.empty'))}</div>`}</div>`;
 }
 
 function debugCountToken(prefix, value, {includeZero = false} = {}) {
@@ -41508,6 +42520,7 @@ function debugGraphNewBucket(startMs, durationMs) {
     tokensPerAgentTotal: 0,
     agentTokenSamples: 0,
     agentTokenRates: new Map(),
+    costSummary: null,
     hostMetrics: debugGraphNewHostMetrics(),
     clients: new Map(),
     servers: new Map(),
@@ -41519,6 +42532,8 @@ function debugGraphNewHostMetrics() {
     systemMemoryUsedTotalBytes: 0,
     systemMemoryCapacityTotalBytes: 0,
     systemMemoryCount: 0,
+    cpuLabel: '',
+    systemMemoryLabel: '',
     cpuProcesses: new Map(),
     memoryProcesses: new Map(),
     gpuUtilProcesses: new Map(),
@@ -41785,6 +42800,30 @@ function debugGraphMergeAgentTokenRates(target, source) {
   }
 }
 
+function debugGraphMergeCostSummary(target, source) {
+  if (!source?.costSummary) return;
+  const current = target.costSummary || {
+    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
+    components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
+  };
+  current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd);
+  current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd);
+  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd);
+  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd);
+  current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount);
+  current.complete = current.complete && source.costSummary.complete === true;
+  current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount);
+  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0);
+  current.components.push(...debugGraphCostRows(source.costSummary.components));
+  current.models.push(...debugGraphCostRows(source.costSummary.models));
+  current.sources.push(...debugGraphCostRows(source.costSummary.sources));
+  current.tmuxWindows.push(...debugGraphCostRows(source.costSummary.tmuxWindows));
+  current.catalogRevision = source.costSummary.catalogRevision || current.catalogRevision;
+  current.activeCatalogRevision = source.costSummary.activeCatalogRevision || current.activeCatalogRevision;
+  current.freshness = source.costSummary.freshness || current.freshness;
+  target.costSummary = current;
+}
+
 function debugGraphMergeBucket(target, source) {
   target.apiCount += source.apiCount || 0;
   target.sseCount += source.sseCount || 0;
@@ -41807,12 +42846,15 @@ function debugGraphMergeBucket(target, source) {
   target.tokensPerAgentTotal += source.tokensPerAgentTotal || 0;
   target.agentTokenSamples += source.agentTokenSamples || 0;
   debugGraphMergeAgentTokenRates(target, source);
+  debugGraphMergeCostSummary(target, source);
   const sourceHost = source.hostMetrics;
   if (sourceHost) {
     const targetHost = target.hostMetrics || (target.hostMetrics = debugGraphNewHostMetrics());
     targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0);
     targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0);
     targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0);
+    if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
+    if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
       [targetHost.cpuProcesses, sourceHost.cpuProcesses, 'totalPercent'],
       [targetHost.memoryProcesses, sourceHost.memoryProcesses, 'totalBytes'],
@@ -42004,6 +43046,7 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     payload.system_cpu_percent,
   ].some(value => Number.isFinite(Number(value)));
   const firstSampleApplied = sampleApplied && !jsDebugStatsPollState.firstSampleReceived;
+  if (sampleApplied) jsDebugStatsPollState.lastSampleAtMs = Date.now();
   if (firstSampleApplied) {
     jsDebugStatsPollState.firstSampleReceived = true;
     armJsDebugStatsPolling();
@@ -42035,6 +43078,24 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
   });
   compactJsDebugGraphBuckets();
   if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
+}
+
+// `stats_sample` arrives on the shared client-events EventSource.  Its record
+// is the durable one-second owner delta, so the visible graph advances without
+// waiting for the 30-second history-backfill poll.  Polling remains the
+// range/zoom and reconnect fallback, not the live-tail transport.
+function applyJsDebugStatsSamplePush(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const sample = payload.sample && typeof payload.sample === 'object' ? payload.sample : {};
+  const record = payload.record && typeof payload.record === 'object' ? payload.record : null;
+  if (!record) return false;
+  const sequence = Number(payload.sequence);
+  const cursor = Number.isFinite(sequence) ? sequence : Number(record.sequence || 0);
+  recordJsDebugStatsSample({
+    ...sample,
+    history: {sequence: cursor, latest_sequence: cursor, records: [record]},
+  }, {forceGraphRefresh: true, advanceHistoryCursor: true});
+  return true;
 }
 
 function clearJsDebugGraphData() {
@@ -42078,6 +43139,40 @@ function debugGraphApplyServerRecord(record) {
   bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
   bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
   debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
+  debugGraphApplyServerCostSummary(bucket, record.cost_summary);
+}
+
+// Cost projection stays attached to the existing stats bucket. The pricing owner supplies
+// integer micro-USD amounts, so this view never introduces a float-based cost cache or a
+// second time-range selection path.
+function debugGraphCostInteger(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+function debugGraphCostRows(value) {
+  return Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : [];
+}
+
+function debugGraphApplyServerCostSummary(bucket, source) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return;
+  bucket.costSummary = {
+    totalMicroUsd: debugGraphCostInteger(source.total_micro_usd),
+    knownMicroUsd: debugGraphCostInteger(source.known_micro_usd),
+    lowerMicroUsd: debugGraphCostInteger(source.lower_micro_usd ?? source.known_micro_usd),
+    upperMicroUsd: debugGraphCostInteger(source.upper_micro_usd ?? source.total_micro_usd ?? source.known_micro_usd),
+    pricedCount: debugGraphCostInteger(source.priced_count),
+    complete: source.complete === true,
+    unpricedCount: debugGraphCostInteger(source.unpriced_count),
+    unpricedTokenQuantity: Math.max(0, Number(source.unpriced_token_quantity) || 0),
+    components: debugGraphCostRows(source.components),
+    models: debugGraphCostRows(source.models),
+    sources: debugGraphCostRows(source.sources),
+    tmuxWindows: debugGraphCostRows(source.tmux_windows),
+    catalogRevision: String(source.catalog_revision || '').slice(0, 160),
+    activeCatalogRevision: String(source.active_catalog_revision || '').slice(0, 160),
+    freshness: String(source.freshness || '').slice(0, 80),
+  };
 }
 
 function debugGraphApplyHostMetricProcesses(target, source, valueKey = 'totalPercent') {
@@ -42101,6 +43196,8 @@ function debugGraphApplyHostMetrics(bucket, source) {
   target.systemMemoryUsedTotalBytes = Math.max(target.systemMemoryUsedTotalBytes, Number(source.system_memory_used_total_bytes || 0));
   target.systemMemoryCapacityTotalBytes = Math.max(target.systemMemoryCapacityTotalBytes, Number(source.system_memory_capacity_total_bytes || 0));
   target.systemMemoryCount = Math.max(target.systemMemoryCount, Number(source.system_memory_count || 0));
+  if (source.cpu_label) target.cpuLabel = String(source.cpu_label);
+  if (source.system_memory_label) target.systemMemoryLabel = String(source.system_memory_label);
   debugGraphApplyHostMetricProcesses(target.cpuProcesses, source.cpu_processes);
   debugGraphApplyHostMetricProcesses(target.memoryProcesses, source.memory_processes, 'totalBytes');
   debugGraphApplyHostMetricProcesses(target.gpuUtilProcesses, source.gpu_util_processes);
@@ -42271,6 +43368,13 @@ function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, r
   }
   const sequence = Number(history.latest_sequence ?? history.sequence);
   if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
+  const backfill = history.usage_atom_backfill;
+  if (backfill && typeof backfill === 'object' && !Array.isArray(backfill)) {
+    const state = String(backfill.state || '').toLowerCase();
+    jsDebugUsageAtomBackfill.state = ['pending', 'running', 'partial', 'complete'].includes(state) ? state : 'pending';
+    jsDebugUsageAtomBackfill.sources = Math.max(0, Number(backfill.sources) || 0);
+    jsDebugUsageAtomBackfill.missing = Math.max(0, Number(backfill.missing) || 0);
+  }
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
   debugGraphApplyServerAgentTokenHistory(history.agent_token_history, {advanceLiveCursor});
@@ -42294,6 +43398,7 @@ function debugGraphApplyServerAgentTokenHistory(history = {}, {advanceLiveCursor
     bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
     bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
     debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
+    debugGraphApplyServerCostSummary(bucket, record.cost_summary);
   }
 }
 
@@ -42449,6 +43554,24 @@ function debugGraphAgentTokenDisplayedSum(buckets) {
   return Math.max(0, total);
 }
 
+function debugGraphModelTokenDisplayedSum(buckets) {
+  let total = 0;
+  for (const bucket of buckets || []) {
+    const components = debugGraphModelTokenComponentRecords(bucket);
+    if (components.length) {
+      total += components.reduce((sum, component) => sum + Math.max(0, Number(component?.quantity) || 0), 0);
+      continue;
+    }
+    if (jsDebugGraphModelTokenDimension !== 'output') continue;
+    if (!(bucket?.agentTokenRates instanceof Map)) continue;
+    for (const item of bucket.agentTokenRates.values()) {
+      if (!(item?.modelRates instanceof Map)) continue;
+      for (const rate of item.modelRates.values()) total += Math.max(0, Number(rate?.tokens) || 0);
+    }
+  }
+  return total;
+}
+
 function debugGraphBucketFieldSum(bucket, fields) {
   return fields.reduce((bucketTotal, field) => (
     bucketTotal + Math.max(0, Number(bucket?.[field]) || 0)
@@ -42468,6 +43591,7 @@ function debugGraphDisplayedSummary(group, buckets) {
   const value = Math.max(0, Number(spec.value(buckets)) || 0);
   return {
     attribute: spec.attribute,
+    descKey: spec.descKey,
     text: t(spec.labelKey, {count: spec.format(value)}),
     value,
   };
@@ -42693,11 +43817,19 @@ function debugGraphTotalMegabytesText(bytes) {
   return value.toFixed(2);
 }
 
-function debugRemovalLatencyMetaText() {
+function debugGraphMetaItem(labelKey, params = {}) {
+  return {text: t(labelKey, params), labelKey, descKey: jsDebugGraphDescriptionKeyByLabelKey[labelKey]};
+}
+
+function debugGraphPlainMetaItem(text, descKey = '') {
+  return {text: String(text || ''), descKey};
+}
+
+function debugRemovalLatencyMetaItem() {
   if (typeof terminalRemovalLatencySummary !== 'function') return '';
   const summary = terminalRemovalLatencySummary();
   if (!summary?.count) return '';
-  return t('debug.graph.meta.removal', {
+  return debugGraphMetaItem('debug.graph.meta.removal', {
     last: debugGraphTerseTimeText(summary.last?.durationMs),
     average: debugGraphTerseTimeText(summary.averageMs),
     count: summary.count,
@@ -42744,18 +43876,18 @@ function debugClientPerfHtml() {
 
 function debugGraphMetaItems() {
   const items = [];
-  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(t('debug.graph.meta.uptime', {uptime: debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}));
-  if (Number.isFinite(jsDebugStatsServerPid)) items.push(`PID=${Math.floor(jsDebugStatsServerPid)}`);
+  if (Number.isFinite(jsDebugStatsServerUptimeSeconds)) items.push(debugGraphMetaItem('debug.graph.meta.uptime', {uptime: debugGraphUptimeText(jsDebugStatsServerUptimeSeconds)}));
+  if (Number.isFinite(jsDebugStatsServerPid)) items.push(debugGraphPlainMetaItem(`PID=${Math.floor(jsDebugStatsServerPid)}`));
   const rss = debugGraphBytesText(jsDebugStatsServerRssBytes);
-  if (rss) items.push(t('debug.graph.meta.rss', {rss}));
-  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(t('debug.graph.meta.serverSequence', {sequence: Math.floor(jsDebugStatsServerSequence)}));
-  const removalLatency = debugRemovalLatencyMetaText();
+  if (rss) items.push(debugGraphMetaItem('debug.graph.meta.rss', {rss}));
+  if (Number.isFinite(jsDebugStatsServerSequence) && jsDebugStatsServerSequence > 0) items.push(debugGraphMetaItem('debug.graph.meta.serverSequence', {sequence: Math.floor(jsDebugStatsServerSequence)}));
+  const removalLatency = debugRemovalLatencyMetaItem();
   if (removalLatency) items.push(removalLatency);
   if (items.length) {
     const counts = debugEventCounts();
     const uploadedMb = debugGraphTotalMegabytesText(counts.apiRequestBytes);
     const downloadedMb = debugGraphTotalMegabytesText(counts.apiResponseBytes + counts.sseBytes);
-    items.push(t('debug.graph.meta.totalTraffic', {uploaded: uploadedMb, downloaded: downloadedMb}));
+    items.push(debugGraphMetaItem('debug.graph.meta.totalTraffic', {uploaded: uploadedMb, downloaded: downloadedMb}));
   }
   return items;
 }
@@ -42769,7 +43901,7 @@ function debugGraphMetaHtml() {
   const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadiness.phase === 'loading-initial'
     && jsDebugHistoryReadiness.overlayVisible === true;
   const metaHtml = items.length
-    ? esc(items.join(' | '))
+    ? items.map(item => `<span class="js-debug-graph-meta-item"${debugGraphExplainAttrs(item.text, item.descKey, {attribute: 'data-js-debug-meta-desc'})}>${esc(item.text)}</span>`).join('<span aria-hidden="true"> | </span>')
     : (initialHistoryOverlayOwnsLoading ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
 }
@@ -42828,6 +43960,8 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
     .map(([key, item], index) => ({
       key: `${prefix}${key}`,
       label: item.label,
+      descKey: dimension === 'agent' ? 'debug.graph.series.agentToken.desc' : 'debug.graph.series.modelToken.desc',
+      descParams: dimension === 'agent' ? {agent: item.label} : {model: item.label},
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
       agentTokenSeries: dimension === 'agent',
@@ -42838,19 +43972,15 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       value: bucket => {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
-        let rate = null;
+        let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
           for (const agentRate of bucket.agentTokenRates.values()) {
             const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
             if (!modelRate) continue;
-            if (!rate) rate = {total: 0, samples: 0, tokens: 0, seconds: 0};
-            rate.total += Number(modelRate.total || 0);
-            rate.samples += Number(modelRate.samples || 0);
-            rate.tokens += Number(modelRate.tokens || 0);
-            rate.seconds += Number(modelRate.seconds || 0);
+            value += debugGraphAgentTokenBucketValue(bucket, {...modelRate, seconds: agentRate.seconds});
           }
         }
-        return rate ? debugGraphAgentTokenBucketValue(bucket, rate) : 0;
+        return value;
       },
       hasData: bucket => {
         if (dimension === 'agent') {
@@ -42869,9 +43999,135 @@ function debugGraphAgentTokenSeriesDefs(buckets) {
   return debugGraphTokenSeriesDefs(buckets, 'agent');
 }
 
-function debugGraphModelTokenSeriesDefs(buckets) {
-  return debugGraphTokenSeriesDefs(buckets, 'model');
+function debugGraphStablePaletteIndex(identity, count) {
+  const size = Math.max(1, Math.floor(Number(count) || 0));
+  let hash = 2166136261;
+  for (const character of String(identity || 'unknown')) {
+    hash ^= character.codePointAt(0) || 0;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash % size;
 }
+
+function debugGraphModelTokenDimensionLabel(dimension = jsDebugGraphModelTokenDimension) {
+  const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
+  return item ? debugGraphCostText(item.labelKey, item.fallback) : debugGraphCostText('debug.cost.output', 'Output');
+}
+
+function debugGraphModelTokenDimensionDescriptionKey(dimension = jsDebugGraphModelTokenDimension) {
+  const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
+  return item ? jsDebugGraphDescriptionKeyByLabelKey[item.labelKey] : '';
+}
+
+function debugGraphModelTokenComponentMatches(component, dimension = jsDebugGraphModelTokenDimension) {
+  if (String(component?.unit || '').toLowerCase() !== 'tokens') return false;
+  const direction = String(component?.direction || '').toLowerCase();
+  const cacheRole = String(component?.cache_role || '').toLowerCase();
+  if (dimension === 'all') return true;
+  if (dimension === 'input') return direction === 'input' && !cacheRole.includes('read') && !cacheRole.includes('write');
+  if (dimension === 'cacheRead') return cacheRole.includes('read');
+  if (dimension === 'cacheWrite') return cacheRole.includes('write');
+  return direction === 'output';
+}
+
+function debugGraphModelTokenComponentRecords(bucket, dimension = jsDebugGraphModelTokenDimension) {
+  // Output is the compatibility projection of the authoritative generated-token
+  // partition. Cost atoms can be temporarily partial during migration or across
+  // provider telemetry variants, so they must not override the exact agent/model
+  // totals that keep Agent tokens and Model tokens synchronized.
+  if (dimension === 'output') return [];
+  const components = debugGraphCostRows(bucket?.costSummary?.components);
+  return components.filter(component => debugGraphModelTokenComponentMatches(component, dimension));
+}
+
+function debugGraphModelTokenSeriesIdentity(component) {
+  const model = String(component?.model || 'unknown').trim() || 'unknown';
+  const effort = String(component?.effort || '').trim().toLowerCase() || 'unknown';
+  return {key: `${model}\u0000${effort}`, model, effort, label: effort === 'unknown' ? model : `${model} · ${effort}`};
+}
+
+function debugGraphSelectedModelTokenBucketValue(bucket) {
+  const components = debugGraphModelTokenComponentRecords(bucket);
+  if (components.length) return components.reduce((total, component) => total + Math.max(0, Number(component?.quantity) || 0), 0)
+    / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
+  // Existing retained history only has the generated-output projection. Keep
+  // that output view exact until component atoms are available for a bucket.
+  if (jsDebugGraphModelTokenDimension !== 'output') return 0;
+  let total = 0;
+  for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
+    for (const rate of agentRate?.modelRates?.values?.() || []) total += debugGraphAgentTokenBucketValue(bucket, {...rate, seconds: agentRate.seconds});
+  }
+  return total;
+}
+
+function debugGraphModelTokenSeriesDefs(buckets) {
+  const tokenItems = new Map();
+  for (const bucket of buckets) {
+    const components = debugGraphModelTokenComponentRecords(bucket);
+    if (components.length) {
+      for (const component of components) {
+        const identity = debugGraphModelTokenSeriesIdentity(component);
+        const item = tokenItems.get(identity.key) || {...identity, samples: 0, componentBacked: true};
+        item.samples += 1;
+        tokenItems.set(identity.key, item);
+      }
+      continue;
+    }
+    // The default Output selector always uses the authoritative generated-token
+    // partition, including new buckets with cost atoms, so its stack is exactly
+    // the same total as Agent tokens/min.
+    if (jsDebugGraphModelTokenDimension !== 'output') continue;
+    for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
+      for (const [rawModel, rate] of agentRate?.modelRates?.entries?.() || []) {
+        const model = String(rawModel || 'unknown').trim() || 'unknown';
+        const item = tokenItems.get(`legacy\u0000${model}`) || {key: `legacy\u0000${model}`, model, effort: '', label: model, samples: 0, componentBacked: false};
+        item.samples += Number(rate?.samples || 0) > 0 || Number(rate?.tokens || 0) > 0 ? 1 : 0;
+        tokenItems.set(item.key, item);
+      }
+    }
+  }
+  return [...tokenItems.values()]
+    .filter(item => item.samples > 0)
+    .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key))
+    .map((item, index) => ({
+      key: `${jsDebugGraphModelTokenSeriesPrefix}${item.key}`,
+      label: item.label,
+      descKey: 'debug.graph.series.modelToken.desc',
+      descParams: {model: item.label},
+      unit: 'tokensPerMinute',
+      cssKey: 'agentToken',
+      agentTokenKey: item.key,
+      tokenDimension: 'model',
+      // Model color is keyed by the exact model alone so adding/changing an
+      // effort variant cannot repaint that model. Pattern keys retain the
+      // model+effort distinction for accessible stacked-series separation.
+      agentTokenPatternIndex: debugGraphStablePaletteIndex(item.key, jsDebugGraphAgentTokenPatternCount),
+      color: jsDebugGraphAgentTokenColors[debugGraphStablePaletteIndex(item.model, jsDebugGraphAgentTokenColors.length)],
+      value: bucket => {
+        const components = debugGraphModelTokenComponentRecords(bucket);
+        if (components.length) {
+          const quantity = components
+            .filter(component => debugGraphModelTokenSeriesIdentity(component).key === item.key)
+            .reduce((total, component) => total + Math.max(0, Number(component?.quantity) || 0), 0);
+          return quantity / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
+        }
+        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return 0;
+        let value = 0;
+        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
+          const rate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(item.model) : null;
+          if (rate) value += debugGraphAgentTokenBucketValue(bucket, {...rate, seconds: agentRate.seconds});
+        }
+        return value;
+      },
+      hasData: bucket => {
+        const components = debugGraphModelTokenComponentRecords(bucket);
+        if (components.length) return components.some(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
+        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return false;
+        return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => Number(agentRate?.modelRates?.get(item.model)?.tokens || 0) > 0);
+      },
+    }));
+}
+
 
 function debugGraphClientMetricSeriesDefs(buckets) {
   const peerSeries = jsDebugGraphClientMetrics
@@ -42966,6 +44222,8 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
     .map(([deviceId, label], index) => ({
       key: `gpu:${metric}:${deviceId}`,
       label,
+      descKey: 'debug.graph.series.gpuDevice.desc',
+      descParams: {device: label, metric: metric === 'gpuMemory' ? t('debug.graph.chart.gpuMemory') : t('debug.graph.chart.gpuUtil')},
       unit: metric === 'gpuMemory' ? 'bytes' : 'percent',
       hostMetric: metric,
       gpuDeviceId: deviceId,
@@ -43019,20 +44277,21 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const sliderId = 'js-debug-range-options';
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
-  const rangeLabel = zoomed ? t('debug.graph.control.zoom') : jsDebugGraphRangeLabel(activeRange, nowMs);
+  const rangeLabel = zoomed ? debugGraphCostRangeText(debugGraphDomain(nowMs)) : jsDebugGraphRangeLabel(activeRange, nowMs);
+  const resetLabel = `${t('common.reset')} ${t('debug.graph.control.zoom')}`;
   return `<div class="js-debug-range-slider-control" data-js-debug-range-control>
     <span class="js-debug-range-prefix" aria-hidden="true">${esc(t('debug.graph.control.timeRange'))}</span>
-    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}">
+    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}"${zoomed ? ' disabled aria-disabled="true"' : ''}>
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
     <span class="js-debug-range-label" data-js-debug-range-label>${esc(rangeLabel)}</span>
-    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(t('common.reset'))}</button>` : ''}
+    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset>${esc(resetLabel)}</button>` : ''}
   </div>`;
 }
 
 function debugGraphChartToggleControlsHtml() {
   return `<div class="js-debug-chart-toggle-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     <span>${esc(t('debug.graph.control.charts'))}:</span>
-    ${jsDebugGraphChartGroups.map(group => {
+    ${jsDebugGraphChartControlItems.map(group => {
       const label = debugGraphLocalizedLabel(group);
       // Compact labels are an English-only design vocabulary. Other locales keep the existing
       // localized chart title until their own compact translation exists; never leak English UI.
@@ -43098,7 +44357,7 @@ function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues
   return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
 }
 
-function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0) {
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false) {
   const segments = [];
   let current = [];
   let previousDataEndMs = NaN;
@@ -43116,14 +44375,14 @@ function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDat
       segments.push(current);
       current = [];
     }
-    current.push(debugGraphPointForValue(value, timeMs, chartMax, domain).join(','));
+    current.push(debugGraphPointForValue(value, timeMs, chartMax, domain, logScale).join(','));
     previousDataEndMs = Number.isFinite(timeMs) ? timeMs + durationMs : NaN;
   });
   if (current.length) segments.push(current);
   return segments;
 }
 
-function debugGraphPointForValue(value, timeMs, chartMax, domain) {
+function debugGraphPointForValue(value, timeMs, chartMax, domain, logScale = false) {
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   const spanMs = Math.max(1, endMs - startMs);
@@ -43131,13 +44390,26 @@ function debugGraphPointForValue(value, timeMs, chartMax, domain) {
     ? ((Number(timeMs) - startMs) / spanMs) * jsDebugGraphGeometry.width
     : jsDebugGraphGeometry.width;
   const x = Math.max(0, Math.min(jsDebugGraphGeometry.width, rawX));
-  const y = debugGraphPlotYForValue(value, chartMax);
+  const y = debugGraphPlotYForValue(value, chartMax, logScale);
   return [x.toFixed(1), y.toFixed(1)];
 }
 
-function debugGraphPlotYForValue(value, chartMax) {
+function debugGraphPlotYForValue(value, chartMax, logScale = false) {
   const max = Math.max(Number(chartMax) || 0, 1);
-  const normalized = Math.max(0, Math.min(1, (Number(value) || 0) / max));
+  const rawValue = Math.max(0, Number(value) || 0);
+  let normalized;
+  if (logScale?.mode === 'broken-linear') {
+    const threshold = Math.max(1, Math.min(max, Number(logScale.threshold) || max));
+    const upperFraction = Math.max(0.1, Math.min(0.3, Number(logScale.upperFraction) || 0.18));
+    normalized = rawValue <= threshold || max <= threshold
+      ? (rawValue / threshold) * (1 - upperFraction)
+      : (1 - upperFraction) + (((rawValue - threshold) / (max - threshold)) * upperFraction);
+    normalized = Math.max(0, Math.min(1, normalized));
+  } else {
+    normalized = logScale === true
+      ? Math.max(0, Math.min(1, Math.log1p(rawValue) / Math.log1p(max)))
+      : Math.max(0, Math.min(1, rawValue / max));
+  }
   return jsDebugGraphGeometry.plotTop + ((1 - normalized) * jsDebugGraphGeometry.plotHeight);
 }
 
@@ -43157,7 +44429,10 @@ function debugGraphDisconnectedRanges(buckets, domain) {
   for (const bucket of buckets || []) {
     const startMs = Number(bucket?.startMs);
     const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
-    const disconnectedMs = Math.min(durationMs, Math.max(0, Number(bucket?.disconnectedMs || 0)));
+    // EventSource can reconnect while ordinary API requests still succeed. A stream reconnect is
+    // useful telemetry, but it is not a full client outage and must not paint over real latency.
+    if (debugGraphCurrentClientCommunicationCount(bucket) > 0) continue;
+    const disconnectedMs = Math.min(durationMs, Math.max(0, debugGraphCurrentClientDisconnectedMs(bucket)));
     if (!Number.isFinite(startMs) || disconnectedMs <= 0) continue;
     const rangeStart = Math.max(domainStart, startMs);
     const rangeEnd = Math.min(domainEnd, startMs + disconnectedMs);
@@ -43234,9 +44509,21 @@ function debugGraphCurrentClientSeriesItems(seriesItems) {
   return currentClientItems.length ? currentClientItems : items;
 }
 
-function debugGraphCurrentClientHeartbeatCount(bucket) {
-  const clientBucket = bucket?.clients instanceof Map ? bucket.clients.get(jsDebugStatsClientIdForRequest()) : null;
-  return Number(clientBucket?.heartbeatCount ?? bucket?.heartbeatCount ?? 0);
+function debugGraphCurrentClientRecord(bucket) {
+  const clients = bucket?.clients;
+  if (clients instanceof Map && clients.size > 0) return clients.get(jsDebugStatsClientIdForRequest()) || null;
+  return bucket && typeof bucket === 'object' ? bucket : null;
+}
+
+function debugGraphCurrentClientCommunicationCount(bucket) {
+  const record = debugGraphCurrentClientRecord(bucket);
+  if (!record) return 0;
+  return ['apiCount', 'sseCount', 'latencyCount', 'bandwidthBytes', 'heartbeatCount']
+    .reduce((total, key) => total + Math.max(0, Number(record[key] || 0)), 0);
+}
+
+function debugGraphCurrentClientDisconnectedMs(bucket) {
+  return Math.max(0, Number(debugGraphCurrentClientRecord(bucket)?.disconnectedMs || 0));
 }
 
 function debugGraphCommunicationGapThresholdMs(seriesItems) {
@@ -43252,11 +44539,11 @@ function debugGraphNoDataRuns(buckets, domain, seriesItems) {
   if (!Number.isFinite(domainStart) || !Number.isFinite(domainEnd) || domainEnd <= domainStart) return [];
   const perf = clientPerfStart('statsNoDataSweep');
   try {
-    const hasCurrentClientHeartbeat = debugGraphBucketRanges(buckets)
-      .some(item => debugGraphCurrentClientHeartbeatCount(item.bucket) > 0);
+    const hasCurrentClientCommunication = debugGraphBucketRanges(buckets)
+      .some(item => debugGraphCurrentClientCommunicationCount(item.bucket) > 0);
     const dataRanges = debugGraphBucketRanges(buckets)
-      .filter(item => hasCurrentClientHeartbeat
-        ? debugGraphCurrentClientHeartbeatCount(item.bucket) > 0
+      .filter(item => hasCurrentClientCommunication
+        ? debugGraphCurrentClientCommunicationCount(item.bucket) > 0
         : items.some(series => series.hasData(item.bucket)))
       .map(item => ({startMs: item.startMs, endMs: item.endMs}));
     const disconnectedRanges = debugGraphDisconnectedRanges(buckets, domain);
@@ -43274,6 +44561,41 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
     const x2 = debugGraphXForTime(range.endMs, domain);
     const width = Math.max(1.5, x2 - x1);
     return debugGraphPlotOverlayRectHtml('js-debug-no-data-range', 'data-js-debug-no-data-range', index, x1, width, t('debug.noCommunicationData'));
+  }).join('');
+}
+
+function debugGraphAgentStatusNoDataRuns(buckets, domain) {
+  const ranges = debugGraphBucketRanges(buckets);
+  const statusRanges = ranges
+    .filter(item => Number(item.bucket?.agentActivitySamples || 0) > 0)
+    .map(item => ({startMs: item.startMs, endMs: item.endMs}));
+  const serverRanges = ranges.filter(item => Number(item.bucket?.cpuCount || 0) > 0 || Number(item.bucket?.agentActivitySamples || 0) > 0);
+  if (!serverRanges.length) return [];
+  const scope = {
+    startMs: Math.max(Number(domain?.startMs) || 0, serverRanges[0].startMs),
+    endMs: Number(domain?.endMs) || 0,
+  };
+  if (scope.endMs <= scope.startMs) return [];
+  const lastServerEndMs = serverRanges.at(-1).endMs;
+  return debugGraphComplementTimeRanges(statusRanges, scope)
+    .map(range => range.startMs >= lastServerEndMs - 1
+      ? {...range, startMs: range.startMs + jsDebugGraphNoDataOverlayDelayMs}
+      : range)
+    .filter(range => range.endMs > range.startMs);
+}
+
+function debugGraphAgentStatusNoDataRectsHtml(buckets, domain) {
+  return debugGraphAgentStatusNoDataRuns(buckets, domain).map((range, index) => {
+    const x1 = debugGraphXForTime(range.startMs, domain);
+    const x2 = debugGraphXForTime(range.endMs, domain);
+    return debugGraphPlotOverlayRectHtml(
+      'js-debug-no-data-range js-debug-agent-status-no-data-range',
+      'data-js-debug-agent-status-no-data-range',
+      index,
+      x1,
+      Math.max(1.5, x2 - x1),
+      t('debug.graph.agentStatus.noData'),
+    );
   }).join('');
 }
 
@@ -43375,8 +44697,13 @@ function debugGraphSeriesTokenAgentAttrs(series) {
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
-function debugGraphPolylineHtml(series, chartMax, domain) {
-  const gapThresholdMs = series?.clientMetric === true ? debugGraphCommunicationGapThresholdMs([series]) : 0;
+function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
+  // CPU is sampled best-effort.  Its absent intervals are facts, not zeroes or
+  // a signal to draw a smooth line between the two surrounding samples.
+  const cpuSeries = series?.processCpu === true || series?.key === 'cpu' || series?.key === 'systemCpu';
+  const gapThresholdMs = series?.clientMetric === true
+    ? debugGraphCommunicationGapThresholdMs([series])
+    : (cpuSeries ? 1 : 0);
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
@@ -43385,6 +44712,7 @@ function debugGraphPolylineHtml(series, chartMax, domain) {
     debugGraphSeriesPlotHasDataValues(series),
     series.durations || [],
     gapThresholdMs,
+    logScale,
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
@@ -43417,7 +44745,7 @@ function debugGraphAreaPathHtml(series, chartMax, domain) {
   return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></path>`;
 }
 
-function debugGraphBarRectsHtml(series, chartMax, domain) {
+function debugGraphBarRectsHtml(series, chartMax, domain, logScale = false) {
   const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
@@ -43436,15 +44764,15 @@ function debugGraphBarRectsHtml(series, chartMax, domain) {
     const gap = jsDebugAgentStatusSeriesKeys.includes(series.key) ? 0 : Math.min(0.15, slotWidth * 0.05);
     const x = x1 + gap / 2;
     const width = Math.max(0, slotWidth - gap);
-    const vertical = debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, series.zeroBar === true);
+    const vertical = debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, series.zeroBar === true, logScale);
     const stacked = lowerValues ? ` data-js-debug-bar-stacked="${esc(series.key)}"` : '';
     return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(vertical.y.toFixed(2))}" width="${esc(width.toFixed(2))}" height="${esc(vertical.height.toFixed(2))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.label)}</title></rect>`;
   }).join('');
 }
 
-function debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, zeroBar = false) {
-  const top = debugGraphPlotYForValue(topValue, chartMax);
-  const bottom = debugGraphPlotYForValue(bottomValue, chartMax);
+function debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, zeroBar = false, logScale = false) {
+  const top = debugGraphPlotYForValue(topValue, chartMax, logScale);
+  const bottom = debugGraphPlotYForValue(bottomValue, chartMax, logScale);
   const height = Math.max(0, bottom - top);
   if (height > 0 || !zeroBar) return {y: top, height};
   const zeroHeight = 0.75;
@@ -43466,7 +44794,10 @@ function debugGraphInteractionOverlayHtml() {
 
 function debugGraphLegendHtml(seriesItems) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
-    ${seriesItems.map(series => `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span>${esc(series.label)}</span></div>`).join('')}
+    ${seriesItems.map(series => {
+      const descKey = series.descKey || jsDebugGraphDescriptionKeyByLabelKey[series.labelKey] || jsDebugGraphDescriptionKeyByLabelKey[series.metricLabelKey];
+      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span${debugGraphExplainAttrs(series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
+    }).join('')}
   </div>`;
 }
 
@@ -43508,36 +44839,60 @@ function debugGraphIntegerAxisHtml(group, max) {
   </div>`;
 }
 
-function debugGraphGridLineY(value, chartMax) {
-  return debugGraphPlotYForValue(value, chartMax);
+function debugGraphGridLineY(value, chartMax, logScale = false) {
+  return debugGraphPlotYForValue(value, chartMax, logScale);
 }
 
-function debugGraphAxisTickStyle(value, chartMax) {
-  const percent = (debugGraphGridLineY(value, chartMax) / jsDebugGraphGeometry.height) * 100;
+function debugGraphAxisTickStyle(value, chartMax, logScale = false) {
+  const percent = (debugGraphGridLineY(value, chartMax, logScale) / jsDebugGraphGeometry.height) * 100;
   return ` style="--js-debug-axis-y: ${esc(percent.toFixed(3))}%;"`;
 }
 
 function debugGraphGridLinesHtml(group, axisMax) {
   const max = Math.max(0, Number(axisMax) || 0);
   const fallbackMax = max > 0 ? max : 1;
+  const scale = group.scale ?? (group.logScale === true);
   const values = group.integerGridLines === true
     ? debugGraphIntegerGridValues(max)
+    : scale?.mode === 'broken-linear'
+    ? [fallbackMax, scale.threshold, scale.threshold / 2, 0]
+    : scale === true
+    ? [fallbackMax, Math.expm1(Math.log1p(fallbackMax) / 2), 0]
     : [fallbackMax, fallbackMax / 2, 0];
   return values.map(value => {
-    const y = debugGraphGridLineY(value, max).toFixed(1);
+    const y = debugGraphGridLineY(value, max, scale).toFixed(1);
     const axisValue = group.integerGridLines === true ? ` data-js-debug-grid-value="${esc(value)}"` : '';
     return `<line class="js-debug-grid-line${group.integerGridLines === true ? ' js-debug-grid-line--integer' : ''}" data-js-debug-grid-line="${esc(group.key)}"${axisValue} x1="0" y1="${esc(y)}" x2="${esc(jsDebugGraphGeometry.width)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
   }).join('');
+}
+
+function debugGraphAxisBreakHtml(group, axisMax, scale) {
+  if (scale?.mode !== 'broken-linear') return '';
+  const y = debugGraphGridLineY(scale.threshold, axisMax, scale);
+  const left = `M0 ${y - 2}l4 4 4-4 4 4`;
+  const rightX = jsDebugGraphGeometry.width - 12;
+  const right = `M${rightX} ${y - 2}l4 4 4-4 4 4`;
+  return `<path class="js-debug-axis-break" data-js-debug-axis-break="${esc(group.key)}" data-js-debug-axis-break-value="${esc(scale.threshold)}" d="${esc(`${left} ${right}`)}" fill="none" vector-effect="non-scaling-stroke"></path>`;
 }
 
 function debugGraphAxisHtml(group, max) {
   const axisMax = Math.max(0, Number(max) || 0);
   if (group.integerAxis === true) return debugGraphIntegerAxisHtml(group, axisMax);
   const positionMax = axisMax > 0 ? axisMax : 1;
+  const scale = group.scale ?? (group.logScale === true);
+  if (scale?.mode === 'broken-linear') {
+    const threshold = Math.min(positionMax, Number(scale.threshold) || positionMax);
+    return `<div class="js-debug-y-axis js-debug-y-axis--broken" data-js-debug-axis="${esc(group.key)}" data-js-debug-axis-break="${esc(threshold)}">
+      <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+      <span data-js-debug-axis-break-label="${esc(group.key)}"${debugGraphAxisTickStyle(threshold, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold, group.unit))}</span>
+      <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(threshold / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(threshold / 2, group.unit))}</span>
+      <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    </div>`;
+  }
   return `<div class="js-debug-y-axis" data-js-debug-axis="${esc(group.key)}">
-    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
-    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax / 2, positionMax)}>${esc(debugGraphAxisValueText(axisMax / 2, group.unit))}</span>
-    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
+    <span data-js-debug-axis-max="${esc(group.key)}"${debugGraphAxisTickStyle(positionMax, positionMax, scale)}>${esc(debugGraphAxisValueText(axisMax, group.unit))}</span>
+    <span data-js-debug-axis-mid="${esc(group.key)}"${debugGraphAxisTickStyle(scale === true ? Math.expm1(Math.log1p(positionMax) / 2) : positionMax / 2, positionMax, scale)}>${esc(debugGraphAxisValueText(scale === true ? Math.expm1(Math.log1p(axisMax) / 2) : axisMax / 2, group.unit))}</span>
+    <span data-js-debug-axis-zero="${esc(group.key)}"${debugGraphAxisTickStyle(0, positionMax, scale)}>${esc(debugGraphAxisValueText(0, group.unit))}</span>
   </div>`;
 }
 
@@ -43687,8 +45042,9 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   return debugGraphValueText(value, data.group.unit);
 }
 
-function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null) {
-  const groupLabel = debugGraphLocalizedLabel(group);
+function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
+  const groupLabel = debugGraphChartLabel(group, buckets);
+  const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
@@ -43699,9 +45055,11 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
+  const tokenAxis = (group.key === 'agentTokens' || group.key === 'modelTokens') ? options.tokenAxis : null;
+  const plotScale = tokenAxis?.scale || debugGraphUsesLogScale(group, plotSeries);
   const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...lineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
-  const max = debugGraphChartAxisMax(group, rawMax);
+  const max = tokenAxis ? tokenAxis.axisMax : debugGraphChartAxisMax(group, rawMax);
   const axisMax = max > 0 ? max : 0;
   const chartClasses = ['js-debug-chart'];
   if (group.dynamicAgentTokens === true || group.dynamicTokenDimension) chartClasses.push('js-debug-chart--token-agents');
@@ -43710,28 +45068,39 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const displayedSummary = debugGraphDisplayedSummary(group, buckets);
   const displayedSummaryHtml = displayedSummary === null
     ? ''
-    : `<span class="js-debug-chart-summary" data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
+    : `<span class="js-debug-chart-summary"${debugGraphExplainAttrs(displayedSummary.text, displayedSummary.descKey, {attribute: 'data-js-debug-summary-desc'})} data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
-  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''}>
+  const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
+  const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
+  const modelDimensionControl = group.key === 'modelTokens'
+    ? `<label class="js-debug-resolution-label js-debug-model-token-dimension" data-js-debug-model-token-dimension>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}: <select data-js-debug-model-token-dimension-select aria-label="${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}">${jsDebugGraphModelTokenDimensions.map(item => {
+        const label = debugGraphModelTokenDimensionLabel(item.key);
+        return `<option value="${esc(item.key)}"${item.key === jsDebugGraphModelTokenDimension ? ' selected' : ''}${debugGraphExplainAttrs(label, debugGraphModelTokenDimensionDescriptionKey(item.key), {attribute: 'data-js-debug-model-token-dimension-desc'})}>${esc(label)}</option>`;
+      }).join('')}</select></label>`
+    : '';
+  return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${tokenAxis ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
-        <span class="js-debug-chart-title">${esc(groupLabel)}</span>
+        <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
+        ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${gpuUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
     ${gpuUnavailable ? `<div class="js-debug-chart-unavailable" data-js-debug-gpu-unavailable="${esc(group.key)}">${esc(t('finder.dateMode.none'))}</div>` : `<div class="js-debug-chart-body">
-      ${debugGraphAxisHtml(group, axisMax)}
+      ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
-          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain)).join('') : ''}
-          ${debugGraphGridLinesHtml(group, axisMax)}
+          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
+          ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
+          ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
@@ -43743,6 +45112,50 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   </section>`;
 }
 
+function debugGraphUsesLogScale(group, seriesItems) {
+  const candidates = (seriesItems || []).flatMap(series => series.plotValues || series.values || []);
+  const values = candidates.map(Number).filter(value => Number.isFinite(value) && value > 0);
+  if (!values.length) return false;
+  const max = Math.max(...values);
+  if (group?.key === 'latency') return max > 1000;
+  return false;
+}
+
+function debugGraphTokenAxisDescriptor(buckets) {
+  const values = (buckets || []).map(bucket => {
+    let total = 0;
+    for (const rate of bucket?.agentTokenRates?.values?.() || []) total += debugGraphAgentTokenBucketValue(bucket, rate);
+    // Model input/cache can legitimately exceed generated output. The shared
+    // descriptor must include the selected Model chart while remaining one
+    // exact axis for both token charts.
+    return Math.max(total, debugGraphSelectedModelTokenBucketValue(bucket));
+  }).filter(value => Number.isFinite(value) && value > 0);
+  const rawMax = Math.max(0, ...values);
+  const group = jsDebugGraphChartGroups.find(item => item.key === 'agentTokens');
+  const axisMax = debugGraphChartAxisMax(group || {unit: 'tokensPerMinute'}, rawMax);
+  const sorted = [...values].sort((left, right) => left - right);
+  const normalMax = sorted.length >= 8 ? sorted[Math.floor((sorted.length - 1) * 0.9)] : rawMax;
+  const threshold = debugGraphChartAxisMax(group || {unit: 'tokensPerMinute'}, normalMax);
+  const peakCount = sorted.filter(value => value > threshold).length;
+  const broken = sorted.length >= 8
+    && peakCount > 0
+    && peakCount <= Math.max(1, Math.ceil(sorted.length * 0.1))
+    && rawMax >= Math.max(threshold * 2.5, normalMax * 3)
+    && threshold < axisMax;
+  return Object.freeze({
+    axisMax,
+    scale: broken ? Object.freeze({mode: 'broken-linear', threshold, upperFraction: 0.18}) : false,
+  });
+}
+
+function debugGraphChartLabel(group, buckets = []) {
+  const label = debugGraphLocalizedLabel(group);
+  const detailKey = group?.key === 'cpu' ? 'cpuLabel' : group?.key === 'memory' ? 'systemMemoryLabel' : '';
+  if (!detailKey) return label;
+  const detail = buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
+  return detail ? `${label} (${detail})` : label;
+}
+
 function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
   return `<div class="js-debug-chart-shell">
     <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(jsDebugGraphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
@@ -43750,14 +45163,648 @@ function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
   </div>`;
 }
 
-function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now()) {
+function debugGraphCostText(key, fallback, params = {}) {
+  const translated = t(key, params);
+  return translated === key ? fallback : translated;
+}
+
+function debugGraphCostMicroUsd(item) {
+  return debugGraphCostInteger(item?.micro_usd ?? item?.total_micro_usd ?? item?.cost_micro_usd);
+}
+
+function debugGraphCostUsdText(microUsd) {
+  const value = debugGraphCostInteger(microUsd);
+  if (value === 0) return '$0.00';
+  const usd = value / 1000000;
+  if (usd >= 1) return `$${usd.toFixed(2)}`;
+  if (usd >= 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(6)}`;
+}
+
+function debugGraphCostRangeUsdText(summary) {
+  const lower = debugGraphCostInteger(summary?.lowerMicroUsd ?? summary?.knownMicroUsd);
+  const upper = Math.max(lower, debugGraphCostInteger(summary?.upperMicroUsd ?? summary?.totalMicroUsd ?? summary?.knownMicroUsd));
+  if (lower === upper) return debugGraphCostUsdText(lower);
+  return `${debugGraphCostUsdText(lower)} – ${debugGraphCostUsdText(upper)}`;
+}
+
+function debugGraphCostKind(item) {
+  return String(item?.key || item?.kind || item?.direction || item?.label || '').toLowerCase();
+}
+
+function debugGraphCostClass(item) {
+  const unit = String(item?.unit || 'tokens').toLowerCase();
+  const modality = String(item?.modality || 'text').toLowerCase();
+  if (unit !== 'tokens' || modality !== 'text') return 'other';
+  const cacheRole = String(item?.cache_role || '').toLowerCase();
+  if (['read', 'write', 'write_5m', 'write_1h'].includes(cacheRole)) return 'cache';
+  const direction = String(item?.direction || debugGraphCostKind(item)).toLowerCase();
+  if (direction.includes('input') || direction.includes('uncached')) return 'input';
+  if (direction.includes('output')) return 'output';
+  return 'other';
+}
+
+function debugGraphCostCompactTotals(summary) {
+  const totals = {input: 0, cache: 0, output: 0};
+  for (const item of summary.components) {
+    const value = debugGraphCostMicroUsd(item);
+    const itemClass = debugGraphCostClass(item);
+    if (itemClass === 'input') totals.input += value;
+    else if (itemClass === 'cache') totals.cache += value;
+    else totals.output += value;
+  }
+  return totals;
+}
+
+function debugGraphCostTokenTotals(summary) {
+  const totals = {input: 0, cache: 0, output: 0, other: 0, total: 0};
+  for (const item of summary.components) {
+    if (String(item?.unit || 'tokens').toLowerCase() !== 'tokens') continue;
+    const quantity = Math.max(0, Number(item?.quantity) || 0);
+    const itemClass = debugGraphCostClass(item);
+    totals[itemClass] += quantity;
+    totals.total += quantity;
+  }
+  return totals;
+}
+
+const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
+const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']);
+const DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS = Object.freeze(['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
+const DEBUG_GRAPH_COST_MODEL_KEY_FIELDS = Object.freeze(['provider', 'model', 'effort']);
+const DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
+const DEBUG_GRAPH_COST_TMUX_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind']);
+let jsDebugCostSummaryCache = {signature: '', summary: null};
+
+function debugGraphCostAggregateRowInto(grouped, row, keyFields) {
+  if (!row || typeof row !== 'object') return;
+  let key = '';
+  for (let index = 0; index < keyFields.length; index += 1) {
+    if (index) key += '\u0000';
+    key += String(row[keyFields[index]] || '');
+  }
+  key ||= 'unknown';
+  const current = grouped.get(key) || {...row};
+  if (!grouped.has(key)) {
+    for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) current[field] = 0;
+    for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] = 0;
+    grouped.set(key, current);
+  }
+  for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) current[field] += debugGraphCostInteger(row?.[field]);
+  for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] += Math.max(0, Number(row?.[field]) || 0);
+}
+
+function debugGraphCostAggregateValues(grouped) {
+  return [...grouped.values()].sort((left, right) => debugGraphCostMicroUsd(right) - debugGraphCostMicroUsd(left)
+    || String(left?.model || left?.label || left?.key || '').localeCompare(String(right?.model || right?.label || right?.key || '')));
+}
+
+function debugGraphCostAggregateRows(rows, keyFields) {
+  const grouped = new Map();
+  for (const row of rows || []) {
+    debugGraphCostAggregateRowInto(grouped, row, keyFields);
+  }
+  return debugGraphCostAggregateValues(grouped);
+}
+
+function debugGraphCostSummarySignature(buckets) {
+  if (!Array.isArray(buckets) || !buckets.length) {
+    return `0:${jsDebugStatsAgentTokenSequence}:${jsDebugUsageAtomBackfill.state || ''}:${jsDebugUsageAtomBackfill.sources || 0}:${jsDebugUsageAtomBackfill.missing || 0}`;
+  }
+  const first = buckets[0] || {};
+  const last = buckets[buckets.length - 1] || {};
+  return [
+    buckets.length,
+    Number(first.startMs ?? first.start ?? 0) || 0,
+    Number(first.durationMs ?? first.duration ?? 0) || 0,
+    Number(first.sequence ?? 0) || 0,
+    Number(last.startMs ?? last.start ?? 0) || 0,
+    Number(last.durationMs ?? last.duration ?? 0) || 0,
+    Number(last.sequence ?? 0) || 0,
+    jsDebugStatsAgentTokenSequence,
+    jsDebugUsageAtomBackfill.state || '',
+    jsDebugUsageAtomBackfill.sources || 0,
+    jsDebugUsageAtomBackfill.missing || 0,
+  ].join(':');
+}
+
+function debugGraphCostSummaryForBuckets(buckets) {
+  const signature = debugGraphCostSummarySignature(buckets);
+  if (signature && jsDebugCostSummaryCache.signature === signature && jsDebugCostSummaryCache.summary) return jsDebugCostSummaryCache.summary;
+  const summaries = (buckets || []).map(bucket => bucket?.costSummary).filter(Boolean);
+  const componentRows = new Map();
+  const modelRows = new Map();
+  const sourceRows = new Map();
+  const tmuxRows = new Map();
+  const result = {
+    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
+    unpricedCount: 0, unpricedTokenQuantity: 0, components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
+    backfill: {...jsDebugUsageAtomBackfill},
+  };
+  for (const summary of summaries) {
+    result.totalMicroUsd += debugGraphCostInteger(summary.totalMicroUsd);
+    result.knownMicroUsd += debugGraphCostInteger(summary.knownMicroUsd);
+    result.lowerMicroUsd += debugGraphCostInteger(summary.lowerMicroUsd ?? summary.knownMicroUsd);
+    result.upperMicroUsd += debugGraphCostInteger(summary.upperMicroUsd ?? summary.totalMicroUsd ?? summary.knownMicroUsd);
+    result.pricedCount += debugGraphCostInteger(summary.pricedCount);
+    result.complete = result.complete && summary.complete === true;
+    result.unpricedCount += debugGraphCostInteger(summary.unpricedCount);
+    result.unpricedTokenQuantity += Math.max(0, Number(summary.unpricedTokenQuantity) || 0);
+    for (const row of debugGraphCostRows(summary.components)) debugGraphCostAggregateRowInto(componentRows, row, DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS);
+    for (const row of debugGraphCostRows(summary.models)) debugGraphCostAggregateRowInto(modelRows, row, DEBUG_GRAPH_COST_MODEL_KEY_FIELDS);
+    for (const row of debugGraphCostRows(summary.sources)) debugGraphCostAggregateRowInto(sourceRows, row, DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS);
+    for (const row of debugGraphCostRows(summary.tmuxWindows)) debugGraphCostAggregateRowInto(tmuxRows, row, DEBUG_GRAPH_COST_TMUX_KEY_FIELDS);
+    result.catalogRevision = summary.catalogRevision || result.catalogRevision;
+    result.activeCatalogRevision = summary.activeCatalogRevision || result.activeCatalogRevision;
+    result.freshness = summary.freshness || result.freshness;
+  }
+  // Effective price/source evidence is part of a billable component identity:
+  // retaining it prevents a displayed-range reprice boundary from being
+  // misleadingly collapsed into one synthetic rate row.
+  result.components = debugGraphCostAggregateValues(componentRows);
+  result.models = debugGraphCostAggregateValues(modelRows);
+  result.sources = debugGraphCostAggregateValues(sourceRows);
+  result.tmuxWindows = debugGraphCostAggregateValues(tmuxRows);
+  if (result.backfill.state !== 'complete') result.complete = false;
+  jsDebugCostSummaryCache = {signature, summary: result};
+  return result;
+}
+
+function debugGraphCostRangeText(domain) {
+  const start = debugGraphExactTimeLabel(domain.startMs);
+  const end = debugGraphExactTimeLabel(domain.endMs);
+  const seconds = Math.max(0, Math.round((Number(domain.endMs) - Number(domain.startMs)) / 1000));
+  return `${start} – ${end} · ${debugGraphCostText('debug.cost.duration', `${seconds}s`, {seconds})}`;
+}
+
+function debugGraphCostModelLabel(row) {
+  const label = String(row?.label || row?.model || row?.source || row?.agent || row?.key || 'unknown');
+  const effort = String(row?.effort || '').trim();
+  return effort ? `${label} · ${effort}` : label;
+}
+
+function debugGraphCostUsageTokensText(tokens) {
+  const value = Math.max(0, Number(tokens) || 0);
+  return value > 0 ? debugGraphTokensText(value) : '0';
+}
+
+function debugGraphCostUsageUsdText(microUsd, tokens = 1) {
+  const value = debugGraphCostInteger(microUsd);
+  if (value > 0) return debugGraphCostUsdText(value);
+  if (Math.max(0, Number(tokens) || 0) <= 0) return '$0';
+  return '$0';
+}
+
+function debugGraphCostBreakdownItems(row) {
+  return [
+    ['input', debugGraphCostText('debug.cost.input', 'Input')],
+    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')],
+    ['output', debugGraphCostText('debug.cost.output', 'Output')],
+    ['other', debugGraphCostText('debug.cost.other', 'Other')],
+  ].map(([key, label]) => ({
+    key,
+    label,
+    tokens: Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
+    microUsd: debugGraphCostInteger(row?.[`${key}_micro_usd`]),
+  }));
+}
+
+function debugGraphCostPricingSourceEntries(components, modelRow = null) {
+  const provider = String(modelRow?.provider || '').trim();
+  const model = String(modelRow?.model || '').trim();
+  const links = new Map();
+  for (const row of components || []) {
+    if (provider && String(row?.provider || '').trim() !== provider) continue;
+    if (model && String(row?.model || '').trim() !== model) continue;
+    const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
+    if (!url || links.has(url)) continue;
+    const sourceLabel = [row?.provider, row?.model].map(value => String(value || '').trim()).filter(Boolean).join(' · ')
+      || debugGraphCostText('debug.cost.source', 'Pricing source');
+    links.set(url, sourceLabel);
+  }
+  return [...links].map(([url, label]) => ({url, label}));
+}
+
+function debugGraphCostPricingLinksHtml(components, modelRow = null) {
+  const links = debugGraphCostPricingSourceEntries(components, modelRow);
+  if (!links.length) return '';
+  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`).join(' · ')}</span>`;
+}
+
+function debugGraphCostAllPricingSourcesHtml(components) {
+  const links = debugGraphCostPricingSourceEntries(components);
+  if (!links.length) return '';
+  return `<section class="js-debug-cost-details-section js-debug-cost-pricing-sources">
+    <h2>${esc(debugGraphCostText('debug.cost.pricingSources', 'Pricing sources'))}</h2>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="pricing-sources"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</th><th scope="col">URL</th></tr></thead><tbody>${links.map(({url, label}) => `<tr><th scope="row">${esc(label)}</th><td><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></td></tr>`).join('')}</tbody></table></div>
+  </section>`;
+}
+
+function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null} = {}) {
+  const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
+  const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
+  return `<span class="js-debug-cost-table-metric"><strong>${esc(debugGraphCostUsageTokensText(tokens))}</strong><small>${esc(cost)}</small></span>`;
+}
+
+function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = []} = {}) {
+  if (!rows.length) return '';
+  const usageKeys = ['input', 'cache', 'output', 'other'];
+  const usageLabels = {
+    input: debugGraphCostText('debug.cost.input', 'Input'),
+    cache: debugGraphCostText('debug.cost.cached', 'Cached'),
+    output: debugGraphCostText('debug.cost.output', 'Output'),
+    other: debugGraphCostText('debug.cost.other', 'Other'),
+  };
+  const totalRow = debugGraphCostAggregateRows(rows, [])[0] || {};
+  const rowHtml = row => {
+    const breakdown = debugGraphCostBreakdownItems(row);
+    const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
+    const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row) : '';
+    const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostUsageUsdText(debugGraphCostMicroUsd(row), totalTokens)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostUsageUsdText(item.microUsd, item.tokens)}`).join('; ')}`;
+    return `<tr aria-label="${esc(accessible)}"><th scope="row"><strong>${esc(labelFor(row))}</strong>${pricingLinks}</th>${breakdown.map(item => `<td>${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td>${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+  };
+  const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
+  const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td>${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td>${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+}
+
+function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
+  if (options.report !== true) return '';
+  return debugGraphCostUsageTableHtml(rows, {
+    kind: 'model',
+    heading: debugGraphCostText('debug.cost.modelUsages', 'Model Usages'),
+    labelHeading: debugGraphCostText('debug.cost.model', 'Model'),
+    labelFor: debugGraphCostModelLabel,
+    components,
+  });
+}
+
+function debugGraphCostComponentLabel(row) {
+  const parts = [row?.provider, row?.model, row?.pricing_profile !== 'default' ? row?.pricing_profile : '', row?.service_tier !== 'default' ? row?.service_tier : '', row?.direction, row?.cache_role, row?.modality, row?.unit]
+    .map(value => String(value || '').trim())
+    .filter(Boolean);
+  return parts.join(' · ') || String(row?.label || row?.key || 'unknown');
+}
+
+function debugGraphCostComponentRateText(row) {
+  const exactRate = String(row?.rate_usd || '').trim();
+  const scale = Math.max(0, Number(row?.rate_scale) || 0);
+  if (exactRate && scale > 0) return `$${exactRate}/${scale.toLocaleString()} ${String(row?.unit || 'unit')}`;
+  const quantity = Number(row?.quantity);
+  const microUsd = debugGraphCostMicroUsd(row);
+  if (!Number.isFinite(quantity) || quantity <= 0 || microUsd <= 0) return '—';
+  return `${debugGraphCostUsdText(Math.round((microUsd * 1000000) / quantity))}/${String(row?.unit || 'unit')}`;
+}
+
+function debugGraphCostComponentFormulaText(row) {
+  const quantity = Number(row?.quantity);
+  const rate = debugGraphCostComponentRateText(row);
+  if (!Number.isFinite(quantity) || quantity <= 0 || rate === '—') return '—';
+  return `${quantity.toLocaleString()} ${String(row?.unit || 'unit')} × ${rate}`;
+}
+
+function debugGraphCostComponentSortValue(row, key) {
+  if (key === 'tokens') return Math.max(0, Number(row?.quantity) || 0);
+  if (key === 'rate') {
+    const rate = Number(row?.rate_usd);
+    const scale = Math.max(1, Number(row?.rate_scale) || 1);
+    return Number.isFinite(rate) ? rate / scale : -1;
+  }
+  if (key === 'cost') return debugGraphCostMicroUsd(row);
+  if (key === 'effective') {
+    const timestamp = Date.parse(String(row?.effective_from || ''));
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+  if (key === 'cache') return String(row?.cache_role || '');
+  if (key === 'source') return String(row?.source_url || '');
+  return String(row?.[key] || '');
+}
+
+function debugGraphCostSortedComponentRows(rows) {
+  const {key, direction} = jsDebugCostComponentSortState;
+  const multiplier = direction === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => {
+    const leftValue = debugGraphCostComponentSortValue(left, key);
+    const rightValue = debugGraphCostComponentSortValue(right, key);
+    const comparison = typeof leftValue === 'number' && typeof rightValue === 'number'
+      ? leftValue - rightValue
+      : String(leftValue).localeCompare(String(rightValue));
+    return (comparison * multiplier) || debugGraphCostComponentLabel(left).localeCompare(debugGraphCostComponentLabel(right));
+  });
+}
+
+function debugGraphCostComponentSortHeaderHtml(key, label) {
+  const active = jsDebugCostComponentSortState.key === key;
+  const ariaSort = active ? (jsDebugCostComponentSortState.direction === 'asc' ? 'ascending' : 'descending') : 'none';
+  const nextDirection = active && jsDebugCostComponentSortState.direction === 'asc' ? 'descending' : 'ascending';
+  return `<th scope="col" aria-sort="${ariaSort}"><button type="button" class="js-debug-cost-sort control-active-hover" data-js-debug-cost-sort="${esc(key)}" data-js-debug-cost-next-sort="${nextDirection}">${esc(label)}</button></th>`;
+}
+
+function debugGraphCostComponentDetailsHtml(rows) {
+  if (!rows.length) return '';
+  const headers = [
+    ['provider', 'Provider'], ['model', 'Model'], ['effort', 'Effort'], ['direction', 'Direction'],
+    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')], ['modality', 'Modality'], ['unit', 'Unit'],
+    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['rate', debugGraphCostText('debug.cost.rate', 'Rate')],
+    ['cost', debugGraphCostText('debug.cost.estimated', 'Cost')], ['effective', debugGraphCostText('debug.cost.effective', 'Effective')],
+    ['source', debugGraphCostText('debug.cost.source', 'Pricing source')],
+  ];
+  return `<section class="js-debug-cost-details-section">
+    <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
+      const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
+      return `<tr><td>${esc(String(row?.provider || '—'))}</td><td>${esc(String(row?.model || '—'))}</td><td>${esc(String(row?.effort || '—'))}</td><td>${esc(String(row?.direction || '—'))}</td><td>${esc(String(row?.cache_role || '—'))}</td><td>${esc(String(row?.modality || '—'))}</td><td>${esc(String(row?.unit || '—'))}</td><td>${esc(debugGraphTokensText(row?.quantity))}</td><td>${esc(debugGraphCostComponentRateText(row))}</td><td>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</td><td>${esc(String(row?.effective_from || '—'))}</td><td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</td></tr>`;
+    }).join('')}</tbody></table></div>
+  </section>`;
+}
+
+function debugGraphCostSourceLabel(row) {
+  const root = String(row?.root_thread_id || '').trim();
+  const agent = String(row?.agent_thread_id || '').trim();
+  const tool = String(row?.tool_name || '').trim();
+  const source = String(row?.source || '').trim();
+  return [source, agent && agent !== root ? agent : '', tool].filter(Boolean).join(' · ') || root || debugGraphCostText('debug.cost.unknown', 'Unknown');
+}
+
+function debugGraphCostRowRangeUsdText(row) {
+  const lower = debugGraphCostInteger(row?.lower_micro_usd ?? row?.micro_usd);
+  const upper = Math.max(lower, debugGraphCostInteger(row?.upper_micro_usd ?? row?.micro_usd));
+  if (lower === upper) return debugGraphCostUsdText(lower);
+  return `${debugGraphCostUsdText(lower)} – ${debugGraphCostUsdText(upper)}`;
+}
+
+function debugGraphCostSubtotalText(row) {
+  const parts = [
+    ['input_micro_usd', debugGraphCostText('debug.cost.input', 'Input')],
+    ['cache_micro_usd', debugGraphCostText('debug.cost.cache', 'Cache')],
+    ['output_micro_usd', debugGraphCostText('debug.cost.output', 'Output')],
+    ['other_micro_usd', debugGraphCostText('debug.cost.other', 'Other')],
+  ];
+  return `${debugGraphTokensText(row?.token_quantity)} · ${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostRowRangeUsdText(row)}`;
+}
+
+function debugGraphCostTmuxLabel(row) {
+  const explicit = String(row?.tmux_label || '').trim();
+  if (explicit) return explicit;
+  const session = String(row?.tmux_session || '').trim();
+  const windowLabel = String(row?.tmux_window_label || row?.tmux_window || '').trim();
+  const kind = String(row?.agent_kind || '').trim();
+  return [session, windowLabel || kind].filter(Boolean).join(':') || debugGraphCostSourceLabel(row);
+}
+
+function debugGraphCostTmuxBreakdownRows(rows) {
+  const grouped = new Map();
+  for (const row of rows || []) {
+    const key = String(row?.tmux_key || row?.root_thread_id || row?.source || debugGraphCostTmuxLabel(row)).trim() || 'unknown';
+    const current = grouped.get(key) || {
+      ...row,
+      token_quantity: 0,
+      micro_usd: 0,
+      lower_micro_usd: 0,
+      upper_micro_usd: 0,
+      input_micro_usd: 0,
+      cache_micro_usd: 0,
+      output_micro_usd: 0,
+      other_micro_usd: 0,
+      input_tokens: 0,
+      cache_tokens: 0,
+      output_tokens: 0,
+      other_tokens: 0,
+    };
+    current.token_quantity += Math.max(0, Number(row?.token_quantity) || 0);
+    for (const field of ['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
+      current[field] += debugGraphCostInteger(row?.[field]);
+    }
+    for (const field of ['input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']) {
+      current[field] += Math.max(0, Number(row?.[field]) || 0);
+    }
+    grouped.set(key, current);
+  }
+  return [...grouped.values()].sort((left, right) => debugGraphCostInteger(right?.upper_micro_usd ?? right?.micro_usd) - debugGraphCostInteger(left?.upper_micro_usd ?? left?.micro_usd)
+    || debugGraphCostTmuxLabel(left).localeCompare(debugGraphCostTmuxLabel(right)));
+}
+
+function debugGraphCostTmuxBreakdownHtml(summary) {
+  const directRows = debugGraphCostRows(summary?.tmuxWindows);
+  const rows = directRows.length ? directRows : debugGraphCostTmuxBreakdownRows(summary.sources);
+  if (!rows.length) return '';
+  return debugGraphCostUsageTableHtml(rows, {
+    kind: 'agent',
+    heading: debugGraphCostText('debug.cost.byAgent', 'By Agent'),
+    labelHeading: t('yoagent.action.row.agent'),
+    labelFor: debugGraphCostTmuxLabel,
+  });
+}
+
+function debugGraphCostTranscriptPath(row) {
+  const path = String(row?.transcript || '').trim();
+  if (!path.startsWith('/') || !/\.(?:jsonl|ndjson)$/i.test(path) || /[\u0000-\u001f\u007f]/.test(path)) return '';
+  const segments = path.split('/');
+  if (segments.slice(1).some(segment => !segment || segment === '.' || segment === '..')) return '';
+  return path;
+}
+
+function debugGraphCostSourceLabelHtml(row) {
+  const label = debugGraphCostSourceLabel(row);
+  const transcript = debugGraphCostTranscriptPath(row);
+  if (!transcript) return esc(label);
+  return `<a href="#" class="js-debug-cost-transcript-link" data-js-debug-cost-transcript-path="${esc(transcript)}" title="${esc(transcript)}">${esc(label)}</a>`;
+}
+
+function debugGraphCostSourceTreeHtml(rows) {
+  if (!rows.length) return '';
+  return `<section class="js-debug-cost-details-section">
+    <h2>${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}</h2>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="source"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th><th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${debugGraphCostSourceLabelHtml(row)}</th><td>${esc(debugGraphTokensText(row?.token_quantity))}</td><td>${esc(debugGraphCostSubtotalText(row))}</td></tr>`).join('')}</tbody></table></div>
+  </section>`;
+}
+
+function debugGraphCostCatalogDetailsHtml(summary) {
+  const revision = String(summary.activeCatalogRevision || summary.catalogRevision || '').trim() || '—';
+  const freshness = String(summary.freshness || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
+  const exclusions = Math.max(0, Number(summary.unpricedCount) || 0);
+  const priced = Math.max(0, Number(summary.pricedCount) || 0);
+  const rows = [
+    [debugGraphCostText('debug.cost.catalogRevision', 'Catalog revision'), revision],
+    [debugGraphCostText('debug.cost.freshness', 'Catalog freshness'), freshness],
+    [debugGraphCostText('debug.cost.coverage', 'Priced coverage'), `${priced}/${priced + exclusions}`],
+    [debugGraphCostText('debug.cost.exclusions', 'Unpriced exclusions'), String(exclusions)],
+  ];
+  return `<div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="catalog"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function debugGraphCostBackfillText(summary) {
+  const state = String(summary?.backfill?.state || 'pending');
+  if (state === 'complete') return '';
+  if (state === 'partial') return debugGraphCostText('debug.cost.backfillPartial', 'Backfill incomplete');
+  if (state === 'running') return debugGraphCostText('debug.cost.backfillRunning', 'Backfill in progress');
+  return debugGraphCostText('debug.cost.backfillPending', 'Backfill pending');
+}
+
+function debugGraphCostUnpricedUsage(summary) {
+  const rows = debugGraphCostRows(summary?.components).filter(row => row?.priced === false || Math.max(0, Number(row?.unpriced_count) || 0) > 0);
+  const labels = [...new Set(rows.map(row => {
+    const model = [row?.provider, row?.model].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || debugGraphCostText('debug.cost.unknown', 'Unknown');
+    const itemClass = debugGraphCostClass(row);
+    return `${model} (${itemClass})`;
+  }))];
+  const rowsTokenQuantity = rows.reduce((total, row) => total + Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0)), 0);
+  const tokenQuantity = Math.max(0, Number(summary?.unpricedTokenQuantity) || rowsTokenQuantity);
+  const knownMicroUsd = debugGraphCostInteger(summary?.knownMicroUsd);
+  const upperMicroUsd = Math.max(knownMicroUsd, debugGraphCostInteger(summary?.upperMicroUsd));
+  return {tokenQuantity, worstCaseMicroUsd: upperMicroUsd - knownMicroUsd, labels};
+}
+
+function debugGraphCostUnknownUsageHtml(summary) {
+  if (Math.max(0, Number(summary?.unpricedCount) || 0) === 0) return '';
+  const usage = debugGraphCostUnpricedUsage(summary);
+  const rows = [
+    [debugGraphCostText('debug.cost.knownTotal', 'Known priced total'), debugGraphCostUsdText(summary?.knownMicroUsd)],
+    [debugGraphCostText('debug.cost.unpricedTokens', 'Unpriced tokens'), debugGraphTokensText(usage.tokenQuantity)],
+    [debugGraphCostText('debug.cost.worstCase', 'Worst-case additional estimate'), debugGraphCostUsdText(usage.worstCaseMicroUsd)],
+    [debugGraphCostText('debug.cost.unpricedModels', 'Unpriced model/classes'), usage.labels.join(', ') || debugGraphCostText('debug.cost.unknown', 'Unknown')],
+  ];
+  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div></section>`;
+}
+
+function debugGraphCostReportHtml(summary, domain) {
+  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0;
+  const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
+  const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
+  const total = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
+  const tokens = debugGraphCostTokenTotals(summary);
+  const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
+  return `<article class="js-debug-cost-report" aria-label="${esc(title)}">
+    <div class="js-debug-cost-report-title">
+      <h1>${esc(title)}</h1>
+    </div>
+    <div class="js-debug-cost-report-body">
+      <p class="meta-muted">${esc(debugGraphCostRangeText(domain))}</p>
+      <p>${esc(!hasEstimatedUsage ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage') : (exact ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total}) : hasFiniteRange ? debugGraphCostText('debug.cost.range', `Estimated API list-price range ${total}`, {amount: total}) : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total})))}</p>
+      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.total', 'Summary'))}</h2>
+        <ul class="js-debug-cost-report-list"><li><strong>${esc(debugGraphCostText('debug.cost.total', 'Estimated total'))}:</strong> ${esc(total)}</li><li><strong>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}:</strong> ${esc(debugGraphTokensText(tokens.total))}<ul><li>${esc(`${debugGraphCostText('debug.cost.input', 'Input')}: ${debugGraphTokensText(tokens.input)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.cache', 'Cache')}: ${debugGraphTokensText(tokens.cache)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.output', 'Output')}: ${debugGraphTokensText(tokens.output)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.other', 'Other')}: ${debugGraphTokensText(tokens.other)}`)}</li></ul></li></ul>
+      </section>
+      ${debugGraphCostUnknownUsageHtml(summary)}
+      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.catalogRevision', 'Pricing catalog'))}</h2>${debugGraphCostCatalogDetailsHtml(summary)}</section>
+      ${debugGraphCostTmuxBreakdownHtml(summary)}
+      ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true})}
+      ${debugGraphCostComponentDetailsHtml(summary.components)}
+      ${debugGraphCostSourceTreeHtml(summary.sources)}
+      ${debugGraphCostAllPricingSourcesHtml(summary.components)}
+    </div>
+  </article>`;
+}
+
+function debugGraphCostSummaryHtml(buckets, domain) {
+  const summary = debugGraphCostSummaryForBuckets(buckets);
+  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0;
+  const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
+  const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
+  const estimated = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
+  const compact = debugGraphCostCompactTotals(summary);
+  const tokens = debugGraphCostTokenTotals(summary);
+  const heading = hasEstimatedUsage ? `${exact || hasFiniteRange ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';
+  const accessible = !hasEstimatedUsage
+    ? 'No displayed usage has a selected price'
+    : exact
+    ? `Estimated API list-price total ${estimated} across displayed usage; open calculation and pricing sources`
+    : `Estimated API list-price range ${estimated}; unknown or incomplete displayed usage widens the range`;
+  const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
+  const refreshHtml = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh aria-label="${esc(refreshLabel)}" title="${esc(jsDebugPricingRefreshState.error || refreshLabel)}"${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
+  const refreshStatus = jsDebugPricingRefreshState.error || (jsDebugPricingRefreshState.inFlight ? (jsDebugPricingRefreshState.status || `${refreshLabel}…`) : '');
+  const backfillStatus = debugGraphCostBackfillText(summary);
+  const moreInfo = debugGraphCostText('debug.cost.moreInfo', 'More Info');
+  const compactRows = [
+    ['Input', compact.input === null ? null : debugGraphCostUsdText(compact.input), tokens.input],
+    ['Cache', compact.cache === null ? null : debugGraphCostUsdText(compact.cache), tokens.cache],
+    ['Output', compact.output === null ? null : debugGraphCostUsdText(compact.output), tokens.output],
+    ['Total', hasEstimatedUsage ? estimated : null, tokens.total],
+  ];
+  return `<section class="js-debug-chart js-debug-cost-summary" data-js-debug-summary-group="costSummary">
+    <div class="js-debug-chart-head">
+      <div class="js-debug-chart-heading-row">
+        <span class="js-debug-chart-title">${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}</span>
+        <span class="js-debug-chart-summary js-debug-cost-estimate">(${esc(heading)})</span>
+        ${refreshHtml}
+        <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="costSummary" aria-label="${esc(t('common.close'))} ${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}" title="${esc(t('common.close'))}">×</button>
+      </div>
+      <div class="js-debug-cost-range">${esc(debugGraphCostRangeText(domain))}</div>
+      ${refreshStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(refreshStatus)}</div>` : ''}
+      ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
+    </div>
+    <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
+      ${compactRows.map(([label, value, tokenCount]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
+    </dl>
+    <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-label="${esc(accessible)}">${esc(moreInfo)}</button></span>
+  </section>`;
+}
+
+async function refreshDebugCostPricing() {
+  if (readOnlyMode || jsDebugPricingRefreshState.inFlight) return;
+  jsDebugPricingRefreshState.inFlight = true;
+  jsDebugPricingRefreshState.error = '';
+  jsDebugPricingRefreshState.lastRequestedAtMs = Date.now();
+  refreshDebugGraphSurfaces();
+  try {
+    const payload = await apiFetchJson('/api/pricing-catalog/refresh', {method: 'POST'});
+    jsDebugPricingRefreshState.status = String(payload?.status || 'running');
+    if (jsDebugPricingRefreshState.status === 'running') {
+      scheduleDebugCostPricingStatusRefresh();
+    } else {
+      jsDebugPricingRefreshState.inFlight = false;
+    }
+  } catch (error) {
+    jsDebugPricingRefreshState.inFlight = false;
+    jsDebugPricingRefreshState.error = userMessageText(error, t('common.requestFailed'));
+  } finally {
+    refreshDebugGraphSurfaces();
+  }
+}
+
+function scheduleDebugCostPricingStatusRefresh() {
+  if (jsDebugPricingRefreshState.timer !== null) clearTimeout(jsDebugPricingRefreshState.timer);
+  jsDebugPricingRefreshState.timer = setTimeout(() => {
+    jsDebugPricingRefreshState.timer = null;
+    void refreshDebugCostPricingStatus();
+  }, 750);
+}
+
+async function refreshDebugCostPricingStatus() {
+  try {
+    const payload = await apiFetchJson('/api/pricing-catalog', {cache: 'no-store'});
+    const refresh = payload?.refresh && typeof payload.refresh === 'object' ? payload.refresh : {};
+    const status = String(refresh.status || 'idle');
+    jsDebugPricingRefreshState.status = status;
+    jsDebugPricingRefreshState.error = status === 'failed' ? String(refresh.error || t('common.requestFailed')) : '';
+    jsDebugPricingRefreshState.inFlight = status === 'running';
+    if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
+  } catch (error) {
+    jsDebugPricingRefreshState.inFlight = false;
+    jsDebugPricingRefreshState.error = userMessageText(error, t('common.requestFailed'));
+  }
+  refreshDebugGraphSurfaces();
+}
+
+function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true} = {}) {
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
-  const gridHtml = chartGroups.map(group => {
+  const tokenBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
+  const tokenAxis = debugGraphTokenAxisDescriptor(tokenBuckets);
+  const visibleGroupKeys = new Set(chartGroups.map(group => group.key));
+  const gridHtml = jsDebugGraphChartGroups.flatMap(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges);
+      const items = visibleGroupKeys.has(group.key)
+        ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {tokenAxis})]
+        : [];
+      // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
+      // displayed bucket array, including the compact wide-range history, but adds no axes,
+      // bars, or independent range state.
+      if (includeCostSummary && group.key === 'modelTokens' && debugGraphChartVisible('costSummary')) {
+        items.push(debugGraphCostSummaryHtml(groupBuckets, domain));
+      }
+      return items;
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }
@@ -43832,7 +45879,7 @@ function jsDebugStatsPanelVisible() {
   return debugModeEnabled === true
     && document.visibilityState !== 'hidden'
     && typeof itemIsActivePaneTab === 'function'
-    && itemIsActivePaneTab(debugPaneItemId);
+    && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
 }
 
 function jsDebugStatsTokenConsumerEnabled() {
@@ -43857,15 +45904,36 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
   resetRuntimeInterval('debug-stats', pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
 }
 
+function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
+  const rangeHoursBeyondFirst = Math.max(0, Math.ceil(Math.max(0, Number(rangeSeconds) || 0) / 3600) - 1);
+  return Math.min(jsDebugStatsHistoryMaxTimeoutMs, jsDebugStatsPollTimeoutMs + (rangeHoursBeyondFirst * 1000));
+}
+
+function jsDebugStatsTimeoutError(timeoutMs) {
+  const error = new Error(`history request timed out after ${Math.round(timeoutMs / 1000)}s`);
+  error.name = 'TimeoutError';
+  return error;
+}
+
 async function fetchJsDebugStatsJson(url, options = {}) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const phaseTimings = {};
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || jsDebugStatsPollTimeoutMs);
+  const requestOptions = {...options};
+  delete requestOptions.timeoutMs;
   let timeoutId = null;
+  let timeoutError = null;
   try {
     if (controller && typeof setTimeout === 'function') {
-      timeoutId = setTimeout(() => controller.abort(), jsDebugStatsPollTimeoutMs);
+      timeoutId = setTimeout(() => {
+        timeoutError = jsDebugStatsTimeoutError(timeoutMs);
+        controller.abort(timeoutError);
+      }, timeoutMs);
     }
-    return await apiFetchJsonQuiet(url, {...options, ...(controller ? {signal: controller.signal} : {})}, phaseTimings);
+    return await apiFetchJsonQuiet(url, {...requestOptions, ...(controller ? {signal: controller.signal} : {})}, phaseTimings);
+  } catch (error) {
+    if (controller?.signal?.aborted && timeoutError) throw timeoutError;
+    throw error;
   } finally {
     if (timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(timeoutId);
     if (Number.isFinite(phaseTimings.fetchMs)) recordClientPerfCounter('statsHistoryFetch', phaseTimings.fetchMs);
@@ -43887,6 +45955,7 @@ async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, re
     requestedRangeSeconds,
     requestedStartSeconds,
     error: '',
+    nextAutoRetryAtMs: 0,
   });
   return true;
 }
@@ -43906,6 +45975,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   jsDebugStatsPollState.pending = false;
   jsDebugStatsPollState.inFlight = true;
   let readinessRequest = null;
+  let historyRequestSuppressed = false;
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
@@ -43919,37 +45989,46 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
     if (needsHistoryCoverage) {
       const state = jsDebugHistoryReadiness;
-      const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
-        && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
-        && Number(state.targetStartSeconds) === Number(targetStart)
-        && Number(state.targetEndSeconds) === Number(targetEnd)
-        && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
-      if (!currentRequestMatches) {
-        const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
-        beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
-          targetStartSeconds: targetStart,
-          targetEndSeconds: targetEnd,
-          requestedEndSeconds: requestWindow.endSeconds,
-          requestedResolutionSeconds: coverageResolution,
-          retry: state.phase === 'error',
-        });
+      if (state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) {
+        historyRequestSuppressed = true;
+      } else {
+        const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
+          && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+          && Number(state.targetStartSeconds) === Number(targetStart)
+          && Number(state.targetEndSeconds) === Number(targetEnd)
+          && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
+        if (!currentRequestMatches) {
+          const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
+          beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
+            targetStartSeconds: targetStart,
+            targetEndSeconds: targetEnd,
+            requestedEndSeconds: requestWindow.endSeconds,
+            requestedResolutionSeconds: coverageResolution,
+            retry: state.phase === 'error',
+          });
+        }
+        readinessRequest = jsDebugHistoryReadinessSnapshot();
+        await nextAnimationFrame();
+        if (!jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
       }
-      readinessRequest = jsDebugHistoryReadinessSnapshot();
-      await nextAnimationFrame();
-      if (!jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     }
     const historyEnd = readinessRequest
       ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
       : 0;
-    const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : targetStart;
+    const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : (historyRequestSuppressed ? 0 : targetStart);
     const tokenHistory = tokenResolution
       ? `&token_since=${encodeURIComponent(String(readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0)))}&token_resolution=${encodeURIComponent(String(tokenResolution))}&token_history_start=${encodeURIComponent(String(targetStart))}&token_history_end=0`
       : '';
+    const historyMode = historyRequestSuppressed ? '&history=0' : '';
     const requestSince = readinessRequest ? 0 : (jsDebugStatsServerSequence || 0);
-    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${tokenHistory}`, {cache: 'no-store'});
+    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${historyMode}${tokenHistory}`, {
+      cache: 'no-store',
+      timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
+    });
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
     if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
+    if (readinessRequest && !coverage.complete) throw new Error('stats history response provided incomplete coverage');
     const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
       ? payload.history.coverage
       : null;
@@ -43972,7 +46051,10 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     }
   } catch (error) {
     if (readinessRequest && jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) {
-      setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error)});
+      setJsDebugHistoryReadiness('error', {
+        error: jsDebugErrorText(error),
+        nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryDelayMs(readinessRequest.attemptCount),
+      });
     }
   } finally {
     jsDebugStatsPollState.inFlight = false;
@@ -43993,6 +46075,30 @@ function scheduleJsDebugStatsHistoryFlush() {
   }, jsDebugStatsHistoryFlushMs);
 }
 
+function jsDebugStatsHistoryUploadRequest(records, clientId, since) {
+  let low = 1;
+  let high = Math.min(records.length, jsDebugStatsHistoryPostMaxRecords);
+  let chunkSize = 1;
+  let body = '';
+  while (low <= high) {
+    const candidateSize = Math.floor((low + high) / 2);
+    const candidateBody = JSON.stringify({client_id: clientId, since, ack_only: true, records: records.slice(0, candidateSize)});
+    if (utf8ByteLength(candidateBody) <= jsDebugStatsHistoryPostMaxBytes) {
+      chunkSize = candidateSize;
+      body = candidateBody;
+      low = candidateSize + 1;
+    } else {
+      high = candidateSize - 1;
+    }
+  }
+  const chunk = records.slice(0, chunkSize);
+  return {
+    chunk,
+    held: records.slice(chunkSize),
+    body: body || JSON.stringify({client_id: clientId, since, ack_only: true, records: chunk}),
+  };
+}
+
 async function flushJsDebugStatsHistory() {
   if (!jsDebugCollectionEnabled || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
   if (jsDebugStatsUploadState.worker) return jsDebugStatsUploadState.worker;
@@ -44000,13 +46106,14 @@ async function flushJsDebugStatsHistory() {
     .map(record => ({...record}))
     .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.disconnected_ms || record.cpu_count || record.system_cpu_count)
     .sort((a, b) => (Number(a.start) - Number(b.start)) || (Number(a.duration) - Number(b.duration)));
-  const chunk = records.slice(0, jsDebugStatsHistoryPostMaxRecords);
-  const held = records.slice(jsDebugStatsHistoryPostMaxRecords);
+  if (!records.length) return;
+  const clientId = jsDebugStatsClientIdForRequest();
+  const since = jsDebugStatsServerSequence || 0;
+  const {chunk, held, body} = jsDebugStatsHistoryUploadRequest(records, clientId, since);
   for (const record of chunk) {
     const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
     jsDebugGraphPendingServerBuckets.delete(key);
   }
-  if (!records.length) return;
   const generation = jsDebugStatsUploadState.generation;
   let worker = null;
   worker = (async () => {
@@ -44014,7 +46121,7 @@ async function flushJsDebugStatsHistory() {
       await apiFetchJsonQuiet('/api/stats-history', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), since: jsDebugStatsServerSequence || 0, ack_only: true, records: chunk}),
+        body,
       });
       if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
       scheduleJsDebugPanelRefresh();
@@ -44145,6 +46252,8 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
     const visible = document.visibilityState === 'visible';
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
+    syncDebugSystemPolling({pollNow: visible});
+    syncDebugLogsPolling({pollNow: visible});
   });
 }
 
@@ -44180,6 +46289,379 @@ function jsDebugTextForClipboard() {
   ].join('\n');
 }
 
+function debugSystemNumber(value, digits = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString(undefined, {maximumFractionDigits: digits}) : t('common.notAvailable');
+}
+
+function debugSystemRowsHtml(rows = []) {
+  return `<dl class="js-debug-system-kv">${rows.map(([label, value]) => `
+    <div><dt>${esc(label)}</dt><dd>${esc(value == null || value === '' ? t('common.notAvailable') : value)}</dd></div>`).join('')}</dl>`;
+}
+
+function debugSystemCardHtml(title, body, options = {}) {
+  return `<section class="js-debug-system-card${options.wide ? ' js-debug-system-card--wide' : ''}">
+    <h3>${esc(title)}</h3>${body}
+  </section>`;
+}
+
+function debugSystemServiceState(service = {}) {
+  const pid = Number(service.pid || 0);
+  if (pid <= 0) {
+    if (Number(service.restart_backoff_seconds || 0) > 0) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
+    return {label: t('state.idle'), tone: 'muted'};
+  }
+  if (service.healthy === false) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
+  return {label: t('debug.system.localServices.state.running'), tone: 'good'};
+}
+
+const DEBUG_SYSTEM_SERVICE_FRESH_MS = 60_000;
+const debugSystemLocalServicesState = {records: new Map(), signature: ''};
+const debugSystemLocalServiceFields = Object.freeze([
+  {key: 'status', labelKey: 'debug.system.localServices.field.status'},
+  {key: 'pid', labelKey: 'debug.system.localServices.field.pid'},
+  {key: 'started', labelKey: 'debug.system.localServices.field.started'},
+  {key: 'lastRan', labelKey: 'debug.system.localServices.field.lastRan'},
+  {key: 'uptime', labelKey: 'debug.system.localServices.field.uptime'},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu'},
+  {key: 'memory', labelKey: 'debug.system.localServices.field.memory'},
+  {key: 'clients', labelKey: 'debug.system.localServices.field.clients'},
+  {key: 'activeTask', labelKey: 'debug.system.localServices.field.activeTask'},
+  {key: 'lastFailure', labelKey: 'debug.system.localServices.field.lastFailure'},
+  {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
+]);
+
+function debugSystemServiceName(service = {}) {
+  return String(service.service || t('debug.system.localServices.serviceFallback')).trim() || t('debug.system.localServices.serviceFallback');
+}
+
+function debugSystemPrevText(value) {
+  const text = String(value == null || value === '' ? t('common.notAvailable') : value);
+  const prefix = t('debug.system.localServices.prevPrefix');
+  return text.startsWith(`${prefix} `) ? text : t('debug.system.localServices.prevValue', {value: text});
+}
+
+function debugSystemStripPrevText(value) {
+  const prefix = t('debug.system.localServices.prevPrefix').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(value || '').replace(new RegExp(`^${prefix}\\s*`), '');
+}
+
+function debugSystemQueueText(service = {}) {
+  const queues = service.queues && typeof service.queues === 'object' ? service.queues : {};
+  return Object.entries(queues).map(([key, count]) => `${key} ${count}`).join('\n');
+}
+
+function debugSystemLocalServiceRecord(name) {
+  let record = debugSystemLocalServicesState.records.get(name);
+  if (!record) {
+    record = {name, fields: new Map(), startedAt: 0, exitedAt: 0, lastPid: 0, running: false};
+    debugSystemLocalServicesState.records.set(name, record);
+  }
+  return record;
+}
+
+function debugSystemLocalServiceUpdateLifecycle(record, service = {}, nowSeconds) {
+  const pid = Number(service.pid || 0);
+  const running = pid > 0;
+  const serverStartedAt = Number(service.started_at || 0);
+  const uptimeSeconds = Number(service.uptime_seconds);
+  if (running) {
+    record.lastPid = pid;
+    record.exitedAt = 0;
+    record.startedAt = serverStartedAt > 0
+      ? serverStartedAt
+      : (Number.isFinite(uptimeSeconds) ? Math.max(0, nowSeconds - uptimeSeconds) : (record.running ? record.startedAt : nowSeconds));
+  } else if (record.running) {
+    record.exitedAt = nowSeconds;
+  }
+  record.running = running;
+}
+
+function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSeconds) {
+  const state = debugSystemServiceState(service);
+  const pid = Number(service.pid || 0);
+  const running = pid > 0;
+  const resources = service.resources && typeof service.resources === 'object' ? service.resources : {};
+  const previous = record.fields.get(fieldKey);
+  const previousDisplay = debugSystemStripPrevText(previous?.display || '');
+  const previousAvailable = previousDisplay && previousDisplay !== '—' && previousDisplay !== t('common.notAvailable');
+  const previousValue = () => previousAvailable ? {display: debugSystemPrevText(previousDisplay), identity: `prev:${previous?.identity || previousDisplay}`, previous: true} : null;
+  const valueOrPrevious = value => {
+    if (running) return value;
+    if (value.display && value.display !== '—' && value.display !== t('common.notAvailable')) return {display: debugSystemPrevText(value.display), identity: `prev:${value.identity}`, previous: true};
+    return previousValue() || value;
+  };
+  if (fieldKey === 'status') return {display: state.label, identity: state.label, tone: state.tone};
+  if (fieldKey === 'pid') {
+    if (running) return {display: String(pid), identity: String(pid)};
+    return record.lastPid > 0 ? {display: debugSystemPrevText(record.lastPid), identity: `prev:${record.lastPid}`, previous: true} : {display: '—', identity: 'empty'};
+  }
+  if (fieldKey === 'started') {
+    return record.startedAt > 0
+      ? {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `started:${record.startedAt}`, dynamic: true}
+      : {display: '—', identity: 'empty'};
+  }
+  if (fieldKey === 'lastRan') {
+    if (running && record.startedAt > 0) return {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `running:${record.startedAt}`, dynamic: true};
+    if (record.exitedAt > 0) return {display: t('debug.system.localServices.exitedAgo', {time: relativeTimeFormat(Math.max(0, nowSeconds - record.exitedAt))}), identity: `exited:${record.exitedAt}`, dynamic: true, previous: true};
+    return {display: '—', identity: 'empty'};
+  }
+  if (fieldKey === 'uptime') return valueOrPrevious({display: service.uptime_seconds == null ? '—' : debugGraphUptimeText(service.uptime_seconds), identity: String(service.uptime_seconds ?? '')});
+  if (fieldKey === 'cpu') return valueOrPrevious({display: resources.cpu_percent == null ? '—' : `${debugSystemNumber(resources.cpu_percent, 1)}%`, identity: String(resources.cpu_percent ?? '')});
+  if (fieldKey === 'memory') return valueOrPrevious({display: resources.rss_bytes == null ? '—' : debugGraphTerseBytesText(resources.rss_bytes), identity: String(resources.rss_bytes ?? '')});
+  if (fieldKey === 'clients') return valueOrPrevious({display: service.clients == null ? '—' : debugSystemNumber(service.clients), identity: String(service.clients ?? '')});
+  if (fieldKey === 'activeTask') return valueOrPrevious({display: service.active_task || '—', identity: String(service.active_task || '')});
+  if (fieldKey === 'lastFailure') return valueOrPrevious({display: service.last_failure || '—', identity: String(service.last_failure || '')});
+  if (fieldKey === 'queues') {
+    const queueText = debugSystemQueueText(service);
+    return valueOrPrevious({display: queueText || '—', identity: queueText});
+  }
+  return {display: '—', identity: 'empty'};
+}
+
+function debugSystemLocalServicesCardHtml() {
+  return `<section class="js-debug-system-card js-debug-system-card--wide" data-js-debug-local-services-card>
+    <h3>${esc(t('debug.system.localServices.title'))}</h3><div data-js-debug-local-services></div>
+  </section>`;
+}
+
+function debugSystemLocalServicesTableHtml(serviceNames = []) {
+  const minWidthRem = 10 + (Math.max(1, serviceNames.length) * 9);
+  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
+    <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
+    <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}">—</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemLocalServiceCellMap(root) {
+  const cells = new Map();
+  root.querySelectorAll?.('[data-js-debug-service-cell]').forEach(cell => {
+    cells.set(`${cell.dataset.service || ''}\x1f${cell.dataset.field || ''}`, cell);
+  });
+  return cells;
+}
+
+function ensureDebugSystemLocalServicesTable(root, serviceNames) {
+  if (!root) return;
+  const signature = serviceNames.join('\x1f');
+  const table = root.querySelector('.js-debug-system-local-services-table');
+  if (table && root.dataset.signature === signature) return;
+  root.innerHTML = serviceNames.length ? debugSystemLocalServicesTableHtml(serviceNames) : `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  root.dataset.signature = signature;
+}
+
+function updateDebugSystemLocalServiceCell(cell, record, fieldKey, value, nowMs) {
+  const field = record.fields.get(fieldKey) || {display: '', identity: '', lastChangedAt: nowMs};
+  if (field.identity !== value.identity) field.lastChangedAt = nowMs;
+  field.display = value.display;
+  field.identity = value.identity;
+  record.fields.set(fieldKey, field);
+  if (cell.textContent !== value.display) cell.textContent = value.display;
+  cell.classList.toggle('js-debug-system-service-cell--prev', value.previous === true);
+  cell.classList.toggle('js-debug-system-service-cell--fresh', value.previous !== true && nowMs - field.lastChangedAt <= DEBUG_SYSTEM_SERVICE_FRESH_MS);
+  cell.classList.toggle('js-debug-system-service-cell--stale', value.previous === true || nowMs - field.lastChangedAt > DEBUG_SYSTEM_SERVICE_FRESH_MS);
+}
+
+function updateDebugSystemLocalServicesCard(card, payload = {}) {
+  const root = card?.querySelector?.('[data-js-debug-local-services]');
+  if (!root) return;
+  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
+  const incomingNames = services.map(debugSystemServiceName);
+  const retainedNames = [...debugSystemLocalServicesState.records.keys()].filter(name => !incomingNames.includes(name));
+  const serviceNames = [...incomingNames, ...retainedNames];
+  ensureDebugSystemLocalServicesTable(root, serviceNames);
+  const cells = debugSystemLocalServiceCellMap(root);
+  const nowMs = Date.now();
+  const nowSeconds = nowMs / 1000;
+  const servicesByName = new Map(services.map(service => [debugSystemServiceName(service), service]));
+  for (const name of serviceNames) {
+    const service = servicesByName.get(name) || {service: name, pid: 0};
+    const record = debugSystemLocalServiceRecord(name);
+    debugSystemLocalServiceUpdateLifecycle(record, service, nowSeconds);
+    const state = debugSystemServiceState(service);
+    const headState = root.querySelector(`[data-js-debug-service-state="${cssEscape(name)}"]`);
+    if (headState) {
+      headState.textContent = state.label;
+      headState.className = `js-debug-system-state js-debug-system-state--${state.tone}`;
+    }
+    for (const field of debugSystemLocalServiceFields) {
+      const cell = cells.get(`${name}\x1f${field.key}`);
+      if (!cell) continue;
+      updateDebugSystemLocalServiceCell(cell, record, field.key, debugSystemLocalServiceFieldValue(service, record, field.key, nowSeconds), nowMs);
+    }
+  }
+}
+
+function debugSystemRolesHtml(roles = {}) {
+  const rows = Object.entries(roles && typeof roles === 'object' ? roles : {});
+  if (!rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table">
+    <thead><tr><th>Role</th><th>Status</th><th>Refreshes</th><th>Fallbacks</th><th>Stale reads</th></tr></thead>
+    <tbody>${rows.map(([name, role]) => `<tr>
+      <td>${esc(name)}</td><td>${esc(role?.status || (role?.owner ? 'owner' : 'follower'))}</td>
+      <td>${esc(debugSystemNumber(role?.refresh_requests))}</td><td>${esc(debugSystemNumber(role?.fallback_count))}</td>
+      <td>${esc(debugSystemNumber(role?.follower_stale_reads))}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
+  if (!Array.isArray(rows) || !rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table">
+    <thead><tr><th>${kind === 'endpoint' ? 'Endpoint' : 'Worker'}</th><th>Calls</th><th>Max</th><th>Payload</th></tr></thead>
+    <tbody>${rows.map(row => `<tr>
+      <td>${esc(kind === 'endpoint' ? row.surface : `${row.role || ''} · ${row.surface || ''}`)}</td>
+      <td>${esc(debugSystemNumber(row.count))}</td>
+      <td>${esc(debugGraphTerseTimeText(row.compute_ms_max))}</td>
+      <td>${esc(debugGraphTerseBytesText(row.payload_bytes_total))}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemInnerHtml() {
+  const payload = jsDebugSystemState.payload;
+  if (!payload) {
+    const message = jsDebugSystemState.error || t('common.loading');
+    return `<div class="js-debug-system-loading" role="status">${esc(message)}</div>`;
+  }
+  const server = payload.server || {};
+  const owner = payload.owner || {};
+  const currentOwner = owner.current_owner || {};
+  const refresh = payload.refresh || {};
+  const localRefreshing = refresh.local_refreshing || {};
+  const coalescing = refresh.coalescing || {};
+  const search = payload.search_index || {};
+  const caches = payload.caches || {};
+  const clientEvents = payload.client_events || {};
+  const chat = payload.chat || {};
+  const totals = payload.local_services?.totals || {};
+  const generatedAgo = payload.generated_at ? relativeTimeFormat(Math.max(0, Date.now() / 1000 - Number(payload.generated_at))) : t('common.notAvailable');
+  const cards = [
+    debugSystemCardHtml('Server', debugSystemRowsHtml([
+      ['Status', payload.ok ? 'Running' : 'Issue'],
+      ['Version', server.version], ['PID', server.pid], ['Uptime', debugGraphUptimeText(server.uptime_seconds)],
+      ['Process CPU', `${debugSystemNumber(server.cpu_percent, 1)}%`], ['System CPU', `${debugSystemNumber(server.system_cpu_percent, 1)}%`],
+      ['Memory', debugGraphTerseBytesText(server.rss_bytes)], ['State directory', payload.state_dir],
+    ])),
+    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
+      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
+      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
+      ['Index mode', owner.search_index?.mode], ['Generations', owner.debug?.generation_count],
+    ])),
+    debugSystemCardHtml('Worker totals', debugSystemRowsHtml([
+      ['Processes', totals.processes], ['CPU', `${debugSystemNumber(totals.cpu_percent, 1)}%`],
+      ['Memory', debugGraphTerseBytesText(totals.rss_bytes)],
+      ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
+      ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
+    ])),
+    debugSystemCardHtml('Search & caches', debugSystemRowsHtml([
+      ['Indexed roots', search.root_count], ['Builds', search.build_count], ['Scanned entries', search.scanned_entries],
+      ['Ignored entries', search.ignored_entries], ['Index bytes', debugGraphTerseBytesText(search.cache_bytes)],
+      ['Session files cache', `${debugSystemNumber(caches.session_files?.files)} files · ${debugGraphTerseBytesText(caches.session_files?.bytes)}`],
+      ['Activity cache', `${debugSystemNumber(caches.activity?.files)} files · ${debugGraphTerseBytesText(caches.activity?.bytes)}`],
+    ])),
+    debugSystemCardHtml('Events & chat', debugSystemRowsHtml([
+      ['SSE subscribers', Object.values(clientEvents.channel_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0)],
+      ['Published events', clientEvents.published_events],
+      ['Delivered events', clientEvents.delivered_events],
+      ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
+    ])),
+    debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
+    debugSystemLocalServicesCardHtml(),
+    debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),
+    debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(payload.top_background_work, 'worker'), {wide: true}),
+  ];
+  return `<div class="js-debug-system-toolbar">
+    <span role="status">Updated ${esc(generatedAgo)}${jsDebugSystemState.error ? ` · ${esc(jsDebugSystemState.error)}` : ''}</span>
+    <button type="button" class="preferences-inline-action" data-js-debug-system-refresh${jsDebugSystemState.inFlight ? ' disabled' : ''}>${esc(t('common.refresh'))}</button>
+  </div><div class="js-debug-system-grid">${cards.join('')}</div>`;
+}
+
+function refreshDebugSystemViews() {
+  for (const view of document.querySelectorAll('[data-js-debug-system]')) {
+    const scrollTop = view.scrollTop;
+    const scrollLeft = view.scrollLeft;
+    const oldLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
+    view.innerHTML = debugSystemInnerHtml();
+    const newLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
+    let localServicesCard = newLocalServicesCard;
+    if (oldLocalServicesCard && newLocalServicesCard && jsDebugSystemState.payload) {
+      newLocalServicesCard.replaceWith(oldLocalServicesCard);
+      localServicesCard = oldLocalServicesCard;
+    }
+    if (jsDebugSystemState.payload) updateDebugSystemLocalServicesCard(localServicesCard, jsDebugSystemState.payload);
+    restoreElementScrollPosition(view, scrollTop, scrollLeft);
+    view.setAttribute('aria-busy', jsDebugSystemState.inFlight ? 'true' : 'false');
+  }
+}
+
+async function pollDebugSystemStatus({force = false} = {}) {
+  if (jsDebugSystemState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
+  if (!force && (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
+  jsDebugSystemState.inFlight = true;
+  jsDebugSystemState.error = '';
+  refreshDebugSystemViews();
+  try {
+    jsDebugSystemState.payload = await apiFetchJsonQuiet('/api/system-status', {cache: 'no-store'});
+    jsDebugSystemState.updatedAt = Date.now();
+    return true;
+  } catch (error) {
+    jsDebugSystemState.error = userMessageText(error);
+    return false;
+  } finally {
+    jsDebugSystemState.inFlight = false;
+    refreshDebugSystemViews();
+  }
+}
+
+function syncDebugSystemPolling({pollNow = false} = {}) {
+  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) {
+    clearRuntimeInterval('debug-system');
+    return;
+  }
+  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, jsDebugSystemPollMs);
+  if (pollNow || !jsDebugSystemState.payload) void pollDebugSystemStatus({force: true});
+}
+
+function refreshDebugLogsViews() {
+  for (const view of document.querySelectorAll('[data-js-debug-subview="logs"]')) {
+    const list = view.querySelector('[data-js-debug-log-list]');
+    const scrollTop = list?.scrollTop || 0;
+    view.innerHTML = debugLogsInnerHtml();
+    const replacement = view.querySelector('[data-js-debug-log-list]');
+    if (replacement) replacement.scrollTop = scrollTop;
+  }
+}
+
+async function pollDebugLogs({force = false} = {}) {
+  if (jsDebugLogsState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
+  if (!force && (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
+  jsDebugLogsState.inFlight = true;
+  jsDebugLogsState.error = '';
+  refreshDebugLogsViews();
+  try {
+    const payload = await apiFetchJsonQuiet('/api/logs', {cache: 'no-store'});
+    jsDebugLogsState.payload = Array.isArray(payload?.logs) ? payload.logs.slice(-500) : [];
+    jsDebugLogsState.updatedAt = Date.now();
+    return true;
+  } catch (error) {
+    jsDebugLogsState.error = userMessageText(error);
+    return false;
+  } finally {
+    jsDebugLogsState.inFlight = false;
+    refreshDebugLogsViews();
+  }
+}
+
+function syncDebugLogsPolling({pollNow = false} = {}) {
+  if (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible()) {
+    clearRuntimeInterval('debug-logs');
+    return;
+  }
+  resetRuntimeInterval('debug-logs', () => { void pollDebugLogs(); }, jsDebugLogsPollMs);
+  if (pollNow || !jsDebugLogsState.updatedAt) void pollDebugLogs({force: true});
+}
+
 function debugPanelHtml() {
   const counts = debugEventCounts();
   return `
@@ -44199,11 +46681,108 @@ function debugPanelHtml() {
       </div>
       <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
     </div>
-    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`;
+    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>
+    <div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>
+    <div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
   return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
+}
+
+function yoCostPanelHtml() {
+  const nowMs = Date.now();
+  const buckets = debugGraphDisplayBuckets(nowMs);
+  const tokenGroups = jsDebugGraphChartGroups.filter(group => group.key === 'agentTokens' || group.key === 'modelTokens');
+  const charts = buckets.length
+    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {includeCostSummary: false})
+    : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
+  const costBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
+  const refreshedAtMs = Math.max(Number(jsDebugStatsPollState.lastSampleAtMs) || 0, Number(jsDebugPricingRefreshState.lastRequestedAtMs) || 0);
+  const ageSeconds = refreshedAtMs > 0 ? Math.max(0, Math.floor((nowMs - refreshedAtMs) / 1000)) : null;
+  const age = ageSeconds === null ? t('common.notAvailable') : ageSeconds < 60 ? `${ageSeconds}s ago` : relativeTimeFormat(ageSeconds);
+  const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
+  const refresh = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
+  const ageLabel = debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-data-age" data-js-yocost-data-age>${esc(ageLabel)}${refresh}</div>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+}
+
+function openYoCostTranscriptPreview(event) {
+  const link = event.target?.closest?.('[data-js-debug-cost-transcript-path]');
+  if (!link) return false;
+  event.preventDefault();
+  const path = debugGraphCostTranscriptPath({transcript: link.dataset.jsDebugCostTranscriptPath});
+  if (!path) return true;
+  Promise.resolve(openFileInEditor(path, basenameOf(path), {viewMode: 'preview', userInitiated: true}))
+    .catch(() => emitNotification('previewOpen', {item: fileEditorItemFor(path), title: t('preview.openFailed', {path}), className: 'attention-alert toast'}));
+  return true;
+}
+
+function handleYoCostTableSort(event, panel) {
+  const button = event.target?.closest?.('[data-js-debug-cost-sort]');
+  if (!button || !panel?.contains(button)) return false;
+  event.preventDefault();
+  const key = String(button.dataset.jsDebugCostSort || 'cost');
+  const nextDirection = jsDebugCostComponentSortState.key === key && jsDebugCostComponentSortState.direction === 'asc' ? 'desc' : 'asc';
+  jsDebugCostComponentSortState.key = key;
+  jsDebugCostComponentSortState.direction = nextDirection;
+  renderYoCostPanels();
+  return true;
+}
+
+function bindYoCostPanel(panel) {
+  if (!panel || panel.dataset.jsYoCostBound === 'true') return;
+  panel.dataset.jsYoCostBound = 'true';
+  panel.addEventListener('pointerdown', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('click', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    if (handleYoCostTableSort(event, panel)) return;
+    openYoCostTranscriptPreview(event);
+  });
+  syncJsDebugStatsPolling({pollNow: !jsDebugStatsPollState.firstSampleReceived});
+}
+
+function createYoCostPanel() {
+  enableDebugMode();
+  const panel = document.createElement('article');
+  panel.className = 'panel js-yocost-panel';
+  panel.id = panelDomId(yocostItemId);
+  panel.innerHTML = panelFrameHtml({
+    item: yocostItemId,
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div><button type="button" class="panel-detail-close" data-detail-toggle="${esc(yocostItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button></div>`,
+    bodyClass: 'preferences-body js-yocost-body',
+    bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+  });
+  bindPanelShell(panel, yocostItemId);
+  bindYoCostPanel(panel);
+  return panel;
+}
+
+function renderYoCostPanels() {
+  for (const panel of document.querySelectorAll('.js-yocost-panel')) {
+    const body = panel.querySelector('.js-yocost-body');
+    const scroll = body?.querySelector('.js-yocost-scroll');
+    const scrollTop = scroll?.scrollTop || 0;
+    const scrollLeft = scroll?.scrollLeft || 0;
+    if (body) {
+      body.innerHTML = `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`;
+      restoreElementScrollPosition(body.querySelector('.js-yocost-scroll'), scrollTop, scrollLeft);
+    }
+    bindYoCostPanel(panel);
+  }
+}
+
+function refreshDebugGraphSurfaces({force = true} = {}) {
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force});
+  renderYoCostPanels();
+}
+
+function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(yocostItemId))) {
+  return relocalizeVirtualPanelChrome(panel, yocostTabLabel());
 }
 
 function createDebugPanel() {
@@ -44241,6 +46820,7 @@ function renderDebugPanels(options = {}) {
     }
     bindDebugPanel(panel);
   }
+  renderYoCostPanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -44248,6 +46828,7 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
+  renderYoCostPanels();
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -44265,6 +46846,7 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   if (statSse) statSse.textContent = String(counts.sseEvents);
   if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
+  if (panel.querySelector('[data-js-debug-subview="logs"]')) refreshDebugLogsViews();
   const graph = panel.querySelector('[data-js-debug-graph]');
   refreshDebugGraphElement(graph, options);
   const log = panel.querySelector('[data-js-debug-log]');
@@ -44284,9 +46866,14 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   const lastRenderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
   if (!force && Number.isFinite(lastRenderedAt) && nowMs - lastRenderedAt < jsDebugGraphRefreshMs) return false;
   const perf = clientPerfStart('statsHistoryRender');
+  const scrollOwner = graph.closest('.js-debug-graph-view');
+  const scrollTop = scrollOwner?.scrollTop || 0;
+  const scrollLeft = scrollOwner?.scrollLeft || 0;
   try {
     graph.className = debugGraphClassName(nowMs);
     graph.innerHTML = debugGraphInnerHtml(nowMs);
+    restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
+    bindDebugCostSummaryTabButtons(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
@@ -44294,6 +46881,18 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
     clientPerfEnd(perf);
   }
   return true;
+}
+
+function bindDebugCostSummaryTabButtons(graph) {
+  if (!graph) return;
+  graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
+    if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
+    anchor.dataset.jsDebugCostDetailsBound = 'true';
+    anchor.addEventListener('click', event => {
+      event.preventDefault();
+      selectSession(yocostItemId, {userInitiated: true});
+    });
+  });
 }
 
 function applyDebugSubTab(panel) {
@@ -44314,6 +46913,8 @@ function setDebugSubTab(tab) {
   jsDebugSubTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
+  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system'});
+  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs'});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
@@ -44326,6 +46927,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionSeconds(requestedStartSeconds, requestedResolutionSeconds);
   if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds)) return false;
   const state = jsDebugHistoryReadiness;
+  if (!retry && state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
     && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
@@ -44364,9 +46966,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
       generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
     });
   }
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    refreshDebugGraphElement(graph, {force: true});
-  }
+  refreshDebugGraphSurfaces();
 }
 
 function setDebugGraphResolutionOverride(value) {
@@ -44374,14 +46974,14 @@ function setDebugGraphResolutionOverride(value) {
   const seconds = Math.max(0, Number(value) || 0);
   jsDebugGraphResolutionOverrideSeconds = [0, 1, 2, 5, 10, 30, 60, 120, 300, 600].includes(seconds) ? seconds : 0;
   saveJsDebugStatsUiPreferences();
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+  refreshDebugGraphSurfaces();
 }
 
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
   saveJsDebugStatsUiPreferences();
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+  refreshDebugGraphSurfaces();
 }
 
 function retryJsDebugHistory() {
@@ -44594,6 +47194,12 @@ function cancelDebugGraphSelection(panel) {
 }
 
 function handleDebugGraphControlEvent(event, panel) {
+  const costRefresh = event.target.closest('[data-js-debug-cost-refresh]');
+  if (event.type === 'click' && costRefresh && panel.contains(costRefresh)) {
+    event.preventDefault();
+    void refreshDebugCostPricing();
+    return true;
+  }
   const chartClose = event.target.closest('[data-js-debug-chart-close]');
   // A chart close reflows the grid. Handling it on pointerdown replaces the target before the
   // corresponding pointerup, so that follow-up event can land on another chart's X. Click is the
@@ -44625,6 +47231,14 @@ function handleDebugGraphControlEvent(event, panel) {
   const resolutionOverride = event.target.closest('[data-js-debug-resolution-override]');
   if (resolutionOverride && panel.contains(resolutionOverride) && event.type === 'change') {
     setDebugGraphResolutionOverride(resolutionOverride.value);
+    return true;
+  }
+  const modelDimension = event.target.closest('[data-js-debug-model-token-dimension-select]');
+  if (modelDimension && panel.contains(modelDimension) && event.type === 'change') {
+    const selected = String(modelDimension.value || '');
+    jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected) ? selected : 'output';
+    saveJsDebugStatsUiPreferences();
+    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
     return true;
   }
   const chartLayout = event.target.closest('button[data-js-debug-chart-layout]');
@@ -44669,6 +47283,9 @@ function handleDebugGraphControlEvent(event, panel) {
 function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
+  bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
+  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
+  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
   panel.addEventListener('pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
@@ -44699,6 +47316,38 @@ function bindDebugPanel(panel) {
     if (subtab && panel.contains(subtab)) {
       event.preventDefault();
       setDebugSubTab(subtab.dataset.jsDebugSubtab);
+      return;
+    }
+    const systemRefresh = event.target.closest('[data-js-debug-system-refresh]');
+    if (systemRefresh && panel.contains(systemRefresh)) {
+      event.preventDefault();
+      void pollDebugSystemStatus({force: true});
+      return;
+    }
+    const logLevel = event.target.closest('[data-js-debug-log-level]');
+    if (logLevel && panel.contains(logLevel)) {
+      event.preventDefault();
+      const level = String(logLevel.dataset.jsDebugLogLevel || '');
+      if (!jsDebugLogLevels.includes(level)) return;
+      if (jsDebugLogsState.levels.has(level)) jsDebugLogsState.levels.delete(level);
+      else jsDebugLogsState.levels.add(level);
+      refreshDebugLogsViews();
+      return;
+    }
+    const logsCopy = event.target.closest('[data-js-debug-logs-copy]');
+    if (logsCopy && panel.contains(logsCopy)) {
+      event.preventDefault();
+      copyTextToClipboard(debugLogsTextForClipboard())
+        .then(() => { statusEl.textContent = t('debug.copied'); })
+        .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
+      return;
+    }
+    const logsClear = event.target.closest('[data-js-debug-logs-clear]');
+    if (logsClear && panel.contains(logsClear)) {
+      event.preventDefault();
+      jsDebugLogsState.clearedAt = Date.now();
+      refreshDebugLogsViews();
+      statusEl.textContent = t('debug.logs.cleared');
       return;
     }
     const copy = event.target.closest('[data-js-debug-copy]');
@@ -45892,9 +48541,10 @@ function sessionFileMissingTimeText() {
 }
 
 function sessionFileDisplayTimeText(mtime, options = {}) {
-  if (fileExplorerTreeDateMode === 'none') return '';
-  const text = fileExplorerTreeDateMode === 'date' ? sessionFileTimeText(mtime)
-    : fileExplorerTreeDateMode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
+  const mode = fileExplorerTreeDateModeForView(options.view || (options.differMode ? 'differ' : 'finder'));
+  if (mode === 'none') return '';
+  const text = mode === 'date' ? sessionFileTimeText(mtime)
+    : mode === 'relative' ? sessionFileRelativeTimeText(mtime, options.nowSeconds)
       : '';
   if (!text && options.placeholderForMissingTime === true) return sessionFileMissingTimeText();
   return text;
@@ -45913,8 +48563,8 @@ function sessionFileDatePlaceholderNeeded(item) {
   return Boolean(item && sessionFileHasMissingTime(item));
 }
 
-function sessionFileDisplayTimeTextForEntry(entry) {
-  return sessionFileDisplayTimeText(entry?.mtime, {placeholderForMissingTime: entry?.changedFileMissingTime === true});
+function sessionFileDisplayTimeTextForEntry(entry, options = {}) {
+  return sessionFileDisplayTimeText(entry?.mtime, {...options, placeholderForMissingTime: entry?.changedFileMissingTime === true});
 }
 
 function sessionFileDiffText(item) {
@@ -45938,10 +48588,10 @@ function sessionFileStatusCountParts(counts = {}) {
   return parts;
 }
 
-function sortedSessionFiles(files) {
+function sortedSessionFiles(files, view = 'differ') {
   const items = Array.isArray(files) ? files.slice() : [];
   const uploadOrder = item => item?.uploaded === true ? 1 : 0;
-  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
+  const mode = fileExplorerTreeSortModeForView(view);
   const nameCompare = (left, right) => String(left.path || '').localeCompare(String(right.path || ''), undefined, {numeric: true, sensitivity: 'base'})
     || String(left.repo || '').localeCompare(String(right.repo || ''), undefined, {numeric: true, sensitivity: 'base'});
   if (mode === 'az' || mode === 'za') {
@@ -46322,7 +48972,8 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     differMode: true,
     compact: options.compact,
     repoForDiffer: treeRoot,
-    treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
+    view: options.view || 'differ',
+    treeSortMode: fileExplorerTreeSortModeForView(options.view || 'differ'),
     includeHidden: true,
   });
 }
@@ -46353,7 +49004,8 @@ function changeFileAgentsHtml(item) {
 // Replaces changesRepoGroupsHtml — incrementally updates sections rather than replacing innerHTML.
 function renderChangesGroups(groupsEl, files, options = {}) {
   if (!groupsEl) return;
-  const regular = sortedSessionFiles(files);
+  const view = normalizeFileExplorerView(options.view || 'differ');
+  const regular = sortedSessionFiles(files, view);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
   const groups = new Map(groupedSessionFiles(regular));
@@ -46422,7 +49074,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       }
       fileList.hidden = false;
       if (repoFiles.length) {
-        renderChangedFileList(fileList, repo, repoFiles, {compact});
+        renderChangedFileList(fileList, repo, repoFiles, {compact, view});
       } else if (options.loading === true) {
         fileList.innerHTML = '';
       } else {
@@ -46438,28 +49090,19 @@ function renderChangesGroups(groupsEl, files, options = {}) {
 
 // Returns the static toolbar/header HTML for the main Changes panel.
 // The .changes-groups div is filled by renderChangesGroups separately.
-function fileExplorerTreeDateButtonHtml(extraClass = '') {
-  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+function fileExplorerTreeDateButtonHtml(extraClass = '', view = 'finder') {
+  const surface = normalizeFileExplorerView(view);
+  const mode = fileExplorerTreeDateModeForView(surface);
   const active = mode !== 'none';
   const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass, active ? 'active' : ''].filter(Boolean).join(' ');
-  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-file-explorer-view="${esc(surface)}" data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
 }
 
-function sessionFilesSortSelectHtml(extraClass = '') {
-  const classes = ['file-explorer-sort-select', 'changes-sort-select', extraClass].filter(Boolean).join(' ');
-  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
-  return `<select class="${esc(classes)}" data-session-files-sort title="${esc(t('changes.sort'))}" aria-label="${esc(t('changes.sort'))}">
-        <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
-        <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
-        <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
-        <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
-      </select>`;
-}
-
-function fileExplorerTreeSortSelectHtml(extraClass = '') {
+function fileExplorerTreeSortSelectHtml(extraClass = '', view = 'finder') {
   const classes = ['file-explorer-sort-select', extraClass].filter(Boolean).join(' ');
-  const mode = ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az';
-  return `<select class="${esc(classes)}" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
+  const surface = normalizeFileExplorerView(view);
+  const mode = fileExplorerTreeSortModeForView(surface);
+  return `<select class="${esc(classes)}" data-file-explorer-tree-sort data-file-explorer-view="${esc(surface)}" title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
               <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
               <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('common.sort.recent'))}</option>
@@ -46502,8 +49145,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
     return `
       <div class="changes-toolbar tabber-toolbar">
         ${tabberLookbackControlHtml()}
-        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact')}
-        ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        ${fileExplorerTreeSortSelectHtml('changes-sort-select-compact', 'tabber')}
+        ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'tabber')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       </div>
       <div class="changes-groups"></div>`;
@@ -46521,8 +49164,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   if (full) {
     return `
       <div class="changes-toolbar file-explorer-diff-toolbar">
-        <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
-        ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+        <label class="changes-control">${esc(t('changes.sort'))} ${fileExplorerTreeSortSelectHtml('changes-sort-select', 'differ')}</label>
+        ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'differ')}
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       </div>
@@ -46535,8 +49178,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">${esc(titleText)}</span>
-      ${sessionFilesSortSelectHtml('changes-sort-select-compact')}
-      ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+      ${fileExplorerTreeSortSelectHtml('changes-sort-select changes-sort-select-compact', 'differ')}
+      ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'differ')}
       ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
@@ -46609,6 +49252,7 @@ function fileExplorerChangesPanelHtml(options = {}) {
     compact: view !== 'differ',
     loading,
     includeEmptyRepoSections: view === 'differ' && (!loading || payloadHasRenderableRepoSections(fileExplorerSessionFilesState.payload)),
+    view,
   });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
@@ -46668,7 +49312,7 @@ function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options =
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-sort], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
@@ -46764,13 +49408,6 @@ function bindChangesPanel(panel) {
       fileExplorerChangesSelectedSession = sessionSelect.value;
       rememberFileExplorerExplicitSyncSession(fileExplorerChangesSelectedSession);
       switchFileExplorerChangesSession(fileExplorerChangesSelectedSession);
-      return;
-    }
-    const sortSelect = event.target.closest('[data-session-files-sort]');
-    if (sortSelect && panel.contains(sortSelect)) {
-      sessionFilesSortMode = normalizeSessionFilesSortMode(sortSelect.value);
-      renderFileExplorerChangesPanels({force: true});
-      scheduleShareUiStatePublish();
       return;
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -46948,7 +49585,7 @@ function changedFileRowEntry(row) {
 }
 
 function differTreeEventTargetsControl(event) {
-  return Boolean(event?.target?.closest?.('[data-diff-ref-controls], [data-session-files-session], [data-session-files-sort], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-repo-toggle], input, select, textarea, button'));
+  return Boolean(event?.target?.closest?.('[data-diff-ref-controls], [data-session-files-session], [data-file-explorer-tree-sort], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all], [data-changes-repo-toggle], input, select, textarea, button'));
 }
 
 function differTreeRowPath(row) {
@@ -47354,9 +49991,9 @@ function createFileExplorerPanel(item = finderItemId) {
             <button type="button" class="file-explorer-header-action file-explorer-folder-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            ${fileExplorerTreeSortSelectHtml()}
+            ${fileExplorerTreeSortSelectHtml('', 'finder')}
             <span class="file-explorer-date-controls">
-              ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
+              ${fileExplorerTreeDateButtonHtml('changes-date-toggle', 'finder')}
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
             </span>
           </div>
@@ -47423,6 +50060,7 @@ function createFileExplorerPanel(item = finderItemId) {
 }
 
 async function refreshFileExplorerPanelTree(panel, options = {}) {
+  const view = fileExplorerViewForItem(panel?.dataset?.panelItem) || 'finder';
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
@@ -47435,7 +50073,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   renderFileExplorerRootModeControls();
   syncFileExplorerHiddenButton(hiddenBtn);
   syncFileExplorerTreeDateButton(dateBtn);
-  if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
+  if (sortSelect && sortSelect.value !== fileExplorerTreeSortModeForView(view)) sortSelect.value = fileExplorerTreeSortModeForView(view);
   if (clientPushCanSupplyData() && !options.entries && options.force !== true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
@@ -47471,6 +50109,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
         compact: false,
         loading: sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, fileExplorerDifferFiles()),
         includeEmptyRepoSections: true,
+        view,
       },
       {force: options.force === true},
     );
@@ -47483,7 +50122,9 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
 
 function renderFileExplorerChangesPanels(options = {}) {
   if (!itemInLayout(differItemId) && !itemInLayout(tabberItemId)) return;
+  const requestedView = options.view ? normalizeFileExplorerView(options.view) : '';
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
+    if (requestedView && fileExplorerViewForItem(panel.dataset.panelItem) !== requestedView) continue;
     renderFileExplorerChangesPanel(panel, options);
   }
   if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
@@ -50240,35 +52881,6 @@ function jsonStructuredPreview(label, source, errorLabel = t('preview.structured
   }
 }
 
-function jsonLinesStructuredPreview(path, source) {
-  const ext = fileExtensionOf(path);
-  const lines = String(source ?? '').split(/\r?\n/);
-  const records = [];
-  const errors = [];
-  lines.forEach((line, index) => {
-    if (!line.trim()) return;
-    try {
-      records.push(JSON.parse(line));
-    } catch (error) {
-      errors.push(t('preview.parse.lineError', {line: index + 1, error: String(error?.message || error)}));
-    }
-  });
-  if (errors.length) {
-    return {
-      label: t('preview.structured.parseError', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL'}),
-      text: source,
-      language: 'json',
-      error: errors.slice(0, 5).join('\n'),
-    };
-  }
-  return {
-    label: t('preview.structured.records', {format: ext === '.ndjson' ? 'NDJSON' : 'JSONL', count: records.length}),
-    text: records.map(record => JSON.stringify(record)).join('\n'),
-    language: 'json',
-    error: '',
-  };
-}
-
 function notebookStructuredPreview(source) {
   let notebook;
   try {
@@ -50295,7 +52907,6 @@ function structuredPreviewValue(path, text) {
   if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
   if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
   if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
-  if (ext === '.jsonl' || ext === '.ndjson') return jsonLinesStructuredPreview(path, source);
   if (ext === '.ipynb') return notebookStructuredPreview(source);
   if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
   if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
@@ -50358,7 +52969,151 @@ function splitDelimitedPreviewLine(line, delimiter) {
   return cells;
 }
 
+function compactJsonLinesCell(value, maxChars = 240) {
+  let full;
+  if (typeof value === 'string') full = value;
+  else if (value === undefined) full = '';
+  else if (value !== null && typeof value === 'object') full = JSON.stringify(value);
+  else full = String(value);
+  const truncated = full.length > maxChars;
+  return {text: truncated ? `${full.slice(0, Math.max(0, maxChars - 1))}…` : full, title: full, truncated};
+}
+
+function jsonLinesTablePreview(path, text, options = {}) {
+  const maxRows = Math.max(1, Number(options.maxRows) || 200);
+  const maxColumns = Math.max(1, Number(options.maxColumns) || 40);
+  const maxCellChars = Math.max(8, Number(options.maxCellChars) || 240);
+  const sourceLines = String(text ?? '').split(/\r?\n/);
+  const nonEmptyLines = sourceLines
+    .map((raw, index) => ({raw, lineNumber: index + 1}))
+    .filter(entry => entry.raw.trim());
+  const parsedRows = nonEmptyLines.slice(0, maxRows).map(entry => {
+    try {
+      const value = JSON.parse(entry.raw);
+      const record = value && typeof value === 'object' && !Array.isArray(value) ? value : {$value: value};
+      return {...entry, parsed: true, record};
+    } catch (_error) {
+      return {...entry, parsed: false, record: null};
+    }
+  });
+  const allColumns = [];
+  const seenColumns = new Set();
+  for (const row of parsedRows) {
+    for (const key of Object.keys(row.record || {})) {
+      if (seenColumns.has(key)) continue;
+      seenColumns.add(key);
+      allColumns.push(key);
+    }
+  }
+  const columns = allColumns.slice(0, maxColumns);
+  const overflowColumns = allColumns.slice(maxColumns);
+  const rows = parsedRows.map(row => {
+    if (!row.parsed) return {lineNumber: row.lineNumber, parsed: false, raw: row.raw};
+    const cells = columns.map(key => compactJsonLinesCell(row.record[key], maxCellChars));
+    const overflow = {};
+    for (const key of overflowColumns) {
+      if (Object.hasOwn(row.record, key)) overflow[key] = row.record[key];
+    }
+    return {
+      lineNumber: row.lineNumber,
+      parsed: true,
+      cells,
+      overflow: overflowColumns.length ? compactJsonLinesCell(overflow, maxCellChars) : null,
+    };
+  });
+  return {
+    format: fileExtensionOf(path) === '.ndjson' ? 'NDJSON' : 'JSONL',
+    total: nonEmptyLines.length,
+    shown: rows.length,
+    columns,
+    overflowColumns,
+    rows,
+    truncated: nonEmptyLines.length > rows.length || overflowColumns.length > 0,
+  };
+}
+
+function appendJsonLinesTableCell(row, tagName, cell, className = '') {
+  const node = document.createElement(tagName);
+  if (className) node.className = className;
+  node.textContent = cell?.text || '';
+  if (cell?.title) node.title = cell.title;
+  row.appendChild(node);
+  return node;
+}
+
+function jsonLinesTableColumnClass(column) {
+  const normalized = String(column || '').trim().toLowerCase();
+  if (normalized === 'payload') return 'file-editor-jsonl-payload';
+  if (normalized === 'timestamp' || normalized === 'time' || normalized === 'type') return 'file-editor-jsonl-compact-column';
+  return '';
+}
+
+function renderJsonLinesTablePreviewInto(container, path, text) {
+  const preview = jsonLinesTablePreview(path, text);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'file-editor-table-preview file-editor-jsonl-preview';
+  const header = document.createElement('div');
+  header.className = 'file-editor-data-preview-header';
+  header.textContent = t('preview.table.summary', {
+    format: preview.format,
+    shown: preview.shown,
+    total: preview.total,
+    truncated: preview.truncated ? t('preview.table.truncatedSuffix') : '',
+  });
+  wrapper.appendChild(header);
+  const table = document.createElement('table');
+  table.className = 'file-editor-jsonl-table';
+  const colgroup = document.createElement('colgroup');
+  preview.columns.forEach(column => {
+    const col = document.createElement('col');
+    const className = jsonLinesTableColumnClass(column);
+    if (className) col.className = className;
+    col.dataset.jsonlField = column;
+    colgroup.appendChild(col);
+  });
+  if (preview.overflowColumns.length) colgroup.appendChild(document.createElement('col'));
+  if (!preview.columns.length && !preview.overflowColumns.length) colgroup.appendChild(document.createElement('col'));
+  table.appendChild(colgroup);
+  const head = document.createElement('thead');
+  const headingRow = document.createElement('tr');
+  preview.columns.forEach(column => appendJsonLinesTableCell(headingRow, 'th', {text: column, title: column}, jsonLinesTableColumnClass(column)));
+  if (preview.overflowColumns.length) {
+    appendJsonLinesTableCell(headingRow, 'th', {
+      text: `… +${preview.overflowColumns.length}`,
+      title: preview.overflowColumns.join(', '),
+    }, 'file-editor-jsonl-overflow');
+  }
+  if (!preview.columns.length && !preview.overflowColumns.length) {
+    appendJsonLinesTableCell(headingRow, 'th', {text: preview.format});
+  }
+  head.appendChild(headingRow);
+  table.appendChild(head);
+  const body = document.createElement('tbody');
+  const columnSpan = Math.max(1, preview.columns.length + (preview.overflowColumns.length ? 1 : 0));
+  preview.rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.dataset.sourceLine = String(row.lineNumber);
+    if (!row.parsed) {
+      tr.className = 'file-editor-jsonl-unparsed';
+      const raw = appendJsonLinesTableCell(tr, 'td', {text: row.raw, title: row.raw});
+      raw.colSpan = columnSpan;
+      raw.dataset.unparsedLine = String(row.lineNumber);
+    } else {
+      row.cells.forEach((cell, index) => appendJsonLinesTableCell(tr, 'td', cell, jsonLinesTableColumnClass(preview.columns[index])));
+      if (row.overflow) appendJsonLinesTableCell(tr, 'td', row.overflow, 'file-editor-jsonl-overflow');
+    }
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  wrapper.appendChild(table);
+  container.replaceChildren(wrapper);
+}
+
 function renderTablePreviewInto(container, path, text) {
+  if (['.jsonl', '.ndjson'].includes(fileExtensionOf(path))) {
+    renderJsonLinesTablePreviewInto(container, path, text);
+    return;
+  }
   const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
   const maxRows = 200;
   const maxCols = 50;
@@ -56828,9 +59583,11 @@ function shareFinderStateSnapshot(options = {}) {
   const finder = {
     ...shareFinderSeed(),
     showHidden: fileExplorerShowHidden === true,
-    treeDateMode: normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode),
-    treeSortMode: ['az', 'za', 'newest', 'oldest'].includes(fileExplorerTreeSortMode) ? fileExplorerTreeSortMode : 'az',
-    sessionFilesSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
+    // Retain the v1 fields for older viewers; new viewers use independent per-surface settings.
+    treeDateMode: fileExplorerTreeDateModeForView('finder'),
+    treeSortMode: fileExplorerTreeSortModeForView('finder'),
+    sessionFilesSortMode: fileExplorerTreeSortModeForView('differ'),
+    viewSettings: fileExplorerViewSettings,
     diffRefFrom: cleanDiffRef(diffRefFrom, 'HEAD'),
     diffRefTo: cleanDiffRef(diffRefTo, 'current'),
   };
@@ -57120,9 +59877,7 @@ async function applyShareFinderState(finder = {}) {
     fileExplorerChangesSelectedSession = session;
     setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
-  if ('treeDateMode' in finder) fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(finder.treeDateMode);
-  if ('treeSortMode' in finder) fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(finder.treeSortMode) ? finder.treeSortMode : 'az';
-  if ('sessionFilesSortMode' in finder) sessionFilesSortMode = normalizeSessionFilesSortMode(finder.sessionFilesSortMode);
+  applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
   if ('diffRefsByRepo' in finder) diffRefsByRepo = shareCleanDiffRefsByRepo(finder.diffRefsByRepo);
@@ -57149,7 +59904,7 @@ async function applyShareFinderState(finder = {}) {
       await openFileExplorerAt(normalizedRoot, {preserveExpanded: true, preserveScroll: true});
     } else {
       setFileExplorerPathDisplay(fileExplorerRoot);
-      const shouldRefreshTree = expandedChanged || 'showHidden' in finder || 'treeDateMode' in finder || 'treeSortMode' in finder;
+      const shouldRefreshTree = expandedChanged || 'showHidden' in finder || 'treeDateMode' in finder || 'treeSortMode' in finder || Boolean(finder.viewSettings?.finder);
       if (shouldRefreshTree) {
         const refreshed = await refreshFileExplorerTreesInPlace({
           root: fileExplorerRoot,
@@ -59426,7 +62181,8 @@ function paneFrameControlsHtml(session, options = {}) {
   }));
   const includeActions = controlOptions.actions ?? isTmuxSession(session);
   const includeDetails = controlOptions.details === true;
-  const includeMinimize = controlOptions.minimize !== false && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
+  const includeMinimize = controlOptions.minimize !== false
+    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
   const includeExpand = controlOptions.expand !== false;
   const includePopout = controlOptions.popout === true;
   if (includeActions) {
@@ -59550,6 +62306,8 @@ const tmuxStatusModes = new Map();
 const terminalMobileAccessoryStates = new Map();
 const terminalMobileAccessoryKeyPresses = new Map();
 const terminalMobileAccessorySuppressedClicks = new Map();
+const terminalMobileAccessoryPaneObservers = new Map();
+const terminalMobileAccessoryModifierTapTimes = new Map();
 let terminalMobileAccessoryDismissalInstalled = false;
 let terminalMobileAccessoryResizeInstalled = false;
 // Clipboard reads must start while a touch still has browser user activation.  The shared
@@ -59596,6 +62354,8 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
   {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
   {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'shift', label: 'Shift', ariaLabel: 'Shift', modifier: 'shift'},
+  {action: 'cmd', label: 'Cmd', ariaLabel: 'Command / Meta', modifier: 'cmd'},
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
@@ -59624,7 +62384,12 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'more']);
+const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
+const terminalMobileAccessoryModifierDoubleTapMs = 450;
+// Keep one visible definition for every first-page key. The primary row stays compact while
+// Backspace uses its existing terminal-byte definition; the utility column ends in Alt/Cmd.
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -59634,7 +62399,23 @@ function terminalMobileAccessoryState(session, options = {}) {
   if (!key) return null;
   let state = terminalMobileAccessoryStates.get(key) || null;
   if (!state && options.create === true) {
-    state = {ctrl: false, alt: false, more: false, open: false, x: null, y: null, drag: null, launcherPress: null, suppressLauncherClick: false};
+    state = {
+      ctrl: false,
+      alt: false,
+      shift: false,
+      cmd: false,
+      ctrlLocked: false,
+      altLocked: false,
+      shiftLocked: false,
+      cmdLocked: false,
+      more: false,
+      open: false,
+      x: null,
+      y: null,
+      palettePress: null,
+      launcherPress: null,
+      suppressLauncherClick: false,
+    };
     terminalMobileAccessoryStates.set(key, state);
   }
   return state;
@@ -59660,27 +62441,217 @@ function terminalMobileAccessoryData(session, action) {
 
 function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
   const active = definition.modifier ? state?.[definition.modifier] === true : false;
+  const locked = definition.modifier ? state?.[terminalMobileAccessoryModifierLockedKey(definition.modifier)] === true : false;
   // Copy reads local terminal selection only, so it stays available to read-only share viewers;
   // every other palette key can change the terminal and keeps the existing write gate.
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const label = definition.labelKey ? t(definition.labelKey) : definition.label;
   const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
-  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
+  return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
 function terminalMobileAccessoryDefinition(action) {
   return [...terminalMobileAccessoryKeyDefs, ...terminalMobileAccessoryMoreKeyDefs].find(item => item.action === action) || null;
 }
 
-function terminalMobileAccessoryPositionStyle(state) {
+function terminalMobileAccessoryLauncherPosition(state) {
   const x = Number.isFinite(state?.x) ? Math.max(0, Math.round(state.x)) : null;
   const y = Number.isFinite(state?.y) ? Math.max(0, Math.round(state.y)) : null;
-  if (x === null && y === null) return '';
-  // A moved absolute overlay must release its original end edges. Leaving `bottom` set alongside
-  // the drag-set `top` makes CSS stretch the palette to the terminal bottom, producing a giant
-  // empty box and preventing a useful upward move.
-  return ` style="${x === null ? '' : `inset-inline-start:${x}px;inset-inline-end:auto;`}${y === null ? '' : `inset-block-start:${y}px;inset-block-end:auto;transform:none;`}"`;
+  return {
+    positionedInline: x !== null,
+    positionedBlock: y !== null,
+    insetInlineStart: x === null ? '' : `${x}px`,
+    insetInlineEnd: x === null ? '' : 'auto',
+    insetBlockStart: y === null ? '' : `${y}px`,
+    insetBlockEnd: y === null ? '' : 'auto',
+    transform: y === null ? '' : 'none',
+  };
+}
+
+function terminalMobileAccessoryPositionStyle(state) {
+  const position = terminalMobileAccessoryLauncherPosition(state);
+  if (!position.positionedInline && !position.positionedBlock) return '';
+  return ` style="${position.positionedInline ? `inset-inline-start:${position.insetInlineStart};inset-inline-end:${position.insetInlineEnd};` : ''}${position.positionedBlock ? `inset-block-start:${position.insetBlockStart};inset-block-end:${position.insetBlockEnd};transform:${position.transform};` : ''}"`;
+}
+
+function terminalMobileAccessoryClamp(value, min, max) {
+  return Math.max(min, Math.min(Math.max(min, max), value));
+}
+
+function terminalMobileAccessoryClampStateToPane(state, launcher, pane) {
+  if (!state || !launcher || !pane || (!Number.isFinite(state.x) && !Number.isFinite(state.y))) return false;
+  const paneRect = pane.getBoundingClientRect?.();
+  const paneWidth = Math.max(0, Number(paneRect?.width) || pane.clientWidth || 0);
+  const paneHeight = Math.max(0, Number(paneRect?.height) || pane.clientHeight || 0);
+  const launcherRect = launcher.getBoundingClientRect?.();
+  const launcherWidth = Math.max(0, Number(launcherRect?.width) || launcher.offsetWidth || 0);
+  const launcherHeight = Math.max(0, Number(launcherRect?.height) || launcher.offsetHeight || 0);
+  // Hidden/transitioning Dockview panes can briefly report zero size. Preserve the last good
+  // offset instead of collapsing a deliberately moved launcher to 0,0 during that transient.
+  if (paneWidth <= 0 || paneHeight <= 0 || launcherWidth <= 0 || launcherHeight <= 0) return false;
+  let changed = false;
+  if (Number.isFinite(state.x)) {
+    const x = terminalMobileAccessoryClamp(state.x, 0, paneWidth - launcherWidth);
+    if (x !== state.x) {
+      state.x = x;
+      changed = true;
+    }
+  }
+  if (Number.isFinite(state.y)) {
+    const y = terminalMobileAccessoryClamp(state.y, 0, paneHeight - launcherHeight);
+    if (y !== state.y) {
+      state.y = y;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function terminalMobileAccessoryObservePane(session, pane) {
+  const key = String(session || '');
+  if (!key) return;
+  const existing = terminalMobileAccessoryPaneObservers.get(key);
+  if (existing?.pane === pane) return;
+  existing?.observer?.disconnect?.();
+  terminalMobileAccessoryPaneObservers.delete(key);
+  if (!pane || typeof ResizeObserver !== 'function') return;
+  const observer = new ResizeObserver(() => {
+    if (!terminalMobileAccessoryState(key)) return;
+    syncTerminalMobileAccessoryState(key);
+  });
+  observer.observe(pane);
+  terminalMobileAccessoryPaneObservers.set(key, {pane, observer});
+}
+
+function terminalMobileAccessoryMoved(state) {
+  return Number.isFinite(state?.x) || Number.isFinite(state?.y);
+}
+
+function terminalMobileAccessoryModifierLockedKey(modifier) {
+  return `${modifier}Locked`;
+}
+
+function terminalMobileAccessoryModifierTapKey(session, modifier) {
+  return `${String(session || '')}:${modifier}`;
+}
+
+function terminalMobileAccessoryModifierActive(state) {
+  return terminalMobileAccessoryModifierActions.some(modifier => state?.[modifier] === true);
+}
+
+function terminalMobileAccessoryClearModifiers(state, options = {}) {
+  if (!state) return false;
+  const includeLocked = options.includeLocked === true;
+  const session = String(options.session || '');
+  let changed = false;
+  for (const modifier of terminalMobileAccessoryModifierActions) {
+    const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+    if ((includeLocked || state[lockedKey] !== true) && state[modifier] === true) {
+      state[modifier] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+    if (includeLocked && state[lockedKey] === true) {
+      state[lockedKey] = false;
+      if (session) terminalMobileAccessoryModifierTapTimes.delete(terminalMobileAccessoryModifierTapKey(session, modifier));
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function toggleTerminalMobileAccessoryModifier(session, modifier) {
+  const key = String(session || '');
+  const state = terminalMobileAccessoryState(key, {create: true});
+  if (!state || !terminalMobileAccessoryModifierActions.includes(modifier)) return false;
+  const tapKey = terminalMobileAccessoryModifierTapKey(key, modifier);
+  const lockedKey = terminalMobileAccessoryModifierLockedKey(modifier);
+  const now = Date.now();
+  const lastTap = Number(terminalMobileAccessoryModifierTapTimes.get(tapKey)) || 0;
+  if (state[lockedKey] === true) {
+    state[modifier] = false;
+    state[lockedKey] = false;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else if (state[modifier] === true && now - lastTap <= terminalMobileAccessoryModifierDoubleTapMs) {
+    state[modifier] = true;
+    state[lockedKey] = true;
+    terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  } else {
+    state[modifier] = !state[modifier];
+    if (state[modifier] === true) terminalMobileAccessoryModifierTapTimes.set(tapKey, now);
+    else terminalMobileAccessoryModifierTapTimes.delete(tapKey);
+  }
+  syncTerminalMobileAccessoryState(key);
+  return state[modifier] === true;
+}
+
+function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, barSize) {
+  const gap = 8;
+  const paneLeft = Number.isFinite(paneRect?.left) ? paneRect.left : 0;
+  const paneTop = Number.isFinite(paneRect?.top) ? paneRect.top : 0;
+  const paneWidth = Math.max(0, Number(paneRect?.width) || 0);
+  const paneHeight = Math.max(0, Number(paneRect?.height) || 0);
+  const width = Math.min(Math.max(0, Number(barSize?.width) || 0), paneWidth);
+  const height = Math.min(Math.max(0, Number(barSize?.height) || 0), paneHeight);
+  const left = (Number.isFinite(launcherRect?.left) ? launcherRect.left : 0) - paneLeft;
+  const top = (Number.isFinite(launcherRect?.top) ? launcherRect.top : 0) - paneTop;
+  const launcherWidth = Math.max(0, Number(launcherRect?.width) || 0);
+  const launcherHeight = Math.max(0, Number(launcherRect?.height) || 0);
+  const right = left + launcherWidth;
+  const bottom = top + launcherHeight;
+  const above = top;
+  const below = paneHeight - bottom;
+  const leftRoom = left;
+  const rightRoom = paneWidth - right;
+  const moved = terminalMobileAccessoryMoved(state);
+  let side = 'above';
+  if (!moved && above >= height + gap) {
+    side = 'above';
+  } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
+    side = 'below';
+  } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
+    side = 'left';
+  } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
+    side = 'right';
+  } else if (below <= gap * 2 && above >= height + gap) {
+    side = 'above';
+  } else {
+    const candidates = [
+      {side: 'above', room: above, fits: above >= height + gap},
+      {side: 'below', room: below, fits: below >= height + gap},
+      {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
+      {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
+    ];
+    const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
+    side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+  }
+  let x = right - width;
+  let y = top - height - gap;
+  if (side === 'below') {
+    x = left;
+    y = bottom + gap;
+  } else if (side === 'left') {
+    x = left - width - gap;
+    y = top;
+  } else if (side === 'right') {
+    x = right + gap;
+    y = top;
+  }
+  return {
+    side,
+    x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
+    y: Math.round(terminalMobileAccessoryClamp(y, 0, paneHeight - height)),
+  };
+}
+
+function terminalMobileAccessoryLauncherDragPosition(press, event) {
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  return {
+    x: terminalMobileAccessoryClamp(press.startX + dx, 0, press.paneWidth - press.launcherWidth),
+    y: terminalMobileAccessoryClamp(press.startY + dy, 0, press.paneHeight - press.launcherHeight),
+  };
 }
 
 function terminalMobileAccessoryHtml(session) {
@@ -59688,12 +62659,16 @@ function terminalMobileAccessoryHtml(session) {
   const state = terminalMobileAccessoryState(session, {create: true});
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
   const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
   // The overflow button remains the rightmost control in both palette states. Keeping the return
   // target in one physical corner avoids a touch user hunting for it after the content switches.
   const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
-  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}">⌨</button>
-    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${terminalMobileAccessoryPositionStyle(state)}${state.open ? '' : ' hidden'}>
-      <button type="button" class="mobile-terminal-key-drag" data-terminal-mobile-drag="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}">⠿</button>
+  const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
+  return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
+    <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
+      <div class="mobile-terminal-key-side">
+        ${sideKeys}
+      </div>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
       <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
       <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
@@ -59705,25 +62680,57 @@ function syncTerminalMobileAccessoryState(session) {
   const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
   const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
   if (!state || !bar) return false;
-  for (const modifier of ['ctrl', 'alt']) {
+  const pane = launcher?.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
+  terminalMobileAccessoryObservePane(session, pane);
+  if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
+  for (const modifier of terminalMobileAccessoryModifierActions) {
     const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
     if (!button) continue;
     const active = state[modifier] === true;
+    const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
     button.classList.toggle(CLS.active, active);
+    button.classList.toggle('locked', locked);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
   const more = bar.querySelector('.mobile-terminal-keyrow--more');
   const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
   bar.hidden = state.open !== true;
   bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
-  if (launcher) launcher.setAttribute('aria-expanded', state.open === true ? 'true' : 'false');
+  if (launcher) {
+    const open = state.open === true;
+    launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
+    launcher.setAttribute('aria-label', open ? t('shortcuts.close') : t('common.keyboardShortcuts'));
+    launcher.textContent = open ? '×' : '⌨';
+    launcher.classList.toggle('mobile-terminal-key-launcher--open', open);
+    const position = terminalMobileAccessoryLauncherPosition(state);
+    launcher.style.insetInlineStart = position.insetInlineStart;
+    launcher.style.insetInlineEnd = position.insetInlineEnd;
+    launcher.style.insetBlockStart = position.insetBlockStart;
+    launcher.style.insetBlockEnd = position.insetBlockEnd;
+    launcher.style.transform = position.transform;
+  }
   const positionedInline = Number.isFinite(state.x);
   const positionedBlock = Number.isFinite(state.y);
-  bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
-  bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
-  bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
-  bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
-  bar.style.transform = positionedBlock ? 'none' : '';
+  if (state.open === true && launcher) {
+    const paneRect = pane?.getBoundingClientRect?.();
+    const launcherRect = launcher.getBoundingClientRect();
+    if (paneRect) {
+      const placement = terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, {width: bar.offsetWidth, height: bar.offsetHeight});
+      bar.style.insetInlineStart = `${placement.x}px`;
+      bar.style.insetInlineEnd = 'auto';
+      bar.style.insetBlockStart = `${placement.y}px`;
+      bar.style.insetBlockEnd = 'auto';
+      bar.style.transform = 'none';
+      bar.dataset.terminalMobilePlacement = placement.side;
+    }
+  } else {
+    bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+    bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+    bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+    bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+    bar.style.transform = positionedBlock ? 'none' : '';
+    delete bar.dataset.terminalMobilePlacement;
+  }
   if (more) more.hidden = state.more !== true;
   for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
@@ -59732,7 +62739,8 @@ function syncTerminalMobileAccessoryState(session) {
 
 function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  if (!state || !['ctrl', 'alt', 'more', 'open'].includes(key)) return false;
+  if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
+  if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
   if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
   state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
@@ -59744,9 +62752,8 @@ function dismissTerminalMobileAccessory(session) {
   if (!state || state.open !== true) return false;
   state.open = false;
   state.more = false;
-  state.ctrl = false;
-  state.alt = false;
-  state.drag = null;
+  terminalMobileAccessoryClearModifiers(state, {includeLocked: true, session});
+  state.launcherPress = null;
   syncTerminalMobileAccessoryState(session);
   return true;
 }
@@ -59776,19 +62783,14 @@ function installTerminalMobileAccessoryResizeSync() {
   if (terminalMobileAccessoryResizeInstalled) return;
   terminalMobileAccessoryResizeInstalled = true;
   window.addEventListener('resize', () => {
-    for (const [session, state] of terminalMobileAccessoryStates) {
-      if (!Number.isFinite(state.x) && !Number.isFinite(state.y)) continue;
-      const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
-      const pane = bar?.closest?.('.tab-pane');
-      if (!bar || !pane) continue;
-      state.x = Math.max(0, Math.min(pane.clientWidth - bar.offsetWidth, state.x));
-      state.y = Math.max(0, Math.min(pane.clientHeight - bar.offsetHeight, state.y));
+    for (const session of terminalMobileAccessoryStates.keys()) {
       syncTerminalMobileAccessoryState(session);
     }
   }, {passive: true});
 }
 
 const terminalMobileAccessoryLongPressMs = 450;
+const terminalMobileAccessoryDragThresholdPx = 6;
 const terminalMobileAccessoryRepeatDelayMs = mobileTerminalKeyRepeatDelayMs;
 const terminalMobileAccessoryRepeatIntervalMs = mobileTerminalKeyRepeatIntervalMs;
 
@@ -59842,12 +62844,35 @@ function consumeTerminalMobileAccessoryKeyClick(session, action) {
   return true;
 }
 
-function beginTerminalMobileAccessoryLauncherPress(session, event) {
+function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  if (!state || event.button > 0 || event.pointerType === 'mouse') return false;
+  const pane = button?.closest?.('.tab-pane');
+  if (!state || event.button > 0 || !button || !pane) return false;
+  // A real drag commonly produces no synthetic click. In that case the previous drag's click
+  // suppression must not eat this new intentional tap; suppression is only for the immediate
+  // click following the drag release that set it.
+  state.suppressLauncherClick = false;
   dismissTerminalMobileAccessories(session);
-  const press = {pointerId: event.pointerId, longPressed: false, timer: null};
+  const paneRect = pane.getBoundingClientRect();
+  const launcherRect = button.getBoundingClientRect();
+  const startX = Number.isFinite(state.x) ? state.x : launcherRect.left - paneRect.left;
+  const startY = Number.isFinite(state.y) ? state.y : launcherRect.top - paneRect.top;
+  const press = {
+    pointerId: event.pointerId,
+    longPressed: false,
+    dragging: false,
+    timer: null,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX,
+    startY,
+    paneWidth: pane.clientWidth,
+    paneHeight: pane.clientHeight,
+    launcherWidth: button.offsetWidth,
+    launcherHeight: button.offsetHeight,
+  };
   state.launcherPress = press;
+  button.setPointerCapture?.(event.pointerId);
   press.timer = window.setTimeout(() => {
     if (terminalMobileAccessoryState(session)?.launcherPress !== press) return;
     press.longPressed = true;
@@ -59858,13 +62883,34 @@ function beginTerminalMobileAccessoryLauncherPress(session, event) {
   return true;
 }
 
-function endTerminalMobileAccessoryLauncherPress(session, event) {
+function moveTerminalMobileAccessoryLauncherPress(session, event) {
+  const state = terminalMobileAccessoryState(session);
+  const press = state?.launcherPress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  if (!press.dragging && Math.hypot(dx, dy) < terminalMobileAccessoryDragThresholdPx) return false;
+  if (!press.dragging) {
+    press.dragging = true;
+    window.clearTimeout(press.timer);
+  }
+  const position = terminalMobileAccessoryLauncherDragPosition(press, event);
+  state.x = position.x;
+  state.y = position.y;
+  syncTerminalMobileAccessoryState(session);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function endTerminalMobileAccessoryLauncherPress(session, event, button) {
   const state = terminalMobileAccessoryState(session);
   const press = state?.launcherPress;
   if (!state || !press || press.pointerId !== event.pointerId) return false;
   window.clearTimeout(press.timer);
   state.launcherPress = null;
-  if (!press.longPressed) return false;
+  button?.releasePointerCapture?.(event.pointerId);
+  if (!press.longPressed && !press.dragging) return false;
   state.suppressLauncherClick = true;
   event.preventDefault();
   event.stopPropagation();
@@ -59878,59 +62924,119 @@ function consumeTerminalMobileAccessoryLauncherClick(session) {
   return true;
 }
 
-function beginTerminalMobileAccessoryDrag(session, event, handle) {
+function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
   const state = terminalMobileAccessoryState(session, {create: true});
-  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
-  if (!state || !bar || event.button > 0) return false;
-  const rect = bar.getBoundingClientRect();
-  state.drag = {pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top};
-  handle.setPointerCapture?.(event.pointerId);
+  const pane = bar?.closest?.('.tab-pane');
+  if (!state || event.button > 0 || !bar || !pane || state.open !== true) return false;
+  if (event.target?.closest?.('[data-terminal-mobile-key]')) return false;
+  const paneRect = pane.getBoundingClientRect();
+  const launcher = pane.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
+  if (!launcher) return false;
+  const launcherRect = launcher?.getBoundingClientRect?.();
+  const startX = Number.isFinite(state.x) ? state.x : (Number(launcherRect?.left) || 0) - paneRect.left;
+  const startY = Number.isFinite(state.y) ? state.y : (Number(launcherRect?.top) || 0) - paneRect.top;
+  const press = {
+    pointerId: event.pointerId,
+    dragging: false,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX,
+    startY,
+    paneWidth: pane.clientWidth,
+    paneHeight: pane.clientHeight,
+    launcherWidth: launcher?.offsetWidth || 0,
+    launcherHeight: launcher?.offsetHeight || 0,
+  };
+  state.palettePress = press;
+  bar.setPointerCapture?.(event.pointerId);
   event.preventDefault();
   event.stopPropagation();
   return true;
 }
 
-function moveTerminalMobileAccessoryDrag(session, event, handle) {
+function moveTerminalMobileAccessoryPalettePress(session, event) {
   const state = terminalMobileAccessoryState(session);
-  const drag = state?.drag;
-  const bar = handle?.closest?.('[data-terminal-mobile-keybar]');
-  const pane = bar?.closest?.('.tab-pane');
-  if (!drag || drag.pointerId !== event.pointerId || !bar || !pane) return false;
-  const paneRect = pane.getBoundingClientRect();
-  state.x = Math.max(0, Math.min(paneRect.width - bar.offsetWidth, event.clientX - paneRect.left - drag.offsetX));
-  state.y = Math.max(0, Math.min(paneRect.height - bar.offsetHeight, event.clientY - paneRect.top - drag.offsetY));
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  const dx = event.clientX - press.startClientX;
+  const dy = event.clientY - press.startClientY;
+  if (!press.dragging && Math.hypot(dx, dy) < terminalMobileAccessoryDragThresholdPx) return false;
+  press.dragging = true;
+  const position = terminalMobileAccessoryLauncherDragPosition(press, event);
+  state.x = position.x;
+  state.y = position.y;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
+  event.stopPropagation();
   return true;
 }
 
-function endTerminalMobileAccessoryDrag(session, event, handle) {
+function endTerminalMobileAccessoryPalettePress(session, event, bar) {
   const state = terminalMobileAccessoryState(session);
-  if (!state?.drag || state.drag.pointerId !== event.pointerId) return false;
-  handle.releasePointerCapture?.(event.pointerId);
-  state.drag = null;
+  const press = state?.palettePress;
+  if (!state || !press || press.pointerId !== event.pointerId) return false;
+  state.palettePress = null;
+  bar?.releasePointerCapture?.(event.pointerId);
+  if (!press.dragging) return false;
   event.preventDefault();
+  event.stopPropagation();
   return true;
+}
+
+const terminalMobileAccessoryShiftMap = Object.freeze({
+  '`': '~',
+  '1': '!',
+  '2': '@',
+  '3': '#',
+  '4': '$',
+  '5': '%',
+  '6': '^',
+  '7': '&',
+  '8': '*',
+  '9': '(',
+  '0': ')',
+  '-': '_',
+  '=': '+',
+  '[': '{',
+  ']': '}',
+  '\\': '|',
+  ';': ':',
+  "'": '"',
+  ',': '<',
+  '.': '>',
+  '/': '?',
+});
+
+function terminalMobileAccessoryShiftText(text) {
+  if (text === '\t') return '\x1b[Z';
+  if (text.length !== 1) return text;
+  if (text >= 'a' && text <= 'z') return text.toUpperCase();
+  return terminalMobileAccessoryShiftMap[text] || text;
+}
+
+function terminalMobileAccessoryControlText(text) {
+  if (text.length !== 1) return text;
+  const code = text.charCodeAt(0);
+  if (code === 32) return '\x00';
+  if (code === 63) return '\x7f';
+  if (code >= 64 && code <= 95) return String.fromCharCode(code & 0x1f);
+  if (code >= 97 && code <= 122) return String.fromCharCode(code - 96);
+  return text;
 }
 
 function terminalDataWithMobileAccessoryModifiers(session, data) {
   const state = terminalMobileAccessoryState(session);
   const text = String(data || '');
-  if (!state || (!state.ctrl && !state.alt) || !text) return text;
+  if (!state || !text || !terminalMobileAccessoryModifierActive(state)) return text;
   const ctrl = state.ctrl === true;
-  const alt = state.alt === true;
-  state.ctrl = false;
-  state.alt = false;
+  const shift = state.shift === true;
+  const meta = state.alt === true || state.cmd === true;
+  terminalMobileAccessoryClearModifiers(state, {session});
   syncTerminalMobileAccessoryState(session);
   let value = text;
-  if (ctrl && text.length === 1) {
-    const code = text.charCodeAt(0);
-    if (code === 32) value = '\x00';
-    else if (code === 63) value = '\x7f';
-    else if (code >= 64 && code <= 95) value = String.fromCharCode(code & 0x1f);
-    else if (code >= 97 && code <= 122) value = String.fromCharCode(code - 96);
-  }
-  return alt ? `\x1b${value}` : value;
+  if (shift) value = terminalMobileAccessoryShiftText(value);
+  if (ctrl) value = terminalMobileAccessoryControlText(value);
+  return meta ? `\x1b${value}` : value;
 }
 
 async function pasteTerminalMobileAccessoryClipboard(session) {
@@ -60006,14 +63112,14 @@ function sendTerminalMobileAccessoryInput(session, action) {
     statusErr(terminalNotConnectedHtml(session));
     return false;
   }
-  if (action === 'ctrl' || action === 'alt' || action === 'more' || action === 'open') {
+  if (terminalMobileAccessoryModifierActions.includes(action) || action === 'more' || action === 'open') {
     toggleTerminalMobileAccessoryState(session, action);
     return true;
   }
   const data = terminalMobileAccessoryData(session, action);
   if (!data) return false;
   noteTerminalExplicitInput(session);
-  const sent = handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true});
+  const sent = handleTerminalData(session, data, {mobileAccessory: true});
   if (!sent) statusErr(terminalNotConnectedHtml(session));
   return sent;
 }
@@ -60529,20 +63635,25 @@ const infoSortDefs = Object.freeze([
   {key: 'date', dir: 'asc', value: 'date:asc', labelKey: 'finder.sort.oldest'},
 ]);
 const infoDimensionDefs = Object.freeze([
-  {key: 'tab', labelKey: 'info.dimension.tab'},
-  {key: 'tmux-window', labelKey: 'info.field.tmuxSubWindow'},
-  {key: 'ai', labelKey: 'info.dimension.ai'},
-  {key: 'path', labelKey: 'common.pathLabel'},
-  {key: 'branch', labelKey: 'common.branchLabel'},
-  {key: 'linear', labelKey: 'info.field.linear'},
-  {key: 'pr', labelKey: 'common.pullRequestShort'},
+  {key: 'tab', labelKey: 'info.dimension.tab', legacyKeys: ['tab']},
+  {key: 'tmux-session', labelKey: 'info.field.tabTmuxSession', legacyKeys: [], userSelectable: false},
+  {key: 'tmux-window', labelKey: 'info.field.tmuxWindow', legacyKeys: ['tmux-window']},
+  {key: 'tmux-pane', labelKey: 'info.field.tmuxWindow', legacyKeys: [], userSelectable: false},
+  {key: 'ai', labelKey: 'info.dimension.ai', legacyKeys: ['ai']},
+  {key: 'path', labelKey: 'common.pathLabel', legacyKeys: ['path']},
+  {key: 'git-worktree', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'local-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'hosted-repository', labelKey: 'common.pathLabel', legacyKeys: [], userSelectable: false},
+  {key: 'branch', labelKey: 'common.branchLabel', legacyKeys: ['branch']},
+  {key: 'pr', labelKey: 'common.pullRequestShort', legacyKeys: ['pr']},
+  {key: 'linear', labelKey: 'info.field.linear', legacyKeys: ['linear']},
 ]);
 const infoPresetDefs = Object.freeze([
-  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window']},
+  {key: 'tab-tmux-window', labelKey: 'info.preset.tabTmuxWindow.label', titleKey: 'info.preset.tabTmuxWindow.title', grouping: ['tab', 'tmux-window', 'path']},
   {key: 'tab-path', labelKey: 'info.preset.tabPath.label', titleKey: 'info.preset.tabPath.title', grouping: ['tab', 'path', 'tmux-window']},
-  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['path', 'branch']},
+  {key: 'path-branch', labelKey: 'info.preset.pathBranch.label', titleKey: 'info.preset.pathBranch.title', grouping: ['git-worktree', 'local-repository', 'branch']},
   {key: 'linear-pr', labelKey: 'info.preset.linearPr.label', titleKey: 'info.preset.linearPr.title', grouping: ['linear', 'pr']},
-  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['pr', 'branch']},
+  {key: 'pr-branch', labelKey: 'info.preset.prBranch.label', titleKey: 'info.preset.prBranch.title', grouping: ['hosted-repository', 'pr', 'branch']},
 ]);
 let infoGrouping = readStoredInfoGrouping();
 let infoSort = readStoredInfoSort();
@@ -60564,22 +63675,33 @@ function infoGroupDimensions() {
 function infoGroupDimensionAllowedAtLevel(key, level, grouping = []) {
   const dimension = String(key || '').trim();
   const index = Number(level);
-  if (!dimension || !Number.isInteger(index) || index < 0 || index > 3) return false;
+  if (!dimension || !Number.isInteger(index) || index < 0 || index > 5) return false;
   if (dimension === 'ai' && index === 0) return false;
-  if (dimension === 'tmux-window') {
+  if (dimension === 'tmux-window' || dimension === 'tmux-pane') {
     const parent = Array.isArray(grouping) ? String(grouping[0] || '') : '';
-    return index >= 1 && parent === 'tab';
+    return index >= 1 && ['tab', 'tmux-session'].includes(parent);
   }
   return true;
 }
 
 function infoGroupDimensionsForLevel(level = 0, grouping = infoGrouping) {
   const index = Number(level);
-  const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(3, index)) : 0;
+  const normalizedIndex = Number.isInteger(index) ? Math.max(0, Math.min(5, index)) : 0;
   const activeGrouping = Array.isArray(grouping) ? grouping.slice() : normalizeInfoGrouping(grouping);
-  return infoDimensionDefs
+  const selectedKey = String(activeGrouping[normalizedIndex] || '');
+  const dimensions = infoDimensionDefs
+    .filter(dimension => dimension.userSelectable !== false || dimension.key === selectedKey)
     .filter(dimension => infoGroupDimensionAllowedAtLevel(dimension.key, normalizedIndex, activeGrouping))
     .map(localizedInfoDefinition);
+  const selected = dimensions.find(dimension => dimension.key === selectedKey);
+  const ordered = selected ? [selected, ...dimensions.filter(dimension => dimension !== selected)] : dimensions;
+  const labels = new Set();
+  return ordered.filter(dimension => {
+    const label = String(dimension.label || dimension.key);
+    if (labels.has(label)) return false;
+    labels.add(label);
+    return true;
+  });
 }
 
 function infoSortFields() {
@@ -60587,7 +63709,14 @@ function infoSortFields() {
 }
 
 function infoGroupingPresets() {
-  return infoPresetDefs.map(preset => ({...localizedInfoDefinition(preset), grouping: preset.grouping.slice()}));
+  return infoPresetDefs.map(preset => {
+    const localized = localizedInfoDefinition(preset);
+    if (preset.key === 'tab-tmux-window') {
+      localized.label = `${localized.label} > ${t('common.pathLabel')}`;
+      localized.title = localized.label;
+    }
+    return {...localized, grouping: preset.grouping.slice()};
+  });
 }
 
 function normalizeInfoGrouping(value, options = {}) {
@@ -60604,13 +63733,14 @@ function normalizeInfoGrouping(value, options = {}) {
   for (const key of Array.isArray(migrated) ? migrated : []) {
     if (!infoGroupDimensionAllowedAtLevel(key, result.length, result)) continue;
     result.push(key);
-    if (result.length >= 4) break;
+    if (result.length >= 6) break;
   }
   return (result.length ? result : infoDefaultGrouping).slice();
 }
 
 function normalizeInfoLegacyPresetGrouping(grouping) {
   const key = (Array.isArray(grouping) ? grouping : []).join('|');
+  if (key === 'tab|tmux-window') return ['tab', 'tmux-window', 'path'];
   if (key === 'tab|ai|path|branch') return ['tab', 'path', 'tmux-window'];
   if (key === 'path|branch|tab|ai') return ['path', 'branch'];
   if (key === 'branch|path|tab|ai') return ['path', 'branch'];
@@ -60723,10 +63853,11 @@ function refreshInfoGroupingControls() {
 
 function setInfoGrouping(value) {
   const previous = infoGrouping.join(',');
-  writeInfoGrouping(value);
+  const next = writeInfoGrouping(value);
   refreshInfoGroupingControls();
   renderInfoPanel();
   if (infoGrouping.join(',') !== previous) scheduleShareUiStatePublish();
+  return next;
 }
 
 function setInfoSort(value, options = {}) {
@@ -60758,7 +63889,7 @@ function setInfoGroupingPreset(key) {
 
 function setInfoGroupingLevel(level, value) {
   const index = Number(level);
-  if (!Number.isInteger(index) || index < 0 || index > 3) return;
+  if (!Number.isInteger(index) || index < 0 || index > 5) return;
   const next = infoGrouping.slice();
   const key = String(value || '').trim();
   next[index] = key;
@@ -60783,8 +63914,8 @@ function infoRecordTmuxWindowIndex(record = {}) {
 }
 
 function infoRecordTmuxWindowLabel(record = {}) {
-  if (!infoRecordHasAi(record)) return t('info.missing.tmuxSubWindow');
-  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxSubWindow');
+  if (!infoRecordHasAi(record)) return t('info.missing.tmuxWindow');
+  return String(record?.tmuxWindowLabel || record?.aiLabel || '').trim() || t('info.field.tmuxWindow');
 }
 
 function infoRecordTmuxWindowKey(record = {}) {
@@ -60799,9 +63930,14 @@ function infoDimensionValue(record, dimension) {
   const fallback = {key: 'none', label: t('info.group.none'), title: ''};
   if (!record || !dimension) return fallback;
   if (dimension === 'tab') return {key: record.tabKey, label: record.tabLabel, title: record.tabTitle, sortValue: infoRecordNumericSortValue(record, 'tab')};
+  if (dimension === 'tmux-session') return {key: record.tmuxSessionKey, label: record.tmuxSessionLabel, title: record.tmuxSessionTitle, sortValue: infoRecordNumericSortValue(record, 'tmux-session')};
   if (dimension === 'tmux-window') return {key: infoRecordTmuxWindowKey(record), label: infoRecordTmuxWindowLabel(record), title: record.tmuxWindowTitle || record.aiTitle || infoRecordTmuxWindowLabel(record), sortValue: infoRecordNumericSortValue(record, 'tmux-window')};
+  if (dimension === 'tmux-pane') return {key: record.tmuxPaneKey, label: record.tmuxPaneLabel, title: record.tmuxPaneTitle, sortValue: infoRecordNumericSortValue(record, 'tmux-pane')};
   if (dimension === 'ai') return {key: infoRecordAiKind(record) || '__no_ai__', label: infoRecordAiAgentLabel(record), title: record.aiAgentTitle || infoRecordAiAgentLabel(record)};
   if (dimension === 'path') return {key: record.pathKey, label: record.pathTitle || record.pathLabel, title: record.pathTitle};
+  if (dimension === 'git-worktree') return {key: record.gitWorktreeKey, label: record.gitWorktreeLabel, title: record.gitWorktreeTitle};
+  if (dimension === 'local-repository') return {key: record.localRepositoryKey, label: record.localRepositoryLabel, title: record.localRepositoryTitle};
+  if (dimension === 'hosted-repository') return {key: record.hostedRepositoryKey, label: record.hostedRepositoryLabel, title: record.hostedRepositoryTitle};
   if (dimension === 'branch') return {key: record.branchKey, label: record.branchLabel, title: record.branchTitle};
   if (dimension === 'pr') return {key: record.prKey, label: record.prTitle || record.prLabel, title: record.prTitle, sortValue: infoRecordNumericSortValue(record, 'pr')};
   if (dimension === 'linear') return {key: record.linearKey, label: record.linearTitle || record.linearLabel, title: record.linearTitle, sortValue: infoRecordNumericSortValue(record, 'linear')};
@@ -60855,7 +63991,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const tmuxWindowKey = tmuxWindowIndex
         ? `${session || 'no-tab'}:${tmuxWindowIndex}:${aiLabel}`
         : '__no_tmux_window__';
-      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxSubWindow') : aiLabel;
+      const tmuxWindowLabel = tmuxWindowKey === '__no_tmux_window__' ? t('info.missing.tmuxWindow') : aiLabel;
       const path = String(row?.path || '');
       const branch = String(row?.branch || '');
       const linearLabel = Array.isArray(row?.linearItems) && row.linearItems.length
@@ -60865,12 +64001,29 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
       const prDisplayLabel = String(row?.prDescriptionTitle || row?.prTitle || row?.prSort || row?.prLabel || '').trim();
       const prNumber = infoRowPrNumber(row);
       const prCompactLabel = Number.isFinite(prNumber) ? `#${prNumber}` : prKeyLabel;
+      const tmuxSessionKey = String(agent?.tmux_session_id || session || '__no_tmux_session__');
+      const tmuxSessionLabel = String(agent?.tmux_session_name || session || t('info.group.none'));
+      const tmuxPaneKey = String(agent?.tmux_pane_id || agent?.pane_target || (session && agent?.pane !== undefined ? `${session}:${agent?.window || '0'}.${agent.pane}` : '__no_tmux_pane__'));
+      const tmuxPaneLabel = String(agent?.tmux_pane_label || (agent?.pane !== undefined && agent?.pane !== '' ? `${agent?.window || '0'}.${agent.pane}` : t('info.group.none')));
+      const tmuxPaneTarget = String(agent?.tmux_pane_target || agent?.pane_target || '');
+      const gitWorktreeKey = String(row?.gitWorktreeId || row?.git_worktree_id || row?.pathKey || '__no_git_worktree__');
+      const gitWorktreeLabel = String(row?.gitWorktreeLabel || row?.git_worktree_label || row?.pathLabel || t('info.missing.path'));
+      const gitWorktreeTitle = String(row?.gitWorktreeTitle || row?.git_worktree_title || row?.pathTitle || gitWorktreeLabel);
+      const localRepositoryKey = String(row?.localRepositoryId || row?.local_repository_id || gitWorktreeKey || '__no_local_repository__');
+      const localRepositoryLabel = String(row?.localRepositoryLabel || row?.local_repository_label || gitWorktreeLabel);
+      const localRepositoryTitle = String(row?.localRepositoryTitle || row?.local_repository_title || localRepositoryLabel);
+      const hostedRepositoryKey = String(row?.hostedRepositoryId || row?.hosted_repository_id || '__no_hosted_repository__');
+      const hostedRepositoryLabel = String(row?.hostedRepositoryLabel || row?.hosted_repository_label || t('info.group.none'));
+      const hostedRepositoryTitle = String(row?.hostedRepositoryTitle || row?.hosted_repository_title || hostedRepositoryLabel);
       records.push({
         id: [path, branch, session || 'no-tab', aiKind || 'no-ai', tmuxWindowIndex, prCompactLabel || prKeyLabel, linearLabel].join('\n'),
         tabKey: session || '__no_tab__',
         tabSession: session,
         tabLabel,
         tabTitle: String(agent?.title || tabLabel),
+        tmuxSessionKey,
+        tmuxSessionLabel,
+        tmuxSessionTitle: tmuxSessionLabel,
         aiKey: `${agent?.kind || 'no-ai'}:${agent?.window || ''}:${aiLabel}`,
         aiKind,
         aiAgentKey: aiKind || '__no_ai__',
@@ -60881,6 +64034,7 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         aiState: String(agent?.state || ''),
         aiPane: String(agent?.pane || ''),
         aiPaneTarget: String(agent?.pane_target || ''),
+        tmuxPaneTarget,
         aiCurrent: agent?.current === true,
         aiWindowActive: agent?.window_active === true,
         aiPid: tmuxWindowProcessPid(agent),
@@ -60892,15 +64046,29 @@ function infoRelationshipRecords(rows = infoBranchRows()) {
         tmuxWindowKey,
         tmuxWindowLabel,
         tmuxWindowTitle: String(agent?.title || tmuxWindowLabel),
+        tmuxPaneKey,
+        tmuxPaneLabel,
+        tmuxPaneTitle: tmuxPaneTarget || tmuxPaneLabel,
         pathKey: infoNormalizedPath(path) || '__no_path__',
         pathLabel: String(row?.pathLabel || compactHomePath(path) || t('info.missing.path')),
         pathTitle: String(row?.pathTitle || path || t('info.missing.path')),
         pathActivityTs: Number.isFinite(row?.pathActivityTs) ? row.pathActivityTs : 0,
         pathActivitySource: String(row?.pathActivitySource || ''),
+        pathObservations: Array.isArray(row?.pathObservations) ? row.pathObservations.slice(0, 100) : [],
+        gitWorktreeKey,
+        gitWorktreeLabel,
+        gitWorktreeTitle,
+        localRepositoryKey,
+        localRepositoryLabel,
+        localRepositoryTitle,
+        hostedRepositoryKey,
+        hostedRepositoryLabel,
+        hostedRepositoryTitle,
         branchKey: branch || '__no_branch__',
         branchLabel: branch || t('info.missing.branch'),
         branchTitle: branch || t('info.missing.branch'),
         branchHtml: row?.branchHtml || esc(branch || t('info.missing.branch')),
+        branchState: normalizeInfoBranchState(row?.branchState),
         prKey: prCompactLabel || prKeyLabel || '__no_pr__',
         prLabel: prCompactLabel || prKeyLabel || prDisplayLabel || t('info.missing.pr'),
         prTitle: prDisplayLabel || prCompactLabel || t('info.missing.pr'),
@@ -60974,7 +64142,9 @@ function infoRecordNumericSortValue(record = {}, dimension = '') {
   if (dimension === 'pr') return infoRecordPrNumber(record);
   if (dimension === 'linear') return infoRecordLinearNumber(record);
   if (dimension === 'tab') return infoFirstRecordNumber(record, [record.tabKey, record.tabLabel, record.tabTitle, record.tabSession]);
+  if (dimension === 'tmux-session') return infoFirstRecordNumber(record, [record.tmuxSessionLabel, record.tmuxSessionKey]);
   if (dimension === 'tmux-window') return infoFirstRecordNumber(record, [infoRecordTmuxWindowIndex(record), infoRecordTmuxWindowLabel(record), record.aiLabel, record.aiKey, record.aiTitle]);
+  if (dimension === 'tmux-pane') return infoFirstRecordNumber(record, [record.tmuxPaneLabel, record.tmuxPaneKey]);
   return NaN;
 }
 
@@ -61001,11 +64171,16 @@ function infoCompareRecordNumberThenLabel(left = {}, right = {}, dimension = '',
 
 function infoRecordLabel(record = {}, dimension = '') {
   if (dimension === 'tab') return record.tabLabel;
+  if (dimension === 'tmux-session') return record.tmuxSessionLabel;
   if (dimension === 'tmux-window') return infoRecordTmuxWindowLabel(record);
+  if (dimension === 'tmux-pane') return record.tmuxPaneLabel;
   if (dimension === 'ai') return infoRecordAiAgentLabel(record);
   if (dimension === 'linear') return record.linearLabel || record.linearTitle;
   if (dimension === 'pr') return record.prLabel || record.prTitle;
   if (dimension === 'path') return record.pathLabel;
+  if (dimension === 'git-worktree') return record.gitWorktreeLabel;
+  if (dimension === 'local-repository') return record.localRepositoryLabel;
+  if (dimension === 'hosted-repository') return record.hostedRepositoryLabel;
   if (dimension === 'branch') return record.branchLabel;
   return '';
 }
@@ -61057,25 +64232,38 @@ function infoLinearSearchFields(record = {}) {
 }
 
 function infoRecordSearchFields(record = {}) {
+  const observations = Array.isArray(record?.pathObservations) ? record.pathObservations : [];
+  const observationFields = observations.flatMap(observation => [
+    infoSearchField('path', observation?.path),
+    infoSearchField('ai', observation?.actorKind),
+    infoSearchField('observation-source', observation?.source),
+  ]).filter(Boolean);
   return [
-    ...(infoRecordHasTab(record) ? infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession) : []),
-    ...(infoRecordHasAi(record) ? infoSearchFields('tmux-window', infoRecordTmuxWindowLabel(record)) : []),
+    ...infoSearchFields('tab', sessionLabel(record.tabSession), record.tabLabel, record.tabSession),
+    infoSearchField('tmux-session', record.tmuxSessionLabel, record.tmuxSessionKey, record.tabSession),
+    ...infoSearchFields('tmux-window', infoRecordTmuxWindowLabel(record), record.aiWindowIndex, record.aiPaneTarget),
+    infoSearchField('tmux-pane', record.tmuxPaneLabel, record.tmuxPaneKey, record.tmuxPaneTarget, record.aiPaneTarget, record.aiPane),
     ...(infoRecordHasAi(record) ? infoSearchFields('ai', infoRecordAiAgentLabel(record), infoRecordAiKind(record)) : []),
     !infoRecordMissingValue(record?.pathLabel) && String(record?.pathKey || '') !== '__no_path__'
       ? infoSearchField('path', record.pathTitle || record.pathLabel)
       : null,
+    infoSearchField('git-worktree', record.gitWorktreeLabel, record.gitWorktreeTitle),
+    infoSearchField('local-repository', record.localRepositoryLabel, record.localRepositoryTitle),
+    infoSearchField('hosted-repository', record.hostedRepositoryLabel, record.hostedRepositoryTitle),
     !infoRecordMissingValue(record?.branchLabel) && String(record?.branchKey || '') !== '__no_branch__'
       ? infoSearchField('branch', record.branchTitle || record.branchLabel)
       : null,
     infoSearchField('pr', infoPrSearchText(record)),
     ...infoLinearSearchFields(record),
+    ...observationFields,
     !infoRecordMissingValue(record?.updated) ? infoSearchField('updated', record.updated) : null,
   ].filter(Boolean);
 }
 
 function infoSearchFieldMatches(field = {}, query = infoSearch) {
   const text = String(query || '').trim();
-  return Boolean(text && Number.isFinite(fuzzySearchScore(text, [field.text])));
+  const value = String(field?.text || '');
+  return Boolean(text && (value.toLocaleLowerCase().includes(text.toLocaleLowerCase()) || Number.isFinite(fuzzySearchScore(text, [value]))));
 }
 
 function infoRecordSearchKindMatches(record = {}, kind = '', query = infoSearch) {
@@ -61087,7 +64275,10 @@ function infoRecordSearchKindMatches(record = {}, kind = '', query = infoSearch)
 function infoRecordMatchesSearch(record = {}, query = infoSearch) {
   const text = String(query || '').trim();
   if (!text) return true;
-  return infoRecordSearchFields(record).some(field => infoSearchFieldMatches(field, text));
+  // The fuzzy scorer ranks a query inside one field. Relationship search instead allows terms
+  // to traverse canonical edges: e.g. a worktree path plus its RuntimeActor or Tmux target.
+  const fields = infoRecordSearchFields(record);
+  return String(text).split(/\s+/).filter(Boolean).every(token => fields.some(field => infoSearchFieldMatches(field, token)));
 }
 
 function infoFilteredRecords(records = [], query = infoSearch) {
@@ -61264,10 +64455,41 @@ function infoRecordPrStatusHtml(record) {
   return parts.filter(Boolean).join(' ');
 }
 
+function infoRecordPrLookupStateHtml(record) {
+  const state = String(record?.prLookupState || '').trim();
+  if (!['loading', 'none', 'stale', 'error', 'not-requested'].includes(state)) return '';
+  const labels = {
+    loading: t('common.loading'),
+    none: t('info.group.none'),
+    stale: t('dialog.staleStatus'),
+    error: t('common.unknown'),
+    'not-requested': t('notify.permission.default'),
+  };
+  return `<span class="info-tree-pr-lookup-state info-tree-pr-lookup-state-${esc(state)}">${esc(labels[state])}</span>`;
+}
+
 function infoRecordPrDescHtml(record) {
-  if (String(record?.prKey || '') === '__no_pr__') return '';
+  const values = Array.isArray(record?.prValues) ? record.prValues.filter(Boolean) : [];
+  if (values.length) {
+    const highlight = infoRecordSearchKindMatches(record, 'pr');
+    return values.map(value => {
+      const number = Number(value?.number);
+      const numberText = Number.isFinite(number) ? `#${number}` : String(value?.title || '').trim();
+      const title = String(value?.title || value?.description || '').trim();
+      const href = String(value?.url || '').trim();
+      const lifecycle = pullRequestLifecycleStatus(value);
+      const ci = pullRequestCiStatus(value);
+      return [
+        infoHighlightedLinkHtml(href, numberText, href || title || numberText, pullRequestStatusClass(value), highlight),
+        title ? (highlight ? infoSearchHighlightHtml(title) : esc(title)) : '',
+        lifecycle?.text ? infoStatusBadgeHtml(record, lifecycle.text, lifecycle.className, {highlight}) : '',
+        ci?.text ? infoStatusBadgeHtml(record, ci.text, ci.className, {highlight}) : '',
+      ].filter(Boolean).join(' ');
+    }).join('<br>');
+  }
+  if (String(record?.prKey || '') === '__no_pr__') return infoRecordPrLookupStateHtml(record);
   const text = String(record?.prTitle || record?.prLabel || '').trim();
-  if (infoRecordMissingValue(text)) return '';
+  if (infoRecordMissingValue(text)) return infoRecordPrLookupStateHtml(record);
   const label = String(record?.prLabel || '').trim();
   const numberText = Number.isFinite(record?.prNumber)
     ? `#${record.prNumber}`
@@ -61282,6 +64504,16 @@ function infoRecordPrDescHtml(record) {
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+function infoRecordPrCount(record = {}) {
+  return Array.isArray(record?.prValues) ? new Set(record.prValues.map(value => String(value?.id || value?.url || value?.number || '')).filter(Boolean)).size : 0;
+}
+
+function infoRecordPrCountHtml(record = {}) {
+  const count = infoRecordPrCount(record);
+  if (count <= 1) return '';
+  return `<span class="info-tree-pr-count">${esc(tPlural('info.count.pr', count))}</span>`;
 }
 
 function infoLinearItemDescHtml(item = {}, options = {}) {
@@ -61329,12 +64561,16 @@ function infoRecordLinearDescHtml(record) {
 function infoFieldLabel(kind) {
   const labels = {
     path: 'common.field.path',
+    'git-worktree': 'common.pathLabel',
+    'local-repository': 'common.pathLabel',
+    'hosted-repository': 'common.pathLabel',
     branch: 'info.field.gitBranch',
     pr: 'info.field.githubPr',
     linear: 'info.field.linear',
     tab: 'info.field.tabTmuxSession',
-    ai: 'info.field.tmuxSubWindow',
-    'tmux-window': 'info.field.tmuxSubWindow',
+    ai: 'info.dimension.ai',
+    'tmux-window': 'info.field.tmuxWindow',
+    'tmux-pane': 'info.field.tmuxWindow',
     updated: 'common.updated',
   };
   return t(labels[kind] || kind);
@@ -61515,7 +64751,7 @@ function infoRecordMainChipsHtml(record, options = {}) {
   const linearDesc = infoRecordLinearDescHtml(record);
   if (!hiddenDimensions.has('linear') && linearDesc) fields.push(infoRecordFieldHtml('linear', linearDesc, record.linearTitle));
   const prDesc = infoRecordPrDescHtml(record);
-  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', prDesc, record.prTitle));
+  if (!hiddenDimensions.has('pr') && prDesc) fields.push(infoRecordFieldHtml('pr', `${prDesc}${infoRecordPrCountHtml(record)}`, record.prTitle));
   if (!hiddenDimensions.has('tab') && infoRecordHasTab(record)) {
     fields.push(infoRecordFieldHtml('tab', infoRecordTabValueHtml(record), record.tabTitle));
   }
@@ -61524,13 +64760,21 @@ function infoRecordMainChipsHtml(record, options = {}) {
   }
   if (pathVisible) {
     const pathText = String(record?.pathTitle || record?.pathLabel || '').trim();
-    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}`, record.pathTitle));
+    fields.push(infoRecordFieldHtml('path', `<button type="button" class="info-tree-action-link info-tree-action-link-path" data-info-open-path="${esc(record.pathKey || pathText)}" title="${esc(pathText)}">${infoRecordSearchValueHtml(record, 'path', pathText)}</button>${infoRecordPathActivityMetaHtml(record)}${infoPathObservationEvidenceHtml(record)}`, record.pathTitle));
   }
   if (branchVisible) {
     const branchText = String(record?.branchTitle || record?.branchLabel || '').trim();
-    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${updatedMeta}`, record.branchTitle));
+    const state = normalizeInfoBranchState(record?.branchState);
+    const stateLabel = state === 'current' ? t('branch.current') : state;
+    const stateHtml = `<span class="info-tree-branch-state info-tree-branch-state-${esc(state)}">${esc(stateLabel)}</span>`;
+    fields.push(infoRecordFieldHtml('branch', `<span class="info-tree-value-text">${infoRecordSearchValueHtml(record, 'branch', branchText)}</span>${stateHtml}${updatedMeta}`, record.branchTitle));
   }
   return fields.join('');
+}
+
+function normalizeInfoBranchState(value) {
+  const state = String(value || '').trim().toLowerCase();
+  return ['current', 'worked', 'missing'].includes(state) ? state : 'available';
 }
 
 function infoRecordHtml(record, options = {}) {
@@ -61545,9 +64789,14 @@ function infoTreeHiddenDimensions(ancestors, dimension) {
 
 const infoDimensionCountKeys = Object.freeze({
   tab: 'common.tabs',
+  'tmux-session': 'common.tabs',
   'tmux-window': 'info.count.tmuxWindow',
+  'tmux-pane': 'info.count.tmuxWindow',
   ai: 'info.count.ai',
   path: 'common.pathCount',
+  'git-worktree': 'common.pathCount',
+  'local-repository': 'common.pathCount',
+  'hosted-repository': 'common.pathCount',
   branch: 'info.count.branch',
   pr: 'info.count.pr',
   linear: 'info.count.linear',
@@ -61638,7 +64887,10 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
   const tree = infoGroupTree(records, grouping, normalizedSort);
   const activeGroupKeys = new Set();
   const childrenHtml = infoTreeChildrenHtml(tree.children || [], 0, [], [], activeGroupKeys);
-  pruneInfoTreeCollapsedGroups(activeGroupKeys);
+  // Host-owned YO!share state can legitimately carry a collapsed group that is currently
+  // filtered out. Preserve it until the host changes the snapshot; pruning it during a readonly
+  // render loses that state before the user clears the host search.
+  if (!shareViewMode) pruneInfoTreeCollapsedGroups(activeGroupKeys);
   return `<div class="info-tree" data-info-grouping="${esc(normalizeInfoGrouping(grouping).join(','))}" data-info-sort="${esc(`${normalizedSort.key}:${normalizedSort.dir}`)}" data-info-search="${esc(infoSearch.trim())}">${childrenHtml}</div>`;
 }
 
@@ -61772,43 +65024,134 @@ function infoPathIsWithin(path, root) {
   return Boolean(normalizedPath && normalizedRoot && (normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`)));
 }
 
+function infoHasWorkGraph(info = {}) {
+  const graph = info?.work_graph;
+  // A schema-valid graph is the source of truth even while it is empty. Falling back to the
+  // compatibility projection here would resurrect stale paths from a prior metadata generation.
+  return graph?.version === 1
+    && ['git_worktrees', 'local_repositories', 'local_branches', 'hosted_repositories', 'pull_requests', 'linear_issues', 'path_observations', 'runtime_actors', 'tmux_sessions', 'tmux_windows', 'tmux_panes', 'worktree_branch_activity']
+      .every(key => graph[key] && typeof graph[key] === 'object');
+}
+
+function infoSourceRoot(source = {}) {
+  return source?.workGraph ? String(source?.worktree?.root || '') : infoGitRoot(source?.git);
+}
+
+function infoSourcePathLabel(source = {}) {
+  if (!source?.workGraph) return infoPathLabel(source?.git);
+  const root = infoSourceRoot(source);
+  const parent = String(source?.worktree?.parent_root || '');
+  return parent
+    ? worktreeDisplayText({name: compactHomePath(root) || root, parent_root: compactHomePath(parent) || parent})
+    : (compactHomePath(root) || root);
+}
+
+function infoSourcePathTitle(source = {}) {
+  if (!source?.workGraph) return infoPathTitle(source?.git);
+  const root = infoSourceRoot(source);
+  const parent = String(source?.worktree?.parent_root || '');
+  return parent ? worktreeDisplayText({name: root, parent_root: parent}) : root;
+}
+
+function infoSourceBranches(source = {}) {
+  if (!source?.workGraph) return Array.isArray(source?.git?.other_branches?.branches) ? source.git.other_branches.branches : [];
+  const graph = source.workGraph;
+  return (source?.localRepository?.local_branch_ids || []).map(branchId => {
+    const branch = graph.local_branches?.[branchId];
+    if (!branch) return null;
+    const pullRequests = (branch.pull_request_ids || []).map(prId => graph.pull_requests?.[prId]).filter(Boolean);
+    const linear = (branch.linear_issue_ids || []).map(issueId => graph.linear_issues?.[issueId]).filter(Boolean);
+    return {...branch, current: branch.id === source?.worktree?.current_branch_id, pull_requests: pullRequests, linear};
+  }).filter(Boolean);
+}
+
+function infoSourceOwnsBranch(source = {}, branch = {}) {
+  if (source?.workGraph) return String(branch?.id || '') === String(source?.worktree?.current_branch_id || '');
+  return infoBranchOwnedBySource(source?.git, branch);
+}
+
+function infoSourceRepositoryUrl(source = {}) {
+  return source?.workGraph
+    ? String(source?.hostedRepository?.url || '')
+    : String(source?.git?.github_repo?.url || '');
+}
+
 function infoBranchSourcesForSession(session, info) {
-  const project = info?.project || {};
-  const primaryGit = project.git;
-  const primaryKey = infoGitPathKey(primaryGit);
+  const workGraph = info?.work_graph;
+  if (!infoHasWorkGraph(info)) return [];
   const sources = [];
-  const seenSources = new Set();
-  const addSource = (git, primary) => {
-    const sourceKey = infoGitPathKey(git);
-    const branches = git?.other_branches?.branches;
-    if (!sourceKey || !Array.isArray(branches) || !branches.length || seenSources.has(sourceKey)) return;
-    seenSources.add(sourceKey);
-    sources.push({session, info, project, git, primary: primary === true});
-  };
-  addSource(primaryGit, true);
-  for (const repo of Array.isArray(project.repos) ? project.repos : []) {
-    addSource(repo, Boolean(primaryKey && infoGitPathKey(repo) === primaryKey));
-  }
-  for (const row of Array.isArray(info?.window_metadata) ? info.window_metadata : []) {
-    addSource(row?.git, Boolean(primaryKey && infoGitPathKey(row?.git) === primaryKey));
-  }
-  const agents = typeof sessionAgentWindowStatusPayloads === 'function'
-    ? sessionAgentWindowStatusPayloads(session, info, autoApproveStates.get(session))
-    : [];
-  for (const agent of agents) {
-    addSource(agent?.git, Boolean(primaryKey && infoGitPathKey(agent?.git) === primaryKey));
-    for (const entry of typeof agentWindowPathEntries === 'function' ? agentWindowPathEntries(agent) : []) {
-      addSource(entry?.git, Boolean(primaryKey && infoGitPathKey(entry?.git) === primaryKey));
-    }
+  for (const worktree of Object.values(workGraph.git_worktrees)) {
+    const localRepository = workGraph.local_repositories?.[worktree?.local_repository_id];
+    if (!localRepository) continue;
+    const hostedRepositoryId = String(worktree.hosted_repository_id || localRepository.hosted_repository_id || '');
+    const hostedRepository = workGraph.hosted_repositories?.[hostedRepositoryId] || null;
+    sources.push({
+      session,
+      info,
+      workGraph,
+      sourceKey: String(worktree.id || ''),
+      worktree,
+      localRepository,
+      hostedRepository,
+      worktreeId: String(worktree.id || ''),
+      localRepositoryId: String(localRepository.id || ''),
+      hostedRepositoryId,
+        gitWorktreeLabel: worktree.parent_root ? worktreeDisplayText({name: worktree.root, parent_root: worktree.parent_root}) : (compactHomePath(worktree.root) || worktree.root),
+        gitWorktreeTitle: worktree.parent_root ? worktreeDisplayText({name: worktree.root, parent_root: worktree.parent_root}) : String(worktree.root || ''),
+      localRepositoryLabel: compactHomePath(worktree.root) || worktree.root,
+      localRepositoryTitle: String(localRepository.common_git_dir || worktree.root || ''),
+      hostedRepositoryLabel: String(hostedRepository?.url || ''),
+      hostedRepositoryTitle: String(hostedRepository?.url || ''),
+      primary: worktree.id === Object.keys(workGraph.git_worktrees)[0],
+    });
   }
   return sources;
+}
+
+function infoGraphTabAgentsForSource(source = {}) {
+  const workGraph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (!workGraph || !worktreeId) return [];
+  const actors = Object.values(workGraph.runtime_actors || {});
+  const result = [];
+  for (const actor of actors) {
+    if (!String(actor?.kind || '').trim()) continue;
+    const observationIds = Array.isArray(actor?.path_observation_ids) ? actor.path_observation_ids : [];
+    if (!observationIds.some(id => workGraph.path_observations?.[id]?.git_worktree_id === worktreeId)) continue;
+    const pane = workGraph.tmux_panes?.[actor.tmux_pane_id] || {};
+    const window = workGraph.tmux_windows?.[pane.tmux_window_id] || {};
+    const displayPane = Array.isArray(source.info?.panes)
+      ? source.info.panes.find(candidate => String(candidate?.target || '') === String(pane?.target || ''))
+      : null;
+    result.push({
+      id: String(actor?.id || ''),
+      tmux_session_id: String(window?.tmux_session_id || ''),
+      tmux_session_name: String(workGraph.tmux_sessions?.[window?.tmux_session_id]?.name || ''),
+      tmux_pane_id: String(pane?.id || ''),
+      tmux_pane_label: String(pane?.index === undefined ? '' : `${window?.index || '0'}.${pane.index}`),
+      tmux_pane_target: String(pane?.target || ''),
+      kind: String(actor?.kind || ''),
+      state: String(actor?.status || ''),
+      window: String(window?.index || ''),
+      window_index: String(window?.index || ''),
+      window_label: String(window?.name || ''),
+      pane: String(pane?.index || ''),
+      pane_target: String(pane?.target || ''),
+      path: String(actor?.cwd || pane?.current_path || ''),
+      path_observation_ids: Array.isArray(actor?.path_observation_ids) ? [...actor.path_observation_ids] : [],
+      current: displayPane?.active === true || (!displayPane && pane?.active === true),
+      window_active: displayPane?.window_active === true || (!displayPane && pane?.window_active === true),
+      pid: actor?.pid,
+    });
+  }
+  return result;
 }
 
 function infoBranchSourcesForIndexedRepos() {
   const repos = Array.isArray(transcriptMetadataState.payload?.indexed_repos) ? transcriptMetadataState.payload.indexed_repos : [];
   return repos
     .filter(git => infoGitPathKey(git) && Array.isArray(git?.other_branches?.branches) && git.other_branches.branches.length)
-    .map(git => ({session: '', info: {}, project: {}, git, primary: false, indexed: true}));
+    .map(git => ({session: '', info: {}, git, primary: false, indexed: true}));
 }
 
 function infoBranchOwnedBySource(git, branch) {
@@ -61860,18 +65203,6 @@ function infoAgentWindowMatchesPathRoot(agent, sourceRoot) {
   return paths.some(path => infoPathIsWithin(path, sourceRoot));
 }
 
-function infoSourceWindowRowsForBranch(source, branch, options = {}) {
-  if (!source.session) return [];
-  const root = infoGitPathKey(source.git);
-  const branchName = String(branch?.name || source.git?.branch || '');
-  return (Array.isArray(source.info?.window_metadata) ? source.info.window_metadata : [])
-    .filter(row => {
-      const git = row?.git || {};
-      return infoGitPathKey(git) === root
-        && infoBranchGitMatches(git, branchName, options);
-    });
-}
-
 function infoTabAgentLabel(session, agent = null) {
   const tabLabel = typeof sessionLabel === 'function' ? sessionLabel(session) : String(session || '');
   if (!agent) return t('info.tabAgent.withoutAi', {tab: tabLabel});
@@ -61900,9 +65231,11 @@ function infoTabAgentEntry(session, agent = null) {
   const label = infoTabAgentLabel(session, agent);
   const title = agent
     ? `${label}${agent.state ? ` · ${agent.state}` : ''}${agent.path ? ` · ${agent.path}` : ''}`
-    : `${label} · ${t('info.missing.tmuxSubWindow')}`;
+    : `${label} · ${t('info.missing.tmuxWindow')}`;
   return {
     session: String(session || ''),
+    tmux_session_id: String(agent?.tmux_session_id || ''),
+    tmux_session_name: String(agent?.tmux_session_name || ''),
     label,
     title,
     tabLabel,
@@ -61914,6 +65247,9 @@ function infoTabAgentEntry(session, agent = null) {
     state: String(agent?.state || ''),
     pane: String(agent?.pane || ''),
     pane_target: String(agent?.pane_target || ''),
+    tmux_pane_id: String(agent?.tmux_pane_id || ''),
+    tmux_pane_label: String(agent?.tmux_pane_label || ''),
+    tmux_pane_target: String(agent?.tmux_pane_target || ''),
     current: agentWindowPayloadCurrent(agent) === true,
     window_active: agent?.window_active === true,
     pid: tmuxWindowProcessPid(agent),
@@ -61925,6 +65261,29 @@ function infoTabAgentEntry(session, agent = null) {
 
 function infoBranchTabAgentsForSource(source, branch) {
   if (!source.session) return [];
+  const graphAgents = infoGraphTabAgentsForSource(source);
+  if (source.workGraph) {
+    const ownsBranch = infoSourceOwnsBranch(source, branch);
+    const branchName = String(branch?.name || '');
+    const branchOwners = graphAgents.filter(agent => {
+      const worktree = source.workGraph?.git_worktrees?.[source.worktreeId] || {};
+      const branchId = String(worktree.current_branch_id || '');
+      // The canonical graph has no mutable actor-level Git projection. An actor can own the
+      // checked-out branch directly; non-current branch ownership is represented by a durable
+      // branch-activity edge, not by assigning every actor observing the worktree to every branch.
+      if (ownsBranch) return true;
+      return Object.values(source.workGraph?.worktree_branch_activity || {}).some(activity => {
+        if (!(activity?.git_worktree_id === source.worktreeId
+          && (activity?.local_branch_id === branch?.id || activity?.branch_name_snapshot === branchName))) return false;
+        const observationIds = new Set(activity?.path_observation_ids || []);
+        return (agent?.path_observation_ids || []).some(id => observationIds.has(id));
+      });
+    });
+    if (branchOwners.length) return branchOwners.map(agent => infoTabAgentEntry(source.session, agent));
+    // A session which observes a secondary worktree has no inferred owner for that worktree's
+    // current branch. Keep the branch available in YO!info without fabricating a "No AI" row.
+    return ownsBranch && source.primary === true ? [infoTabAgentEntry(source.session, null)] : [];
+  }
   const owned = infoBranchOwnedBySource(source.git, branch);
   const root = infoGitRoot(source.git);
   const branchName = String(branch?.name || source.git?.branch || '');
@@ -61933,18 +65292,18 @@ function infoBranchTabAgentsForSource(source, branch) {
     : [];
   const matchingAgents = agents.filter(agent => infoAgentWindowMatchesBranchGit(agent, root, branchName, {requireBranch: !owned}));
   if (matchingAgents.length) return matchingAgents.map(agent => infoTabAgentEntry(source.session, agent));
-  const matchingWindows = infoSourceWindowRowsForBranch(source, branch, {requireBranch: !owned});
   if (!owned) {
-    if (matchingWindows.length) return [infoTabAgentEntry(source.session, null)];
     return [];
   }
   if (source.primary === true && agents.length) return agents.map(agent => infoTabAgentEntry(source.session, agent));
-  if (matchingWindows.length || source.primary === true || !agents.length) return [infoTabAgentEntry(source.session, null)];
+  if (source.primary === true || !agents.length) return [infoTabAgentEntry(source.session, null)];
   return [];
 }
 
 function infoPathTabAgentsForSource(source) {
   if (!source.session) return [];
+  const graphAgents = infoGraphTabAgentsForSource(source);
+  if (source.workGraph) return graphAgents.map(agent => infoTabAgentEntry(source.session, agent));
   const root = infoGitRoot(source.git);
   if (!root) return [];
   const agents = typeof sessionAgentWindowStatusPayloads === 'function'
@@ -61967,6 +65326,8 @@ function mergedInfoTabAgents(...groups) {
       seen.add(key);
       result.push({
         session,
+        tmux_session_id: String(item?.tmux_session_id || ''),
+        tmux_session_name: String(item?.tmux_session_name || ''),
         label,
         title: String(item?.title || label),
         tabLabel: String(item?.tabLabel || (session && typeof sessionLabel === 'function' ? sessionLabel(session) : session) || ''),
@@ -61977,6 +65338,9 @@ function mergedInfoTabAgents(...groups) {
         state: String(item?.state || ''),
         pane: String(item?.pane || ''),
         pane_target: String(item?.pane_target || ''),
+        tmux_pane_id: String(item?.tmux_pane_id || ''),
+        tmux_pane_label: String(item?.tmux_pane_label || ''),
+        tmux_pane_target: String(item?.tmux_pane_target || ''),
         current: item?.current === true,
         window_active: item?.window_active === true,
         working_stopped_ts: Number.isFinite(Number(item?.working_stopped_ts)) ? Number(item.working_stopped_ts) : 0,
@@ -62008,24 +65372,64 @@ function rowWithInfoTabAgents(row, tabAgents) {
 }
 
 function infoPathActivityForSource(source = {}) {
-  const root = infoGitRoot(source.git);
-  const repos = Array.isArray(source?.project?.repos) ? source.project.repos : [];
-  const repo = repos.find(item => infoNormalizedPath(item?.root) === infoNormalizedPath(root));
-  const timestamp = Number(repo?.activity_ts ?? source?.git?.activity_ts ?? 0);
-  return {
-    timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
-    source: String(repo?.activity_source || source?.git?.activity_source || ''),
-  };
+  const graph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (graph && worktreeId) {
+    const observations = Object.values(graph.path_observations || {})
+      .filter(observation => observation?.git_worktree_id === worktreeId);
+    const timestamp = Math.max(0, ...observations.map(observation => Number(observation?.last_observed_at || 0)));
+    return {timestamp, source: String(observations.find(observation => Number(observation?.last_observed_at || 0) === timestamp)?.source || '')};
+  }
+  return {timestamp: 0, source: ''};
+}
+
+function infoPathObservationsForSource(source = {}) {
+  const graph = source?.workGraph;
+  const worktreeId = String(source?.worktreeId || '');
+  if (!graph || !worktreeId) return [];
+  const actors = graph.runtime_actors || {};
+  return Object.values(graph.path_observations || {})
+    .filter(observation => observation?.git_worktree_id === worktreeId)
+    .map(observation => {
+      const actor = actors[observation.runtime_actor_id] || null;
+      return {
+        id: String(observation?.id || ''),
+        path: String(observation?.path || observation?.path_snapshot || ''),
+        source: String(observation?.source || ''),
+        lastObservedAt: Number(observation?.last_observed_at || 0),
+        actorId: String(actor?.id || ''),
+        actorKind: String(actor?.kind || ''),
+      };
+    })
+    .sort((left, right) => right.lastObservedAt - left.lastObservedAt || left.path.localeCompare(right.path) || left.id.localeCompare(right.id));
+}
+
+function infoPathObservationEvidenceHtml(record = {}) {
+  const observations = Array.isArray(record?.pathObservations) ? record.pathObservations : [];
+  if (observations.length <= 1) return '';
+  const summary = observations.map(observation => {
+    const path = compactHomePath(observation.path) || observation.path;
+    const actor = observation.actorKind || t('info.missing.ai');
+    const source = observation.source || t('info.group.none');
+    const recency = Number.isFinite(observation.lastObservedAt) && observation.lastObservedAt > 0
+      ? relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - observation.lastObservedAt))
+      : '';
+    return `<li><code>${esc(path)}</code> · ${esc(actor)} · ${esc(source)}${recency ? ` · ${esc(recency)}` : ''}</li>`;
+  }).join('');
+  return `<details class="info-tree-path-observations"><summary>${esc(tPlural('common.pathCount', observations.length))}</summary><ul>${summary}</ul></details>`;
 }
 
 function infoBranchRowForSource(source, branch, ownsSession) {
-  const {session, info, project, git, primary} = source;
-  const useCurrentProjectMetadata = ownsSession && primary;
-  const currentPr = useCurrentProjectMetadata ? displayPullRequest(info) : null;
-  const currentLinear = useCurrentProjectMetadata ? project.linear || [] : [];
+  const {session, info, git, primary} = source;
+  const useCurrentWorkMetadata = ownsSession && primary && Boolean(source.workGraph);
+  const currentPr = useCurrentWorkMetadata ? displayPullRequest(info) : null;
+  const currentLinear = useCurrentWorkMetadata ? sessionWorkSummary(session, info).linearIssues || [] : [];
   const branchLinear = Array.isArray(branch.linear) ? branch.linear : [];
   const branchLinearIds = Array.isArray(branch.linear_ids) ? branch.linear_ids : [];
-  const prLinearIds = Array.isArray(branch.pull_request?.linear_ids) ? branch.pull_request.linear_ids : [];
+  const branchPullRequests = Array.isArray(branch.pull_requests)
+    ? branch.pull_requests.filter(Boolean)
+    : (branch.pull_request ? [branch.pull_request] : []);
+  const prLinearIds = branchPullRequests.flatMap(pullRequest => Array.isArray(pullRequest?.linear_ids) ? pullRequest.linear_ids : []);
   const linearSourceItems = currentLinear.length ? currentLinear : branchLinear;
   const fallbackLinearIds = Array.from(new Set([...branchLinearIds, ...prLinearIds].map(item => String(item || '').trim()).filter(Boolean)));
   const linearIds = linearSourceItems.length
@@ -62034,14 +65438,15 @@ function infoBranchRowForSource(source, branch, ownsSession) {
   const linearHtml = linearSourceItems.length
     ? linearSourceItems.map(issue => linearIssueHtml(issue)).join(' ')
     : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
-  const prHtml = currentPr?.number ? pullRequestLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
-  const prValue = currentPr?.number ? currentPr : branch.pull_request;
+  const prValues = currentPr?.number ? [currentPr] : branchPullRequests;
+  const prValue = prValues[0] || null;
+  const prHtml = prValues.map(pullRequestLinkHtml).filter(Boolean).join(' ');
   const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
   const prNumber = infoPrNumberFromValue(prValue?.number);
-  const prDescriptionTitle = prValue?.number
-    ? [`#${prValue.number}`, prValue.title || prValue.description || branch.subject || ''].filter(Boolean).join(' ')
-    : '';
-  const repoUrl = git?.github_repo?.url || '';
+  const prDescriptionTitle = prValues.map(value => value?.number
+    ? [`#${value.number}`, value.title || value.description || branch.subject || ''].filter(Boolean).join(' ')
+    : '').filter(Boolean).join(' · ');
+  const repoUrl = infoSourceRepositoryUrl(source);
   const prUrl = prValue?.url || (prValue?.number && repoUrl ? `${repoUrl}/pull/${prValue.number}` : '');
   const prLabel = prValue?.number ? pullRequestLinkLabel(prValue) : '';
   const prClass = prValue?.number ? pullRequestStatusClass(prValue) : '';
@@ -62071,15 +65476,44 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     180,
   );
   const pathActivity = infoPathActivityForSource(source);
+  const pathObservations = infoPathObservationsForSource(source);
+  const workGraph = source?.workGraph;
+  const branchId = String(branch?.id || '');
+  const worktreeId = String(source?.worktreeId || '');
+  const branchActivities = Object.values(workGraph?.worktree_branch_activity || {}).filter(activity => (
+    activity?.git_worktree_id === worktreeId
+      && (activity?.local_branch_id === branchId || activity?.branch_name_snapshot === branch?.name)
+  ));
+  const current = branch?.current === true;
+  const missing = branch?.missing === true;
+  const worked = !current && branchActivities.length > 0;
+  const branchState = current ? 'current' : (missing ? 'missing' : (worked ? 'worked' : 'available'));
+  const branchStateLabel = branchState === 'current'
+    ? t('branch.current')
+    : branchState;
   return {
     session: '',
-    path: infoGitRoot(git),
-    pathLabel: infoPathLabel(git),
-    pathTitle: infoPathTitle(git),
+    path: infoSourceRoot(source),
+    pathLabel: infoSourcePathLabel(source),
+    pathTitle: infoSourcePathTitle(source),
     pathActivityTs: pathActivity.timestamp,
     pathActivitySource: pathActivity.source,
+    pathObservations,
+    gitWorktreeId: String(source?.worktreeId || ''),
+    gitWorktreeLabel: String(source?.gitWorktreeLabel || infoSourcePathLabel(source)),
+    gitWorktreeTitle: String(source?.gitWorktreeTitle || infoSourcePathTitle(source)),
+    localRepositoryId: String(source?.localRepositoryId || git?.local_repository?.id || ''),
+    localRepositoryLabel: String(source?.localRepositoryLabel || infoSourcePathLabel(source)),
+    localRepositoryTitle: String(source?.localRepositoryTitle || infoSourcePathTitle(source)),
+    hostedRepositoryId: String(source?.hostedRepositoryId || ''),
+    hostedRepositoryLabel: String(source?.hostedRepositoryLabel || git?.github_repo?.url || ''),
+    hostedRepositoryTitle: String(source?.hostedRepositoryTitle || git?.github_repo?.url || ''),
     branch: branch.name || '',
-    branchHtml: branchLinkHtml(git, branch.name),
+    branchId,
+    branchState,
+    branchStateLabel,
+    branchActivityIds: branchActivities.map(activity => String(activity?.id || '')).filter(Boolean),
+    branchHtml: branchLinkHtml(git || {}, branch.name),
     desc,
     updated: branch.updated || '',
     updatedText: branchUpdatedText(branch),
@@ -62091,6 +65525,8 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     prDescriptionTitle,
     prUrl,
     prLabel,
+    prValues,
+    prLookupState: String(branch.pull_request_lookup_state || 'not-requested'),
     prNumber: Number.isFinite(prNumber) ? prNumber : null,
     prClass,
     prLifecycleText,
@@ -62101,7 +65537,7 @@ function infoBranchRowForSource(source, branch, ownsSession) {
     linearHtml,
     linearItems,
     linearTitle,
-    current: false,
+    current,
     sourcePrimary: primary,
     tabAgents: infoBranchTabAgentsForSource(source, branch),
     pathTabAgents: infoPathTabAgentsForSource(source),
@@ -62120,7 +65556,12 @@ function mergeInfoBranchRow(existing, next) {
   const preferred = preferInfoBranchMetadataRow(existing, next);
   const mergedAgents = mergedInfoTabAgents(existing.tabAgents, next.tabAgents);
   const mergedPathAgents = mergedInfoTabAgents(existing.pathTabAgents, next.pathTabAgents);
-  return rowWithInfoTabAgents({...preferred, pathTabAgents: mergedPathAgents}, mergedAgents);
+  const branchState = preferred.branchState === 'current' || next.branchState === 'current'
+    ? 'current'
+    : (preferred.branchState === 'worked' || next.branchState === 'worked'
+      ? 'worked'
+      : (preferred.branchState === 'missing' || next.branchState === 'missing' ? 'missing' : 'available'));
+  return rowWithInfoTabAgents({...preferred, pathTabAgents: mergedPathAgents, branchState}, mergedAgents);
 }
 
 function rawInfoBranchRows() {
@@ -62129,9 +65570,11 @@ function rawInfoBranchRows() {
   for (const session of infoSessions) {
     const info = transcriptMetadataState.payload.sessions?.[session];
     for (const source of infoBranchSourcesForSession(session, info)) {
-      for (const branch of source.git?.other_branches?.branches || []) {
-        const key = `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
-        const row = infoBranchRowForSource(source, branch, infoBranchOwnedBySource(source.git, branch));
+      for (const branch of infoSourceBranches(source)) {
+        const key = source.workGraph
+          ? `${source.localRepositoryId}\n${branch.id || branch.name || ''}`
+          : `${infoGitPathKey(source.git)}\n${branch.name || ''}`;
+        const row = infoBranchRowForSource(source, branch, infoSourceOwnsBranch(source, branch));
         rowsByKey.set(key, mergeInfoBranchRow(rowsByKey.get(key), row));
       }
     }
@@ -62180,6 +65623,7 @@ function shareInfoRowSnapshot(row = {}) {
     pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
     pathActivitySource: shareInfoString(row.pathActivitySource, 100),
     branch: shareInfoString(row.branch, 500),
+    branchState: normalizeInfoBranchState(row.branchState),
     desc: shareInfoString(row.desc, 1000),
     updated: shareInfoString(row.updated, 200),
     updatedText: shareInfoString(row.updatedText, 200),
@@ -62215,6 +65659,7 @@ function shareInfoStateSnapshot(options = {}) {
     grouping: currentInfoGrouping(),
     sort: currentInfoSort(),
     search: currentInfoSearch(),
+    collapsedGroupKeys: [...infoCollapsedGroupKeys].slice(0, 1000),
   };
   if (options.includeRows !== false) snapshot.branchRows = infoBranchRows().map(shareInfoRowSnapshot);
   return snapshot;
@@ -62231,6 +65676,13 @@ function applyShareInfoState(info = {}) {
   if ('search' in info || 'infoSearch' in info || 'info2Search' in info) {
     setInfoSearch(info.search ?? info.infoSearch ?? info.info2Search, {publish: false, render: false});
   }
+  if (Array.isArray(info.collapsedGroupKeys)) {
+    infoCollapsedGroupKeys.clear();
+    info.collapsedGroupKeys.slice(0, 1000).forEach(key => {
+      const value = String(key || '');
+      if (value) infoCollapsedGroupKeys.add(value);
+    });
+  }
   if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
   refreshInfoGroupingControls();
   renderInfoPanel({force: true});
@@ -62239,28 +65691,19 @@ function applyShareInfoState(info = {}) {
 
 function bindPanelControls(panel, session) {
   delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
-    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-toggle]', (event, button) => {
+    moveTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'pointerup', '[data-terminal-mobile-toggle]', (event, button) => {
-    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'pointercancel', '[data-terminal-mobile-toggle]', (event, button) => {
-    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event);
+    endTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
   });
   delegate(panel, 'contextmenu', '[data-terminal-mobile-toggle]', event => {
     event.preventDefault();
-  });
-  delegate(panel, 'pointerdown', '[data-terminal-mobile-drag]', (event, handle) => {
-    beginTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointermove', '[data-terminal-mobile-drag]', (event, handle) => {
-    moveTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointerup', '[data-terminal-mobile-drag]', (event, handle) => {
-    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
-  });
-  delegate(panel, 'pointercancel', '[data-terminal-mobile-drag]', (event, handle) => {
-    endTerminalMobileAccessoryDrag(handle.dataset.terminalMobileDrag || session, event, handle);
   });
   delegate(panel, 'click', '[data-terminal-mobile-toggle]', (event, button) => {
     event.preventDefault();
@@ -62268,6 +65711,18 @@ function bindPanelControls(panel, session) {
     const targetSession = button.dataset.terminalMobileToggle || session;
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
+    beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointermove', '[data-terminal-mobile-keybar]', (event, bar) => {
+    moveTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointerup', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
+  });
+  delegate(panel, 'pointercancel', '[data-terminal-mobile-keybar]', (event, bar) => {
+    endTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
   });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-key]', (event, button) => {
     // Do not blur xterm/close the software keyboard before the click sends its byte.
@@ -62673,7 +66128,6 @@ async function uploadFiles(session, fileList, options = {}) {
     }
     refreshTerminalAfterUpload(session);
     refreshOpenEventLogs();
-    refreshTranscripts({force: true});
   } catch (error) {
     showFileTransferError(error, {session, fallback: t('status.uploadFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
@@ -64297,6 +67751,13 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
   if (!requestIsCurrent()) return false;
+  const nextPayload = transcriptPayloadWithTmuxWindowOverrides(payload);
+  const currentSessions = transcriptMetadataState.payload?.sessions || {};
+  for (const [session, nextInfo] of Object.entries(nextPayload?.sessions || {})) {
+    const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
+    const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
+    if (nextGeneration > 0 && currentGeneration > nextGeneration) return false;
+  }
   setTranscriptMetadataPayload(transcriptPayloadWithTmuxWindowOverrides(payload), {invalidateRequest: options.source !== 'request'});
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
@@ -64318,6 +67779,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return false;
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
+  // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The
+  // topbar renderer intentionally defers all full rebuilds during an open menu so pointer/click
+  // targets cannot disappear; this shared owner updates just the cache-backed menu rows instead.
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   renderSessionButtons();
   renderInfoPanel();
   renderYoagentPanel();
@@ -64712,6 +68177,13 @@ function relocalizeTranscriptPanelStatus(session) {
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
     const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    if (payload?.pending === true) {
+      preview.textContent = t('transcript.loadingRecentContext');
+      setTimeout(() => {
+        if (transcriptPreviewPaneIsActive(session)) refreshTranscriptPreview(session, preview, options);
+      }, 200);
+      return;
+    }
     if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
@@ -65362,6 +68834,10 @@ function handleClientPushEventNow(type, payload = {}) {
     }
     return;
   }
+  if (type === 'stats_sample') {
+    if (typeof applyJsDebugStatsSamplePush === 'function') applyJsDebugStatsSamplePush(payload);
+    return;
+  }
   if (type === 'auto_approve_changed') {
     if (payload.refresh) {
       refreshAutoStatuses().catch(() => {});
@@ -65490,6 +68966,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
+    if (activeItems.includes(debugPaneItemId)) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
       channels.add('transcripts');
@@ -65566,7 +69043,7 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
+  for (const type of ['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;

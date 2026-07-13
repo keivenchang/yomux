@@ -14,7 +14,6 @@ from urllib.parse import quote
 from .common import AgentInfo
 from .common import SessionInfo
 from .common import is_generated_upload_name
-from .common import project_git
 from .common import tail_file_lines
 from .common import truncate_text
 from .transcripts import compact_transcript_items
@@ -145,10 +144,23 @@ def compact_relative_age_text(timestamp: float | None, now: datetime | None = No
     return server_plural(locale, "relative.compact.day", max(1, round(seconds / 86400)))
 
 
-def agent_transcript_activity_ts(agent: AgentInfo | None) -> dict[str, Any]:
+def agent_transcript_activity_ts(agent: AgentInfo | None, transcript_view: dict[str, Any] | None = None) -> dict[str, Any]:
     if not agent or not agent.transcript:
         return {"timestamp": None, "source": "none", "reason": "no transcript", "path": ""}
     path = Path(agent.transcript).expanduser()
+    if transcript_view is not None:
+        activity_text = str(transcript_view.get("activity_timestamp") or "")
+        try:
+            activity = datetime.fromisoformat(activity_text.replace("Z", "+00:00")) if activity_text else None
+        except ValueError:
+            activity = None
+        if activity is not None:
+            return {"timestamp": activity.timestamp(), "source": "transcript-event", "reason": "meaningful transcript event", "path": str(path)}
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        except OSError as exc:
+            return {"timestamp": None, "source": "none", "reason": str(exc), "path": str(path)}
+        return {"timestamp": mtime.timestamp(), "source": "file-mtime", "reason": "file mtime fallback: no meaningful transcript timestamp", "path": str(path)}
     mtime: datetime | None = None
     try:
         mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
@@ -171,8 +183,8 @@ def agent_transcript_activity_ts(agent: AgentInfo | None) -> dict[str, Any]:
     return {"timestamp": None, "source": "none", "reason": reason, "path": str(path)}
 
 
-def transcript_last_activity(agent: AgentInfo | None, locale: str = "en") -> dict[str, Any]:
-    activity = dict(agent_transcript_activity_ts(agent))
+def transcript_last_activity(agent: AgentInfo | None, locale: str = "en", transcript_view: dict[str, Any] | None = None) -> dict[str, Any]:
+    activity = dict(agent_transcript_activity_ts(agent, transcript_view))
     timestamp = activity.get("timestamp")
     activity["text"] = relative_age_text(timestamp, locale=locale) if isinstance(timestamp, (int, float)) and timestamp > 0 else ""
     return activity
@@ -264,6 +276,7 @@ def build_recent_agents_payload(
     session_order: list[str] | tuple[str, ...] | None = None,
     now: datetime | None = None,
     session_files_by_session: dict[str, dict[str, Any]] | None = None,
+    transcript_views_by_path: dict[str, dict[str, Any]] | None = None,
     locale: str = "en",
 ) -> list[dict[str, Any]]:
     current = now or datetime.now(timezone.utc)
@@ -275,8 +288,9 @@ def build_recent_agents_payload(
             if kind not in {"claude", "codex"}:
                 continue
             window, window_index, pane = agent_window_for_summary(info, agent)
-            last_activity = transcript_last_activity(agent, locale)
-            activity_state = transcript_activity_state(agent.transcript, kind) if agent.transcript else {"key": "idle", "text": ""}
+            view = (transcript_views_by_path or {}).get(str(agent.transcript or ""))
+            last_activity = transcript_last_activity(agent, locale, transcript_view=view)
+            activity_state = dict(view.get("activity_state") or {"key": "idle", "text": ""}) if view is not None else (transcript_activity_state(agent.transcript, kind) if agent.transcript else {"key": "idle", "text": ""})
             running = activity_state.get("key") == "working"
             last_used_ts = last_activity.get("timestamp")
             if not isinstance(last_used_ts, (int, float)):
@@ -317,9 +331,9 @@ def build_recent_agents_payload(
     return rows
 
 
-def activity_signature(info: SessionInfo, project: dict[str, Any], files_payload: dict[str, Any]) -> dict[str, Any]:
+def activity_signature(info: SessionInfo, work: dict[str, Any], files_payload: dict[str, Any]) -> dict[str, Any]:
     agent = agent_for_summary(info)
-    git = project_git(project)
+    git = work.get("git") if isinstance(work.get("git"), dict) else {}
     file_rows = []
     for item in files_payload.get("files", []) if isinstance(files_payload, dict) else []:
         if not isinstance(item, dict):
@@ -352,7 +366,9 @@ def activity_signature(info: SessionInfo, project: dict[str, Any], files_payload
     }
 
 
-def recent_transcript_items(agent: AgentInfo | None, max_lines: int = 800) -> list[dict[str, str]]:
+def recent_transcript_items(agent: AgentInfo | None, max_lines: int = 800, transcript_view: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    if transcript_view is not None:
+        return [dict(item) for item in transcript_view.get("items", []) if isinstance(item, dict)]
     if not agent or not agent.transcript:
         return []
     try:
@@ -543,11 +559,11 @@ def stale_work_sentence(session_summaries: list[dict[str, Any]], locale: str = "
     return server_string(locale, "summary.recommendation.stale", session=tmux_session_label(session, locale), work=work, time=last)
 
 
-def project_status_sentence(project: dict[str, Any], files: dict[str, Any], active: bool, locale: str = "en") -> str:
+def work_status_sentence(work: dict[str, Any], files: dict[str, Any], active: bool, locale: str = "en") -> str:
     parts: list[str] = []
-    git = project_git(project)
-    pr = project.get("pull_request") if isinstance(project, dict) else None
-    ci = ci_summary(project, locale)
+    git = work.get("git") if isinstance(work.get("git"), dict) else {}
+    pr = work.get("pull_request") if isinstance(work.get("pull_request"), dict) else None
+    ci = ci_summary(work, locale)
     if ci:
         parts.append(ci)
     if isinstance(git, dict):
@@ -570,9 +586,9 @@ def project_status_sentence(project: dict[str, Any], files: dict[str, Any], acti
     return "; ".join(parts)
 
 
-def repo_names(project: dict[str, Any], files_payload: dict[str, Any]) -> list[str]:
+def repo_names(work: dict[str, Any], files_payload: dict[str, Any]) -> list[str]:
     names: list[str] = []
-    git = project_git(project)
+    git = work.get("git") if isinstance(work.get("git"), dict) else {}
     if git.get("root"):
         names.append(str(git["root"]))
     for item in files_payload.get("repos", []) if isinstance(files_payload, dict) else []:
@@ -582,8 +598,8 @@ def repo_names(project: dict[str, Any], files_payload: dict[str, Any]) -> list[s
     return names
 
 
-def ci_summary(project: dict[str, Any], locale: str = "en") -> str:
-    pr = project.get("pull_request") if isinstance(project, dict) else None
+def ci_summary(work: dict[str, Any], locale: str = "en") -> str:
+    pr = work.get("pull_request") if isinstance(work.get("pull_request"), dict) else None
     if not isinstance(pr, dict):
         return ""
     checks = pr.get("checks")
@@ -600,35 +616,41 @@ def ci_summary(project: dict[str, Any], locale: str = "en") -> str:
     return ""
 
 
-def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], files_payload: dict[str, Any], locale: str = "en") -> dict[str, Any]:
+def build_session_activity_summary(
+    info: SessionInfo,
+    work_summary: dict[str, Any],
+    files_payload: dict[str, Any],
+    locale: str = "en",
+    transcript_view: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     agent = agent_for_summary(info)
-    items = recent_transcript_items(agent)
-    activity_state = session_transcript_activity_state(info)
-    last_activity = transcript_last_activity(agent, locale)
-    git = project_git(project)
-    pr = project.get("pull_request") if isinstance(project, dict) else None
+    items = recent_transcript_items(agent, transcript_view=transcript_view)
+    activity_state = dict(transcript_view.get("activity_state") or {"key": "idle", "text": ""}) if transcript_view is not None else session_transcript_activity_state(info)
+    last_activity = transcript_last_activity(agent, locale, transcript_view=transcript_view)
+    git = work_summary.get("git") if isinstance(work_summary.get("git"), dict) else {}
+    pr = work_summary.get("pull_request") if isinstance(work_summary.get("pull_request"), dict) else None
     goal = latest_item_text(items, "user")
     latest_tool = latest_item_text(items, "tool_use")
     latest_assistant = latest_item_text(items, "assistant")
-    work = ""
+    work_text = ""
     if isinstance(pr, dict):
-        work = str(pr.get("title") or pr.get("description") or "")
-    if not work and git:
-        work = str(git.get("subject") or git.get("branch") or "")
-    if not work:
-        work = latest_assistant
+        work_text = str(pr.get("title") or pr.get("description") or "")
+    if not work_text and git:
+        work_text = str(git.get("subject") or git.get("branch") or "")
+    if not work_text:
+        work_text = latest_assistant
     files = changed_file_totals(files_payload)
     file_lines = changed_file_lines(files_payload, locale=locale)
-    repos = repo_names(project, files_payload)
+    repos = repo_names(work_summary, files_payload)
     agent_name = agent.kind if agent else "no agent"
     state_label, active = recent_activity_label(activity_state, last_activity, locale=locale)
-    ci = ci_summary(project, locale)
-    status = project_status_sentence(project, files, activity_state.get("key") == "working", locale)
+    ci = ci_summary(work_summary, locale)
+    status = work_status_sentence(work_summary, files, activity_state.get("key") == "working", locale)
     recent_files = server_string(locale, "summary.session.recentFiles", files=", ".join(file_lines[:3])) if file_lines else ""
     local_parts = [
         server_string(locale, "summary.session.identity", agent=agent_display_label(agent, locale=locale), session=info.session, state=state_label, repos=repo_sentence(repos, locale)),
         server_string(locale, "summary.session.lastWorked", time=last_activity["text"]) if last_activity.get("text") else "",
-        work_sentence(work, goal, locale),
+        work_sentence(work_text, goal, locale),
         server_string(locale, "summary.session.files", files=files_sentence(files, locale), recent=recent_files),
         server_string(locale, "summary.session.status", status=status),
     ]
@@ -639,8 +661,8 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
         lines.append(server_string(locale, "common.repoDetail", repo=f"{repo_label(repos[0])}{branch}"))
     if goal:
         lines.append(server_string(locale, "summary.line.goal", goal=goal))
-    if work:
-        lines.append(server_string(locale, "common.workDetail", work=truncate_text(work, 180)))
+    if work_text:
+        lines.append(server_string(locale, "common.workDetail", work=truncate_text(work_text, 180)))
     if latest_tool:
         lines.append(server_string(locale, "summary.line.latestTool", tool=latest_tool))
     if ci:
@@ -663,7 +685,7 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
         "last_activity_ts": last_activity.get("timestamp"),
         "repos": repos,
         "goal": goal,
-        "work": truncate_text(work, 220) if work else "",
+        "work": truncate_text(work_text, 220) if work_text else "",
         "pr_number": pr.get("number") if isinstance(pr, dict) else None,
         "ci": ci,
         "status_text": status,
@@ -1093,28 +1115,18 @@ def yoagent_question_requests_full_work_inventory(question: str) -> bool:
     )
 
 
-def yoagent_summary_project(summary: dict[str, Any]) -> dict[str, Any]:
-    project = summary.get("project")
-    if isinstance(project, dict):
-        return project
-    return {}
-
-
 def yoagent_summary_git(summary: dict[str, Any]) -> dict[str, Any]:
     git = summary.get("git")
     if isinstance(git, dict):
         return git
-    project = yoagent_summary_project(summary)
-    return project_git(project)
+    return {}
 
 
 def yoagent_summary_pull_request(summary: dict[str, Any]) -> dict[str, Any]:
     pr = summary.get("pull_request")
     if isinstance(pr, dict):
         return pr
-    project = yoagent_summary_project(summary)
-    pr = project.get("pull_request")
-    return pr if isinstance(pr, dict) else {}
+    return {}
 
 
 def yoagent_summary_ci(summary: dict[str, Any]) -> dict[str, Any]:
@@ -1358,8 +1370,20 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
             session_key = str(item.get("session") or key)
             session_info = activity_payload.get("session_info") if isinstance(activity_payload, dict) else {}
             details = session_info.get(session_key) if isinstance(session_info, dict) else None
-            if isinstance(details, dict) and "project" not in item:
-                item = {**item, "project": details.get("project") if isinstance(details.get("project"), dict) else {}}
+            # Activity summaries intentionally stay compact. Their companion session detail is a
+            # graph-derived projection, so pull the recommendation inputs from that canonical
+            # ``work`` record rather than reviving a second session-level project owner.
+            work = details.get("work") if isinstance(details, dict) else None
+            if isinstance(work, dict):
+                item = {
+                    **item,
+                    "git": work.get("git") if isinstance(work.get("git"), dict) else item.get("git"),
+                    "pull_request": work.get("pull_request") if isinstance(work.get("pull_request"), dict) else item.get("pull_request"),
+                }
+                if not isinstance(item.get("ci"), dict) and isinstance(work.get("pull_request"), dict):
+                    checks = work["pull_request"].get("checks")
+                    if isinstance(checks, dict):
+                        item["ci"] = checks
             if work_priority_hints.get(session_key):
                 item = {**item, "work_priority_reasons": [*yoagent_summary_priority_hints(item), *work_priority_hints[session_key]]}
             all_summaries.append(item)

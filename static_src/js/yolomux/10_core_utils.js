@@ -1353,28 +1353,166 @@ function setFileConflictDialogOpen(path, open) {
   if (state) state.conflictDialogOpen = open === true;
 }
 
-// Normalized view of a session's transcript metadata — prevents each call site from re-implementing
-// the same `?.[session]?.project?.git?.root` chain differently.
-function sessionTranscriptInfo(session) {
-  const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const git = info.project?.git || {};
-  return {
-    gitRoot: git.root || '',
-    gitCwd: git.cwd || '',
-    gitBranch: git.branch || '',
-    selectedPath: info.selected_pane?.current_path || '',
-    info,
-  };
-}
-
 function repoRootKey(value) {
   return String(value || '').replace(/\/+$/, '');
 }
 
+// `work_graph` owns repository identity. These selectors are deliberately shared by the tab,
+// popover, layout, Finder/Differ, and command-palette paths so every surface chooses the same
+// canonical branch and PR edges.
+function sessionWorkGraph(info = {}) {
+  const graph = info?.work_graph;
+  const required = ['git_worktrees', 'local_repositories', 'local_branches', 'hosted_repositories', 'pull_requests', 'linear_issues', 'path_observations', 'runtime_actors', 'tmux_sessions', 'tmux_windows', 'tmux_panes', 'worktree_branch_activity'];
+  return graph?.version === 1 && required.every(key => graph[key] && typeof graph[key] === 'object') ? graph : null;
+}
+
+function graphEntityValues(graph, key, ids = []) {
+  return (ids || []).map(id => graph?.[key]?.[id]).filter(Boolean);
+}
+
+function graphTmuxPaneIdsForTarget(graph, tmuxTarget = '') {
+  const target = String(tmuxTarget || '').trim();
+  const panes = Object.values(graph?.tmux_panes || {});
+  if (target) {
+    const match = panes.find(pane => String(pane?.target || '') === target || String(pane?.id || '') === target);
+    if (match?.id) return [match.id];
+  }
+  const active = panes.filter(pane => pane?.active === true || pane?.window_active === true).map(pane => pane.id).filter(Boolean);
+  return active.length ? active : panes.map(pane => pane?.id).filter(Boolean);
+}
+
+function graphObservationIdsForTmuxPaneIds(graph, tmuxPaneIds = []) {
+  const ids = new Set();
+  for (const pane of graphEntityValues(graph, 'tmux_panes', tmuxPaneIds)) {
+    for (const id of pane.path_observation_ids || []) ids.add(id);
+    for (const actor of graphEntityValues(graph, 'runtime_actors', pane.runtime_actor_ids)) {
+      for (const id of actor.path_observation_ids || []) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+function focusedRepositoryIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
+    const worktree = graph.git_worktrees?.[observation.git_worktree_id];
+    if (worktree?.local_repository_id) ids.add(worktree.local_repository_id);
+  }
+  return [...ids];
+}
+
+function focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const observation of graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, tmuxTarget)))) {
+    if (observation.git_worktree_id) ids.add(observation.git_worktree_id);
+  }
+  return [...ids];
+}
+
+function branchIdsForGitWorktree(info, gitWorktreeId) {
+  const graph = sessionWorkGraph(info);
+  const worktree = graph?.git_worktrees?.[gitWorktreeId];
+  const repository = graph?.local_repositories?.[worktree?.local_repository_id];
+  return repository?.local_branch_ids ? [...repository.local_branch_ids] : [];
+}
+
+function focusedBranchIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const worktreeId of focusedGitWorktreeIdsForTmuxTarget(info, tmuxTarget)) {
+    const branchId = graph.git_worktrees?.[worktreeId]?.current_branch_id;
+    if (branchId) ids.add(branchId);
+  }
+  return [...ids];
+}
+
+function pullRequestIdsForTmuxTarget(info, tmuxTarget = '') {
+  const graph = sessionWorkGraph(info);
+  if (!graph) return [];
+  const ids = new Set();
+  for (const branch of graphEntityValues(graph, 'local_branches', focusedBranchIdsForTmuxTarget(info, tmuxTarget))) {
+    for (const prId of branch.pull_request_ids || []) ids.add(prId);
+  }
+  return [...ids];
+}
+
+function graphBranchSummary(graph, branchId, currentBranchId = '') {
+  const branch = graph?.local_branches?.[branchId];
+  if (!branch) return null;
+  const pullRequests = graphEntityValues(graph, 'pull_requests', branch.pull_request_ids);
+  const linear = graphEntityValues(graph, 'linear_issues', branch.linear_issue_ids);
+  return {...branch, current: String(branch.id) === String(currentBranchId), pull_requests: pullRequests, pull_request: pullRequests[0] || null, linear};
+}
+
+function graphRepoSummary(graph, worktree) {
+  const repository = graph?.local_repositories?.[worktree?.local_repository_id] || {};
+  const hostedRepository = graph?.hosted_repositories?.[worktree?.hosted_repository_id || repository?.hosted_repository_id] || null;
+  const branches = (repository.local_branch_ids || []).map(branchId => graphBranchSummary(graph, branchId, worktree?.current_branch_id)).filter(Boolean);
+  const currentBranch = branches.find(branch => branch.current) || null;
+  const root = repoRootKey(worktree?.root || '');
+  return {
+    id: String(worktree?.id || ''),
+    worktree_id: String(worktree?.id || ''),
+    local_repository_id: String(repository?.id || ''),
+    hosted_repository_id: String(hostedRepository?.id || ''),
+    root,
+    cwd: root,
+    branch: String(currentBranch?.name || ''),
+    // Branch identity belongs to the LocalGitRepository, while checkout state belongs to this
+    // GitWorktree. Repositories can share branches across linked worktrees with different dirty
+    // and ahead/behind state, so never project those worktree fields from the branch record.
+    ahead: worktree?.git?.ahead,
+    behind: worktree?.git?.behind,
+    dirty_count: worktree?.git?.dirty_count,
+    head: worktree?.git?.head || '',
+    upstream: worktree?.git?.upstream || '',
+    activity_ts: worktree?.activity_ts ?? currentBranch?.updated_ts,
+    activity_source: worktree?.activity_source || '',
+    github_repo: hostedRepository,
+    other_branches: {branches, hidden_count: 0},
+    worktree: {path: root, kind: worktree?.kind || '', parent_root: worktree?.parent_root || ''},
+  };
+}
+
+function sessionWorkSummary(session, info = {}, options = {}) {
+  const graph = sessionWorkGraph(info);
+  const target = String(options.tmuxTarget || options.target || info?.selected_pane?.target || '');
+  if (graph) {
+    const repositories = Object.values(graph.git_worktrees || {}).map(worktree => graphRepoSummary(graph, worktree)).filter(repo => repo.root);
+    const focusedWorktreeIds = focusedGitWorktreeIdsForTmuxTarget(info, target);
+    const focusedRepositoryIds = focusedRepositoryIdsForTmuxTarget(info, target);
+    const focusedBranchIds = focusedBranchIdsForTmuxTarget(info, target);
+    const pullRequestIds = pullRequestIdsForTmuxTarget(info, target);
+    const focusedRepo = repositories.find(repo => focusedRepositoryIds.includes(repo.local_repository_id)) || repositories.find(repo => focusedWorktreeIds.includes(repo.worktree_id)) || repositories[0] || null;
+    const observations = graphEntityValues(graph, 'path_observations', graphObservationIdsForTmuxPaneIds(graph, graphTmuxPaneIdsForTarget(graph, target)));
+    const selectedPath = observations.sort((left, right) => Number(right?.last_observed_at || 0) - Number(left?.last_observed_at || 0)).find(observation => observation?.path)?.path || focusedRepo?.cwd || '';
+    const pullRequests = graphEntityValues(graph, 'pull_requests', pullRequestIds)
+      .sort((left, right) => Number(right?.updated_at || right?.updated_ts || 0) - Number(left?.updated_at || left?.updated_ts || 0) || Number(left?.number || 0) - Number(right?.number || 0));
+    const linearIssues = graphEntityValues(graph, 'linear_issues', [...new Set(graphEntityValues(graph, 'local_branches', focusedBranchIds).flatMap(branch => branch.linear_issue_ids || []))]);
+    const focusedPullRequest = pullRequests.length === 1 ? pullRequests[0] : null;
+    return {graph, graphBacked: true, repositories, focusedWorktreeIds, focusedRepositoryIds, focusedBranchIds, pullRequestIds, pullRequests, focusedPullRequest, linearIssues, selectedRepo: focusedRepo, git: focusedRepo ? gitFromRepoSummary(focusedRepo) : null, selectedPath};
+  }
+  return {graph: null, graphBacked: false, repositories: [], focusedWorktreeIds: [], focusedRepositoryIds: [], focusedBranchIds: [], pullRequestIds: [], pullRequests: [], focusedPullRequest: null, linearIssues: [], selectedRepo: null, git: null, selectedPath: info?.selected_pane?.current_path || ''};
+}
+
+// Normalized view of a session's transcript metadata. A schema-valid graph is authoritative even
+// when empty; metadata without one has no Git work rather than a hidden compatibility path.
+function sessionTranscriptInfo(session) {
+  const info = transcriptMetadataState.payload.sessions?.[session] || {};
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git || {};
+  return {gitRoot: git.root || '', gitCwd: git.cwd || '', gitBranch: git.branch || '', selectedPath: summary.selectedPath || '', info};
+}
+
 function sessionRepoSummaries(info) {
-  return (Array.isArray(info?.project?.repos) ? info.project.repos : [])
-    .filter(repo => repo && repo.root)
-    .map(repo => ({...repo, root: repoRootKey(repo.root), cwd: repo.cwd || repo.root}));
+  const summary = sessionWorkSummary('', info);
+  if (summary.graphBacked) return summary.repositories;
+  return summary.repositories;
 }
 
 function selectedSessionRepoIndex(session, info) {
@@ -1400,6 +1538,8 @@ function gitFromRepoSummary(repo) {
     ahead: repo.ahead,
     behind: repo.behind,
     dirty_count: repo.dirty_count,
+    head: repo.head || '',
+    upstream: repo.upstream || '',
     activity_ts: repo.activity_ts,
     activity_source: repo.activity_source || '',
     github_repo: repo.github_repo || null,
@@ -1409,8 +1549,8 @@ function gitFromRepoSummary(repo) {
 }
 
 function displayedSessionGit(session, info) {
-  const project = info?.project || {};
-  const git = project.git || null;
+  const summary = sessionWorkSummary(session, info);
+  const git = summary.git;
   const repo = selectedSessionRepo(session, info);
   if (!repo) return git;
   if (git && repoRootKey(git.root) === repoRootKey(repo.root)) return git;
@@ -1429,12 +1569,30 @@ function cycleSessionRepoDisplay(session, info, direction) {
 
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
+function resetLayoutStatusSurface() {
+  statusEl.classList.remove('layout-status-visible', 'layout-status-danger', 'layout-status-advisory');
+  statusEl.removeAttribute('data-layout-status-kind');
+  delete statusEl.dataset.layoutStatusKind;
+}
+
 function statusErr(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="err">${html}</span>`;
 }
 
 function statusOk(html) {
+  resetLayoutStatusSurface();
   statusEl.innerHTML = `<span class="ok">${html}</span>`;
+}
+
+function showLayoutStatus(message, kind = '') {
+  const tone = kind === 'danger' || kind === 'advisory' ? kind : '';
+  statusEl.textContent = String(message || '');
+  resetLayoutStatusSurface();
+  if (tone && statusEl.textContent.trim()) {
+    statusEl.classList.add('layout-status-visible', `layout-status-${tone}`);
+    statusEl.dataset.layoutStatusKind = tone;
+  }
 }
 
 function localizedHtml(key, params) {
@@ -1599,6 +1757,82 @@ function readStoredFileExplorerTreeSortMode() {
 
 function writeStoredFileExplorerTreeSortMode(value) {
   storageSet(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
+}
+
+function normalizeFileExplorerView(view) {
+  return ['finder', 'tabber', 'differ'].includes(view) ? view : 'finder';
+}
+
+function normalizeFileExplorerViewSettings(value, fallback = {}) {
+  const settings = value && typeof value === 'object' ? value : {};
+  return {
+    treeDateMode: normalizeFileExplorerTreeDateMode(settings.treeDateMode ?? fallback.treeDateMode),
+    treeSortMode: normalizeSessionFilesSortMode(settings.treeSortMode ?? fallback.treeSortMode),
+  };
+}
+
+function readStoredFileExplorerViewSettings() {
+  const legacyFinder = {
+    treeDateMode: readStoredFileExplorerTreeDateMode(),
+    treeSortMode: readStoredFileExplorerTreeSortMode(),
+  };
+  const stored = readStoredJson(fileExplorerViewSettingsStorageKey, null);
+  const tabberFallback = legacyFinder;
+  const differFallback = {treeDateMode: legacyFinder.treeDateMode, treeSortMode: 'newest'};
+  return {
+    finder: normalizeFileExplorerViewSettings(stored?.finder, legacyFinder),
+    tabber: normalizeFileExplorerViewSettings(stored?.tabber, tabberFallback),
+    differ: normalizeFileExplorerViewSettings(stored?.differ, differFallback),
+  };
+}
+
+function fileExplorerViewSettingsFor(view = 'finder') {
+  const key = normalizeFileExplorerView(view);
+  const fallback = key === 'differ' ? {treeDateMode: 'none', treeSortMode: 'newest'} : {treeDateMode: 'none', treeSortMode: 'az'};
+  const settings = normalizeFileExplorerViewSettings(fileExplorerViewSettings?.[key], fallback);
+  if (!fileExplorerViewSettings || fileExplorerViewSettings[key] !== settings) {
+    fileExplorerViewSettings = {...(fileExplorerViewSettings || {}), [key]: settings};
+  }
+  return settings;
+}
+
+function fileExplorerTreeDateModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeDateMode;
+}
+
+function fileExplorerTreeSortModeForView(view = 'finder') {
+  return fileExplorerViewSettingsFor(view).treeSortMode;
+}
+
+function writeStoredFileExplorerViewSettings() {
+  storageSet(fileExplorerViewSettingsStorageKey, JSON.stringify(fileExplorerViewSettings));
+}
+
+function setFileExplorerViewSetting(view, key, value, options = {}) {
+  const surface = normalizeFileExplorerView(view);
+  const current = fileExplorerViewSettingsFor(surface);
+  const next = normalizeFileExplorerViewSettings({...current, [key]: value}, current);
+  if (next.treeDateMode === current.treeDateMode && next.treeSortMode === current.treeSortMode) return false;
+  fileExplorerViewSettings = {...fileExplorerViewSettings, [surface]: next};
+  writeStoredFileExplorerViewSettings();
+  if (options.refresh !== false) refreshFileExplorerViewSettingsSurface(surface);
+  if (options.publish !== false) scheduleShareUiStatePublish();
+  return true;
+}
+
+// URL state and YO!share use the same payload shape. Keep legacy-field migration here so a
+// restored URL and a replayed frame can never teach the three fixed surfaces different rules.
+function applyFileExplorerViewSettingsSeed(seed = {}) {
+  if (!seed || typeof seed !== 'object') return;
+  if (seed.viewSettings && typeof seed.viewSettings === 'object') {
+    for (const view of ['finder', 'tabber', 'differ']) {
+      if (seed.viewSettings[view]) fileExplorerViewSettings = {...fileExplorerViewSettings, [view]: normalizeFileExplorerViewSettings(seed.viewSettings[view], fileExplorerViewSettingsFor(view))};
+    }
+    return;
+  }
+  if ('treeDateMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeDateMode: normalizeFileExplorerTreeDateMode(seed.treeDateMode)}};
+  if ('treeSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, finder: {...fileExplorerViewSettingsFor('finder'), treeSortMode: normalizeSessionFilesSortMode(seed.treeSortMode)}};
+  if ('sessionFilesSortMode' in seed) fileExplorerViewSettings = {...fileExplorerViewSettings, differ: {...fileExplorerViewSettingsFor('differ'), treeSortMode: normalizeSessionFilesSortMode(seed.sessionFilesSortMode)}};
 }
 
 function normalizeStoredFileExplorerIndexedDir(path) {
@@ -1855,17 +2089,17 @@ function syncFileExplorerHiddenButton(button) {
   });
 }
 
-function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return t(`finder.dateMode.${normalized}`);
 }
 
-function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return normalized === 'none' ? t('finder.dateMode.date') : fileExplorerTreeDateModeLabel(normalized);
 }
 
-function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
+function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateModeForView('finder')) {
   return t('finder.dateMode.title', {
     mode: fileExplorerTreeDateModeLabel(mode),
     none: fileExplorerTreeDateModeLabel('none'),
@@ -1876,7 +2110,8 @@ function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
 
 function syncFileExplorerTreeDateButton(button) {
   if (!button) return;
-  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const view = normalizeFileExplorerView(button.dataset.fileExplorerView || fileExplorerViewForItem(button.closest?.('.file-explorer-panel')?.dataset?.panelItem));
+  const mode = fileExplorerTreeDateModeForView(view);
   const active = mode !== 'none';
   button.classList.toggle(CLS.active, active);
   button.dataset.dateMode = mode;
@@ -1893,31 +2128,28 @@ function syncFileExplorerTreeDateButtons(scope = document) {
   }
 }
 
-function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateMode) {
+function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   const index = fileExplorerTreeDateModes.indexOf(normalized);
   return fileExplorerTreeDateModes[(index + 1) % fileExplorerTreeDateModes.length];
 }
 
-function refreshFileExplorerTreeDateModeSurfaces() {
-  syncFileExplorerTreeDateButtons();
-  if (typeof refreshFileExplorerTrees === 'function') {
-    void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+function refreshFileExplorerViewSettingsSurface(view) {
+  const surface = normalizeFileExplorerView(view);
+  if (surface === 'finder') {
+    if (typeof refreshFileExplorerTrees === 'function') void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  } else if (typeof renderFileExplorerChangesPanels === 'function') {
+    renderFileExplorerChangesPanels({force: true, view: surface});
   }
-  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+  syncFileExplorerTreeDateButtons();
 }
 
-function setFileExplorerTreeDateMode(mode) {
-  const next = normalizeFileExplorerTreeDateMode(mode);
-  if (next === fileExplorerTreeDateMode) return;
-  fileExplorerTreeDateMode = next;
-  writeStoredFileExplorerTreeDateMode(fileExplorerTreeDateMode);
-  refreshFileExplorerTreeDateModeSurfaces();
-  scheduleShareUiStatePublish();
+function setFileExplorerTreeDateMode(mode, view = 'finder') {
+  setFileExplorerViewSetting(view, 'treeDateMode', mode);
 }
 
-function cycleFileExplorerTreeDateMode() {
-  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode());
+function cycleFileExplorerTreeDateMode(view = 'finder') {
+  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode(fileExplorerTreeDateModeForView(view)), view);
 }
 
 function renderTabMetaToggle() {
@@ -2297,6 +2529,26 @@ function fuzzySubsequenceMatch(query, text) {
   const needle = String(query || '').toLowerCase().replace(/\s+/g, '');
   const haystack = String(text || '').toLowerCase();
   if (!needle) return {score: 0, indexes: []};
+  // A contiguous occurrence is the strongest fuzzy match. Select its actual indexes
+  // before the greedy subsequence walk so result highlighting points at the same
+  // evidence that receives the contiguous-substring rank bonus. Without this, a
+  // query such as "w5k" could rank a path for `/w5k/` but highlight the earlier
+  // `t` in `/notes/` plus `5t` in the matching directory.
+  const contiguousStart = haystack.indexOf(needle);
+  if (contiguousStart >= 0) {
+    const indexes = Array.from({length: needle.length}, (_, offset) => contiguousStart + offset);
+    let score = needle.length * searchRankWeights.perChar;
+    for (const index of indexes) {
+      const previousChar = haystack[index - 1] || '';
+      if (index === contiguousStart && (index === 0 || /[\s/_:.-]/.test(previousChar))) {
+        score += searchRankWeights.wordStart;
+      } else if (index > contiguousStart) {
+        score += searchRankWeights.contiguous;
+      }
+    }
+    score += searchRankWeights.contiguousSubstring;
+    return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
+  }
   let position = 0;
   let previousIndex = -1;
   let score = 0;
@@ -2315,7 +2567,6 @@ function fuzzySubsequenceMatch(query, text) {
     position = index + 1;
     indexes.push(index);
   }
-  if (needle.length >= 3 && haystack.includes(needle)) score += searchRankWeights.contiguousSubstring;
   return {score: score - Math.max(0, haystack.length - needle.length) * searchRankWeights.haystackLengthPenalty, indexes};
 }
 

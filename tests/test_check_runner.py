@@ -78,8 +78,14 @@ def test_check_runner_reuses_background_owner_process_liveness():
     assert check.pid_is_alive is background_owner_pid_is_alive
 
 
+def test_check_lock_is_one_per_user_across_worktrees_and_tmpdirs():
+    check = load_check_module()
+    assert check.DEFAULT_TOOL_LOCK_PATH == Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"
+
+
 def test_default_check_lanes_keep_full_pytest_gate():
     check = load_check_module()
+    nonbrowser_workers, browser_workers, e2e_workers = check.pytest_worker_counts()
     lanes = check.lanes()
     default_names = [lane.name for lane in lanes if lane.default]
     assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
@@ -89,23 +95,25 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # it ran that ~20s node suite twice concurrently), e2e tests launch real tmux + mock agents, and
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "-m", "not node_bridge and not e2e and not browser", "-q"]
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", nonbrowser_workers, "-m", "not node_bridge and not e2e and not browser", "-q"]
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
     assert boot_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
     assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", "auto", "--dist", "worksteal", "-m", "browser and not e2e and not boot", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
+    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", "tests", "-m", "visual_golden", "-q"]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
-    assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", "4", "-m", "e2e", "-q"]
+    assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", e2e_workers, "-m", "e2e", "-q"]
     assert "pytest-unit" not in default_names
     assert "pytest-socket" not in default_names
 
 
 def test_focused_pytest_lanes_keep_expected_filters():
     check = load_check_module()
+    _nonbrowser_workers, browser_workers, _e2e_workers = check.pytest_worker_counts()
     lanes = {lane.name: lane for lane in check.lanes()}
     assert lanes["pytest-unit"].steps[0].args == [
         "python3",
@@ -142,11 +150,20 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "pytest",
         "tests",
         "-n",
-        "auto",
+        browser_workers,
         "--dist",
         "worksteal",
         "-m",
-        "browser and not e2e and not boot",
+        "browser and not e2e and not boot and not visual_golden",
+        "-q",
+    ]
+    assert lanes["pytest-browser"].steps[2].args == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-m",
+        "visual_golden",
         "-q",
     ]
     assert lanes["pytest-boot"].steps[0].args == [
@@ -158,6 +175,78 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "boot",
         "-q",
     ]
+
+
+def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkeypatch):
+    check = load_check_module()
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.setattr(check.platform, "system", lambda: "Linux")
+
+    expected = {
+        4: ("1", "1", "1"),
+        10: ("3", "2", "2"),
+        14: ("5", "3", "2"),
+        32: ("12", "8", "4"),
+    }
+    for cores, counts in expected.items():
+        monkeypatch.setattr(check.os, "cpu_count", lambda cores=cores: cores)
+        assert check.pytest_worker_counts() == counts
+
+    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
+    assert check.pytest_worker_counts() == ("5", "3", "1")
+
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
+    assert check.pytest_worker_counts() == ("2", "1", "1")
+
+
+def test_serial_check_gate_forces_every_pytest_pool_to_one_worker(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "8,8,8")
+
+    pytest_steps = {
+        lane.name: lane.steps
+        for lane in check.lanes(serial=True)
+        if lane.name in {"pytest", "pytest-browser", "pytest-e2e"}
+    }
+    assert check.pytest_worker_counts(serial=True) == ("1", "1", "1")
+    for steps in pytest_steps.values():
+        for step in steps:
+            assert "-n" not in step.args
+            assert "--dist" not in step.args
+
+
+def test_expensive_tool_lock_refuses_independent_contender_without_queueing(tmp_path):
+    lock_path = tmp_path / "shared" / "expensive-tools.lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib.util,time;"
+                f"s=importlib.util.spec_from_file_location('check_holder',{str(CHECK_PATH)!r});"
+                "m=importlib.util.module_from_spec(s);"
+                "__import__('sys').modules[s.name]=m;s.loader.exec_module(m);"
+                f"c=m.expensive_tool_lock(lock_path=m.Path({str(lock_path)!r}));"
+                "c.__enter__();print('locked',flush=True);time.sleep(5);c.__exit__(None,None,None)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        check = load_check_module()
+        try:
+            with check.expensive_tool_lock(lock_path=lock_path):
+                raise AssertionError("contender unexpectedly acquired the lock")
+        except check.ToolGuardBusy:
+            pass
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
 
 
 def test_every_slowest_first_base_node_id_resolves_in_collection():
@@ -233,7 +322,7 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
     assert events[2][0] == "run"
     assert events[2][1] == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
     output = capsys.readouterr().out
-    assert "Waiting for YOLOmux expensive-tool lock" in output
+    assert "Acquiring YOLOmux expensive-tool lock" in output
     assert "lowered check priority by nice +5" in output
 
 

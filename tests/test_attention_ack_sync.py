@@ -96,8 +96,10 @@ def test_auto_approve_change_invalidates_local_cache_and_pushes_to_peer_without_
     first = make_app()
     second = make_app()
     _subscriber_id, subscriber_queue = second.client_events.subscribe("status", "browser-b")
-    worker = SimpleNamespace(alive=lambda: True, stop=lambda: True)
-    first.auto_worker_records["1:%1"] = SimpleNamespace(session="1", worker=worker)
+    first.approval_client = SimpleNamespace(
+        status_session=lambda session: [{"target": "%1", "enabled": True}] if session == "1" else [],
+        stop_session=lambda session: {"ok": session == "1"},
+    )
     first.auto_approve_cache_record.payload = (time.monotonic(), ({"sessions": {"1": {"enabled": True}}}, HTTPStatus.OK))
     second.auto_approve_cache_record.payload = (time.monotonic(), ({"sessions": {"1": {"enabled": True}}}, HTTPStatus.OK))
     monkeypatch.setattr(first, "auto_approve_session_status", lambda session: {"session": session, "enabled": False})

@@ -7,6 +7,7 @@ from yolomux_lib.yoagent.stream_events import TOOL_CALL_DELTA
 from yolomux_lib.yoagent.stream_events import TOOL_CALL_FINISHED
 from yolomux_lib.yoagent.stream_events import TOOL_CALL_STARTED
 from yolomux_lib.yoagent.stream_events import TURN_DONE
+from yolomux_lib.yoagent.stream_events import USAGE
 from yolomux_lib.yoagent.stream_events import ClaudeStreamJsonNormalizer
 from yolomux_lib.yoagent.stream_events import normalize_codex_app_server_message
 from yolomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_item
@@ -33,6 +34,17 @@ def test_codex_app_server_stream_events_cover_answer_reasoning_tool_and_approval
     assert events[4]["text"] == "tests passed"
     assert events[5]["command"] == "python3 tools/check.py"
     assert "approval requested: python3 tools/check.py" == yoagent_stream_event_auxiliary_line(events[5])
+
+
+def test_codex_app_server_completion_keeps_structured_usage_for_cost_attribution():
+    events = normalize_codex_app_server_message({
+        "jsonrpc": "2.0",
+        "method": "turn/completed",
+        "params": {"threadId": "t1", "turn": {"usage": {"input_tokens": 12, "cached_input_tokens": 4, "output_tokens": 7}}},
+    })
+
+    assert [event["kind"] for event in events] == [USAGE, TURN_DONE]
+    assert events[0]["metadata"] == {"usage": {"input_tokens": 12, "cached_input_tokens": 4, "output_tokens": 7}}
 
 
 def test_textless_reasoning_delta_uses_truthful_minimal_state():
