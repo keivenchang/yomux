@@ -1496,6 +1496,67 @@ def test_statsd_history_profile_separates_sqlite_query_and_assembly(tmp_path):
     service.store.close()
 
 
+def test_statsd_history_contract_distinguishes_empty_complete_and_partial_coverage(tmp_path):
+    """Consumers must use coverage, not an empty record list, to judge history."""
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        empty = service.handle({"action": "history", "start": 100, "end": 200})
+        assert empty["ok"] is True
+        assert empty["records"] == []
+        assert empty["coverage"]["complete"] is False
+        assert empty["coverage"]["covered_start"] == 0
+        assert empty["coverage"]["covered_end"] == 0
+
+        service.store.upsert_bucket(_bucket(start=100, duration=1, sequence=1))
+        complete_but_unchanged = service.handle({"action": "history", "since": 1, "start": 100, "end": 101})
+        assert complete_but_unchanged["records"] == []
+        assert complete_but_unchanged["coverage"]["complete"] is True
+        assert complete_but_unchanged["coverage"]["returned_records"] == 0
+
+        partial = service.handle({"action": "history", "start": 50, "end": 200})
+        assert partial["coverage"]["complete"] is False
+        assert (partial["coverage"]["covered_start"], partial["coverage"]["covered_end"]) == (100, 101)
+
+        status, encoded = service.handle_with_binary({
+            "action": "write_encoded_sample",
+            "sample": {"time": 101.0, "pid": 8881},
+            "shared_stats": {"enabled": True},
+            "query": {"start": 100, "end": 101},
+        })
+        assert status == {"ok": True, "encoding": "json", "size": len(encoded)}
+        assert json.loads(encoded)["history"]["coverage"]["complete"] is True
+    finally:
+        service.store.close()
+
+
+def test_statsd_history_contract_enforces_24h_point_payload_and_latency_budget(tmp_path):
+    """A retained 24-hour window must stay bounded without a browser-side fallback."""
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    start = 1_000_000
+    try:
+        service.store.replace_buckets([
+            _bucket(start=start + (index * 60), duration=60, sequence=index + 1)
+            for index in range(24 * 60)
+        ])
+        started = time.perf_counter()
+        status, encoded = service.handle_with_binary({
+            "action": "write_encoded_history",
+            "start": start,
+            "end": start + (24 * 60 * 60),
+            "max_points": 360,
+        })
+        elapsed = time.perf_counter() - started
+        payload = json.loads(encoded)
+
+        assert status == {"ok": True, "encoding": "json", "size": len(encoded)}
+        assert len(payload["records"]) <= 360
+        assert payload["coverage"]["complete"] is True
+        assert len(encoded) <= 768 * 1024
+        assert elapsed <= 2.0
+    finally:
+        service.store.close()
+
+
 def test_statsd_compaction_preserves_the_full_large_legacy_history_not_just_query_cap(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     now = 1_100_000
