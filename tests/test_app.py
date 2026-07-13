@@ -941,6 +941,52 @@ def test_statsd_sample_pushes_its_durable_one_second_delta_to_stats_sse(monkeypa
     assert payload["record"]["sequence"] == payload["sequence"] > 0
 
 
+def test_cpu_durable_times_keep_one_second_phase_across_wall_clock_jitter(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    samples = iter((1000.9, 1002.0, 1002.99))
+    records = []
+    monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({
+        "time": next(samples), "pid": 1, "started_at": 900.0,
+        "uptime_seconds": 100.0, "cpu_percent": 1.0,
+        "system_cpu_percent": 2.0, "rss_bytes": 3,
+    }, True))
+    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda _family, record, _sample: records.append(record) or {"ok": True})
+    scheduled_times = (1000.9, 1001.9, 1002.9)
+    try:
+        for scheduled_time in scheduled_times:
+            webapp.stats_metric_thread_context.scheduled_time = scheduled_time
+            webapp.record_stats_cpu_sample()
+    finally:
+        webapp.stats_metric_thread_context.scheduled_time = None
+        webapp.control_server.stop()
+
+    assert [record["time"] for record in records] == pytest.approx(scheduled_times)
+    assert [int(record["time"]) for record in records] == [1000, 1001, 1002]
+
+
+def test_cpu_scheduler_deadline_never_turns_into_cached_success(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    wall_times = iter((1000.0, 1000.2))
+    monotonic_times = iter((50.0, 50.2))
+    process_times = iter((10.0, 10.1))
+    records = []
+    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
+    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
+    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: (100.0, 20.0))
+    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 3)
+    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda _family, record, _sample: records.append(record) or {"ok": True})
+    try:
+        for scheduled_time in (1000.0, 1001.0):
+            webapp.stats_metric_thread_context.scheduled_time = scheduled_time
+            webapp.record_stats_cpu_sample()
+    finally:
+        webapp.stats_metric_thread_context.scheduled_time = None
+        webapp.control_server.stop()
+
+    assert [record["time"] for record in records] == [1000.0, 1001.0]
+
+
 def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monkeypatch, tmp_path):
     stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     owner = app_module.TmuxWebtermApp(["1"])
@@ -1398,14 +1444,15 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
     webapp = app_module.TmuxWebtermApp([])
     transcript_forces = []
     monkeypatch.setattr(webapp, "transcripts_payload", lambda force=False: transcript_forces.append(force) or {"sessions": {}, "cache": {"hit": True}})
-    monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({
+    monkeypatch.setattr(webapp, "current_stats_sample", lambda: pytest.fail("System diagnostics must not collect CPU"))
+    monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {
         "pid": 321,
         "started_at": 100.0,
         "uptime_seconds": 25.0,
         "cpu_percent": 3.5,
         "system_cpu_percent": 12.0,
         "rss_bytes": 4096,
-    }, False))
+    })
     try:
         payload = webapp.system_status_payload()
     finally:

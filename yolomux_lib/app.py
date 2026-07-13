@@ -2491,6 +2491,8 @@ class TmuxWebtermApp:
         stop_event: threading.Event,
     ) -> None:
         next_deadline = time.monotonic()
+        schedule_anchor_monotonic = next_deadline
+        schedule_anchor_wall = time.time()
         wake_event = self.stats_history_service.scheduler_wake_events[family]
         while not stop_event.is_set() and generation == self.stats_history_service.scheduler_generation:
             wait_seconds = max(0.0, next_deadline - time.monotonic())
@@ -2527,6 +2529,13 @@ class TmuxWebtermApp:
                 if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
                     break
                 self.stats_metric_thread_context.generation = generation
+                # Tie persisted timestamps to the monotonic deadline phase.
+                # Actual wall-clock attempt times can jitter across integer
+                # boundaries even when deadlines are exactly one second apart,
+                # producing a false gap followed by a double-sample bucket.
+                self.stats_metric_thread_context.scheduled_time = (
+                    schedule_anchor_wall + next_deadline - schedule_anchor_monotonic
+                )
                 collector()
             except Exception as exc:  # each family survives and reports its own failure
                 error = str(exc)[:500]
@@ -2535,6 +2544,7 @@ class TmuxWebtermApp:
                 family_lock.release()
             runtime = max(0.0, time.monotonic() - started)
             self.stats_metric_thread_context.generation = None
+            self.stats_metric_thread_context.scheduled_time = None
             with self.stats_history_service.scheduler_lock:
                 previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
                 successes = int(previous.get("successes") or 0) + (0 if error else 1)
@@ -2608,6 +2618,9 @@ class TmuxWebtermApp:
         sample, record_cpu_sample = self.current_stats_sample()
         if not record_cpu_sample:
             return
+        scheduled_time = getattr(self.stats_metric_thread_context, "scheduled_time", None)
+        if scheduled_time is not None:
+            sample = {**sample, "time": float(scheduled_time)}
         process_id, label, port = self.stats_history_process_identity()
         record = {
             "time": sample["time"], "cpu_total_percent": sample["cpu_percent"], "cpu_count": 1,
@@ -2666,7 +2679,17 @@ class TmuxWebtermApp:
             record = self.stats_history_service.sample_record
             cached = record.cached_payload
             cached_monotonic = record.cached_monotonic
-            use_cached = cached is not None and cached_monotonic is not None and monotonic_now - cached_monotonic < STATS_SAMPLE_CACHE_SECONDS
+            scheduler_sample = getattr(self.stats_metric_thread_context, "scheduled_time", None) is not None
+            # The cache remains useful to legacy/direct callers, but a real
+            # scheduler deadline is itself the authority to take a new CPU
+            # observation. Treating that tick as cached records a diagnostic
+            # "success" without a durable second.
+            use_cached = (
+                not scheduler_sample
+                and cached is not None
+                and cached_monotonic is not None
+                and monotonic_now - cached_monotonic < STATS_SAMPLE_CACHE_SECONDS
+            )
             if use_cached:
                 sample = dict(cached)
                 record_cpu_sample = False
@@ -8745,7 +8768,10 @@ class TmuxWebtermApp:
 
     def system_status_payload(self) -> dict[str, Any]:
         """Return bounded live diagnostics for the YO!stats System view."""
-        sample, _record_cpu_sample = self.current_stats_sample()
+        # Diagnostics are a reader. Only the CPU family worker may advance the
+        # process/host baselines; otherwise a System refresh can consume the
+        # next one-second observation and leave no durable bucket for it.
+        sample = self.latest_stats_sample()
         return {
             **self.runtime_report_payload(force_transcripts=False),
             "generated_at": time.time(),
