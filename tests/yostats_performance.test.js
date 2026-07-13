@@ -3,12 +3,113 @@
 
 const {
   assert,
+  fs,
   loadYolomux,
   runSuites,
   test,
 } = require('./layout_test_helper');
 
 function runYostatsPerformanceSuite() {
+  test('YO!stats holds sparse gauges for display without inventing samples or bridging outages', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    const start = now - 60_000;
+    const records = Array.from({length: 60}, (_unused, index) => {
+      const record = {
+        start: (start / 1000) + index,
+        duration: 1,
+        sequence: index + 1,
+        cpu_total_percent: 10,
+        cpu_count: 1,
+      };
+      if (index === 0) Object.assign(record, {
+        run_agent_total: 2,
+        agent_activity_samples: 1,
+        tokens_per_agent_total: 120,
+        agent_token_samples: 1,
+        cost_summary: {
+          total_micro_usd: 7,
+          known_micro_usd: 7,
+          lower_micro_usd: 7,
+          upper_micro_usd: 7,
+          priced_count: 1,
+          complete: true,
+          components: [{provider: 'openai', model: 'gpt-test', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 120, micro_usd: 7}],
+        },
+        host_metrics: {
+          system_memory_used_total_bytes: 300,
+          system_memory_capacity_total_bytes: 600,
+          system_memory_count: 3,
+          gpu_devices: {'gpu:0': {label: 'GPU 0', util_total_percent: 75, memory_used_total_bytes: 50, memory_capacity_total_bytes: 100, samples: 1}},
+        },
+      });
+      if (index === 30) record.disconnected_ms = 1000;
+      if (index === 40) record.host_metrics = {
+        system_memory_used_total_bytes: 240,
+        system_memory_capacity_total_bytes: 480,
+        system_memory_count: 2,
+      };
+      return record;
+    });
+    api.clearJsDebugEventsForTest();
+    api.setDebugGraphRangeForTest(60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
+    const buckets = api.debugGraphDisplayBucketsForTest(now);
+    const byKey = new Map(api.debugGraphSeriesDataForTest(now).map(series => [series.key, series]));
+    const memory = byKey.get('systemMemory');
+    const gpu = byKey.get('gpu:gpuUtil:gpu:0');
+    const status = byKey.get('workingAgents');
+    const tokens = byKey.get('tokensPerAgent');
+
+    assert.equal(memory.samples, 2, 'two durable memory observations remain two samples');
+    assert.equal(memory.displaySamples, 50, `the minute gauge paints only its bounded pre-outage and post-recovery slots (got ${memory.displaySamples})`);
+    assert.equal(memory.provenanceValues[20].held, true, 'a held point is explicitly presentation-only');
+    assert.equal(memory.provenanceValues[20].sampleTimeMs, start, 'held points retain the real source timestamp');
+    assert.equal(memory.provenanceValues[20].sampleCount, 3, 'held points retain the real aggregate sample count');
+    assert.equal(memory.provenanceValues[30], null, 'an explicit outage clears the hold before its nominal expiry');
+    assert.equal(memory.hasDataValues.slice(31, 40).some(Boolean), false, 'the display does not bridge the post-outage gap');
+    assert.equal(memory.provenanceValues[45].sampleTimeMs, start + 40_000, 'a recovered observation becomes the new provenance owner');
+    assert.equal(memory.provenanceValues[45].sampleCount, 2, 'recovery preserves its own count instead of inheriting the earlier sample');
+
+    assert.equal(gpu.samples, 1, 'one GPU observation remains one sample');
+    assert.equal(gpu.displaySamples, 10, 'a ten-second GPU gauge paints exactly ten one-second slots');
+    assert.equal(gpu.hasDataValues[9], true);
+    assert.equal(gpu.hasDataValues[10], false, 'GPU hold expires at its named ten-second boundary');
+    assert.equal(status.samples, 1, 'Agent Status is not expanded into synthetic one-second samples');
+    assert.equal(status.displaySamples, 1, 'Agent Status retains its native observation while its chart keeps ten-second bars');
+    assert.equal(tokens.samples, 1, 'token observations are not sample-and-held');
+    assert.equal(tokens.displaySamples, 1, 'token rates and totals remain unprojected');
+    assert.equal(buckets.reduce((total, bucket) => total + Number(bucket.hostMetrics?.systemMemoryCount || 0), 0), 5, 'display projection does not mutate durable gauge counts');
+    assert.equal(api.debugGraphCostSummaryForTest(buckets).totalMicroUsd, 7, 'display projection does not multiply cost totals');
+    assert.equal(api.jsDebugGraphChartGroupsForTest().find(group => group.key === 'activity').bucketSeconds, 10, 'Agent Status remains a ten-second bar chart');
+
+    api.setDebugGraphChartVisibleForTest('memory', true);
+    const memoryHtml = api.debugGraphInnerHtmlForTest(now).match(/<section[^>]*data-js-debug-chart="memory"[\s\S]*?<\/section>/)?.[0] || '';
+    const memoryLines = (memoryHtml.match(/data-js-debug-series="systemMemory"/g) || []).length;
+    assert.equal(memoryLines, 2, `the memory gauge renders separate pre-outage and recovered runs (got ${memoryLines})`);
+    assert.match(memoryHtml, /data-js-debug-series="systemMemory"[^>]*data-js-debug-series-segment="1"/, 'the recovered gauge is marked as a separate segment');
+    const source = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    assert.match(source, /function debugGraphHoverProvenanceAtTime[\s\S]*series\.provenanceValues[\s\S]*data-js-debug-hover-provenance/, 'hover diagnostics consume the same preserved sample provenance');
+
+    const uninterrupted = loadYolomux('?debug=1&sessions=debug', ['1']);
+    uninterrupted.clearJsDebugEventsForTest();
+    uninterrupted.setDebugGraphRangeForTest(60, {render: false});
+    uninterrupted.debugGraphApplyServerHistoryForTest({
+      sequence: 60,
+      records: Array.from({length: 60}, (_unused, index) => ({
+        start: (start / 1000) + index,
+        duration: 1,
+        sequence: index + 1,
+        cpu_total_percent: 10,
+        cpu_count: 1,
+        ...(index === 0 ? {host_metrics: {system_memory_used_total_bytes: 100, system_memory_count: 1}} : {}),
+      })),
+    });
+    const uninterruptedMemory = uninterrupted.debugGraphSeriesDataForTest(now).find(series => series.key === 'systemMemory');
+    assert.equal(uninterruptedMemory.samples, 1, 'the uninterrupted minute projection still reports one real sample');
+    assert.equal(uninterruptedMemory.displaySamples, 60, 'one minute gauge sample may paint exactly sixty one-second display slots');
+  });
+
   test('YO!cost reuses the selected big-range cost aggregate instead of recomputing every render', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const makeComponent = (bucketIndex, rowIndex) => ({

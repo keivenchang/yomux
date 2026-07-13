@@ -153,6 +153,10 @@ const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
 const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
+const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
+  tenSecondGauge: 10 * 1000,
+  minuteGauge: 60 * 1000,
+});
 const jsDebugGraphThisClientId = 'this-client';
 const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
 const jsDebugGraphThisClientAggregate = 'thisClient';
@@ -293,7 +297,13 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
-  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
+  {
+    key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid',
+    value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0,
+    hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    sampleCount: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0),
+    displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
+  },
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
@@ -2831,6 +2841,10 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       color: jsDebugGraphGpuDeviceColors[index % jsDebugGraphGpuDeviceColors.length],
       value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
+      sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, gpuDeviceId: deviceId})?.samples || 0),
+      familyHasData: bucket => [...(bucket?.hostMetrics?.gpuDevices?.values?.() || [])]
+        .some(item => Number(item?.samples || 0) > 0),
+      displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
     }));
 }
 
@@ -2841,22 +2855,91 @@ function debugGraphHostMetricSeriesDefs(buckets) {
   ];
 }
 
+function debugGraphDisplayHoldOutage(bucket) {
+  return Number(bucket?.disconnectedMs || 0) > 0;
+}
+
+function debugGraphProjectSeriesSamples(def, buckets) {
+  const holdMs = Math.max(0, Number(def?.displayHoldMs) || 0);
+  const values = [];
+  const hasDataValues = [];
+  const observedDataValues = [];
+  const provenanceValues = [];
+  let heldSample = null;
+  for (const [index, bucket] of (buckets || []).entries()) {
+    const value = def.value(bucket);
+    const observed = def.hasData(bucket) === true;
+    if (observed) {
+      const bucketStartMs = Number(bucket?.startMs) || 0;
+      const requestedSampleTimeMs = typeof def.sampleTimeMs === 'function' ? Number(def.sampleTimeMs(bucket)) : NaN;
+      const sampleTimeMs = Number.isFinite(requestedSampleTimeMs) ? requestedSampleTimeMs : bucketStartMs;
+      const requestedSampleCount = typeof def.sampleCount === 'function' ? Number(def.sampleCount(bucket)) : 1;
+      const sampleCount = Number.isFinite(requestedSampleCount) ? Math.max(0, requestedSampleCount) : 0;
+      const provenance = {
+        sampleTimeMs,
+        sampleCount,
+        sourceBucketStartMs: bucketStartMs,
+        sourceBucketDurationMs: Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs),
+        sourceIndex: index,
+        expiresAtMs: holdMs > 0 ? sampleTimeMs + holdMs : sampleTimeMs,
+        held: false,
+      };
+      values.push(value);
+      hasDataValues.push(true);
+      observedDataValues.push(true);
+      provenanceValues.push(provenance);
+      heldSample = holdMs > 0 ? {value, provenance} : null;
+      continue;
+    }
+    const familyObserved = typeof def.familyHasData === 'function' && def.familyHasData(bucket) === true;
+    if (familyObserved || debugGraphDisplayHoldOutage(bucket)) heldSample = null;
+    const bucketStartMs = Number(bucket?.startMs) || 0;
+    const bucketDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+    const bucketEndMs = bucketStartMs + bucketDurationMs;
+    const held = heldSample && bucketStartMs >= heldSample.provenance.sampleTimeMs
+      && bucketEndMs <= heldSample.provenance.expiresAtMs;
+    values.push(held ? heldSample.value : value);
+    hasDataValues.push(Boolean(held));
+    observedDataValues.push(false);
+    provenanceValues.push(held ? {...heldSample.provenance, held: true} : null);
+  }
+  return {values, hasDataValues, observedDataValues, provenanceValues};
+}
+
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
   const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
-    const values = buckets.map(bucket => def.value(bucket));
-    const hasDataValues = buckets.map(bucket => def.hasData(bucket));
-    const sampleValues = values.filter((_value, index) => hasDataValues[index]);
-    const sampleTimes = times.filter((_time, index) => hasDataValues[index]);
+    const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
+    const sampleValues = values.filter((_value, index) => observedDataValues[index]);
+    const sampleTimes = provenanceValues
+      .filter((_provenance, index) => observedDataValues[index])
+      .map(provenance => provenance.sampleTimeMs);
     const samples = sampleValues.length;
-    const max = Math.max(0, ...sampleValues);
-    const current = sampleValues.length ? sampleValues[sampleValues.length - 1] : 0;
+    const displayValues = values.filter((_value, index) => hasDataValues[index]);
+    const displaySamples = displayValues.length;
+    const max = Math.max(0, ...displayValues);
+    const current = displayValues.length ? displayValues[displayValues.length - 1] : 0;
     const movingAverageSamples = Number(def.movingAverageSamples || 0);
     const movingAverageValues = movingAverageSamples > 0 ? debugGraphMovingAverageValues(sampleValues, movingAverageSamples) : [];
-    return {...localizedDef, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
+    return {
+      ...localizedDef,
+      values,
+      times,
+      durations,
+      hasDataValues,
+      observedDataValues,
+      provenanceValues,
+      movingAverageValues,
+      movingAverageTimes: sampleTimes,
+      movingAverageSamples,
+      max,
+      current,
+      samples,
+      displaySamples,
+    };
   });
 }
 
@@ -3301,9 +3384,10 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
   // CPU is sampled best-effort.  Its absent intervals are facts, not zeroes or
   // a signal to draw a smooth line between the two surrounding samples.
   const cpuSeries = series?.processCpu === true || series?.key === 'cpu' || series?.key === 'systemCpu';
+  const heldGaugeSeries = Number(series?.displayHoldMs || 0) > 0;
   const gapThresholdMs = series?.clientMetric === true
     ? debugGraphCommunicationGapThresholdMs([series])
-    : (cpuSeries ? 1 : 0);
+    : ((cpuSeries || heldGaugeSeries) ? 1 : 0);
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
@@ -3640,6 +3724,19 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
     ? values.reduce((total, item) => total + item, 0)
     : Math.max(0, ...values);
   return debugGraphValueText(value, data.group.unit);
+}
+
+function debugGraphHoverProvenanceAtTime(chart, timestamp) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  if (!data) return [];
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  if (index < 0) return [];
+  return data.groupSeries.flatMap(series => {
+    if (Array.isArray(series.hasDataValues) && series.hasDataValues[index] !== true) return [];
+    const provenance = Array.isArray(series.provenanceValues) ? series.provenanceValues[index] : null;
+    return provenance ? [{series: series.key, ...provenance}] : [];
+  });
 }
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
@@ -5707,6 +5804,9 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
   tooltip.querySelector('[data-js-debug-hover-max]').textContent = debugGraphHoverValueAtTime(chart, timestamp);
   tooltip.querySelector('[data-js-debug-hover-time]').textContent = debugGraphExactTimeLabel(timestamp);
+  const provenance = debugGraphHoverProvenanceAtTime(chart, timestamp);
+  if (provenance.length) tooltip.setAttribute('data-js-debug-hover-provenance', JSON.stringify(provenance));
+  else tooltip.removeAttribute('data-js-debug-hover-provenance');
   debugGraphSetHoverLegendItems(chart, timestamp);
   for (const item of panel.querySelectorAll('[data-js-debug-hover-tooltip]')) item.hidden = item !== tooltip;
   tooltip.hidden = false;
