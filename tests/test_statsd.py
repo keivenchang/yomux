@@ -1743,6 +1743,32 @@ def test_statsd_history_uses_cached_cursor_delta_and_point_budget(tmp_path):
     service.store.close()
 
 
+def test_statsd_history_cursor_survives_replacement_without_replaying_acknowledged_rows(tmp_path):
+    socket_path = tmp_path / "statsd.sock"
+    database_path = tmp_path / "stats.sqlite3"
+    first_owner = statsd.PersistentStatsService(socket_path, database_path)
+    first_owner.handle({
+        "action": "merge_records",
+        "client_id": "browser-a",
+        "now": 1000,
+        "records": [{"start": 999, "api_count": 2}],
+    })
+    acknowledged = first_owner.handle({"action": "history", "client_id": "browser-a", "after_sequence": 0})
+    cursor = acknowledged["coverage"]["cursor"]
+    first_owner.store.close()
+
+    replacement_owner = statsd.PersistentStatsService(socket_path, database_path)
+    replay = replacement_owner.handle({"action": "history", "client_id": "browser-a", "after_sequence": cursor})
+    full = replacement_owner.handle({"action": "history", "client_id": "browser-a", "after_sequence": 0})
+
+    assert acknowledged["records"] and cursor == 1
+    assert replay["records"] == []
+    assert replay["coverage"]["cursor"] == cursor
+    assert sum(record["api_count"] for record in full["records"]) == 2
+    assert full["coverage"]["cursor"] == cursor
+    replacement_owner.store.close()
+
+
 def test_statsd_merge_records_owns_browser_deltas_and_cursor(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
 

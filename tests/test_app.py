@@ -511,6 +511,23 @@ def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
     assert payload["history"]["sequence"] >= 20
 
 
+def test_stats_history_empty_legacy_post_uses_bounded_cursor_acknowledgement():
+    webapp = app_module.TmuxWebtermApp([])
+    calls = []
+    webapp.stats_client = SimpleNamespace(
+        history=lambda **kwargs: calls.append(kwargs) or {"ok": True, "sequence": 7, "latest_sequence": 9, "records": []},
+        merge_and_history=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("empty legacy acknowledgement must not serialize retained history")),
+    )
+    try:
+        payload, status = webapp.record_stats_history_payload({"client_id": "triage", "since": 0, "records": []})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert calls == [{"include_history": False, "since": 0, "client_id": "triage"}]
+    assert payload == {"ok": True, "history": {"records": [], "sequence": 9}}
+
+
 def test_stats_history_wide_token_history_is_server_aggregated(tmp_path):
     stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     now = 200000.0

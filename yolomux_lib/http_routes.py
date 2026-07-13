@@ -340,20 +340,35 @@ def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
         request_error = token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
         request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
         return
-    app_profile, encoded = request.server.app.stats_sample_encoded_payload(
-        since=since or 0,
-        client_id=client_id,
-        token_consumer=token_consumer,
-        token_since=token_since or 0,
-        token_resolution_seconds=token_resolution or 0,
-        token_history_start=token_history_start if token_history_start_supplied else None,
-        token_history_end=token_history_end if token_history_end_supplied else None,
-        history_start=history_start or 0,
-        history_end=history_end or 0,
-        history_resolution_seconds=history_resolution or 0,
-        history_max_points=history_max_points or 0,
-        include_history=history_enabled,
-    )
+    try:
+        app_profile, encoded = request.server.app.stats_sample_encoded_payload(
+            since=since or 0,
+            client_id=client_id,
+            token_consumer=token_consumer,
+            token_since=token_since or 0,
+            token_resolution_seconds=token_resolution or 0,
+            token_history_start=token_history_start if token_history_start_supplied else None,
+            token_history_end=token_history_end if token_history_end_supplied else None,
+            history_start=history_start or 0,
+            history_end=history_end or 0,
+            history_resolution_seconds=history_resolution or 0,
+            history_max_points=history_max_points or 0,
+            include_history=history_enabled,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        # Statsd is the sole durable history owner. A failed or timed-out RPC
+        # must be an explicit bounded 503, never a legacy in-process replay.
+        request.write_json(
+            error_payload(
+                "statsd unavailable",
+                message_key="stats.error.unavailable",
+                message_params={"error": "statsd unavailable"},
+                diagnostic=exc,
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            ),
+            status=HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+        return
     build_ms = (time.perf_counter() - started) * 1000
     setattr(request, "_http_response_compute_ms", build_ms)
     details = {"stats_build_ms": round(build_ms, 3)}

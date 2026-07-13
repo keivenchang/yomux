@@ -1986,6 +1986,26 @@ class TmuxWebtermApp:
         except (TypeError, ValueError):
             since = 0
 
+        if not records and payload.get("ack_only") is not True:
+            # Older callers omitted ack_only for an empty follow-up POST. Do
+            # not ask the RPC metadata frame to carry the entire retained
+            # history just to acknowledge that cursor: its response stays
+            # bounded and keeps the legacy response shape.
+            history = self.stats_client.history(
+                include_history=False,
+                since=max(0, since),
+                client_id=client_id,
+            )
+            if not history.get("ok"):
+                return user_message_payload("stats.error.unavailable", str(history.get("error") or "statsd unavailable")), HTTPStatus.SERVICE_UNAVAILABLE
+            return {
+                "ok": True,
+                "history": {
+                    "records": [],
+                    "sequence": int(history.get("latest_sequence", history.get("sequence", 0)) or 0),
+                },
+            }, HTTPStatus.OK
+
         if payload.get("ack_only") is True:
             merged = self.stats_client.merge_records(
                 [record for record in records if isinstance(record, dict)],

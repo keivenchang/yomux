@@ -321,6 +321,67 @@ def test_get_stats_sample_promotes_backend_phase_profile_without_exposing_privat
     }
 
 
+@pytest.mark.parametrize("failure", [RuntimeError("statsd socket unavailable"), TimeoutError("statsd RPC timed out")])
+def test_get_stats_sample_returns_one_bounded_503_without_legacy_history_replay(failure):
+    calls = []
+    writes = []
+
+    def unavailable(**kwargs):
+        calls.append(kwargs)
+        raise failure
+
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=SimpleNamespace(stats_sample_encoded_payload=unavailable)),
+        write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)),
+        write_json_bytes=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unavailable statsd must not emit a stale history payload")),
+    )
+
+    http_routes.get_stats_sample(request, SimpleNamespace(query="since=7&client_id=browser-a&history_start=100&history_end=200"), None)
+
+    assert len(calls) == 1, "the failed statsd request must not fall back to an in-process or replay path"
+    assert writes == [(
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        {
+            "error": "statsd unavailable",
+            "user_message": {
+                "key": "stats.error.unavailable",
+                "params": {"error": "statsd unavailable"},
+                "fallback": "statsd unavailable",
+            },
+            "diagnostic": str(failure),
+            "status": 503,
+        },
+    )]
+
+
+def test_do_post_stats_history_rejects_oversized_body_before_app_dispatch():
+    app_calls = []
+    handler, calls, writes = route_handler(
+        "/api/stats-history",
+        SimpleNamespace(record_stats_history_payload=lambda payload: app_calls.append(payload) or ("unexpected", HTTPStatus.OK)),
+    )
+    handler.headers = {"Content-Length": str((128 * 1024) + 1)}
+    handler.rfile = io.BytesIO(b"")
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert app_calls == []
+    assert writes == [(
+        "json",
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        {
+            "error": "content too large",
+            "user_message": {
+                "key": "request.error.contentTooLarge",
+                "params": {"max": 128 * 1024},
+                "fallback": "content too large",
+            },
+            "status": 413,
+        },
+    )]
+
+
 class FakeShareConnection:
     def __init__(self) -> None:
         self.sent: list[bytes] = []
