@@ -6051,6 +6051,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     for (let index = 0; index < 5; index += 1) await flushAsyncWork();
     assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'a successful retry clears the error state after paint');
     assert.equal(api.debugPanelHtmlForTest().includes('data-js-debug-history-retry'), false, 'the Retry action disappears after success');
+    const diagnostics = api.jsDebugEventsForTest().filter(event => event.type === 'stats_history').map(event => String(event.message));
+    assert.ok(diagnostics.some(message => message.includes('history request failed: history unavailable')), 'Logs names the request failure');
+    assert.ok(diagnostics.some(message => message.includes('retry entered')) && diagnostics.some(message => message.includes('retry exited')), 'Logs names both retry lifecycle edges');
     const counters = new Set(api.clientPerfSummaryForTest().map(counter => counter.name));
     for (const counter of ['statsHistoryFetch', 'statsHistoryParse', 'statsHistoryApply', 'statsHistoryPaint', 'statsHistoryLoading']) {
       assert.ok(counters.has(counter), `${counter} records its readiness phase`);
@@ -6073,6 +6076,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const state = api.jsDebugHistoryReadinessForTest();
     assert.equal(state.phase, 'error', 'missing history coverage is a bounded explicit error, not a permanent retrying state');
     assert.match(state.error, /coverage/, 'the error names the malformed coverage envelope');
+    assert.ok(api.jsDebugEventsForTest().some(event => event.type === 'stats_history' && /coverage rejected/.test(String(event.message))), 'Logs records the rejected malformed coverage');
     const html = api.debugPanelHtmlForTest();
     assert.ok(html.includes('data-js-debug-history-retry'), 'malformed history still exposes the manual Retry action');
   });
@@ -6208,6 +6212,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(summary.rawBuckets + summary.rollupBuckets > 0, 'returned token records are retained');
     assert.ok(html.includes('Agent tokens/min') && html.includes('8881:0:codex'), 'Agent token chart renders the partial response');
     assert.equal(html.includes('Could not load history'), false, 'usable partial availability does not cover the chart with an error');
+    assert.ok(api.jsDebugEventsForTest().some(event => event.type === 'stats_history' && /terminal partial coverage accepted/.test(String(event.message))), 'Logs names the accepted partial-availability path');
   });
 
   await testAsync('YO!stats widening the range queues an older-history fetch behind an in-flight poll', async () => {
