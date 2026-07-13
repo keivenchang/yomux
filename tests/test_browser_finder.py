@@ -1006,6 +1006,81 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
     }, metrics
 
 
+def test_sync_finder_remembers_same_root_cursor_without_stealing_browser_focus(browser, tmp_path):
+    root = "/home/test"
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1,2&layout=row@35(slot1,left)&tabs=slot1:files;left:1,2",
+        settings={"file_explorer": {"root_mode": "sync"}},
+        sessions=["1", "2"],
+        fs_entries={root: [{"name": "one.txt", "kind": "file"}, {"name": "two.txt", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-tree-row[data-path=\"/home/test/one.txt\"]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const root = '/home/test';
+            const plan = session => ({session, root, expandPaths: [], affectedDirs: [root]});
+            const sentinel = document.createElement('button');
+            sentinel.type = 'button';
+            sentinel.textContent = 'focus sentinel';
+            document.body.append(sentinel);
+            await syncFileExplorerRootToPlan(plan('1'), '1', {force: true});
+            selectFileTreePath(`${root}/one.txt`);
+            await syncFileExplorerRootToPlan(plan('2'), '2', {force: true});
+            selectFileTreePath(`${root}/two.txt`);
+            sentinel.focus();
+            await syncFileExplorerRootToPlan(plan('1'), '1', {force: true});
+            const tree = document.querySelector('.file-explorer-tree-panel');
+            const first = tree?.querySelector('.file-tree-row[data-path="/home/test/one.txt"]');
+            const firstState = {
+              lead: fileExplorerSelectionLead,
+              activeDescendant: tree?.getAttribute('aria-activedescendant') || '',
+              rowId: first?.id || '',
+              focusPreserved: document.activeElement === sentinel,
+            };
+            await syncFileExplorerRootToPlan(plan('2'), '2', {force: true});
+            const second = tree?.querySelector('.file-tree-row[data-path="/home/test/two.txt"]');
+            done({
+              first: firstState,
+              second: {
+                lead: fileExplorerSelectionLead,
+                activeDescendant: tree?.getAttribute('aria-activedescendant') || '',
+                rowId: second?.id || '',
+                focusPreserved: document.activeElement === sentinel,
+              },
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["first"] == {
+        "lead": "/home/test/one.txt",
+        "activeDescendant": metrics["first"]["rowId"],
+        "rowId": metrics["first"]["rowId"],
+        "focusPreserved": True,
+    }, metrics
+    assert metrics["second"] == {
+        "lead": "/home/test/two.txt",
+        "activeDescendant": metrics["second"]["rowId"],
+        "rowId": metrics["second"]["rowId"],
+        "focusPreserved": True,
+    }, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_sync_mode_stale_session_root_open_cannot_override_typed_manual_path(browser, tmp_path):
     session_files_payload = {
         "session": "8002",
