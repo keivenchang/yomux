@@ -1452,7 +1452,7 @@ def test_statsd_hot_write_starts_only_when_socket_transport_is_absent(monkeypatc
     client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     responses = iter([
         {"ok": False, "error": "No such file or directory", "_transport_error": "absent"},
-        {"ok": True, "changed": 1},
+        {"ok": True, "changed": 1, "version": statsd.STATSD_PROTOCOL_VERSION},
     ])
     monkeypatch.setattr(client, "request", lambda _payload, timeout: next(responses))
     starts = []
@@ -1470,6 +1470,41 @@ def test_statsd_hot_write_does_not_start_for_application_not_found(monkeypatch, 
     monkeypatch.setattr(client, "ensure_started", lambda: pytest.fail("application errors must not launch statsd"))
 
     assert client.update_sampler_family("cpu", {}) == {"ok": False, "error": "model not found"}
+
+
+def test_statsd_browser_writes_use_live_socket_without_probe_or_inline_compaction(monkeypatch, tmp_path):
+    client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    requests = []
+    monkeypatch.setattr(
+        client, "request",
+        lambda payload, timeout: requests.append((payload, timeout))
+        or {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION},
+    )
+    monkeypatch.setattr(client, "ensure_started", lambda: pytest.fail("live browser writes must not health-probe"))
+
+    assert client.merge_records([{"time": 1000, "api_count": 1}], client_id="browser-a")["ok"] is True
+    assert client.merge_and_history(
+        [{"time": 1001, "api_count": 1}], client_id="browser-a", query={"since": 0},
+    )["ok"] is True
+
+    assert [request[0]["action"] for request in requests] == ["merge_records", "merge_and_history"]
+    assert all(request[0]["compact"] is False for request in requests)
+
+
+def test_statsd_hot_write_replaces_stale_protocol_once(monkeypatch, tmp_path):
+    client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    responses = iter([
+        {"ok": True, "changed": 1},
+        {"ok": True, "changed": 1, "version": statsd.STATSD_PROTOCOL_VERSION},
+    ])
+    monkeypatch.setattr(client, "request", lambda payload, timeout: next(responses))
+    starts = []
+    monkeypatch.setattr(client, "ensure_started", lambda: starts.append(True) or True)
+
+    response = client.merge_records([{"time": 1000, "api_count": 1}], client_id="browser-a")
+
+    assert response["version"] == statsd.STATSD_PROTOCOL_VERSION
+    assert starts == [True]
 
 
 def test_statsd_live_token_rates_advance_while_historical_atom_spool_is_pending(monkeypatch, tmp_path):
@@ -1918,6 +1953,152 @@ def test_statsd_merge_records_compacts_browser_history_into_retention_tiers(tmp_
     assert sum(record["api_count"] for record in history["records"]) == 100
     assert {record["duration"] for record in history["records"]} == {600}
     service.store.close()
+
+
+def test_statsd_browser_retention_compacts_cooperatively_without_losing_totals(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    now = 200000.0
+    records = [
+        {"start": now - age + index, "api_count": 1}
+        for age in (90 * 60, 3 * 60 * 60, 6 * 60 * 60, 10 * 60 * 60, 18 * 60 * 60)
+        for index in range(20)
+    ]
+
+    merged = service.merge_records(records, client_id="browser-a", now=now, compact=False)
+    steps = 0
+    while service.retention_compaction is not None:
+        result = service._retention_maintenance_step()
+        assert result["processed"] <= 1
+        steps += 1
+        assert steps < 500
+    history = service.handle({"action": "history", "client_id": "browser-a"})
+
+    assert merged["changed"] == 100
+    assert len(history["records"]) <= 10
+    assert sum(record["api_count"] for record in history["records"]) == 100
+    assert {record["duration"] for record in history["records"]} == {600}
+    service.store.close()
+
+
+def test_statsd_cooperative_retention_expires_raw_and_rollup_rows(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    now = 200000.0
+    expired = statsd.stats_store.empty_bucket(int(now - statsd.STATS_HISTORY_RETENTION_SECONDS - 100), 1)
+    expired["sequence"] = 1
+    retained = statsd.stats_store.empty_bucket(int(now - 100), 1)
+    retained["sequence"] = 2
+    service.store.upsert_bucket(expired)
+    service.store.upsert_bucket(retained)
+    service.store.upsert_rollup(expired)
+    service._enqueue_retention_compaction(now)
+
+    while service.retention_compaction is not None:
+        service._retention_maintenance_step()
+
+    assert service.store.bucket(expired["start"], 1) is None
+    assert service.store.rollup_bucket(expired["start"], 1) is None
+    assert service.store.bucket(retained["start"], 1) is not None
+    service.store.close()
+
+
+def test_statsd_retention_converges_while_live_writes_continue(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    now = 200000.0
+    historical = [
+        {"start": now - 6 * 60 * 60 + index, "_statsd_duration": 1, "api_count": 1}
+        for index in range(40)
+    ]
+    service.merge_records(historical, client_id="browser-a", now=now, compact=False)
+
+    # A one-second writer keeps advancing the requested maintenance epoch
+    # while the active pass consumes old fine-grained rows.
+    for index in range(60):
+        sample_now = now + index
+        service.merge_server_records(
+            [{"time": sample_now, "cpu_total_percent": 1, "cpu_count": 1}],
+            now=sample_now, compact=False, refresh_rollups=False,
+        )
+        result = service._retention_maintenance_step()
+        assert result["processed"] <= 1
+
+    steps = 0
+    while service.retention_compaction is not None:
+        service._retention_maintenance_step()
+        steps += 1
+        assert steps < 500
+
+    buckets = service.store.all_buckets()
+    assert sum(
+        float(client.get("api_count") or 0)
+        for bucket in buckets
+        for client in (bucket.get("clients") or {}).values()
+    ) == 40
+    assert sum(float(bucket.get("cpu_count") or 0) for bucket in buckets) == 60
+    assert not any(
+        int(bucket["duration"]) < service._bucket_seconds(float(bucket["start"]), now + 59)
+        for bucket in buckets
+    )
+    service.store.close()
+
+
+def test_statsd_cooperative_retention_preserves_legacy_component_normalization(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    now = 200000.0
+    bucket = statsd.stats_store.empty_bucket(int(now - 10), 1)
+    bucket["sequence"] = 1
+    bucket["cost_summary"] = {"components": [
+        {"event_id": "one", "source": "rollout", "transcript": "/tmp/same.jsonl", "unit": "tokens"},
+        {"event_id": "two", "source": "rollout", "transcript": "/tmp/same.jsonl", "unit": "tokens"},
+    ]}
+    service.store.upsert_bucket(bucket)
+    service._enqueue_retention_compaction(now)
+
+    while service.retention_compaction is not None:
+        service._retention_maintenance_step()
+
+    normalized = service.store.bucket(bucket["start"], bucket["duration"])
+    assert normalized["cost_summary"]["components"][0]["transcript"] == "/tmp/same.jsonl"
+    assert normalized["cost_summary"]["components"][1]["transcript"] == ""
+    service.store.close()
+
+
+def test_statsd_cpu_write_stays_responsive_during_browser_retention_maintenance(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    original_replace = service.store.replace_compacted_bucket
+    maintenance_started = threading.Event()
+
+    def slow_replace(*args, **kwargs):
+        maintenance_started.set()
+        time.sleep(0.2)
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(service.store, "replace_compacted_bucket", slow_replace)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = statsd.StatsClient(service.socket_path, service.store.path)
+    deadline = time.monotonic() + 2.0
+    while not client.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.healthy() is True
+    now = time.time()
+    browser = client.merge_records(
+        [{"start": now - 3 * 60 * 60 + index, "_statsd_duration": 1, "api_count": 1} for index in range(16)],
+        client_id="browser-a", now=now,
+    )
+    assert browser["ok"] is True
+    assert maintenance_started.wait(2.0) is True
+
+    started = time.monotonic()
+    response = client.merge_server_records(
+        [{"time": time.time(), "cpu_total_percent": 1, "cpu_count": 1}],
+        compact=False, refresh_rollups=False, timeout=0.9,
+    )
+    elapsed = time.monotonic() - started
+
+    client.request({"action": "shutdown"})
+    worker.join(timeout=2.0)
+    assert response["ok"] is True
+    assert elapsed < 0.9
 
 
 def test_statsd_merge_server_records_owns_global_process_and_host_deltas(tmp_path):

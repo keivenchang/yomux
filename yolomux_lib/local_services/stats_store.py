@@ -393,6 +393,52 @@ class StatsStore:
         ).fetchall()
         return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
+    def retention_candidate(
+        self, *, now: float, retention_seconds: int, tiers: tuple[tuple[int, int], ...]
+    ) -> dict[str, Any] | None:
+        """Return one row that is expired or finer than its current age tier."""
+
+        clauses = ["start <= 0", "start < ?"]
+        values: list[Any] = [float(now) - int(retention_seconds)]
+        previous_age = 0
+        for max_age, bucket_seconds in tiers:
+            clauses.append("(start >= ? AND start < ? AND duration < ?)")
+            values.extend((float(now) - int(max_age), float(now) - previous_age, int(bucket_seconds)))
+            previous_age = int(max_age)
+        row = self._connection().execute(
+            f"SELECT bucket_json FROM stats_buckets WHERE {' OR '.join(clauses)} ORDER BY start,duration LIMIT 1",
+            values,
+        ).fetchone()
+        return normalize_bucket(json.loads(str(row[0]))) if row is not None else None
+
+    def replace_compacted_bucket(
+        self, source_start: int, source_duration: int, replacement: dict[str, Any] | None
+    ) -> None:
+        """Atomically retire one source row and optionally merge its replacement."""
+
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "DELETE FROM stats_buckets WHERE start=? AND duration=?",
+                (int(source_start), int(source_duration)),
+            )
+            if replacement is not None:
+                self._upsert_bucket(connection, replacement)
+
+    def oldest_rollup_before(self, cutoff_time: float) -> tuple[int, int] | None:
+        row = self._connection().execute(
+            "SELECT start,duration FROM stats_rollups WHERE start + duration < ? ORDER BY start,duration LIMIT 1",
+            (float(cutoff_time),),
+        ).fetchone()
+        return (int(row[0]), int(row[1])) if row is not None else None
+
+    def delete_rollup(self, start: int, duration: int) -> None:
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "DELETE FROM stats_rollups WHERE start=? AND duration=?", (int(start), int(duration))
+            )
+
     def rollup_source_page(
         self,
         *,

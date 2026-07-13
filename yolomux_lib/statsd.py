@@ -44,7 +44,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 17
+STATSD_PROTOCOL_VERSION = 18
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -735,6 +735,8 @@ class PersistentStatsService:
         # rebuild those windows inline on the RPC thread.
         self.rollup_pending: set[tuple[int, int]] = set()
         self.rollup_jobs: dict[tuple[int, int], dict[str, Any]] = {}
+        self.retention_compaction: dict[str, Any] | None = None
+        self.retention_normalization_complete = False
         self.maintenance_turn = 0
 
     def _pricing_catalog_metadata(self) -> tuple[str, int]:
@@ -765,14 +767,16 @@ class PersistentStatsService:
         # The listener and SQLite writer are intentionally one thread. Advance
         # exactly one maintenance family after an actual 100ms accept timeout;
         # doing token + pricing + rollup work in one turn starves queued CPU RPCs.
-        maintenance_kind = self.maintenance_turn % 3
+        maintenance_kind = self.maintenance_turn % 4
         self.maintenance_turn += 1
         if maintenance_kind == 0:
             self._drain_agent_token_scan_result()
         elif maintenance_kind == 1:
             self._maybe_reproject_cost_summaries()
-        else:
+        elif maintenance_kind == 2:
             self._rollup_maintenance_step()
+        else:
+            self._retention_maintenance_step()
         with self.agent_token_scan_lock:
             scan_active = (
                 self.agent_token_scan_worker is not None
@@ -784,7 +788,7 @@ class PersistentStatsService:
         # An elected sampler is active work even while no browser reads YO!stats.
         maintenance_pending = self.pricing_reprojection is not None
         rollup_pending = bool(self.rollup_pending or self.rollup_jobs or self.rollup_backfill is not None)
-        return not scan_active and not maintenance_pending and not rollup_pending and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
+        return not scan_active and not maintenance_pending and not rollup_pending and self.retention_compaction is None and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     @staticmethod
     def _legacy_client_bucket(snapshot: Any) -> dict[str, Any] | None:
@@ -886,7 +890,10 @@ class PersistentStatsService:
             return 0.0
         return number if math.isfinite(number) and number > 0.0 else 0.0
 
-    def merge_records(self, records: list[dict[str, Any]], *, client_id: str = "", now: float | None = None, clear: bool = False) -> dict[str, Any]:
+    def merge_records(
+        self, records: list[dict[str, Any]], *, client_id: str = "", now: float | None = None,
+        clear: bool = False, compact: bool = True,
+    ) -> dict[str, Any]:
         """Apply bounded browser deltas through the durable single writer."""
         if len(records) > STATS_HISTORY_POST_MAX_RECORDS:
             raise ValueError(f"records limit is {STATS_HISTORY_POST_MAX_RECORDS}")
@@ -936,9 +943,13 @@ class PersistentStatsService:
             client["sequence"] = next_sequence
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
             self.store.upsert_bucket(bucket)
+            self._enqueue_persisted_rollups(sample_time)
             changed += 1
         if changed:
-            self._compact_history(sample_now)
+            if compact:
+                self._compact_history(sample_now)
+            else:
+                self._enqueue_retention_compaction(sample_now)
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
 
@@ -1090,6 +1101,8 @@ class PersistentStatsService:
             changed += 1
         if changed and compact:
             self._compact_history(sample_now)
+        elif changed:
+            self._enqueue_retention_compaction(sample_now)
         if changed:
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
@@ -1172,6 +1185,77 @@ class PersistentStatsService:
     def _rollup_backfill_step(self) -> dict[str, Any]:
         """Compatibility name for focused callers; use the shared queue."""
         return self._rollup_maintenance_step()
+
+    def _enqueue_retention_compaction(self, now: float) -> None:
+        if self.retention_compaction is None:
+            self.retention_compaction = {"now": float(now), "next_now": 0.0, "phase": "buckets"}
+            return
+        # Freeze one pass's tier boundaries. New writes are already assigned to
+        # their current tier; remember a later epoch without restarting the
+        # active pass on every one-second sample.
+        self.retention_compaction["next_now"] = max(
+            float(self.retention_compaction.get("next_now") or 0.0), float(now)
+        )
+
+    def _retention_maintenance_step(self) -> dict[str, Any]:
+        """Compact or expire exactly one durable row between live RPCs."""
+
+        state = self.retention_compaction
+        if state is None:
+            return {"ok": True, "pending": False, "processed": 0}
+        now = float(state["now"])
+        cutoff = now - STATS_HISTORY_RETENTION_SECONDS
+        if state["phase"] == "buckets":
+            source = self.store.retention_candidate(
+                now=now, retention_seconds=STATS_HISTORY_RETENTION_SECONDS, tiers=STATS_HISTORY_TIERS,
+            )
+            if source is not None:
+                start, duration = int(source["start"]), int(source["duration"])
+                if start < cutoff:
+                    self.store.replace_compacted_bucket(start, duration, None)
+                else:
+                    normalized = self._merge_usage_components(source, [])
+                    target_duration = max(duration, self._bucket_seconds(float(start), now))
+                    target_start = int(math.floor(start / target_duration) * target_duration)
+                    if (target_start, target_duration) != (start, duration):
+                        target = self.store.bucket(target_start, target_duration) or stats_store.empty_bucket(target_start, target_duration)
+                        self._merge_bucket(target, source)
+                        self.store.replace_compacted_bucket(start, duration, target)
+                        # A rollup job may have observed the source before this
+                        # atomic move. Invalidate it so its eventual projection
+                        # is derived wholly from the final compacted sources.
+                        self._enqueue_persisted_rollups(float(target_start))
+                    elif normalized:
+                        self.store.upsert_bucket(source)
+                return {"ok": True, "pending": True, "processed": 1}
+            if self.retention_normalization_complete:
+                state["phase"] = "rollups"
+            else:
+                state.update({"phase": "normalize", "after_start": -1, "after_duration": -1})
+        if state["phase"] == "normalize":
+            rows = self.store.maintenance_buckets_after(
+                after_start=int(state["after_start"]), after_duration=int(state["after_duration"]), limit=1,
+            )
+            if rows:
+                source = rows[0]
+                state["after_start"] = int(source["start"])
+                state["after_duration"] = int(source["duration"])
+                if self._merge_usage_components(source, []):
+                    self.store.upsert_bucket(source)
+                return {"ok": True, "pending": True, "processed": 1}
+            self.retention_normalization_complete = True
+            state["phase"] = "rollups"
+        stale_rollup = self.store.oldest_rollup_before(cutoff)
+        if stale_rollup is not None:
+            self.store.delete_rollup(*stale_rollup)
+            return {"ok": True, "pending": True, "processed": 1}
+        next_now = float(state.get("next_now") or 0.0)
+        self.retention_compaction = (
+            {"now": next_now, "next_now": 0.0, "phase": "buckets"}
+            if next_now > now else None
+        )
+        self._encoded_query_cache.clear()
+        return {"ok": True, "pending": self.retention_compaction is not None, "processed": 0}
 
     def _merge_usage_components(self, bucket: dict[str, Any], atoms: Any) -> bool:
         """Persist a bounded, idempotent component projection in one bucket."""
@@ -3003,6 +3087,7 @@ class PersistentStatsService:
         except (TypeError, ValueError):
             requested_protocol = STATSD_COMPAT_PROTOCOL_VERSION
         response_protocol = STATSD_PROTOCOL_VERSION if requested_protocol >= STATSD_PROTOCOL_VERSION else STATSD_COMPAT_PROTOCOL_VERSION
+        hot_version = {"version": STATSD_PROTOCOL_VERSION} if requested_protocol >= STATSD_PROTOCOL_VERSION else {}
         if action == "ping":
             return {"ok": True, "version": response_protocol, "pid": os.getpid(), "started_at": self.started_at}, b""
         if action == "status":
@@ -3051,7 +3136,7 @@ class PersistentStatsService:
                 if str(item.get("last_failure") or "").strip()
             ]
             self.last_sampler_failure = "; ".join(failures)
-            return {"ok": True, "family": family}, b""
+            return {"ok": True, "family": family, **hot_version}, b""
         if action == "upsert_bucket":
             bucket = request.get("bucket")
             if not isinstance(bucket, dict):
@@ -3067,12 +3152,14 @@ class PersistentStatsService:
             if not isinstance(records, list):
                 return {"ok": False, "error": "records must be a list"}, b""
             try:
-                return self.merge_records(
+                merged = self.merge_records(
                     [record for record in records if isinstance(record, dict)],
                     client_id=str(request.get("client_id") or ""),
                     now=request.get("now"),
                     clear=bool(request.get("clear")),
-                ), b""
+                    compact=request.get("compact") is not False,
+                )
+                return {**merged, **hot_version}, b""
             except (TypeError, ValueError, sqlite3.Error) as exc:
                 return {"ok": False, "error": str(exc)}, b""
         if action == "merge_and_history":
@@ -3086,22 +3173,24 @@ class PersistentStatsService:
                     client_id=str(request.get("client_id") or ""),
                     now=request.get("now"),
                     clear=bool(request.get("clear")),
+                    compact=request.get("compact") is not False,
                 )
                 history = self._encoded_history(query)
             except (TypeError, ValueError, sqlite3.Error) as exc:
                 return {"ok": False, "error": str(exc)}, b""
-            return {"ok": True, "merged": merged, "history": history}, b""
+            return {"ok": True, "merged": merged, "history": history, **hot_version}, b""
         if action == "merge_server_records":
             records = request.get("records")
             if not isinstance(records, list):
                 return {"ok": False, "error": "records must be a list"}, b""
             try:
-                return self.merge_server_records(
+                merged = self.merge_server_records(
                     [record for record in records if isinstance(record, dict)],
                     now=request.get("now"),
                     compact=request.get("compact") is not False,
                     refresh_rollups=request.get("refresh_rollups") is not False,
-                ), b""
+                )
+                return {**merged, **hot_version}, b""
             except (TypeError, ValueError, sqlite3.Error) as exc:
                 return {"ok": False, "error": str(exc)}, b""
         if action == "claim_agent_token_deltas":
@@ -3348,15 +3437,20 @@ class StatsClient(LocalServiceClient):
         return self.request({"action": "history", **request}, timeout=1.0)
 
     def merge_records(self, records: list[dict[str, Any]], *, client_id: str, now: float | None = None, clear: bool = False) -> dict[str, Any]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}
-        return self.request({"action": "merge_records", "records": records, "client_id": client_id, "now": now, "clear": clear}, timeout=3.0)
+        return self._request_live_or_start(
+            {
+                "action": "merge_records", "records": records, "client_id": client_id,
+                "now": now, "clear": clear, "compact": False,
+            },
+            timeout=3.0,
+        )
 
     def merge_and_history(self, records: list[dict[str, Any]], *, client_id: str, query: dict[str, Any], now: float | None = None, clear: bool = False) -> dict[str, Any]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}
-        return self.request(
-            {"action": "merge_and_history", "records": records, "client_id": client_id, "query": query, "now": now, "clear": clear},
+        return self._request_live_or_start(
+            {
+                "action": "merge_and_history", "records": records, "client_id": client_id,
+                "query": query, "now": now, "clear": clear, "compact": False,
+            },
             timeout=3.0,
         )
 
@@ -3369,20 +3463,30 @@ class StatsClient(LocalServiceClient):
     def _request_live_or_start(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         """Use the live socket first; contention is not evidence the daemon died."""
 
-        response = self.request(payload, timeout=timeout)
-        if response.get("ok") is not False or not self._transport_requires_start(response):
+        versioned_payload = {**payload, "protocol_version": STATSD_PROTOCOL_VERSION}
+        response = self.request(versioned_payload, timeout=timeout)
+        try:
+            response_version = int(response.get("version") or 0)
+        except (TypeError, ValueError):
+            response_version = 0
+        if response.get("ok") is not False and response_version == STATSD_PROTOCOL_VERSION:
+            return response
+        should_start = self._transport_requires_start(response) or (
+            response.get("ok") is not False and response_version != STATSD_PROTOCOL_VERSION
+        )
+        if not should_start:
             return response
         if not self.ensure_started():
             return response
-        return self.request(payload, timeout=timeout)
+        return self.request(versioned_payload, timeout=timeout)
 
     def merge_server_records(
         self,
         records: list[dict[str, Any]],
         *,
         now: float | None = None,
-        compact: bool = True,
-        refresh_rollups: bool = True,
+        compact: bool = False,
+        refresh_rollups: bool = False,
         timeout: float = 3.0,
     ) -> dict[str, Any]:
         return self._request_live_or_start(
