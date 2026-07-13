@@ -42117,6 +42117,27 @@ function applyJsDebugHistoryCoverage(coverage) {
   return jsDebugHistoryReadinessSnapshot();
 }
 
+function jsDebugHistorySatisfiedCoverage(coverage, request) {
+  if (!coverage || coverage.complete) return coverage;
+  // `complete:false` can mean the durable store simply does not have samples
+  // for the older prefix yet (fresh install, restart, or intentionally sparse
+  // sampling).  When statsd explicitly says there is no older page, that gap
+  // is known-unavailable rather than a failed request.  Render the records it
+  // did return and satisfy this client domain so the UI does not discard valid
+  // Agent/Model token history and retry the same unavailable prefix forever.
+  if (coverage.mode !== 'live' || coverage.hasMoreOlder) return null;
+  const targetStart = Number(request?.targetStartSeconds);
+  const targetEnd = Number(request?.targetEndSeconds);
+  if (!Number.isFinite(targetStart) || !Number.isFinite(targetEnd) || targetEnd <= targetStart) return null;
+  if (!(coverage.coveredStart > 0) || !(coverage.coveredEnd > coverage.coveredStart)) return null;
+  return {
+    ...coverage,
+    complete: true,
+    coveredStart: Math.min(targetStart, coverage.coveredStart),
+    coveredEnd: Math.max(targetEnd, coverage.coveredEnd),
+  };
+}
+
 function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
   const intervals = jsDebugHistoryReadiness.coverageIntervals
     .filter(interval => Number(interval.resolutionSeconds) <= Math.max(maxResolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
@@ -42774,85 +42795,99 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
   scheduleJsDebugStatsHistoryFlush();
 }
 
-function debugGraphMergeAgentTokenRates(target, source) {
+function debugGraphMergeAgentTokenRates(target, source, multiplier = 1) {
   if (!(source?.agentTokenRates instanceof Map)) return;
+  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
+  if (!scale) return;
   if (!(target.agentTokenRates instanceof Map)) target.agentTokenRates = new Map();
   for (const [key, item] of source.agentTokenRates.entries()) {
     const existing = target.agentTokenRates.get(String(key)) || {label: item?.label || String(key), total: 0, samples: 0, tokens: 0, seconds: 0};
     existing.label = item?.label || existing.label;
-    existing.total += Number(item?.total || 0);
-    existing.samples += Number(item?.samples || 0);
-    existing.tokens += Number(item?.tokens || 0);
-    existing.seconds += Number(item?.seconds || 0);
+    existing.total += Number(item?.total || 0) * scale;
+    existing.samples += Number(item?.samples || 0) * scale;
+    existing.tokens += Number(item?.tokens || 0) * scale;
+    existing.seconds += Number(item?.seconds || 0) * scale;
     if (!(existing.modelRates instanceof Map)) existing.modelRates = new Map();
     const sourceModelRates = item?.modelRates instanceof Map
       ? item.modelRates
       : new Map(Array.isArray(item?.modelRates) ? item.modelRates : []);
     for (const [model, sourceRate] of sourceModelRates.entries()) {
       const targetRate = existing.modelRates.get(String(model)) || {total: 0, samples: 0, tokens: 0, seconds: 0};
-      targetRate.total += Number(sourceRate?.total || 0);
-      targetRate.samples += Number(sourceRate?.samples || 0);
-      targetRate.tokens += Number(sourceRate?.tokens || 0);
-      targetRate.seconds += Number(sourceRate?.seconds || 0);
+      targetRate.total += Number(sourceRate?.total || 0) * scale;
+      targetRate.samples += Number(sourceRate?.samples || 0) * scale;
+      targetRate.tokens += Number(sourceRate?.tokens || 0) * scale;
+      targetRate.seconds += Number(sourceRate?.seconds || 0) * scale;
       existing.modelRates.set(String(model), targetRate);
     }
     target.agentTokenRates.set(String(key), existing);
   }
 }
 
-function debugGraphMergeCostSummary(target, source) {
+function debugGraphMergeCostSummary(target, source, multiplier = 1) {
   if (!source?.costSummary) return;
+  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
+  if (!scale) return;
   const current = target.costSummary || {
     totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
     components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
   };
-  current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd);
-  current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd);
-  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd);
-  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd);
-  current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount);
+  current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd) * scale;
+  current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd) * scale;
+  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
+  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
+  current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount) * scale;
   current.complete = current.complete && source.costSummary.complete === true;
-  current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount);
-  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0);
-  current.components.push(...debugGraphCostRows(source.costSummary.components));
-  current.models.push(...debugGraphCostRows(source.costSummary.models));
-  current.sources.push(...debugGraphCostRows(source.costSummary.sources));
-  current.tmuxWindows.push(...debugGraphCostRows(source.costSummary.tmuxWindows));
+  current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount) * scale;
+  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0) * scale;
+  const scaledRows = value => debugGraphCostRows(value).map(row => {
+    if (scale === 1) return row;
+    const scaled = {...row};
+    for (const key of ['quantity', 'token_quantity', 'micro_usd', 'total_micro_usd', 'cost_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
+      if (Number.isFinite(Number(scaled[key]))) scaled[key] = Number(scaled[key]) * scale;
+    }
+    return scaled;
+  });
+  current.components.push(...scaledRows(source.costSummary.components));
+  current.models.push(...scaledRows(source.costSummary.models));
+  current.sources.push(...scaledRows(source.costSummary.sources));
+  current.tmuxWindows.push(...scaledRows(source.costSummary.tmuxWindows));
   current.catalogRevision = source.costSummary.catalogRevision || current.catalogRevision;
   current.activeCatalogRevision = source.costSummary.activeCatalogRevision || current.activeCatalogRevision;
   current.freshness = source.costSummary.freshness || current.freshness;
   target.costSummary = current;
 }
 
-function debugGraphMergeBucket(target, source) {
-  target.apiCount += source.apiCount || 0;
-  target.sseCount += source.sseCount || 0;
-  target.latencyTotalMs += source.latencyTotalMs || 0;
-  target.latencyCount += source.latencyCount || 0;
-  target.bandwidthBytes += source.bandwidthBytes || 0;
-  target.disconnectedMs += source.disconnectedMs || 0;
-  target.cpuTotalPercent += source.cpuTotalPercent || 0;
-  target.cpuCount += source.cpuCount || 0;
-  target.systemCpuTotalPercent += source.systemCpuTotalPercent || 0;
-  target.systemCpuCount += source.systemCpuCount || 0;
-  target.askAgentTotal += source.askAgentTotal || 0;
-  target.runAgentTotal += source.runAgentTotal || 0;
-  target.transitionAgentTotal += source.transitionAgentTotal || 0;
-  target.idleAgentTotal += source.idleAgentTotal || 0;
-  target.activeAgentTotal += source.activeAgentTotal || 0;
-  target.inactiveAgentTotal += source.inactiveAgentTotal || 0;
-  target.agentActivitySamples += source.agentActivitySamples || 0;
+function debugGraphMergeBucket(target, source, multiplier = 1) {
+  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
+  if (!scale) return;
+  target.apiCount += (source.apiCount || 0) * scale;
+  target.sseCount += (source.sseCount || 0) * scale;
+  target.latencyTotalMs += (source.latencyTotalMs || 0) * scale;
+  target.latencyCount += (source.latencyCount || 0) * scale;
+  target.bandwidthBytes += (source.bandwidthBytes || 0) * scale;
+  target.disconnectedMs += (source.disconnectedMs || 0) * scale;
+  target.cpuTotalPercent += (source.cpuTotalPercent || 0) * scale;
+  target.cpuCount += (source.cpuCount || 0) * scale;
+  target.systemCpuTotalPercent += (source.systemCpuTotalPercent || 0) * scale;
+  target.systemCpuCount += (source.systemCpuCount || 0) * scale;
+  target.askAgentTotal += (source.askAgentTotal || 0) * scale;
+  target.runAgentTotal += (source.runAgentTotal || 0) * scale;
+  target.transitionAgentTotal += (source.transitionAgentTotal || 0) * scale;
+  target.idleAgentTotal += (source.idleAgentTotal || 0) * scale;
+  target.activeAgentTotal += (source.activeAgentTotal || 0) * scale;
+  target.inactiveAgentTotal += (source.inactiveAgentTotal || 0) * scale;
+  target.agentActivitySamples += (source.agentActivitySamples || 0) * scale;
   target.agentStatusSequence = Math.max(Number(target.agentStatusSequence ?? -1), Number(source.agentStatusSequence ?? -1));
-  target.tokensPerAgentTotal += source.tokensPerAgentTotal || 0;
-  target.agentTokenSamples += source.agentTokenSamples || 0;
-  debugGraphMergeAgentTokenRates(target, source);
-  debugGraphMergeCostSummary(target, source);
+  target.tokensPerAgentTotal += (source.tokensPerAgentTotal || 0) * scale;
+  target.agentTokenSamples += (source.agentTokenSamples || 0) * scale;
+  debugGraphMergeAgentTokenRates(target, source, scale);
+  debugGraphMergeCostSummary(target, source, scale);
   const sourceHost = source.hostMetrics;
   if (sourceHost) {
     const targetHost = target.hostMetrics || (target.hostMetrics = debugGraphNewHostMetrics());
-    targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0);
-    targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0);
-    targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0);
+    targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0) * scale;
+    targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0) * scale;
+    targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0) * scale;
     if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
     if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
@@ -42865,8 +42900,8 @@ function debugGraphMergeBucket(target, source) {
       for (const [key, sourceItem] of sourceMap.entries()) {
         const item = targetMap.get(key) || {label: sourceItem.label || key, [valueKey]: 0, samples: 0};
         item.label = sourceItem.label || item.label;
-        item[valueKey] += Number(sourceItem[valueKey] || 0);
-        item.samples += Number(sourceItem.samples || 0);
+        item[valueKey] += Number(sourceItem[valueKey] || 0) * scale;
+        item.samples += Number(sourceItem.samples || 0) * scale;
         targetMap.set(key, item);
       }
     }
@@ -42874,10 +42909,10 @@ function debugGraphMergeBucket(target, source) {
       for (const [key, sourceItem] of sourceHost.gpuDevices.entries()) {
         const item = targetHost.gpuDevices.get(key) || {label: sourceItem.label || key, utilTotalPercent: 0, memoryUsedTotalBytes: 0, memoryCapacityTotalBytes: 0, samples: 0};
         item.label = sourceItem.label || item.label;
-        item.utilTotalPercent += Number(sourceItem.utilTotalPercent || 0);
-        item.memoryUsedTotalBytes += Number(sourceItem.memoryUsedTotalBytes || 0);
-        item.memoryCapacityTotalBytes += Number(sourceItem.memoryCapacityTotalBytes || 0);
-        item.samples += Number(sourceItem.samples || 0);
+        item.utilTotalPercent += Number(sourceItem.utilTotalPercent || 0) * scale;
+        item.memoryUsedTotalBytes += Number(sourceItem.memoryUsedTotalBytes || 0) * scale;
+        item.memoryCapacityTotalBytes += Number(sourceItem.memoryCapacityTotalBytes || 0) * scale;
+        item.samples += Number(sourceItem.samples || 0) * scale;
         targetHost.gpuDevices.set(key, item);
       }
     }
@@ -42886,12 +42921,12 @@ function debugGraphMergeBucket(target, source) {
     if (!(target.clients instanceof Map)) target.clients = new Map();
     for (const [clientId, sourceClient] of source.clients.entries()) {
       const targetClient = target.clients.get(clientId) || debugGraphNewClientBucket();
-      targetClient.apiCount += Number(sourceClient.apiCount || 0);
-      targetClient.sseCount += Number(sourceClient.sseCount || 0);
-      targetClient.latencyTotalMs += Number(sourceClient.latencyTotalMs || 0);
-      targetClient.latencyCount += Number(sourceClient.latencyCount || 0);
-      targetClient.bandwidthBytes += Number(sourceClient.bandwidthBytes || 0);
-      targetClient.disconnectedMs += Number(sourceClient.disconnectedMs || 0);
+      targetClient.apiCount += Number(sourceClient.apiCount || 0) * scale;
+      targetClient.sseCount += Number(sourceClient.sseCount || 0) * scale;
+      targetClient.latencyTotalMs += Number(sourceClient.latencyTotalMs || 0) * scale;
+      targetClient.latencyCount += Number(sourceClient.latencyCount || 0) * scale;
+      targetClient.bandwidthBytes += Number(sourceClient.bandwidthBytes || 0) * scale;
+      targetClient.disconnectedMs += Number(sourceClient.disconnectedMs || 0) * scale;
       target.clients.set(clientId, targetClient);
     }
   }
@@ -42900,8 +42935,8 @@ function debugGraphMergeBucket(target, source) {
     for (const [processId, sourceProcess] of source.servers.entries()) {
       const targetProcess = target.servers.get(processId) || {label: processId, cpuTotalPercent: 0, cpuCount: 0};
       targetProcess.label = sourceProcess.label || targetProcess.label;
-      targetProcess.cpuTotalPercent += Number(sourceProcess.cpuTotalPercent || 0);
-      targetProcess.cpuCount += Number(sourceProcess.cpuCount || 0);
+      targetProcess.cpuTotalPercent += Number(sourceProcess.cpuTotalPercent || 0) * scale;
+      targetProcess.cpuCount += Number(sourceProcess.cpuCount || 0) * scale;
       target.servers.set(processId, targetProcess);
     }
   }
@@ -43436,11 +43471,11 @@ function clearDebugGraphAgentTokenData() {
   resetDebugGraphAgentTokenHistory();
 }
 
-function debugGraphAggregateBucket(map, source, scaleMs) {
-  const durationMs = Math.max(scaleMs, Number(source.durationMs) || scaleMs);
+function debugGraphAggregateBucket(map, source, scaleMs, multiplier = 1) {
+  const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(scaleMs) || jsDebugGraphRawBucketMs);
   const startMs = Math.floor(source.startMs / durationMs) * durationMs;
   const bucket = debugGraphBucket(map, startMs, durationMs);
-  debugGraphMergeBucket(bucket, source);
+  debugGraphMergeBucket(bucket, source, multiplier);
 }
 
 function debugGraphBucketInRange(bucket, cutoffMs, nowMs) {
@@ -43455,6 +43490,14 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
   return jsDebugGraphRangeOptions;
 }
 
+function debugGraphMinimumDisplayResolutionMs(domain, nowMs = Date.now()) {
+  const domainStartMs = Number(domain?.startMs);
+  return Math.max(
+    Number.isFinite(domainStartMs) ? debugGraphBucketDurationForTime(domainStartMs, nowMs) : jsDebugGraphRawBucketMs,
+    ...debugGraphSourceBuckets(domain).map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs)),
+  );
+}
+
 function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
   const domainStartMs = Number(domain?.startMs);
   const domainEndMs = Number(domain?.endMs);
@@ -43464,9 +43507,10 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   const targetMs = domainSpanMs / jsDebugGraphMaxDisplayPoints;
   const displayMs = jsDebugGraphDisplayBucketMs.find(bucketMs => bucketMs >= targetMs)
     || jsDebugGraphDisplayBucketMs.at(-1);
-  const retainedMs = Number.isFinite(domainStartMs)
-    ? debugGraphBucketDurationForTime(domainStartMs, nowMs)
-    : jsDebugGraphRawBucketMs;
+  // A display set has one bar width. Its scale must therefore accommodate the
+  // coarsest retained source in the whole domain, not merely the tier at its
+  // left edge. This also covers server history overlapping the live raw tail.
+  const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
   const overrideMs = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0) * 1000;
   if (overrideMs > 0) return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
@@ -43479,16 +43523,50 @@ function debugGraphSourceBuckets(domain) {
     .sort((left, right) => left.startMs - right.startMs);
 }
 
+function debugGraphCoveredDuration(intervals, startMs, endMs) {
+  let covered = 0;
+  for (const interval of intervals) {
+    if (interval.endMs <= startMs) continue;
+    if (interval.startMs >= endMs) break;
+    covered += Math.max(0, Math.min(endMs, interval.endMs) - Math.max(startMs, interval.startMs));
+  }
+  return Math.min(Math.max(0, endMs - startMs), covered);
+}
+
+function debugGraphAddCoveredInterval(intervals, startMs, endMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+  let index = 0;
+  while (index < intervals.length && intervals[index].endMs < startMs) index += 1;
+  let mergedStart = startMs;
+  let mergedEnd = endMs;
+  while (index < intervals.length && intervals[index].startMs <= mergedEnd) {
+    mergedStart = Math.min(mergedStart, intervals[index].startMs);
+    mergedEnd = Math.max(mergedEnd, intervals[index].endMs);
+    intervals.splice(index, 1);
+  }
+  intervals.splice(index, 0, {startMs: mergedStart, endMs: mergedEnd});
+}
+
 function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
   const buckets = new Map();
-  for (const bucket of jsDebugGraphRollupBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
-  }
-  for (const bucket of jsDebugGraphRawBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+  const coveredIntervals = [];
+  const sources = debugGraphSourceBuckets(domain).sort((left, right) => (
+    (Number(left.durationMs) - Number(right.durationMs))
+    || (Number(left.startMs) - Number(right.startMs))
+  ));
+  for (const bucket of sources) {
+    const startMs = Number(bucket.startMs);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+    const endMs = startMs + durationMs;
+    const uncoveredMs = durationMs - debugGraphCoveredDuration(coveredIntervals, startMs, endMs);
+    if (uncoveredMs > 0) debugGraphAggregateBucket(buckets, bucket, scaleMs, uncoveredMs / durationMs);
+    // Once a finer source has claimed an instant, a coarser history response
+    // may only fill the remaining interval. This prevents raw/live + rollup
+    // overlap from double-counting values in the same rendered bar.
+    debugGraphAddCoveredInterval(coveredIntervals, startMs, endMs);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
@@ -44261,10 +44339,9 @@ function debugGraphSeriesData(buckets) {
 
 function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
-  const defaultSeconds = debugGraphBucketDurationForTime(domain.startMs, nowMs) / 1000;
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
   const choices = [1, 2, 5, 10, 30, 60, 120, 300, 600];
-  const retainedSeconds = debugGraphBucketDurationForTime(domain.startMs, nowMs) / 1000;
+  const retainedSeconds = debugGraphMinimumDisplayResolutionMs(domain, nowMs) / 1000;
   const availableChoices = choices.filter(value => value >= retainedSeconds && value * 10 <= domain.rangeSeconds);
   const overrideSeconds = availableChoices.includes(Number(jsDebugGraphResolutionOverrideSeconds)) ? Number(jsDebugGraphResolutionOverrideSeconds) : 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
@@ -46028,7 +46105,10 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
     if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
-    if (readinessRequest && !coverage.complete) throw new Error('stats history response provided incomplete coverage');
+    const satisfiedCoverage = readinessRequest ? jsDebugHistorySatisfiedCoverage(coverage, readinessRequest) : coverage;
+    if (readinessRequest && !coverage.complete && !satisfiedCoverage && !coverage.hasMoreOlder) {
+      throw new Error('stats history response provided unusable partial coverage');
+    }
     const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
       ? payload.history.coverage
       : null;
@@ -46039,7 +46119,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       advanceHistoryCursor: coverage?.mode !== 'older',
       replaceCoverage,
     });
-    if (coverage) applyJsDebugHistoryCoverage(coverage);
+    if (satisfiedCoverage) applyJsDebugHistoryCoverage(satisfiedCoverage);
     recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
     if (readinessRequest) {
       if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {

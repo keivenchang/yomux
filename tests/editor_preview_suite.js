@@ -6161,6 +6161,53 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'readiness clears only after the final page paints');
   });
 
+  await testAsync('YO!stats renders terminal partial history instead of discarding token data', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setFetchForTest((url) => {
+      const requestUrl = String(url);
+      requests.push(requestUrl);
+      const parsed = new URL(requestUrl, 'http://localhost');
+      const requestedStart = Number(parsed.searchParams.get('history_start'));
+      return Promise.resolve(jsonResponse({history: {
+        sequence: 8,
+        latest_sequence: 8,
+        records: [{
+          start: requestedStart + 60,
+          duration: 60,
+          sequence: 8,
+          tokens_per_agent_total: 120,
+          agent_token_samples: 1,
+          agent_token_rates: [{
+            key: '8881|0|codex', label: '8881:0:codex', total: 120,
+            tokens: 120, seconds: 60, samples: 1,
+            model_rates: {'gpt-5.6-terra': {total: 120, tokens: 120, seconds: 60, samples: 1}},
+          }],
+        }],
+        coverage: statsHistoryCoverageForRequest(requestUrl, {
+          covered_start: requestedStart + 60,
+          complete: false,
+          has_more_older: false,
+          next_older_end: 0,
+        }),
+      }}));
+    });
+
+    await api.pollJsDebugStatsSampleForTest();
+    for (let index = 0; index < 4; index += 1) await flushAsyncWork();
+    const state = api.jsDebugHistoryReadinessForTest();
+    const summary = api.debugGraphBucketSummaryForTest();
+    const html = api.debugPanelHtmlForTest();
+    assert.equal(requests.length, 1, 'known-unavailable older prefix does not retry forever');
+    assert.equal(state.phase, 'ready', 'usable partial availability reaches ready after painting');
+    assert.ok(summary.rawBuckets + summary.rollupBuckets > 0, 'returned token records are retained');
+    assert.ok(html.includes('Agent tokens/min') && html.includes('8881:0:codex'), 'Agent token chart renders the partial response');
+    assert.equal(html.includes('Could not load history'), false, 'usable partial availability does not cover the chart with an error');
+  });
+
   await testAsync('YO!stats widening the range queues an older-history fetch behind an in-flight poll', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];

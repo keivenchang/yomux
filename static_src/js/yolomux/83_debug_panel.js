@@ -630,6 +630,27 @@ function applyJsDebugHistoryCoverage(coverage) {
   return jsDebugHistoryReadinessSnapshot();
 }
 
+function jsDebugHistorySatisfiedCoverage(coverage, request) {
+  if (!coverage || coverage.complete) return coverage;
+  // `complete:false` can mean the durable store simply does not have samples
+  // for the older prefix yet (fresh install, restart, or intentionally sparse
+  // sampling).  When statsd explicitly says there is no older page, that gap
+  // is known-unavailable rather than a failed request.  Render the records it
+  // did return and satisfy this client domain so the UI does not discard valid
+  // Agent/Model token history and retry the same unavailable prefix forever.
+  if (coverage.mode !== 'live' || coverage.hasMoreOlder) return null;
+  const targetStart = Number(request?.targetStartSeconds);
+  const targetEnd = Number(request?.targetEndSeconds);
+  if (!Number.isFinite(targetStart) || !Number.isFinite(targetEnd) || targetEnd <= targetStart) return null;
+  if (!(coverage.coveredStart > 0) || !(coverage.coveredEnd > coverage.coveredStart)) return null;
+  return {
+    ...coverage,
+    complete: true,
+    coveredStart: Math.min(targetStart, coverage.coveredStart),
+    coveredEnd: Math.max(targetEnd, coverage.coveredEnd),
+  };
+}
+
 function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
   const intervals = jsDebugHistoryReadiness.coverageIntervals
     .filter(interval => Number(interval.resolutionSeconds) <= Math.max(maxResolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
@@ -4597,7 +4618,10 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
     if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
-    if (readinessRequest && !coverage.complete) throw new Error('stats history response provided incomplete coverage');
+    const satisfiedCoverage = readinessRequest ? jsDebugHistorySatisfiedCoverage(coverage, readinessRequest) : coverage;
+    if (readinessRequest && !coverage.complete && !satisfiedCoverage && !coverage.hasMoreOlder) {
+      throw new Error('stats history response provided unusable partial coverage');
+    }
     const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
       ? payload.history.coverage
       : null;
@@ -4608,7 +4632,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       advanceHistoryCursor: coverage?.mode !== 'older',
       replaceCoverage,
     });
-    if (coverage) applyJsDebugHistoryCoverage(coverage);
+    if (satisfiedCoverage) applyJsDebugHistoryCoverage(satisfiedCoverage);
     recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
     if (readinessRequest) {
       if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {
