@@ -658,7 +658,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.fileExplorerSelectionLeadForTest(), '/home/test/one.txt', 'returning to session 1 restores its own lead row');
     assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/home/test/one.txt'], 'the remembered lead is selected after restore');
     assert.equal(api.fileExplorerTreeForTest().getAttribute('aria-activedescendant'), restoredOne.id, 'the tree active-descendant names the restored cursor row');
-    assert.ok(firstScrolls >= 1, 'returning to session 1 scrolls its restored cursor into view');
+    assert.equal(firstScrolls, 0, 'an already visible restored cursor does not force the native scroll fallback');
     assert.equal(api.documentActiveElementForTest(), terminal, 'cursor restore never steals terminal/browser focus');
 
     await api.syncFileExplorerRootToPlanForTest(secondPlan, '2');

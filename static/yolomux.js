@@ -15686,7 +15686,13 @@ function fileExplorerSyncTargetRecord(targetKey, create = false, touch = false) 
   if (!key) return null;
   let record = fileExplorerSyncTargetRecords.get(key) || null;
   if (!record && create) {
-    record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    record = {
+      expandedPaths: [],
+      manualCollapsedPaths: new Set(),
+      cursorPath: '',
+      selectedPaths: [],
+      anchorPath: '',
+    };
   }
   if (record && (touch || !fileExplorerSyncTargetRecords.has(key))) {
     setLimitedMapEntry(fileExplorerSyncTargetRecords, key, record, fileExplorerMemoryCacheLimit);
@@ -15700,12 +15706,85 @@ function rememberFileExplorerSyncExpandedState(session = fileExplorerVisibleSync
   if (!key) return;
   const record = fileExplorerSyncTargetRecord(key, true, true);
   record.expandedPaths = fileExplorerExpandedPathsForRoot(root);
+  // This is deliberately one target record with disclosure state: a same-root session must retain
+  // its own keyboard cursor rather than borrowing the other session's global Finder selection.
+  record.cursorPath = fileExplorerSyncCursorPathForRoot(root, fileExplorerSelectionLead);
+  record.selectedPaths = fileExplorerSyncPathsForRoot(root, fileExplorerSelectedPaths);
+  record.anchorPath = fileExplorerSyncCursorPathForRoot(root, fileExplorerSelectionAnchor);
 }
 
 function rememberedFileExplorerSyncExpandedPaths(session, root) {
   const key = fileExplorerSyncTargetKey(session, root);
   const paths = fileExplorerSyncTargetRecord(key)?.expandedPaths;
   return Array.isArray(paths) ? fileExplorerExpandedPathsForRoot(root, paths) : [];
+}
+
+function fileExplorerSyncCursorPathForRoot(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const normalizedPath = normalizeDirectoryPath(path || '');
+  return normalizedRoot && normalizedPath && normalizedPath !== normalizedRoot
+    && pathIsInsideDirectory(normalizedPath, normalizedRoot) ? normalizedPath : '';
+}
+
+function fileExplorerSyncPathsForRoot(root, paths) {
+  return Array.from(new Set(Array.from(paths || [])
+    .map(path => fileExplorerSyncCursorPathForRoot(root, path))
+    .filter(Boolean))).sort();
+}
+
+function fileExplorerVisibleSyncCursorPath(root, path) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  let candidate = fileExplorerSyncCursorPathForRoot(normalizedRoot, path);
+  while (candidate) {
+    for (const container of fileExplorerTreeContainers()) {
+      if (selectableFileTreeRows(container).some(row => row.dataset.path === candidate)) return candidate;
+    }
+    const parent = normalizeDirectoryPath(dirnameOf(candidate));
+    candidate = parent && parent !== candidate && parent !== normalizedRoot ? parent : '';
+  }
+  return '';
+}
+
+function fileExplorerTreeActiveDescendantId(container, path) {
+  const containers = fileExplorerTreeContainers();
+  const index = Math.max(0, containers.indexOf(container));
+  return `file-explorer-tree-${index}-${encodeURIComponent(path)}`;
+}
+
+function syncFileExplorerTreeActiveDescendant(cursorPath = '') {
+  for (const container of fileExplorerTreeContainers()) {
+    const row = selectableFileTreeRows(container).find(item => item.dataset.path === cursorPath) || null;
+    if (!row) {
+      container.removeAttribute?.('aria-activedescendant');
+      continue;
+    }
+    const id = fileExplorerTreeActiveDescendantId(container, cursorPath);
+    if (row.id !== id) row.id = id;
+    container.setAttribute?.('aria-activedescendant', id);
+    // Deliberately do not call focus(): Finder Sync must not take keyboard ownership away from a terminal.
+    if (!scrollFileTreeRowIntoView(container, row)) row.scrollIntoView?.({block: 'nearest'});
+  }
+}
+
+function restoreFileExplorerSyncCursorState(session, root) {
+  const key = fileExplorerSyncTargetKey(session, root);
+  const record = fileExplorerSyncTargetRecord(key, false, true);
+  const rememberedSelection = fileExplorerSyncPathsForRoot(root, record?.selectedPaths);
+  const requestedCursor = fileExplorerSyncCursorPathForRoot(root, record?.cursorPath);
+  let cursorPath = fileExplorerVisibleSyncCursorPath(root, requestedCursor);
+  if (!cursorPath) {
+    cursorPath = rememberedSelection.map(path => fileExplorerVisibleSyncCursorPath(root, path)).find(Boolean) || '';
+  }
+  const visibleSelection = rememberedSelection.filter(path => fileExplorerVisibleSyncCursorPath(root, path) === path);
+  fileExplorerSelectedPaths.clear();
+  for (const path of visibleSelection) fileExplorerSelectedPaths.add(path);
+  if (cursorPath) fileExplorerSelectedPaths.add(cursorPath);
+  fileExplorerSelectionLead = cursorPath || null;
+  const anchorPath = fileExplorerVisibleSyncCursorPath(root, record?.anchorPath);
+  fileExplorerSelectionAnchor = anchorPath || cursorPath || null;
+  updateFileExplorerCurrentFileHighlight();
+  syncFileExplorerTreeActiveDescendant(cursorPath);
+  return cursorPath;
 }
 
 function setFileExplorerVisibleSyncTarget(session, root) {
@@ -15927,7 +16006,7 @@ function resetFileExplorerSyncManualCollapsesIfNeeded(plan) {
     let record = fileExplorerSyncTargetRecord(targetKey);
     rememberFileExplorerSyncManualCollapseState();
     fileExplorerSyncManualCollapseTargetKey = targetKey;
-    if (!record && targetKey) record = {expandedPaths: [], manualCollapsedPaths: new Set()};
+    if (!record && targetKey) record = fileExplorerSyncTargetRecord(targetKey, true, false);
     if (record) setLimitedMapEntry(fileExplorerSyncTargetRecords, targetKey, record, fileExplorerMemoryCacheLimit);
     fileExplorerSyncManualCollapsedPaths = record?.manualCollapsedPaths || new Set();
   }
@@ -16537,6 +16616,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
       const currentDirectories = fileExplorerSyncListingDirectories(plan, currentRenderPaths);
       const completeEntriesByDir = cachedFileExplorerSyncListings(currentDirectories) || entriesByDir;
       renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir);
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
       updateFileExplorerSessionHighlightRows(plan.session);
     }).catch(error => console.warn('Finder sync background revalidation failed', error));
   });
@@ -16567,6 +16647,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
     if (cachedListings) {
       changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings) || changed;
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
       markFileExplorerSyncPlanApplied(plan);
@@ -16578,6 +16659,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     if (fetchedListings.has(normalizeDirectoryPath(plan.root))) {
       changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings) || changed;
+      restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
       markFileExplorerSyncPlanApplied(plan);
@@ -43007,6 +43089,24 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
   if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
 }
 
+// `stats_sample` arrives on the shared client-events EventSource.  Its record
+// is the durable one-second owner delta, so the visible graph advances without
+// waiting for the 30-second history-backfill poll.  Polling remains the
+// range/zoom and reconnect fallback, not the live-tail transport.
+function applyJsDebugStatsSamplePush(payload = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const sample = payload.sample && typeof payload.sample === 'object' ? payload.sample : {};
+  const record = payload.record && typeof payload.record === 'object' ? payload.record : null;
+  if (!record) return false;
+  const sequence = Number(payload.sequence);
+  const cursor = Number.isFinite(sequence) ? sequence : Number(record.sequence || 0);
+  recordJsDebugStatsSample({
+    ...sample,
+    history: {sequence: cursor, latest_sequence: cursor, records: [record]},
+  }, {forceGraphRefresh: true, advanceHistoryCursor: true});
+  return true;
+}
+
 function clearJsDebugGraphData() {
   jsDebugGraphRawBuckets.clear();
   jsDebugGraphRollupBuckets.clear();
@@ -68581,6 +68681,10 @@ function handleClientPushEventNow(type, payload = {}) {
     }
     return;
   }
+  if (type === 'stats_sample') {
+    if (typeof applyJsDebugStatsSamplePush === 'function') applyJsDebugStatsSamplePush(payload);
+    return;
+  }
   if (type === 'auto_approve_changed') {
     if (payload.refresh) {
       refreshAutoStatuses().catch(() => {});
@@ -68709,6 +68813,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
+    if (activeItems.includes(debugPaneItemId)) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
       channels.add('transcripts');
@@ -68785,7 +68890,7 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
+  for (const type of ['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;
