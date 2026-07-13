@@ -2472,6 +2472,16 @@ class TmuxWebtermApp:
             wake_event.set()
             return True
 
+    def wake_stats_agent_tokens_if_due(self) -> bool:
+        """Shorten an idle token deadline without defeating its active cadence."""
+
+        with self.stats_history_service.scheduler_lock:
+            status = self.stats_history_service.scheduler_diagnostics.get("agent_tokens", {})
+            last_attempt_at = float(status.get("last_attempt_at") or 0.0)
+        if last_attempt_at and time.time() - last_attempt_at < STATS_AGENT_TOKEN_SAMPLE_SECONDS:
+            return True
+        return self.wake_stats_metric_family("agent_tokens")
+
     def stats_metric_family_status(self, family: str, **updates: Any) -> dict[str, Any]:
         service = self.stats_history_service
         with service.scheduler_lock:
@@ -2823,7 +2833,7 @@ class TmuxWebtermApp:
                 self.stats_history_service.agent_token_consumer_until = max(self.stats_history_service.agent_token_consumer_until, consumer_until)
             self.stats_client.set_token_consumer_until(consumer_until)
             if self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
-                self.wake_stats_metric_family("agent_tokens")
+                self.wake_stats_agent_tokens_if_due()
             else:
                 self.request_background_refresh(
                     BACKGROUND_ROLE_STATS_SAMPLER,
@@ -3202,7 +3212,7 @@ class TmuxWebtermApp:
         )
         if result.get("local_owner"):
             if role == BACKGROUND_ROLE_STATS_SAMPLER and request_payload.get("family") == "agent_tokens":
-                result["refreshing"] = self.wake_stats_metric_family("agent_tokens")
+                result["refreshing"] = self.wake_stats_agent_tokens_if_due()
             if not result.get("coalesced"):
                 self.log_sampled_background_refresh_event(
                     "background_refresh_started",

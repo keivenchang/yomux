@@ -2604,6 +2604,10 @@ def test_token_consumer_wakes_only_idle_token_family_while_cpu_keeps_ticking(mon
         time.sleep(0.2)
         assert len(token_attempts) == 1  # worker is holding its 60-second idle deadline
         cpu_before_demand = len(cpu_attempts)
+        with webapp.stats_history_service.scheduler_lock:
+            webapp.stats_history_service.scheduler_diagnostics["agent_tokens"]["last_attempt_at"] = (
+                time.time() - app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS - 1.0
+            )
 
         webapp.stats_sample_context(token_consumer=True)
 
@@ -2611,6 +2615,10 @@ def test_token_consumer_wakes_only_idle_token_family_while_cpu_keeps_ticking(mon
         cpu_during_token = len(cpu_attempts)
         webapp.stats_sample_context(token_consumer=True)  # running scan already satisfies this wake
         second_token_release.set()
+        deadline = time.monotonic() + 1.0
+        while webapp.stats_history_service.scheduler_diagnostics.get("agent_tokens", {}).get("running") and time.monotonic() < deadline:
+            time.sleep(0.01)
+        webapp.stats_sample_context(token_consumer=True)  # a completed scan still owns the next ten-second deadline
         time.sleep(0.2)
     finally:
         second_token_release.set()
