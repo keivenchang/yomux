@@ -1,3 +1,4 @@
+import gzip
 import json
 import os
 import sqlite3
@@ -98,6 +99,115 @@ def _bucket(start=100, duration=1, sequence=1):
     bucket["servers"] = {"port:17071": {**stats_store.empty_process_bucket(), "sequence": sequence, "label": "yolomux.py :17071", "port": 17071, "cpu_total_percent": 12.5, "cpu_count": 1.0}}
     bucket["agent_token_rates"] = {"17071|0|codex": {"label": "17071:0:codex", "total": 8.0, "samples": 1.0, "tokens": 8.0}}
     bucket["host_metrics"] = {**stats_store.empty_host_metrics(), "cpu_processes": {"python": {"label": "python", "total_percent": 12.5, "samples": 1.0}}}
+    return bucket
+
+
+def _real_schema_history_bucket(start, duration, sequence):
+    """Dense production-shaped stats row for deterministic history budgets."""
+    bucket = stats_store.empty_bucket(start, duration)
+    bucket.update({
+        "sequence": sequence,
+        "server_sequence": sequence,
+        "cpu_total_percent": 40.0 * duration,
+        "cpu_count": float(duration),
+        "tokens_per_agent_total": 80.0 * duration,
+        "agent_token_samples": float(duration),
+    })
+    bucket["clients"] = {
+        "browser-a": {
+            **stats_store.empty_client_bucket(),
+            "sequence": sequence,
+            "api_count": 2.0 * duration,
+            "latency_total_ms": 20.0 * duration,
+            "latency_count": 2.0 * duration,
+            "bandwidth_bytes": 2048.0 * duration,
+        }
+    }
+    bucket["servers"] = {
+        f"port:{9900 + index}": {
+            **stats_store.empty_process_bucket(),
+            "sequence": sequence,
+            "label": f"yolomux.py :{9900 + index}",
+            "pid": 10_000 + index,
+            "port": 9900 + index,
+            "started_at": start - 3600,
+            "cpu_total_percent": float((index + 1) * duration),
+            "cpu_count": float(duration),
+        }
+        for index in range(4)
+    }
+    bucket["agent_token_rates"] = {
+        f"session|{index}|codex": {
+            "label": f"session:{index}:codex",
+            "total": 10.0 * duration,
+            "samples": float(duration),
+            "tokens": 10.0 * duration,
+            "seconds": float(duration),
+            "source": "transcript",
+            "model_rates": {
+                f"gpt-{index % 3}": {
+                    "total": 10.0 * duration,
+                    "samples": float(duration),
+                    "tokens": 10.0 * duration,
+                    "seconds": float(duration),
+                }
+            },
+        }
+        for index in range(8)
+    }
+    for index in range(12):
+        bucket["host_metrics"]["cpu_processes"][f"process-{index}"] = {
+            "label": f"process-{index}",
+            "total_percent": float((index + 1) * duration),
+            "samples": float(duration),
+        }
+        bucket["host_metrics"]["memory_processes"][f"process-{index}"] = {
+            "label": f"process-{index}",
+            "used_total_bytes": float((index + 1) * 1024 * duration),
+            "samples": float(duration),
+        }
+    bucket["cost_summary"]["components"] = [
+        {
+            "event_id": f"event-{start}-{index}",
+            "provider": "openai",
+            "model": f"gpt-{index % 3}",
+            "model_evidence": "transcript",
+            "effort": "high" if index % 2 else "",
+            "direction": "output" if index % 3 == 0 else "input",
+            "modality": "text",
+            "cache_role": "read" if index % 3 == 1 else "none",
+            "unit": "tokens",
+            "root_thread_id": f"root-{index % 2}",
+            "agent_thread_id": f"agent-{index}",
+            "parent_thread_id": "",
+            "depth": 0,
+            "endpoint": "responses",
+            "tool_name": "",
+            "tmux_key": f"session|{index}|codex",
+            "tmux_label": f"session:{index}:codex",
+            "tmux_session": "session",
+            "tmux_window": str(index),
+            "tmux_window_label": f"agent-{index}",
+            "agent_kind": "codex",
+            "pricing_profile": "standard",
+            "service_tier": "default",
+            "backfill_source": "codex",
+            "telemetry_complete": True,
+            "source": "transcript",
+            "priced": True,
+            "catalog_revision": 1,
+            "source_url": "https://example.invalid/pricing",
+            "effective_from": "2026-01-01T00:00:00Z",
+            "rate_usd": "1.0",
+            "rate_scale": 1_000_000,
+            "estimated": False,
+            "quantity": float((index + 1) * duration),
+            "micro_usd": (index + 1) * duration,
+            "lower_micro_usd": (index + 1) * duration,
+            "upper_micro_usd": (index + 1) * duration,
+        }
+        for index in range(8)
+    ]
     return bucket
 
 
@@ -1553,30 +1663,70 @@ def test_statsd_history_contract_distinguishes_empty_complete_and_partial_covera
         service.store.close()
 
 
-def test_statsd_history_contract_enforces_24h_point_payload_and_latency_budget(tmp_path):
-    """A retained 24-hour window must stay bounded without a browser-side fallback."""
+def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_path):
+    """Dense retained history stays exact, bounded, and responsive."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    start = 1_000_000
+    start = 1_000_200  # aligned to every retained and persisted rollup tier
+    end = start + (24 * 60 * 60)
     try:
-        service.store.replace_buckets([
-            _bucket(start=start + (index * 60), duration=60, sequence=index + 1)
-            for index in range(24 * 60)
-        ])
-        started = time.perf_counter()
-        status, encoded = service.handle_with_binary({
-            "action": "write_encoded_history",
-            "start": start,
-            "end": start + (24 * 60 * 60),
-            "max_points": 360,
-        })
-        elapsed = time.perf_counter() - started
-        payload = json.loads(encoded)
+        # The exact production tiers total 2,700 retained slots: 12h/10m,
+        # 4h/5m, 4h/2m, 2h/1m, 90m/10s, and the newest 30m/1s.
+        tiers = ((12 * 3600, 600), (4 * 3600, 300), (4 * 3600, 120),
+                 (2 * 3600, 60), (90 * 60, 10), (30 * 60, 1))
+        raw = []
+        cursor = start
+        sequence = 1
+        for span, duration in tiers:
+            for bucket_start in range(cursor, cursor + span, duration):
+                raw.append(_real_schema_history_bucket(bucket_start, duration, sequence))
+                sequence += 1
+            cursor += span
+        assert len(raw) == 2700 and cursor == end
+        service.store.replace_buckets(raw)
+        for duration in (60, 300):
+            for bucket_start in range(start, end, duration):
+                service.store.upsert_rollup(_real_schema_history_bucket(bucket_start, duration, sequence))
+                sequence += 1
 
-        assert status == {"ok": True, "encoding": "json", "size": len(encoded)}
-        assert len(payload["records"]) <= 360
-        assert payload["coverage"]["complete"] is True
-        assert len(encoded) <= 768 * 1024
-        assert elapsed <= 2.0
+        for span, latency_budget in (
+            (3600, 1.0),
+            (24 * 3600, 2.0),
+        ):
+            service._encoded_query_cache.clear()
+            requested_start = end - span
+            started = time.perf_counter()
+            status, encoded = service.handle_with_binary({
+                "action": "write_encoded_history",
+                "start": requested_start,
+                "end": end,
+                "max_points": 360,
+                "client_id": "browser-a",
+                "token_resolution_seconds": 60,
+            })
+            elapsed = time.perf_counter() - started
+            payload = json.loads(encoded)
+            token_records = payload["agent_token_history"]["records"]
+            token_total = sum(float(record["tokens_per_agent_total"]) for record in token_records)
+            agent_total = sum(
+                float(rate["total"])
+                for record in token_records
+                for rate in record["agent_token_rates"]
+            )
+            component_quantity = sum(
+                float(component["quantity"])
+                for record in token_records
+                for component in record["cost_summary"]["components"]
+            )
+
+            assert status == {"ok": True, "encoding": "json", "size": len(encoded)}
+            assert len(payload["records"]) <= 360
+            assert payload["coverage"]["complete"] is True
+            assert payload["agent_token_history"]["coverage"]["complete"] is True
+            assert token_total == agent_total == 80.0 * span
+            assert component_quantity == 36.0 * span
+            assert len(encoded) <= 4 * 1024 * 1024
+            assert len(gzip.compress(encoded)) <= 768 * 1024
+            assert elapsed <= latency_budget
     finally:
         service.store.close()
 

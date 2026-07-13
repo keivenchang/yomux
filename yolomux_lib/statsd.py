@@ -80,6 +80,15 @@ STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
 STATS_AGENT_TOKEN_SCHEMA_VERSION = 4
 STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_samples")
+STATS_COST_COMPONENT_DIMENSION_FIELDS = (
+    "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
+    "root_thread_id", "agent_thread_id", "parent_thread_id", "depth", "endpoint", "tool_name",
+    "tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind",
+    "pricing_profile", "service_tier", "backfill_source", "telemetry_complete", "source", "priced",
+    "catalog_revision", "source_url", "effective_from", "rate_usd", "rate_scale",
+    "estimated", "estimate_rate_min_usd", "estimate_rate_max_usd", "estimate_rate_scale",
+    "estimate_source_url", "estimate_catalog_revision",
+)
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATSD_SAMPLE_INTERVAL_SECONDS = 1.0
@@ -2369,19 +2378,15 @@ class PersistentStatsService:
         return changed
 
     @staticmethod
-    def _coalesced_backfill_components(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        dimension_fields = (
-            "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
-            "root_thread_id", "agent_thread_id", "parent_thread_id", "depth", "endpoint", "tool_name",
-            "tmux_key", "tmux_label", "tmux_session", "tmux_window", "tmux_window_label", "agent_kind",
-            "pricing_profile", "service_tier", "backfill_source", "telemetry_complete", "source", "priced",
-            "catalog_revision", "source_url", "effective_from", "rate_usd", "rate_scale",
-            "estimated", "estimate_rate_min_usd", "estimate_rate_max_usd", "estimate_rate_scale",
-            "estimate_source_url", "estimate_catalog_revision",
-        )
-        grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+    def _merge_coalesced_cost_components(
+        grouped: dict[tuple[str, ...], dict[str, Any]], components: list[dict[str, Any]]
+    ) -> None:
+        """Add components to an exact response-only dimension accumulator."""
         for component in components:
-            identity = tuple(str(component.get(field) if component.get(field) is not None else "") for field in dimension_fields)
+            identity = tuple(
+                str(component.get(field) if component.get(field) is not None else "")
+                for field in STATS_COST_COMPONENT_DIMENSION_FIELDS
+            )
             current = grouped.get(identity)
             if current is None:
                 current = dict(component)
@@ -2404,6 +2409,11 @@ class PersistentStatsService:
             current["upper_micro_usd"] += upper_micro_usd
             current["estimated_lower_micro_usd"] += lower_micro_usd
             current["estimated_upper_micro_usd"] += upper_micro_usd
+
+    @staticmethod
+    def _coalesced_backfill_components(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+        PersistentStatsService._merge_coalesced_cost_components(grouped, components)
         return list(grouped.values())
 
     def migrate_usage_atom_history_from_rows(self, rows: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
@@ -2686,7 +2696,14 @@ class PersistentStatsService:
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
         return record
 
-    def _merge_bucket(self, target: dict[str, Any], source: dict[str, Any], *, coalesce_cost_components: bool = False) -> None:
+    def _merge_bucket(
+        self,
+        target: dict[str, Any],
+        source: dict[str, Any],
+        *,
+        merge_cost_summary: bool = True,
+        merge_agent_details: bool = True,
+    ) -> None:
         for field in stats_store.SERVER_FIELDS:
             target[field] = float(target.get(field) or 0.0) + float(source.get(field) or 0.0)
         target["sequence"] = max(int(target.get("sequence") or 0), int(source.get("sequence") or 0), int(source.get("server_sequence") or 0))
@@ -2702,67 +2719,57 @@ class PersistentStatsService:
                             existing[field] = float(existing.get(field) or 0.0) + float(value)
                         elif field not in existing or value:
                             existing[field] = value
-        target_rates = target.setdefault("agent_token_rates", {})
-        source_rates = source.get("agent_token_rates") if isinstance(source.get("agent_token_rates"), dict) else {}
-        for rate_key, values in source_rates.items():
-            if not isinstance(values, dict):
-                continue
-            existing = target_rates.setdefault(str(rate_key), {"label": str(values.get("label") or rate_key), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": "", "model_rates": {}})
-            for field in ("total", "samples", "tokens", "seconds"):
-                existing[field] = float(existing.get(field) or 0.0) + float(values.get(field) or 0.0)
-            existing["label"] = str(values.get("label") or existing.get("label") or rate_key)
-            if values.get("source"):
-                existing["source"] = str(values["source"])
-            PersistentStatsService._merge_agent_token_model_rates(existing, values.get("model_rates"))
-        target_summary = target.setdefault("cost_summary", {})
-        source_summary = source.get("cost_summary") if isinstance(source.get("cost_summary"), dict) else {}
-        target_components = target_summary.get("components") if isinstance(target_summary.get("components"), list) else []
-        source_components = source_summary.get("components") if isinstance(source_summary.get("components"), list) else []
-        seen_components = {
-            (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
-            for item in target_components if isinstance(item, dict)
-        }
-        for item in source_components:
-            if not isinstance(item, dict):
-                continue
-            identity = (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
-            if identity in seen_components or len(target_components) >= STATS_COST_SUMMARY_MAX_COMPONENTS:
-                target_summary["lower_bound"] = True
-                target_summary["truncated"] = True
-                continue
-            target_components.append(copy.deepcopy(item))
-            seen_components.add(identity)
-        target_summary["components"] = target_components
-        if coalesce_cost_components and len(target_components) > 1:
-            # History response buckets are temporary transport aggregates.  Keep
-            # durable atoms untouched, but coalesce their equivalent billing
-            # dimensions here so a 24h range does not serialize every raw event.
-            target_components = self._coalesced_backfill_components(target_components)
+        if merge_agent_details:
+            target_rates = target.setdefault("agent_token_rates", {})
+            source_rates = source.get("agent_token_rates") if isinstance(source.get("agent_token_rates"), dict) else {}
+            for rate_key, values in source_rates.items():
+                if not isinstance(values, dict):
+                    continue
+                existing = target_rates.setdefault(str(rate_key), {"label": str(values.get("label") or rate_key), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0, "source": "", "model_rates": {}})
+                for field in ("total", "samples", "tokens", "seconds"):
+                    existing[field] = float(existing.get(field) or 0.0) + float(values.get(field) or 0.0)
+                existing["label"] = str(values.get("label") or existing.get("label") or rate_key)
+                if values.get("source"):
+                    existing["source"] = str(values["source"])
+                PersistentStatsService._merge_agent_token_model_rates(existing, values.get("model_rates"))
+        if merge_cost_summary:
+            target_summary = target.setdefault("cost_summary", {})
+            source_summary = source.get("cost_summary") if isinstance(source.get("cost_summary"), dict) else {}
+            target_components = target_summary.get("components") if isinstance(target_summary.get("components"), list) else []
+            source_components = source_summary.get("components") if isinstance(source_summary.get("components"), list) else []
+            seen_components = {
+                (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
+                for item in target_components if isinstance(item, dict)
+            }
+            for item in source_components:
+                if not isinstance(item, dict):
+                    continue
+                identity = (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
+                if identity in seen_components or len(target_components) >= STATS_COST_SUMMARY_MAX_COMPONENTS:
+                    target_summary["lower_bound"] = True
+                    target_summary["truncated"] = True
+                    continue
+                target_components.append(copy.deepcopy(item))
+                seen_components.add(identity)
             target_summary["components"] = target_components
-        valid_target_components = [item for item in target_components if isinstance(item, dict)]
-        known_micro_usd = sum(int(item.get("micro_usd") or 0) for item in valid_target_components if item.get("priced"))
-        lower_micro_usd = sum(_component_lower_micro_usd(item) for item in valid_target_components)
-        upper_micro_usd = sum(max(_component_lower_micro_usd(item), _component_upper_micro_usd(item)) for item in valid_target_components)
-        target_summary["total_micro_usd"] = known_micro_usd
-        target_summary["known_micro_usd"] = known_micro_usd
-        target_summary["lower_micro_usd"] = lower_micro_usd
-        target_summary["upper_micro_usd"] = max(lower_micro_usd, upper_micro_usd)
-        target_summary["priced_components"] = sum(1 for item in target_components if isinstance(item, dict) and item.get("priced"))
-        target_summary["unpriced_components"] = sum(1 for item in target_components if isinstance(item, dict) and not item.get("priced"))
-        target_summary["truncated"] = bool(target_summary.get("truncated")) or bool(source_summary.get("truncated"))
-        target_summary["lower_bound"] = bool(target_summary.get("lower_bound")) or bool(source_summary.get("lower_bound")) or any(not item.get("priced") or not item.get("telemetry_complete") for item in target_components if isinstance(item, dict))
-        target_summary["catalog_revisions"] = sorted({int(item.get("catalog_revision") or 0) for item in target_components if isinstance(item, dict) and int(item.get("catalog_revision") or 0) > 0})
-        try:
-            target_summary["active_catalog_revision"] = max(
-                int(target_summary.get("active_catalog_revision") or 0),
-                int(source_summary.get("active_catalog_revision") or 0),
-            )
-        except (TypeError, ValueError):
-            target_summary["active_catalog_revision"] = 0
-        if source_summary.get("freshness"):
-            target_summary["freshness"] = str(source_summary["freshness"])
-        self._merge_usage_components(target, [])
-        source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
+            self._recalculate_usage_summary(target_summary, target_components)
+            target_summary["truncated"] = bool(target_summary.get("truncated")) or bool(source_summary.get("truncated"))
+            target_summary["lower_bound"] = bool(target_summary.get("lower_bound")) or bool(source_summary.get("lower_bound")) or any(not item.get("priced") or not item.get("telemetry_complete") for item in target_components if isinstance(item, dict))
+            try:
+                target_summary["active_catalog_revision"] = max(
+                    int(target_summary.get("active_catalog_revision") or 0),
+                    int(source_summary.get("active_catalog_revision") or 0),
+                )
+            except (TypeError, ValueError):
+                target_summary["active_catalog_revision"] = 0
+            if source_summary.get("freshness"):
+                target_summary["freshness"] = str(source_summary["freshness"])
+            # Durable rollups retain the storage byte/count bounds and
+            # transcript de-duplication enforced by the canonical projector.
+            # Response-only history aggregation bypasses this branch and uses
+            # its incremental dimension accumulator instead.
+            self._merge_usage_components(target, [])
+        source_metrics = source.get("host_metrics") if merge_agent_details and isinstance(source.get("host_metrics"), dict) else {}
         if source_metrics:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())
             for field in ("cpu_label", "system_memory_label"):
@@ -2882,6 +2889,8 @@ class PersistentStatsService:
             effective_resolution = persisted_rollup
         def encode_records(target_resolution: int) -> list[dict[str, Any]]:
             grouped: dict[tuple[int, int], dict[str, Any]] = {}
+            cost_groups: dict[tuple[int, int], dict[tuple[str, ...], dict[str, Any]]] = {}
+            cost_metadata: dict[tuple[int, int], dict[str, Any]] = {}
             for bucket in source_buckets:
                 bucket_start, bucket_duration = int(bucket["start"]), int(bucket["duration"])
                 if not target_resolution or bucket_duration >= target_resolution:
@@ -2890,7 +2899,53 @@ class PersistentStatsService:
                     anchor = start or 0
                     bucket_key = (anchor + ((bucket_start - anchor) // target_resolution) * target_resolution, target_resolution)
                 target = grouped.setdefault(bucket_key, stats_store.empty_bucket(*bucket_key))
-                self._merge_bucket(target, bucket, coalesce_cost_components=True)
+                # The public response needs the same exact component totals as
+                # durable history, but repeatedly rebuilding a growing list is
+                # quadratic for token-heavy ranges.  Accumulate billing
+                # dimensions once and project the public summary after all
+                # source buckets have been merged.
+                self._merge_bucket(
+                    target,
+                    bucket,
+                    merge_cost_summary=False,
+                    merge_agent_details=include_agent_tokens,
+                )
+                if include_agent_tokens:
+                    source_summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
+                    source_components = [
+                        item for item in source_summary.get("components", []) if isinstance(item, dict)
+                    ]
+                    self._merge_coalesced_cost_components(
+                        cost_groups.setdefault(bucket_key, {}), source_components
+                    )
+                    metadata = cost_metadata.setdefault(bucket_key, {
+                        "truncated": False,
+                        "lower_bound": False,
+                        "active_catalog_revision": 0,
+                        "freshness": "",
+                    })
+                    metadata["truncated"] = bool(metadata["truncated"]) or bool(source_summary.get("truncated"))
+                    metadata["lower_bound"] = bool(metadata["lower_bound"]) or bool(source_summary.get("lower_bound"))
+                    try:
+                        metadata["active_catalog_revision"] = max(
+                            int(metadata["active_catalog_revision"] or 0),
+                            int(source_summary.get("active_catalog_revision") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    if source_summary.get("freshness"):
+                        metadata["freshness"] = str(source_summary["freshness"])
+            if include_agent_tokens:
+                for bucket_key, target in grouped.items():
+                    metadata = cost_metadata.get(bucket_key, {})
+                    summary = target.setdefault("cost_summary", {})
+                    summary["truncated"] = bool(metadata.get("truncated"))
+                    components = list(cost_groups.get(bucket_key, {}).values())
+                    self._recalculate_usage_summary(summary, components)
+                    summary["lower_bound"] = bool(summary.get("lower_bound")) or bool(metadata.get("lower_bound"))
+                    summary["active_catalog_revision"] = max(0, int(metadata.get("active_catalog_revision") or 0))
+                    if metadata.get("freshness"):
+                        summary["freshness"] = str(metadata["freshness"])
             return [
                 self._record_from_bucket(bucket, client_id, include_agent_tokens=include_agent_tokens)
                 for _key, bucket in sorted(grouped.items())
