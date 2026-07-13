@@ -3341,9 +3341,9 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
         jsDebugGraphRangeSeconds = 15 * 60;
         const base = Math.floor((Date.now() - 100_000) / 10_000) * 10;
         debugGraphApplyServerHistory({sequence: 3, records: [
-          {start: base, duration: 10, sequence: 1, cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
-          {start: base + 10, duration: 10, sequence: 2, cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
-          {start: base + 30, duration: 10, sequence: 3, cpu_count: 1, run_agent_total: 0, idle_agent_total: 2, agent_activity_samples: 1},
+          {start: base, duration: 10, sequence: 1, cpu_count: 1, system_cpu_total_percent: 0, system_cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
+          {start: base + 10, duration: 10, sequence: 2, cpu_count: 1, system_cpu_total_percent: 20, system_cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
+          {start: base + 30, duration: 10, sequence: 3, cpu_count: 1, system_cpu_total_percent: 40, system_cpu_count: 1, run_agent_total: 0, idle_agent_total: 2, agent_activity_samples: 1},
         ]});
         renderDebugPanels({force: true});
         const chart = document.querySelector('[data-js-debug-chart="activity"]');
@@ -3355,12 +3355,15 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
           .sort((a, b) => a.x - b.x);
         const outages = [...chart.querySelectorAll('[data-js-debug-agent-status-no-data-range]')]
           .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width')), title: node.textContent}));
+        const cpuChart = document.querySelector('[data-js-debug-chart="cpu"]');
         return {
           working,
           idle,
           outages,
           workingGap: working.length >= 2 ? Math.abs((working[0].x + working[0].width) - working[1].x) : null,
           transitionBoundary: idle.length >= 3 ? idle.at(-1).x : null,
+          cpuSegments: cpuChart?.querySelectorAll('[data-js-debug-series="systemCpu"]').length || 0,
+          cpuHasStatusOverlay: Boolean(cpuChart?.querySelector('[data-js-debug-agent-status-no-data-range]')),
         };
         """
     )
@@ -3369,6 +3372,7 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
     assert len(metrics["outages"]) == 2 and all(item["width"] > 0 for item in metrics["outages"]), metrics
     assert all("sample" in item["title"].lower() for item in metrics["outages"]), metrics
     assert metrics["transitionBoundary"] > metrics["working"][-1]["x"], metrics
+    assert metrics["cpuSegments"] == 2 and metrics["cpuHasStatusOverlay"] is False, metrics
 
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")

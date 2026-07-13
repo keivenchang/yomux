@@ -3206,7 +3206,12 @@ function debugGraphSeriesTokenAgentAttrs(series) {
 }
 
 function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
-  const gapThresholdMs = series?.clientMetric === true ? debugGraphCommunicationGapThresholdMs([series]) : 0;
+  // CPU is sampled best-effort.  Its absent intervals are facts, not zeroes or
+  // a signal to draw a smooth line between the two surrounding samples.
+  const cpuSeries = series?.processCpu === true || series?.key === 'cpu' || series?.key === 'systemCpu';
+  const gapThresholdMs = series?.clientMetric === true
+    ? debugGraphCommunicationGapThresholdMs([series])
+    : (cpuSeries ? 1 : 0);
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
