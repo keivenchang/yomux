@@ -701,6 +701,33 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'background freshness does not collapse or invent disclosure state');
   });
 
+  await testAsync('Finder Sync unchanged revalidation preserves the mounted row identity', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerDirListingForTest('/repo', [{name: 'same.txt', kind: 'file'}]);
+    api.setFetchForTest((_url, options = {}) => {
+      const items = JSON.parse(options.body).requests;
+      return Promise.resolve(jsonResponse({responses: items.map(item => ({
+        id: item.id, ok: true, status: 200, payload: {entries: [{name: 'same.txt', kind: 'file'}]},
+      }))}));
+    });
+    const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
+    await api.syncFileExplorerRootToPlanForTest(plan, '1');
+    const row = api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/same.txt"]');
+    assert.ok(row, 'the cache-first row is mounted before revalidation');
+    frames.shift()();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/same.txt"]'), row, 'an unchanged signature skips reconciliation and preserves DOM identity');
+  });
+
   await testAsync('Finder Sync cold listings start in bounded parallel batches and share the LRU bound', async () => {
     const api = loadYolomux('', ['1']);
     const directories = Array.from({length: 12}, (_value, index) => `/cold/${index}`);

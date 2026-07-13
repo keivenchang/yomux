@@ -444,6 +444,7 @@ def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
     webapp = app_module.TmuxWebtermApp([])
     now = time.time()
     records = [{"start": now + index, "api_count": 1} for index in range(20)]
+    webapp.stats_client.merge_and_history = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ack-only upload queried history"))
     try:
         payload, status = webapp.record_stats_history_payload({"ack_only": True, "records": records})
     finally:

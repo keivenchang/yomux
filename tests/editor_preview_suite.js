@@ -5333,6 +5333,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const outage = api.debugGraphAgentStatusNoDataRectsHtmlForTest(buckets, domain);
     assert.match(outage, /data-js-debug-agent-status-no-data-range="0"[^>]* x="200\.0"[^>]* width="200\.0"/, 'the status outage overlay exactly spans the missing slot');
     assert.ok(/key: 'activity'[\s\S]{0,500}statusNoDataOverlay: true/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'only the held-state activity chart opts into sampler-outage rendering');
+    const trailingDomain = {startMs: 0, endMs: 70000};
+    const trailingRuns = [...api.debugGraphAgentStatusNoDataRunsForTest(buckets, trailingDomain)]
+      .map(({startMs, endMs}) => ({startMs, endMs}));
+    assert.deepStrictEqual(trailingRuns, [
+      {startMs: 10000, endMs: 20000},
+      {startMs: 60000, endMs: 70000},
+    ], 'an ongoing trailing sampler outage appears after the shared 30-second grace period');
+    assert.deepStrictEqual(
+      [1, 2, 3, 6, 20].map(attempt => api.jsDebugHistoryRetryDelayMsForTest(attempt)),
+      [10000, 20000, 40000, 300000, 300000],
+      'history retry backs off exponentially from 10 seconds and chills at the five-minute cap',
+    );
   });
 
   test('YO!stats Cost summary is a compact non-chart card with full accounting in its popover', () => {
@@ -5412,6 +5424,20 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(html.includes('data-js-debug-cost-details') && html.includes('aria-haspopup="dialog"') && html.includes('<article class="js-debug-cost-modal-dialog js-debug-cost-report"') && html.includes('data-js-debug-cost-modal-close') && html.includes('class="js-debug-cost-report-body"') && html.includes('152k tokens') && html.includes('Input: 23.5k tokens') && html.includes('Cache: 125k tokens') && html.includes('Output: 3.7k tokens') && html.includes('Other: 0 tokens') && html.includes('Cost calculation') && html.includes('By Agent') && html.includes('Model Usages') && html.includes('Agent and source attribution') && html.includes('<table'), 'More Info opens a bounded report whose inner body owns complete by-agent and by-model tables plus calculation and source content');
     assert.ok(html.includes('data-js-debug-cost-transcript-path="/tmp/root.jsonl"') && html.includes('>Root Codex</a>'), 'a source with a canonical transcript path renders a Preview link');
     assert.equal(/data-js-debug-cost-transcript-path[^>]*>Research subagent</.test(html), false, 'a source without a transcript path remains plain text with no dead link');
+    const unsafePathHtml = api.debugGraphCostSourceTreeHtmlForTest([{source: 'Unsafe', transcript: '/tmp/../outside.jsonl', token_quantity: 1}]);
+    assert.equal(unsafePathHtml.includes('data-js-debug-cost-transcript-path'), false, 'a traversal-shaped non-canonical transcript path never becomes a Preview link');
+    const multiAgentHtml = api.debugGraphCostTmuxBreakdownHtmlForTest({tmuxWindows: [
+      {tmux_key: 'one', tmux_label: 'one:0:codex', input_tokens: 10, input_micro_usd: 100, token_quantity: 10, micro_usd: 100},
+      {tmux_key: 'two', tmux_label: 'two:1:claude', cache_tokens: 20, cache_micro_usd: 200, token_quantity: 20, micro_usd: 200},
+    ]});
+    assert.equal((multiAgentHtml.match(/<tr aria-label=/g) || []).length, 2, 'two distinct interactive agents render one semantic row each');
+    assert.ok(multiAgentHtml.includes('one:0:codex') && multiAgentHtml.includes('two:1:claude') && multiAgentHtml.includes('Grand total'), 'the multi-agent table retains both agents and one grand total');
+    const multiModelHtml = api.debugGraphCostModelUsageChartHtmlForTest([
+      {provider: 'openai', model: 'gpt-a', input_tokens: 1, input_micro_usd: 10, output_tokens: 2, output_micro_usd: 20, token_quantity: 3, micro_usd: 30},
+      {provider: 'anthropic', model: 'claude-b', cache_tokens: 4, cache_micro_usd: 40, other_tokens: 5, other_micro_usd: 50, token_quantity: 9, micro_usd: 90},
+    ], [], {report: true});
+    assert.equal((multiModelHtml.match(/<tr aria-label=/g) || []).length, 2, 'every distinct model renders one semantic row');
+    for (const model of ['gpt-a', 'claude-b']) assert.match(multiModelHtml, new RegExp(`aria-label="[^"]*${model}[^"]*Total[^"]*Input[^"]*Cached[^"]*Output[^"]*Other`), `${model} exposes every token-and-cost class plus Total`);
     const sourceTreeIndex = html.indexOf('Agent and source attribution');
     const pricingSourcesIndex = html.indexOf('Pricing sources');
     const pricingSourcesSection = html.slice(pricingSourcesIndex, html.indexOf('</article>', pricingSourcesIndex));

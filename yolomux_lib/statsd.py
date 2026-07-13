@@ -43,7 +43,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 12
+STATSD_PROTOCOL_VERSION = 15
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -80,6 +80,7 @@ STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS = 5.0
 STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS = 60.0
 STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
+STATS_COST_SUMMARY_MAX_BYTES = stats_store.STATS_COST_SUMMARY_MAX_BYTES
 STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
 
 
@@ -703,7 +704,11 @@ class PersistentStatsService:
             if not isinstance(client, dict):
                 client = stats_store.empty_client_bucket()
                 clients[clean_client_id] = client
-            record_changed = False
+            # Old or unusually busy buckets may predate the byte-aware cost
+            # bound. Compact that projection before adding any token/process
+            # field so an otherwise small live update cannot overflow SQLite's
+            # bounded bucket JSON.
+            record_changed = self._merge_usage_components(bucket, [])
             for field in stats_store.BROWSER_FIELDS:
                 value = self._positive_finite(record.get(field))
                 if value:
@@ -868,12 +873,38 @@ class PersistentStatsService:
             return False
         summary = bucket.setdefault("cost_summary", {})
         existing = summary.get("components") if isinstance(summary.get("components"), list) else []
-        components = [item for item in existing if isinstance(item, dict)][-STATS_COST_SUMMARY_MAX_COMPONENTS:]
+        components: list[dict[str, Any]] = []
+        encoded_bytes = 2
+        transcript_sources: set[tuple[str, str]] = set()
+        changed = False
+
+        def append_if_bounded(raw_component: dict[str, Any]) -> bool:
+            nonlocal encoded_bytes, changed
+            component = raw_component
+            transcript = str(component.get("transcript") or "")
+            transcript_key = (str(component.get("source") or ""), transcript)
+            if transcript and transcript_key in transcript_sources:
+                component = {**component, "transcript": ""}
+                changed = True
+            encoded = json.dumps(component, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            next_bytes = encoded_bytes + len(encoded) + (1 if components else 0)
+            if len(components) >= STATS_COST_SUMMARY_MAX_COMPONENTS or next_bytes > STATS_COST_SUMMARY_MAX_BYTES:
+                return False
+            components.append(component)
+            encoded_bytes = next_bytes
+            if transcript:
+                transcript_sources.add(transcript_key)
+            return True
+
+        for item in existing:
+            if not isinstance(item, dict) or not append_if_bounded(item):
+                changed = True
+                summary["lower_bound"] = True
+                summary["truncated"] = True
         seen = {
             (str(item.get("event_id") or ""), str(item.get("direction") or ""), str(item.get("modality") or ""), str(item.get("cache_role") or ""), str(item.get("unit") or ""))
             for item in components
         }
-        changed = False
         for atom in atoms:
             component = projected_usage_component(atom, self.pricing_catalog)
             if component is None:
@@ -881,13 +912,13 @@ class PersistentStatsService:
             identity = (component["event_id"], component["direction"], component["modality"], component["cache_role"], component["unit"])
             if identity in seen:
                 continue
-            if len(components) >= STATS_COST_SUMMARY_MAX_COMPONENTS:
+            if not append_if_bounded(component):
                 # This cannot claim exactness after eviction because a future
                 # replay cannot prove the evicted event was absent.
                 summary["lower_bound"] = True
                 summary["truncated"] = True
+                changed = True
                 continue
-            components.append(component)
             seen.add(identity)
             changed = True
         if not changed:
@@ -1789,6 +1820,8 @@ class PersistentStatsService:
         cutoff = now - STATS_HISTORY_RETENTION_SECONDS
         changed = False
         for source in sources:
+            if self._merge_usage_components(source, []):
+                changed = True
             start = int(source.get("start") or 0)
             duration = int(source.get("duration") or 0)
             if start <= 0 or duration <= 0 or start < cutoff:
@@ -1929,8 +1962,7 @@ class PersistentStatsService:
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
         return record
 
-    @staticmethod
-    def _merge_bucket(target: dict[str, Any], source: dict[str, Any]) -> None:
+    def _merge_bucket(self, target: dict[str, Any], source: dict[str, Any]) -> None:
         for field in stats_store.SERVER_FIELDS:
             target[field] = float(target.get(field) or 0.0) + float(source.get(field) or 0.0)
         target["sequence"] = max(int(target.get("sequence") or 0), int(source.get("sequence") or 0), int(source.get("server_sequence") or 0))
@@ -1987,6 +2019,7 @@ class PersistentStatsService:
         target_summary["upper_micro_usd"] = max(lower_micro_usd, upper_micro_usd)
         target_summary["priced_components"] = sum(1 for item in target_components if isinstance(item, dict) and item.get("priced"))
         target_summary["unpriced_components"] = sum(1 for item in target_components if isinstance(item, dict) and not item.get("priced"))
+        target_summary["truncated"] = bool(target_summary.get("truncated")) or bool(source_summary.get("truncated"))
         target_summary["lower_bound"] = bool(target_summary.get("lower_bound")) or bool(source_summary.get("lower_bound")) or any(not item.get("priced") or not item.get("telemetry_complete") for item in target_components if isinstance(item, dict))
         target_summary["catalog_revisions"] = sorted({int(item.get("catalog_revision") or 0) for item in target_components if isinstance(item, dict) and int(item.get("catalog_revision") or 0) > 0})
         try:
@@ -1998,6 +2031,7 @@ class PersistentStatsService:
             target_summary["active_catalog_revision"] = 0
         if source_summary.get("freshness"):
             target_summary["freshness"] = str(source_summary["freshness"])
+        self._merge_usage_components(target, [])
         source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
         if source_metrics:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())

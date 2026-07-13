@@ -1264,6 +1264,10 @@ globalThis.__layoutTestApi = {
   debugGraphBarRectsHtmlForTest: debugGraphBarRectsHtml,
   debugGraphAgentStatusNoDataRunsForTest: debugGraphAgentStatusNoDataRuns,
   debugGraphAgentStatusNoDataRectsHtmlForTest: debugGraphAgentStatusNoDataRectsHtml,
+  jsDebugHistoryRetryDelayMsForTest: jsDebugHistoryRetryDelayMs,
+  debugGraphCostTmuxBreakdownHtmlForTest: debugGraphCostTmuxBreakdownHtml,
+  debugGraphCostModelUsageChartHtmlForTest: debugGraphCostModelUsageChartHtml,
+  debugGraphCostSourceTreeHtmlForTest: debugGraphCostSourceTreeHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
   jsDebugStatsPollingStateForTest() {
     return {

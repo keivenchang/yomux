@@ -44480,10 +44480,15 @@ function debugGraphAgentStatusNoDataRuns(buckets, domain) {
   if (!serverRanges.length) return [];
   const scope = {
     startMs: Math.max(Number(domain?.startMs) || 0, serverRanges[0].startMs),
-    endMs: Math.min(Number(domain?.endMs) || 0, serverRanges.at(-1).endMs),
+    endMs: Number(domain?.endMs) || 0,
   };
   if (scope.endMs <= scope.startMs) return [];
-  return debugGraphComplementTimeRanges(statusRanges, scope);
+  const lastServerEndMs = serverRanges.at(-1).endMs;
+  return debugGraphComplementTimeRanges(statusRanges, scope)
+    .map(range => range.startMs >= lastServerEndMs - 1
+      ? {...range, startMs: range.startMs + jsDebugGraphNoDataOverlayDelayMs}
+      : range)
+    .filter(range => range.endMs > range.startMs);
 }
 
 function debugGraphAgentStatusNoDataRectsHtml(buckets, domain) {
@@ -45403,8 +45408,10 @@ function debugGraphCostTmuxBreakdownHtml(summary) {
 
 function debugGraphCostTranscriptPath(row) {
   const path = String(row?.transcript || '').trim();
-  if (!path.startsWith('/') || !/\.(?:jsonl|ndjson)$/i.test(path) || path.includes('\u0000')) return '';
-  return normalizeDirectoryPath(path);
+  if (!path.startsWith('/') || !/\.(?:jsonl|ndjson)$/i.test(path) || /[\u0000-\u001f\u007f]/.test(path)) return '';
+  const segments = path.split('/');
+  if (segments.slice(1).some(segment => !segment || segment === '.' || segment === '..')) return '';
+  return path;
 }
 
 function debugGraphCostSourceLabelHtml(row) {

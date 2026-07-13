@@ -91,9 +91,15 @@ def test_macos_stop_disables_each_recorded_per_port_launch_job(tmp_path, monkeyp
     owner = tmp_path / "owner.json"
     owner.write_text(json.dumps({"port": 8881}), encoding="utf-8")
     calls = []
+
+    def fake_run(args, **kwargs):
+        if args and args[0] == "launchctl":
+            calls.append((args, kwargs))
+        return stats_rebuild.subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
     monkeypatch.setattr(stats_rebuild.sys, "platform", "darwin")
     monkeypatch.setattr(stats_rebuild.shutil, "which", lambda command: "/bin/launchctl" if command == "launchctl" else None)
-    monkeypatch.setattr(stats_rebuild.subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(stats_rebuild.subprocess, "run", fake_run)
 
     stats_rebuild._disable_macos_launch_jobs([
         stats_rebuild.ProcessRecord(10, "yolomux-server", str(owner)),

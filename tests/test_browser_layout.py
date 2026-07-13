@@ -3092,6 +3092,22 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
               serviceWidth: themedTable.querySelector('td[data-service="statsd"]').getBoundingClientRect().width,
             };
           });
+          const paneHost = view.closest('[data-pane-role]') || view.parentElement;
+          const priorPaneRole = paneHost?.dataset?.paneRole || '';
+          const roleLayouts = [['generic', 920], ['side', 260]].map(([role, width]) => {
+            if (paneHost) paneHost.dataset.paneRole = role;
+            view.style.width = `${width}px`;
+            refreshDebugSystemViews();
+            const roleTable = view.querySelector('.js-debug-system-local-services-table');
+            const roleWrap = roleTable.closest('.js-debug-system-local-services-wrap');
+            return {
+              role,
+              scrolls: roleWrap.scrollWidth > roleWrap.clientWidth + 1,
+              labelWidth: roleTable.querySelector('tbody th').getBoundingClientRect().width,
+              serviceWidth: roleTable.querySelector('td[data-service="statsd"]').getBoundingClientRect().width,
+            };
+          });
+          if (paneHost) paneHost.dataset.paneRole = priorPaneRole;
           document.body.classList.toggle('theme-light', wasLight);
           view.style.width = '260px';
           refreshDebugSystemViews();
@@ -3110,6 +3126,7 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
             narrowMetrics,
             wideServices,
             themeLayouts,
+            roleLayouts,
             rows: [...table.querySelectorAll('tbody tr')].map(node => node.getAttribute('data-js-debug-service-row')),
             fieldLabels: [...table.querySelectorAll('tbody th')].map(node => node.textContent.trim()),
             pidBefore: pidBeforeText,
@@ -3174,6 +3191,10 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert [layout["theme"] for layout in metrics["themeLayouts"]] == ["dark", "light"], metrics
     assert all(layout["scrolls"] for layout in metrics["themeLayouts"]), metrics
     assert all(layout["labelWidth"] >= 120 and layout["serviceWidth"] >= 120 for layout in metrics["themeLayouts"]), metrics
+    assert [item["role"] for item in metrics["roleLayouts"]] == ["generic", "side"], metrics
+    assert metrics["roleLayouts"][0]["scrolls"] is False, metrics
+    assert metrics["roleLayouts"][1]["scrolls"] is True, metrics
+    assert all(item["labelWidth"] >= 120 and item["serviceWidth"] >= 120 for item in metrics["roleLayouts"]), metrics
 
 
 def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browser, tmp_path):
@@ -3268,7 +3289,7 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
         stopJsDebugStatsPolling();
         clearJsDebugGraphData();
         jsDebugGraphRangeSeconds = 15 * 60;
-        const base = Math.floor((Date.now() - 60_000) / 10_000) * 10;
+        const base = Math.floor((Date.now() - 100_000) / 10_000) * 10;
         debugGraphApplyServerHistory({sequence: 3, records: [
           {start: base, duration: 10, sequence: 1, cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
           {start: base + 10, duration: 10, sequence: 2, cpu_count: 1, run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1},
@@ -3282,11 +3303,12 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
         const idle = [...chart.querySelectorAll('[data-js-debug-bar-series="idleAgents"]')]
           .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width'))}))
           .sort((a, b) => a.x - b.x);
-        const outage = chart.querySelector('[data-js-debug-agent-status-no-data-range]');
+        const outages = [...chart.querySelectorAll('[data-js-debug-agent-status-no-data-range]')]
+          .map(node => ({x: Number(node.getAttribute('x')), width: Number(node.getAttribute('width')), title: node.textContent}));
         return {
           working,
           idle,
-          outage: outage ? {x: Number(outage.getAttribute('x')), width: Number(outage.getAttribute('width')), title: outage.textContent} : null,
+          outages,
           workingGap: working.length >= 2 ? Math.abs((working[0].x + working[0].width) - working[1].x) : null,
           transitionBoundary: idle.length >= 3 ? idle.at(-1).x : null,
         };
@@ -3294,8 +3316,8 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
     )
     assert len(metrics["working"]) == 2, metrics
     assert metrics["workingGap"] <= 0.02, metrics
-    assert metrics["outage"] is not None and metrics["outage"]["width"] > 0, metrics
-    assert "sample" in metrics["outage"]["title"].lower(), metrics
+    assert len(metrics["outages"]) == 2 and all(item["width"] > 0 for item in metrics["outages"]), metrics
+    assert all("sample" in item["title"].lower() for item in metrics["outages"]), metrics
     assert metrics["transitionBoundary"] > metrics["working"][-1]["x"], metrics
 
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):

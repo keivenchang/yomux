@@ -1859,7 +1859,21 @@ class TmuxWebtermApp:
         except (TypeError, ValueError):
             since = 0
 
-        response_since = 0 if payload.get("ack_only") is True else max(0, since)
+        if payload.get("ack_only") is True:
+            merged = self.stats_client.merge_records(
+                [record for record in records if isinstance(record, dict)],
+                client_id=client_id,
+                now=now,
+                clear=payload.get("clear") is True,
+            )
+            if not merged.get("ok"):
+                return user_message_payload("stats.error.unavailable", str(merged.get("error") or "statsd unavailable")), HTTPStatus.SERVICE_UNAVAILABLE
+            # Upload acknowledgements need only advance the durable cursor.
+            # Asking statsd to serialize the entire retained history here can
+            # exceed the bounded RPC metadata frame before the app discards it.
+            return {"ok": True, "history": {"records": [], "sequence": int(merged.get("sequence") or 0)}}, HTTPStatus.OK
+
+        response_since = max(0, since)
         response = self.stats_client.merge_and_history(
             [record for record in records if isinstance(record, dict)],
             client_id=client_id,
@@ -1871,8 +1885,6 @@ class TmuxWebtermApp:
             return user_message_payload("stats.error.unavailable", str(response.get("error") or "statsd unavailable")), HTTPStatus.SERVICE_UNAVAILABLE
         merged = response.get("merged") if isinstance(response.get("merged"), dict) else {}
         history = response.get("history") if isinstance(response.get("history"), dict) else {}
-        if payload.get("ack_only") is True:
-            history = {**history, "records": [], "sequence": int(merged.get("sequence") or history.get("sequence") or 0)}
         return {"ok": True, "history": history}, HTTPStatus.OK
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:

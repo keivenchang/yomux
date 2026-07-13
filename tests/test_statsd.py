@@ -766,6 +766,65 @@ def test_statsd_cost_summary_truncation_marks_incomplete_lower_bound(monkeypatch
     service.store.close()
 
 
+def test_statsd_cost_component_bytes_leave_room_for_live_bucket_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(statsd, "STATS_COST_SUMMARY_MAX_BYTES", 1800)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    atoms = [{
+        "event_id": f"event-{index}",
+        "timestamp": 1000,
+        "provider": "openai",
+        "model": "gpt-5.6",
+        "direction": "output",
+        "modality": "text",
+        "cache_role": "none",
+        "unit": "tokens",
+        "quantity": 10,
+        "telemetry_complete": True,
+        "source": "/tmp/large.jsonl",
+        "transcript": "/tmp/large.jsonl",
+    } for index in range(20)]
+
+    service.merge_server_records([{"time": 1000, "usage_atoms": atoms}], now=1000)
+    service.merge_server_records([{
+        "time": 1000,
+        "tokens_per_agent_total": 5,
+        "agent_token_samples": 1,
+        "agent_token_rates": [{"key": "s|0|codex", "tokens": 5, "total": 5, "samples": 1, "seconds": 1}],
+    }], now=1000)
+    bucket = service.store.bucket(1000, 1)
+    summary = bucket["cost_summary"]
+
+    assert summary["truncated"] is True
+    assert summary["lower_bound"] is True
+    assert len(json.dumps(summary["components"], sort_keys=True, separators=(",", ":")).encode("utf-8")) <= 1800
+    assert sum(1 for item in summary["components"] if item.get("transcript")) == 1
+    assert bucket["tokens_per_agent_total"] == 5
+    service.store.close()
+
+
+def test_statsd_compaction_repairs_legacy_oversized_cost_projection_before_live_merge(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog())
+    atoms = [{
+        "event_id": f"legacy-{index}", "timestamp": 1000, "provider": "openai", "model": "gpt-5.6",
+        "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens",
+        "quantity": 1, "telemetry_complete": True, "source": f"source-{index}-" + ("x" * 80),
+    } for index in range(30)]
+    service.merge_server_records([{"time": 1000, "usage_atoms": atoms}], now=1000)
+    monkeypatch.setattr(statsd, "STATS_COST_SUMMARY_MAX_BYTES", 2400)
+
+    merged = service.merge_records([{"start": 1060, "api_count": 1}], client_id="browser-a", now=1060)
+    buckets = service.store.query_buckets()
+
+    assert merged["ok"] is True
+    assert any(bucket.get("clients", {}).get("browser-a", {}).get("api_count") == 1 for bucket in buckets)
+    for bucket in buckets:
+        summary = bucket.get("cost_summary", {})
+        encoded = json.dumps(summary.get("components", []), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        assert len(encoded) <= 2400
+    assert any(bucket.get("cost_summary", {}).get("truncated") is True for bucket in buckets)
+    service.store.close()
+
+
 def test_statsd_large_live_atom_claim_stays_below_rpc_metadata_limit(monkeypatch, tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     rows = [{"key": "s|0|codex", "label": "s:0", "transcript": "/large.jsonl", "kind": "codex"}]
