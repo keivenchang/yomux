@@ -257,48 +257,23 @@ def test_statsd_new_owner_negotiates_old_and_current_protocols(tmp_path):
     service.store.close()
 
 
-def test_statsd_sampler_survives_store_maintenance_owned_by_rpc_thread(monkeypatch, tmp_path):
-    """The daemon sampler must keep ticking after pricing maintenance is requested.
-
-    StatsStore opens its SQLite connection on the RPC thread.  This regression
-    deliberately opens it before starting the sampler thread, matching the
-    daemon startup order, so direct sampler-thread store access fails loudly.
-    """
-    service = statsd.PersistentStatsService(
-        tmp_path / "statsd.sock",
-        tmp_path / "stats.sqlite3",
-        pricing_catalog=_MutablePricingCatalog(),
-    )
-    service.store.open()
-    calls = []
-    monkeypatch.setattr(service, "_sampler_owner_for_cycle", lambda: {"control_socket": "owner.sock"})
-    owner_timeouts = []
-    monkeypatch.setattr(
-        statsd,
-        "send_yolomux_control_request",
-        lambda *_args, **kwargs: owner_timeouts.append(kwargs["timeout"]) or calls.append(time.time()) or {"ok": True},
-    )
-
-    class BoundedWake:
-        def wait(self, _seconds):
-            if len(calls) >= 2:
-                service.stop_event.set()
-
-        def clear(self):
-            pass
-
-        def set(self):
-            pass
-
-    service.sampler_wake_event = BoundedWake()
-    thread = threading.Thread(target=service._sampler_loop)
-    thread.start()
-    thread.join(timeout=2)
-
-    assert thread.is_alive() is False
-    assert len(calls) == 2
-    assert owner_timeouts == [statsd.STATSD_OWNER_SAMPLE_TIMEOUT_SECONDS] * 2
-    assert service.last_sampler_success_at > 0
+def test_statsd_tracks_independent_sampler_family_diagnostics_deterministically(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    cpu = {
+        "cadence_seconds": 1.0, "attempts": 8, "successes": 7, "failures": 1,
+        "late_cycles": 1, "missed_cycles": 1, "last_runtime_seconds": 0.03,
+        "last_attempt_at": 100.0, "last_success_at": 99.0, "last_failure": "cpu delayed", "alive": True,
+    }
+    gpu = {
+        "cadence_seconds": 10.0, "attempts": 2, "successes": 2, "failures": 0,
+        "late_cycles": 0, "missed_cycles": 0, "last_runtime_seconds": 0.4,
+        "last_attempt_at": 101.0, "last_success_at": 101.0, "last_failure": "", "alive": True,
+    }
+    assert service.handle({"action": "update_sampler_family", "family": "cpu", "status": cpu})["ok"] is True
+    assert service.handle({"action": "update_sampler_family", "family": "gpu", "status": gpu})["ok"] is True
+    status = service.common_status()
+    assert status["sampler_families"] == {"cpu": cpu, "gpu": gpu}
+    assert status["last_failure"] == "cpu: cpu delayed"
     service.store.close()
 
 
@@ -348,13 +323,7 @@ def test_statsd_defers_database_migration_until_listener_owns_singleton(monkeypa
     monkeypatch.setattr(statsd, "run_local_rpc_service", fake_runtime)
 
     assert service.run() == 0
-    assert events == [
-        "listener-owned",
-        "import",
-        "reproject-scheduled",
-        ("thread", "_sampler_loop", "statsd-sampler", True),
-        "sampler-start",
-    ]
+    assert events == ["listener-owned", "import", "reproject-scheduled"]
     service.store.close()
 
 
@@ -1166,50 +1135,6 @@ def test_statsd_service_has_single_writer_protocol_and_recovers_after_restart(tm
     restarted_worker.join(timeout=2.0)
 
 
-def test_statsd_restart_recovers_durable_sampler_owner_and_does_not_idle_exit(tmp_path):
-    owner_path = tmp_path / "background-owner" / "owner.json"
-    owner_path.parent.mkdir()
-    owner = {
-        "status": "owner",
-        "roles": ["stats-sampler"],
-        "control_socket": str(tmp_path / "owner.sock"),
-        "generation_id": "generation-1",
-        "last_heartbeat": time.time(),
-        "pid": os.getpid(),
-        "port": 9991,
-    }
-    owner_path.write_text(json.dumps(owner), encoding="utf-8")
-    service = statsd.PersistentStatsService(
-        tmp_path / "statsd.sock",
-        tmp_path / "stats.sqlite3",
-        idle_seconds=1.0,
-        sampler_owner_path=owner_path,
-    )
-    service.last_client_at = time.monotonic() - 10
-
-    assert service._sampler_owner_for_cycle()["generation_id"] == "generation-1"
-    assert service._idle_shutdown_ready() is False
-    service.store.close()
-
-
-def test_statsd_clears_cached_sampler_when_durable_owner_is_released(tmp_path):
-    owner_path = tmp_path / "background-owner" / "owner.json"
-    owner_path.parent.mkdir()
-    owner_path.write_text(json.dumps({"status": "follower", "pid": os.getpid()}), encoding="utf-8")
-    service = statsd.PersistentStatsService(
-        tmp_path / "statsd.sock",
-        tmp_path / "stats.sqlite3",
-        idle_seconds=1.0,
-        sampler_owner_path=owner_path,
-    )
-    service.sampler_owner = {"generation_id": "stale-owner", "pid": os.getpid()}
-    service.last_client_at = time.monotonic() - 10
-
-    assert service._sampler_owner_for_cycle() == {}
-    assert service._idle_shutdown_ready() is True
-    service.store.close()
-
-
 def test_stats_client_registry_spawns_statsd_with_its_requested_database(tmp_path):
     socket_path = tmp_path / "state with spaces" / "statsd.sock"
     database_path = tmp_path / "state with spaces" / "stats.sqlite3"
@@ -1251,6 +1176,7 @@ def test_stats_client_runtime_status_exposes_sampler_and_history_diagnostics(mon
     monkeypatch.setattr(client.registry, "status", lambda: {"healthy": True, "status": {
         "pid": 123, "sampler_alive": True, "sampler_last_cycle_seconds": 1.25,
         "sampler_late_cycles": 2, "sampler_missed_cycles": 3,
+        "sampler_families": {"cpu": {"cadence_seconds": 1.0, "attempts": 4, "successes": 4}},
         "history_requests": 8, "history_cache_hits": 6,
         "history_profile": {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2},
     }})
@@ -1259,42 +1185,11 @@ def test_stats_client_runtime_status_exposes_sampler_and_history_diagnostics(mon
     status = client.runtime_status()
 
     assert status["sampler_alive"] is True
+    assert status["sampler_families"]["cpu"]["cadence_seconds"] == 1.0
     assert status["sampler_last_cycle_seconds"] == 1.25
     assert (status["sampler_late_cycles"], status["sampler_missed_cycles"]) == (2, 3)
     assert (status["history_requests"], status["history_cache_hits"]) == (8, 6)
     assert status["history_profile"] == {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2}
-
-
-def test_statsd_history_listener_stays_responsive_while_sampler_owner_is_slow(monkeypatch, tmp_path):
-    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    service.store.upsert_bucket(_bucket(sequence=1))
-    entered = threading.Event()
-    release = threading.Event()
-    monkeypatch.setattr(service, "_sampler_owner_for_cycle", lambda: {"control_socket": "slow-owner.sock"})
-
-    def slow_owner(*_args, **_kwargs):
-        entered.set()
-        release.wait(1.0)
-        return {"ok": False, "error": "injected slow sampler"}
-
-    monkeypatch.setattr(statsd, "send_yolomux_control_request", slow_owner)
-    sampler = threading.Thread(target=service._sampler_loop)
-    sampler.start()
-    assert entered.wait(1.0) is True
-
-    started = time.perf_counter()
-    response, _binary = service.handle_with_binary({"action": "history", "start": 0, "end": 0})
-    elapsed = time.perf_counter() - started
-
-    release.set()
-    service.stop_event.set()
-    service.sampler_wake_event.set()
-    sampler.join(timeout=1.0)
-    assert response["ok"] is True
-    assert response["records"]
-    assert elapsed < 0.1
-    assert sampler.is_alive() is False
-    service.store.close()
 
 
 def test_statsd_history_listener_stays_responsive_while_agent_token_scan_is_slow(monkeypatch, tmp_path):
@@ -1752,43 +1647,6 @@ def test_statsd_compaction_preserves_the_full_large_legacy_history_not_just_quer
     assert history["coverage"]["covered_start"] == now - count
     assert history["coverage"]["covered_end"] == now
     assert history["coverage"]["source_records"] < count
-    service.store.close()
-
-
-def test_statsd_sampler_failure_delay_backs_off(tmp_path):
-    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-
-    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_INTERVAL_SECONDS
-    service.sampler_failure_count = 1
-    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS
-    service.sampler_failure_count = 2
-    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS * 2
-    service.sampler_failure_count = 99
-    assert service._sampler_delay_seconds() == statsd.STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS
-    service.store.close()
-
-
-def test_statsd_sampler_deadline_math_does_not_add_successful_rpc_duration(tmp_path):
-    """A 200ms owner RPC still leaves the following fixed 1s deadline at 1.0."""
-
-    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-
-    assert service._next_sampler_deadline(0.0, 0.2, cycle_failed=False) == 1.0
-    assert service._next_sampler_deadline(1.0, 1.2, cycle_failed=False) == 2.0
-    assert service.sampler_missed_cycles == 0
-    assert service.sampler_late_cycles == 0
-    service.store.close()
-
-
-def test_statsd_sampler_deadline_math_skips_overdue_cycles_and_retains_failure_backoff(tmp_path):
-    """A slow cycle is observable degradation, never a catch-up burst."""
-
-    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    assert service._next_sampler_deadline(0.0, 2.2, cycle_failed=False) == 3.0
-    assert service.sampler_late_cycles == 1
-    assert service.sampler_missed_cycles == 2
-    service.sampler_failure_count = 2
-    assert service._next_sampler_deadline(3.0, 3.2, cycle_failed=True) == 13.2
     service.store.close()
 
 

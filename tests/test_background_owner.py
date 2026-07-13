@@ -33,7 +33,8 @@ def no_detached_local_services(monkeypatch):
     """Ownership unit tests must not leave five-minute service daemons behind."""
 
     monkeypatch.setattr(app_module.JobClient, "start_for_scheduler", lambda self: False)
-    monkeypatch.setattr(app_module.StatsClient, "set_sampler_owner", lambda self, owner: {"ok": True})
+    monkeypatch.setattr(app_module.StatsClient, "ensure_started", lambda self: True)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "start_stats_metric_scheduler", lambda self: True)
 
 
 class FollowerOwner:

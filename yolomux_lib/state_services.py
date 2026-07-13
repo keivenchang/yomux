@@ -105,7 +105,7 @@ class TabberActivityWarmerRecord:
 
 @dataclass
 class StatsHistoryService:
-    """Own the HTTP-process stats sample cache and token sampling cadence."""
+    """Own the elected HTTP-process metric scheduler and sample caches."""
 
     sample_lock: threading.Lock = field(default_factory=threading.Lock)
     sample_record: StatsSampleRecord = field(default_factory=StatsSampleRecord)
@@ -116,6 +116,12 @@ class StatsHistoryService:
     agent_token_consumer_until: float = 0.0
     agent_token_bootstrap_pending: bool = True
     agent_token_worker: threading.Thread | None = None
+    scheduler_lock: threading.RLock = field(default_factory=threading.RLock)
+    scheduler_stop_event: threading.Event = field(default_factory=threading.Event)
+    scheduler_threads: dict[str, threading.Thread] = field(default_factory=dict)
+    scheduler_family_locks: dict[str, threading.Lock] = field(default_factory=dict)
+    scheduler_generation: int = 0
+    scheduler_diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass

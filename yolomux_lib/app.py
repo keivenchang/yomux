@@ -420,6 +420,9 @@ STATS_HISTORY_LEGACY_MAX_SAMPLES_PER_SECOND = 100
 STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_HISTORY_SAMPLER_SECONDS = 1.0
+STATS_AGENT_STATUS_SAMPLE_SECONDS = 10.0
+STATS_GPU_SAMPLE_SECONDS = 10.0
+STATS_SYSTEM_MEMORY_SAMPLE_SECONDS = 60.0
 # Per-server CPU history shares one durable 24-hour snapshot with every browser client. Coalesce
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
 STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS = 60.0
@@ -437,7 +440,7 @@ STATS_HISTORY_CLIENT_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 STATS_HOST_RESOURCE_TIMEOUT_SECONDS = 0.75
 # GPU driver CLIs and IORegistry queries are materially slower than the one-second
 # sampler.  Keep their last aggregate value between asynchronous refreshes.
-STATS_GPU_REFRESH_SECONDS = 5.0
+STATS_GPU_REFRESH_SECONDS = STATS_GPU_SAMPLE_SECONDS
 _stats_host_fallback_warning_emitted = False
 STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted"})
 STATS_AGENT_RUN_STATES = frozenset({"working"})
@@ -814,8 +817,20 @@ def _set_stats_gpu_refreshing(value: bool) -> None:
 
 
 def stats_host_resource_metrics() -> dict[str, Any]:
+    """Compatibility aggregate assembled from independently collectible families."""
+    memory = stats_system_memory_metrics()
     hardware = stats_host_hardware_metadata()
     gpu = stats_cached_gpu_metrics(hardware.get("gpu_label", ""))
+    return {
+        **memory,
+        "gpu_devices": gpu.get("devices", {}) if isinstance(gpu, dict) else {},
+        "gpu_util_processes": {},
+        "gpu_memory_processes": {},
+    }
+
+
+def stats_system_memory_metrics() -> dict[str, Any]:
+    hardware = stats_host_hardware_metadata()
     memory = current_system_memory_bytes()
     return {
         "system_memory_used_bytes": memory[1] if memory is not None else None,
@@ -824,7 +839,14 @@ def stats_host_resource_metrics() -> dict[str, Any]:
         "system_memory_label": hardware.get("system_memory_label", ""),
         "cpu_processes": {},
         "memory_processes": {},
-        "gpu_devices": gpu.get("devices", {}),
+    }
+
+
+def stats_gpu_metrics() -> dict[str, Any]:
+    hardware = stats_host_hardware_metadata()
+    gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics(hardware.get("gpu_label", ""))
+    return {
+        "gpu_devices": gpu.get("devices", {}) if isinstance(gpu, dict) else {},
         "gpu_util_processes": {},
         "gpu_memory_processes": {},
     }
@@ -1739,6 +1761,7 @@ class TmuxWebtermApp:
         self.metadata_badge_lock = threading.Lock()
         self.metadata_badge_records: dict[str, MetadataBadgeRecord] = {}
         self.stats_history_service = StatsHistoryService()
+        self.stats_metric_thread_context = threading.local()
         self.job_client = JobClient()
         self.approval_client = ApprovalClient()
         self.attention_ack_lock = threading.RLock()
@@ -2383,6 +2406,231 @@ class TmuxWebtermApp:
         common.start_thread_with_rollback(worker, rollback)
         return True
 
+    def stats_metric_family_specs(self) -> dict[str, tuple[Callable[[], None], Callable[[], float]]]:
+        """Return independently scheduled collectors owned by the elected server."""
+
+        return {
+            "cpu": (self.record_stats_cpu_sample, lambda: STATS_HISTORY_SAMPLER_SECONDS),
+            "agent_status": (self.record_stats_agent_status_sample, lambda: STATS_AGENT_STATUS_SAMPLE_SECONDS),
+            "gpu": (self.record_stats_gpu_sample, lambda: STATS_GPU_SAMPLE_SECONDS),
+            "system_memory": (self.record_stats_system_memory_sample, lambda: STATS_SYSTEM_MEMORY_SAMPLE_SECONDS),
+            "agent_tokens": (self.record_stats_agent_token_sample, self.stats_agent_token_scheduler_seconds),
+        }
+
+    def stats_agent_token_scheduler_seconds(self) -> float:
+        statsd_status = self.stats_client.runtime_status()
+        shared_consumer_until = float(statsd_status.get("agent_token_consumer_until") or 0.0)
+        with self.stats_history_service.agent_token_lock:
+            consumer_until = max(self.stats_history_service.agent_token_consumer_until, shared_consumer_until)
+            if time.time() <= consumer_until:
+                return STATS_AGENT_TOKEN_SAMPLE_SECONDS
+        return STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+
+    def start_stats_metric_scheduler(self) -> bool:
+        service = self.stats_history_service
+        with service.scheduler_lock:
+            if any(worker.is_alive() for worker in service.scheduler_threads.values()):
+                return False
+            service.scheduler_generation += 1
+            generation = service.scheduler_generation
+            service.scheduler_stop_event = threading.Event()
+            service.scheduler_threads = {}
+            for family, (collector, cadence) in self.stats_metric_family_specs().items():
+                service.scheduler_family_locks.setdefault(family, threading.Lock())
+                worker = threading.Thread(
+                    target=self.stats_metric_family_loop,
+                    args=(family, collector, cadence, generation, service.scheduler_stop_event),
+                    name=f"stats-{family.replace('_', '-')}",
+                    daemon=True,
+                )
+                service.scheduler_threads[family] = worker
+                common.start_thread_with_rollback(worker, lambda family=family: service.scheduler_threads.pop(family, None))
+        return True
+
+    def stop_stats_metric_scheduler(self) -> None:
+        service = self.stats_history_service
+        with service.scheduler_lock:
+            service.scheduler_generation += 1
+            service.scheduler_stop_event.set()
+            service.scheduler_threads = {}
+
+    def stats_metric_family_status(self, family: str, **updates: Any) -> dict[str, Any]:
+        service = self.stats_history_service
+        with service.scheduler_lock:
+            status = service.scheduler_diagnostics.setdefault(family, {
+                "attempts": 0, "successes": 0, "failures": 0,
+                "late_cycles": 0, "missed_cycles": 0,
+            })
+            status.update(updates)
+            return dict(status)
+
+    def stats_metric_family_loop(
+        self,
+        family: str,
+        collector: Callable[[], None],
+        cadence: Callable[[], float],
+        generation: int,
+        stop_event: threading.Event,
+    ) -> None:
+        next_deadline = time.monotonic()
+        while not stop_event.is_set() and generation == self.stats_history_service.scheduler_generation:
+            wait_seconds = max(0.0, next_deadline - time.monotonic())
+            if stop_event.wait(wait_seconds):
+                break
+            interval = max(0.1, float(cadence()))
+            attempt_at = time.time()
+            started = time.monotonic()
+            with self.stats_history_service.scheduler_lock:
+                previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
+                attempts = int(previous.get("attempts") or 0) + 1
+            self.stats_metric_family_status(
+                family, cadence_seconds=interval, attempts=attempts,
+                last_attempt_at=attempt_at, running=True, alive=True,
+            )
+            error = ""
+            family_lock = self.stats_history_service.scheduler_family_locks[family]
+            if not family_lock.acquire(blocking=False):
+                with self.stats_history_service.scheduler_lock:
+                    previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
+                self.stats_metric_family_status(
+                    family, running=False,
+                    late_cycles=int(previous.get("late_cycles") or 0) + 1,
+                    missed_cycles=int(previous.get("missed_cycles") or 0) + 1,
+                )
+                next_deadline += interval
+                continue
+            try:
+                if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
+                    break
+                self.stats_metric_thread_context.generation = generation
+                collector()
+            except Exception as exc:  # each family survives and reports its own failure
+                error = str(exc)[:500]
+                logger.exception("stats %s sample failed", family)
+            finally:
+                family_lock.release()
+            runtime = max(0.0, time.monotonic() - started)
+            self.stats_metric_thread_context.generation = None
+            with self.stats_history_service.scheduler_lock:
+                previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
+                successes = int(previous.get("successes") or 0) + (0 if error else 1)
+                failures = int(previous.get("failures") or 0) + (1 if error else 0)
+            status = self.stats_metric_family_status(
+                family, successes=successes, failures=failures, running=False,
+                last_runtime_seconds=runtime, last_failure=error,
+                last_success_at=float(previous.get("last_success_at") or 0.0) if error else time.time(),
+            )
+            try:
+                self.stats_client.update_sampler_family(family, status)
+            except (OSError, RuntimeError, ValueError):
+                logger.exception("stats %s diagnostics update failed", family)
+            next_deadline += interval
+            now = time.monotonic()
+            if now >= next_deadline:
+                skipped = int((now - next_deadline) // interval) + 1
+                next_deadline += skipped * interval
+                with self.stats_history_service.scheduler_lock:
+                    previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
+                self.stats_metric_family_status(
+                    family,
+                    late_cycles=int(previous.get("late_cycles") or 0) + 1,
+                    missed_cycles=int(previous.get("missed_cycles") or 0) + skipped,
+                )
+        self.stats_metric_family_status(family, running=False, alive=False)
+
+    def latest_stats_sample(self) -> dict[str, Any]:
+        """Read the last scheduler-owned CPU sample without collecting in an API thread."""
+
+        with self.stats_history_service.sample_lock:
+            cached = self.stats_history_service.sample_record.cached_payload
+            if cached is not None:
+                return dict(cached)
+        now = time.time()
+        return {
+            "time": now, "pid": os.getpid(), "started_at": SERVER_STARTED_AT,
+            "uptime_seconds": max(0.0, now - SERVER_STARTED_AT), "cpu_percent": 0.0,
+            "system_cpu_percent": 0.0, "rss_bytes": 0,
+        }
+
+    def merge_stats_family_record(self, family: str, record: dict[str, Any], sample: dict[str, Any]) -> dict[str, Any]:
+        self.assert_stats_metric_write_allowed()
+        now = float(record.get("time") or sample.get("time") or time.time())
+        merged = self.stats_client.merge_server_records([record], now=now)
+        if not merged.get("ok"):
+            raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
+        sequence = max(0, int(merged.get("sequence") or 0))
+        live_record = {**record, "start": int(now), "duration": 1, "sequence": sequence, "server_sequence": sequence}
+        if self.client_events.has_demand("stats"):
+            self.publish_client_event(
+                "stats_sample", {"sample": dict(sample), "record": live_record, "sequence": sequence},
+                trigger=f"stats-{family}", cache="ready",
+            )
+        return merged
+
+    def assert_stats_metric_write_allowed(self) -> None:
+        """Reject a slow collector result after its elected-owner generation ended."""
+
+        generation = getattr(self.stats_metric_thread_context, "generation", None)
+        if generation is None:
+            return
+        if generation != self.stats_history_service.scheduler_generation or not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
+            raise RuntimeError("stats owner generation ended before durable write")
+
+    def record_stats_cpu_sample(self) -> None:
+        sample, record_cpu_sample = self.current_stats_sample()
+        if not record_cpu_sample:
+            return
+        process_id, label, port = self.stats_history_process_identity()
+        record = {
+            "time": sample["time"], "cpu_total_percent": sample["cpu_percent"], "cpu_count": 1,
+            "system_cpu_total_percent": sample["system_cpu_percent"], "system_cpu_count": 1,
+            "process": {
+                "id": process_id, "label": label, "pid": int(sample.get("pid") or os.getpid()),
+                "port": port, "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
+                "cpu_percent": sample["cpu_percent"], "cpu_count": 1,
+            },
+        }
+        self.merge_stats_family_record("cpu", record, sample)
+
+    def record_stats_agent_status_sample(self) -> None:
+        sample_time = time.time()
+        rows = self.stats_agent_window_rows()
+        record = self.stats_agent_activity_record_from_rows(rows, sample_time, include_token_rates=False)
+        if record is None:
+            record = {
+                "time": sample_time, "ask_agent_total": 0, "run_agent_total": 0,
+                "transition_agent_total": 0, "idle_agent_total": 0,
+                "active_agent_total": 0, "inactive_agent_total": 0,
+                "agent_activity_samples": 1,
+            }
+        record.pop("_agent_token_records", None)
+        record.pop("_usage_atom_migration_rows", None)
+        self.merge_stats_family_record("agent_status", record, self.latest_stats_sample())
+
+    def record_stats_gpu_sample(self) -> None:
+        sample_time = time.time()
+        self.merge_stats_family_record(
+            "gpu", {"time": sample_time, "host_metrics": stats_gpu_metrics()}, self.latest_stats_sample()
+        )
+
+    def record_stats_system_memory_sample(self) -> None:
+        sample_time = time.time()
+        self.merge_stats_family_record(
+            "system_memory", {"time": sample_time, "host_metrics": stats_system_memory_metrics()}, self.latest_stats_sample()
+        )
+
+    def record_stats_agent_token_sample(self) -> None:
+        sample_time = time.time()
+        rows = self.stats_agent_window_rows()
+        records = self.stats_agent_token_records_for_rows(rows, sample_time)
+        self.assert_stats_metric_write_allowed()
+        if records:
+            merged = self.stats_client.merge_server_records(records, now=sample_time)
+            if not merged.get("ok"):
+                raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
+        self.assert_stats_metric_write_allowed()
+        self.statsd_migrate_usage_atom_history(rows, sample_time)
+
     def current_stats_sample(self) -> tuple[dict[str, Any], bool]:
         now = time.time()
         monotonic_now = time.monotonic()
@@ -2525,9 +2773,11 @@ class TmuxWebtermApp:
             self.stats_client.set_token_consumer_until(consumer_until)
         endpoint_profile["stats_token_consumer_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
         phase_started = time.perf_counter()
-        sample = self.record_stats_global_sample(trigger="api", token_consumer=token_consumer, defer_token_scan=True)
+        sample = self.latest_stats_sample()
         statsd_status = self.stats_client.runtime_status()
-        last_sampler_success_at = float(statsd_status.get("last_sampler_success_at") or 0.0)
+        sampler_families = statsd_status.get("sampler_families") if isinstance(statsd_status.get("sampler_families"), dict) else {}
+        cpu_sampler = sampler_families.get("cpu") if isinstance(sampler_families.get("cpu"), dict) else {}
+        last_sampler_success_at = float(cpu_sampler.get("last_success_at") or 0.0)
         sampler_fresh = bool(last_sampler_success_at and time.time() - last_sampler_success_at <= STATS_SHARED_FRESH_SECONDS)
         shared_stats = {
             "enabled": True,
@@ -2694,15 +2944,12 @@ class TmuxWebtermApp:
         # jobd is started only by the elected scheduler owner.  HTTP handlers
         # can submit/read work but must never create a child process themselves.
         self.job_client.start_for_scheduler()
-        sampler_owner = {**self.background_owner.owner_payload(), **self.control_server.owner_payload()}
-        sampler_response = self.stats_client.set_sampler_owner(sampler_owner)
-        if not sampler_response.get("ok"):
+        if self.stats_client.ensure_started():
+            self.start_stats_metric_scheduler()
+        else:
             self.log_event(
-                None,
-                "statsd_sampler_unavailable",
-                "statsd sampler owner registration failed",
-                {"diagnostic": str(sampler_response.get("error") or "statsd unavailable")},
-                message_key="events.message.statsHistory.sampleFailed",
+                None, "statsd_sampler_unavailable", "statsd metric scheduler could not start",
+                {"diagnostic": "statsd unavailable"}, message_key="events.message.statsHistory.sampleFailed",
             )
         self.warm_start_session_files_payload_cache()
         self.warm_start_tabber_activity_cache()
@@ -2778,6 +3025,7 @@ class TmuxWebtermApp:
         return payload, HTTPStatus.OK
 
     def demote_background_owner(self) -> None:
+        self.stop_stats_metric_scheduler()
         with self.metadata_warm_lock:
             self.metadata_warm_record.stop_event.set()
         with self.activity_transcript_service.tabber_cache_lock:
@@ -9716,14 +9964,6 @@ class TmuxWebtermApp:
             return {"ok": True, "status": self.background_owner.status_payload()}
         if action == "background_client_event":
             return self.handle_background_client_event(request)
-        if action == "statsd_sample":
-            if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
-                return {"ok": False, "error": "stats owner is no longer elected"}
-            try:
-                sample = self.record_stats_global_sample(trigger="statsd", token_consumer=bool(request.get("token_consumer")))
-            except (OSError, RuntimeError, ValueError) as exc:
-                return {"ok": False, "error": str(exc)}
-            return {"ok": True, "sample_time": float(sample.get("time") or 0.0)}
         if action == "background_refresh":
             role = str(request.get("role") or "")
             payload = request.get("payload") if isinstance(request, dict) else {}
@@ -12393,6 +12633,7 @@ class TmuxWebtermApp:
         return self.refresh_auto_approve_cache_sync()
 
     def stop_auto_approve_all(self) -> None:
+        self.stop_stats_metric_scheduler()
         self.approval_client.request({"action": "shutdown"}, timeout=2.5)
         self.background_owner.stop()
         self.yoagent_controller.close_yoagent_codex_app_server()

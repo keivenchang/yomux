@@ -26,7 +26,6 @@ from pathlib import Path
 from time import monotonic as monotonic_clock
 from typing import Any
 
-from .control import send_yolomux_control_request
 from .common import STATE_DIR
 from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
@@ -45,7 +44,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 15
+STATSD_PROTOCOL_VERSION = 16
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -91,13 +90,6 @@ STATS_COST_COMPONENT_DIMENSION_FIELDS = (
 )
 STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
 STATS_HISTORY_POST_MAX_RECORDS = 1000
-STATSD_SAMPLE_INTERVAL_SECONDS = 1.0
-# The owner sample includes bounded host probes.  Leave a small transport
-# margin beyond the one-second cadence so a completed ~0.9s sample is not
-# falsely classified as failed by envelope serialization/scheduling overhead.
-STATSD_OWNER_SAMPLE_TIMEOUT_SECONDS = 1.2
-STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS = 5.0
-STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS = 60.0
 STATSD_BACKGROUND_OWNER_STALE_SECONDS = 10.0
 STATS_COST_SUMMARY_MAX_COMPONENTS = stats_store.STATS_COST_SUMMARY_MAX_COMPONENTS
 STATS_COST_SUMMARY_MAX_BYTES = stats_store.STATS_COST_SUMMARY_MAX_BYTES
@@ -699,7 +691,6 @@ class PersistentStatsService:
         self.last_history_profile: dict[str, Any] = {}
         self.history_request_count = 0
         self.history_cache_hit_count = 0
-        self.sampler_owner: dict[str, Any] = {}
         self.sampler_owner_path = Path(sampler_owner_path) if sampler_owner_path is not None else None
         self.agent_token_consumer_until = 0.0
         self.last_sampler_success_at = 0.0
@@ -709,8 +700,7 @@ class PersistentStatsService:
         self.sampler_missed_cycles = 0
         self.sampler_late_cycles = 0
         self.sampler_last_cycle_seconds = 0.0
-        self.sampler_thread: threading.Thread | None = None
-        self.sampler_wake_event = threading.Event()
+        self.sampler_families: dict[str, dict[str, Any]] = {}
         self.agent_token_scan_lock = threading.Lock()
         # JSONL parsing can be CPU-bound for minutes. It must not share the
         # daemon GIL with the sampler/control listener; the process returns a
@@ -768,47 +758,6 @@ class PersistentStatsService:
         summary["freshness"] = freshness
         summary["active_catalog_revision"] = revision
 
-    def _durable_sampler_owner(self) -> dict[str, Any]:
-        path = self.sampler_owner_path
-        if path is None:
-            return {}
-        try:
-            owner = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return {}
-        if not isinstance(owner, dict) or owner.get("status") != "owner":
-            return {}
-        control_socket = owner.get("control_socket")
-        if not isinstance(control_socket, str) or not control_socket:
-            return {}
-        roles = owner.get("roles")
-        if not isinstance(roles, list) or "stats-sampler" not in roles:
-            return {}
-        try:
-            heartbeat = float(owner.get("last_heartbeat") or 0.0)
-            pid = int(owner.get("pid") or 0)
-        except (TypeError, ValueError):
-            return {}
-        if heartbeat <= 0 or abs(time.time() - heartbeat) > STATSD_BACKGROUND_OWNER_STALE_SECONDS or pid <= 0:
-            return {}
-        try:
-            os.kill(pid, 0)
-        except (OSError, ValueError):
-            return {}
-        return owner
-
-    def _sampler_owner_for_cycle(self) -> dict[str, Any]:
-        # A history request can launch statsd after the elected web process has
-        # already acquired background ownership. Adopt that durable owner rather
-        # than waiting for another election transition to register it over RPC.
-        durable_owner = self._durable_sampler_owner()
-        if self.sampler_owner_path is not None:
-            # The durable election record is authoritative. Clear an RPC-cached
-            # owner after release/staleness so statsd can idle instead of living
-            # forever on a dead generation.
-            self.sampler_owner = durable_owner
-        return dict(self.sampler_owner)
-
     def _idle_shutdown_ready(self) -> bool:
         self._drain_agent_token_atom_worker()
         self._drain_agent_token_scan_result()
@@ -823,77 +772,7 @@ class PersistentStatsService:
                 or self.agent_token_atom_persistence is not None
             )
         # An elected sampler is active work even while no browser reads YO!stats.
-        return not scan_active and not maintenance.get("pending") and not rollup_maintenance.get("pending") and not self.leases and not self.sampler_owner and monotonic_clock() - self.last_client_at >= self.idle_seconds
-
-    def _sampler_delay_seconds(self) -> float:
-        if self.sampler_failure_count <= 0:
-            return STATSD_SAMPLE_INTERVAL_SECONDS
-        multiplier = 2 ** min(6, self.sampler_failure_count - 1)
-        return min(STATSD_SAMPLE_FAILURE_MAX_BACKOFF_SECONDS, STATSD_SAMPLE_FAILURE_INITIAL_BACKOFF_SECONDS * multiplier)
-
-    def _next_sampler_deadline(self, previous_deadline: float, now: float, *, cycle_failed: bool) -> float:
-        """Advance the sampler clock without coupling a success to its work time."""
-
-        if cycle_failed:
-            # Failure retries deliberately retain exponential backoff; do not
-            # immediately spin against an unavailable elected owner.
-            return now + self._sampler_delay_seconds()
-        next_deadline = previous_deadline + STATSD_SAMPLE_INTERVAL_SECONDS
-        if now >= next_deadline:
-            # A late healthy cycle is never overlapped. Skip deadlines already
-            # in the past and expose that bounded degradation rather than
-            # manufacturing catch-up samples.
-            skipped = int((now - next_deadline) // STATSD_SAMPLE_INTERVAL_SECONDS) + 1
-            self.sampler_late_cycles += 1
-            self.sampler_missed_cycles += skipped
-            next_deadline += skipped * STATSD_SAMPLE_INTERVAL_SECONDS
-        return next_deadline
-
-    def _sampler_loop(self) -> None:
-        next_deadline = monotonic_clock()
-        while not self.stop_event.is_set():
-            wait_seconds = max(0.0, next_deadline - monotonic_clock())
-            if wait_seconds and self.sampler_wake_event.wait(wait_seconds):
-                self.sampler_wake_event.clear()
-                # Owner/consumer state changed. Sampling immediately is both
-                # useful and safe: this loop is the sole owner RPC caller.
-                next_deadline = monotonic_clock()
-            else:
-                self.sampler_wake_event.clear()
-            if self.stop_event.is_set():
-                break
-            cycle_started = monotonic_clock()
-            cycle_failed = False
-            try:
-                owner = self._sampler_owner_for_cycle()
-                if owner:
-                    self.last_sampler_attempt_at = time.time()
-                    response = send_yolomux_control_request(
-                        owner,
-                        {"action": "statsd_sample", "token_consumer": time.time() < self.agent_token_consumer_until},
-                        timeout=STATSD_OWNER_SAMPLE_TIMEOUT_SECONDS,
-                    )
-                    if not response.get("ok"):
-                        self.last_sampler_failure = redact_local_service_text(response.get("error") or "stats owner unavailable")
-                        cycle_failed = True
-                    else:
-                        self.last_sampler_success_at = self.last_sampler_attempt_at
-                        self.last_sampler_failure = ""
-                        # StatsStore's SQLite connection belongs to the RPC thread. Route catalog
-                        # maintenance through that thread as a normal typed request; direct access
-                        # here kills the sampler while leaving the daemon process deceptively alive.
-                        maintenance = StatsClient(self.socket_path, self.store.path).maybe_reproject_cost_summaries()
-                        if maintenance.get("ok") is False:
-                            self.last_sampler_failure = redact_local_service_text(maintenance.get("error") or "stats pricing maintenance unavailable")
-                            cycle_failed = True
-            except Exception as exc:  # the persistent sampler must survive one failed owner/maintenance cycle
-                self.last_sampler_failure = redact_local_service_text(exc)
-                cycle_failed = True
-            self.sampler_failure_count = self.sampler_failure_count + 1 if cycle_failed else 0
-            self.sampler_last_cycle_seconds = max(0.0, monotonic_clock() - cycle_started)
-            next_deadline = self._next_sampler_deadline(
-                next_deadline, monotonic_clock(), cycle_failed=cycle_failed
-            )
+        return not scan_active and not maintenance.get("pending") and not rollup_maintenance.get("pending") and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     @staticmethod
     def _legacy_client_bucket(snapshot: Any) -> dict[str, Any] | None:
@@ -3087,10 +2966,12 @@ class PersistentStatsService:
             "last_failure": last_failure,
             "last_sampler_success_at": self.last_sampler_success_at,
             "last_sampler_attempt_at": self.last_sampler_attempt_at,
+            "agent_token_consumer_until": self.agent_token_consumer_until,
             "sampler_missed_cycles": self.sampler_missed_cycles,
             "sampler_late_cycles": self.sampler_late_cycles,
             "sampler_last_cycle_seconds": self.sampler_last_cycle_seconds,
-            "sampler_alive": bool(self.sampler_thread and self.sampler_thread.is_alive()),
+            "sampler_alive": any(bool(item.get("alive")) for item in self.sampler_families.values()),
+            "sampler_families": copy.deepcopy(self.sampler_families),
             "restart_backoff_seconds": 0.0,
             "generation": generation,
             "idle_seconds": self.idle_seconds,
@@ -3128,32 +3009,31 @@ class PersistentStatsService:
             return {"ok": True, "shutdown": True}, b""
         if action == "shutdown":
             self.stop_event.set()
-            self.sampler_wake_event.set()
             return {"ok": True}, b""
-        if action == "set_sampler_owner":
-            owner = request.get("owner")
-            if not isinstance(owner, dict) or not isinstance(owner.get("control_socket"), str) or not owner["control_socket"]:
-                return {"ok": False, "error": "owner control socket is required"}, b""
-            self.sampler_owner = dict(owner)
-            self.sampler_wake_event.set()
-            return {"ok": True, "owner": {"port": int(owner.get("port") or 0), "control_socket": owner["control_socket"]}}, b""
         if action == "set_token_consumer_until":
             try:
                 consumer_until = max(0.0, float(request.get("consumer_until") or 0.0))
             except (TypeError, ValueError):
                 return {"ok": False, "error": "consumer_until must be a number"}, b""
             self.agent_token_consumer_until = max(self.agent_token_consumer_until, consumer_until)
-            self.sampler_wake_event.set()
             return {"ok": True, "agent_token_consumer_until": self.agent_token_consumer_until}, b""
-        if action == "mark_sampler_success":
-            try:
-                sample_time = max(0.0, float(request.get("sample_time") or time.time()))
-            except (TypeError, ValueError):
-                sample_time = time.time()
-            self.last_sampler_attempt_at = sample_time
-            self.last_sampler_success_at = sample_time
-            self.last_sampler_failure = ""
-            return {"ok": True, "last_sampler_success_at": self.last_sampler_success_at}, b""
+        if action == "update_sampler_family":
+            family = str(request.get("family") or "").strip()
+            status = request.get("status")
+            if not family or not isinstance(status, dict):
+                return {"ok": False, "error": "family and status are required"}, b""
+            self.sampler_families[family] = copy.deepcopy(status)
+            successes = [float(item.get("last_success_at") or 0.0) for item in self.sampler_families.values()]
+            attempts = [float(item.get("last_attempt_at") or 0.0) for item in self.sampler_families.values()]
+            self.last_sampler_success_at = max(successes, default=0.0)
+            self.last_sampler_attempt_at = max(attempts, default=0.0)
+            failures = [
+                f"{name}: {item.get('last_failure')}"
+                for name, item in sorted(self.sampler_families.items())
+                if str(item.get("last_failure") or "").strip()
+            ]
+            self.last_sampler_failure = "; ".join(failures)
+            return {"ok": True, "family": family}, b""
         if action == "upsert_bucket":
             bucket = request.get("bucket")
             if not isinstance(bucket, dict):
@@ -3355,14 +3235,9 @@ class PersistentStatsService:
         # retained-history pass advances in bounded listener idle turns.
         self.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
         self._schedule_cost_reprojection()
-        self.sampler_thread = threading.Thread(target=self._sampler_loop, name="statsd-sampler", daemon=True)
-        self.sampler_thread.start()
 
     def _shutdown(self) -> None:
         self.stop_event.set()
-        self.sampler_wake_event.set()
-        if self.sampler_thread is not None and self.sampler_thread.is_alive():
-            self.sampler_thread.join(timeout=1.0)
         with self.agent_token_scan_lock:
             scan_worker = self.agent_token_scan_worker
             scan_result_path = self.agent_token_scan_result_path
@@ -3425,6 +3300,7 @@ class StatsClient(LocalServiceClient):
             "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""),
             "last_sampler_success_at": float(payload.get("last_sampler_success_at") or 0.0),
             "last_sampler_attempt_at": float(payload.get("last_sampler_attempt_at") or 0.0),
+            "agent_token_consumer_until": float(payload.get("agent_token_consumer_until") or 0.0),
             "sampler_missed_cycles": int(payload.get("sampler_missed_cycles") or 0),
             "sampler_late_cycles": int(payload.get("sampler_late_cycles") or 0),
             "sampler_last_cycle_seconds": float(payload.get("sampler_last_cycle_seconds") or 0.0),
@@ -3432,6 +3308,7 @@ class StatsClient(LocalServiceClient):
             "history_requests": int(payload.get("history_requests") or 0),
             "history_cache_hits": int(payload.get("history_cache_hits") or 0),
             "sampler_alive": payload.get("sampler_alive") is True,
+            "sampler_families": payload.get("sampler_families") if isinstance(payload.get("sampler_families"), dict) else {},
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - monotonic_clock()),
             "generation": int(payload.get("generation") or 0), "record": status.get("record") if isinstance(status.get("record"), dict) else {},
             "resources": self.registry.resources(int(payload.get("pid") or 0)),
@@ -3541,20 +3418,15 @@ class StatsClient(LocalServiceClient):
     def maybe_reproject_cost_summaries(self) -> dict[str, Any]:
         return self.request({"action": "maybe_reproject_cost_summaries"}, timeout=10.0)
 
-    def set_sampler_owner(self, owner: dict[str, Any]) -> dict[str, Any]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}
-        return self.request({"action": "set_sampler_owner", "owner": owner}, timeout=1.0)
-
     def set_token_consumer_until(self, consumer_until: float) -> dict[str, Any]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
         return self.request({"action": "set_token_consumer_until", "consumer_until": consumer_until}, timeout=1.0)
 
-    def mark_sampler_success(self, sample_time: float | None = None) -> dict[str, Any]:
+    def update_sampler_family(self, family: str, status: dict[str, Any]) -> dict[str, Any]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
-        return self.request({"action": "mark_sampler_success", "sample_time": sample_time}, timeout=1.0)
+        return self.request({"action": "update_sampler_family", "family": family, "status": status}, timeout=1.0)
 
     def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
