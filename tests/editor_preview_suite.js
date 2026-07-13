@@ -5832,7 +5832,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setJsDebugHistoryReadinessForTest('ready');
     const emptyReady = api.jsDebugHistoryReadinessForTest();
     assert.equal(emptyReady.loadedStartSeconds, 0, 'successful empty history does not invent or regress a loaded start');
-    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(targetStart, nowSeconds, 5), false, 'successful empty history marks the requested domain satisfied');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(targetStart, nowSeconds, 5), true, 'an empty partial response cannot claim the requested domain is satisfied');
     assert.equal(api.debugPanelHtmlForTest().includes('aria-busy="true"'), false, 'successful empty history clears busy state');
 
     api.resetJsDebugHistoryReadinessForTest();
@@ -5863,6 +5863,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {startSeconds: 500, endSeconds: 600},
       'a disjoint fine zoom aligns its bounded replacement to the retained five-second bucket edges',
     );
+  });
+
+  test('YO!stats partial live deltas retain the durable prefix and leave its gap refreshable', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.resetJsDebugHistoryReadinessForTest();
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'older', requestedStart: 100, requestedEnd: 160, coveredStart: 100, coveredEnd: 160,
+      resolutionSeconds: 1, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: 100, requestedEnd: 0, coveredStart: 140, coveredEnd: 160,
+      resolutionSeconds: 1, complete: false, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(100, 160, 1), false, 'a partial live tail cannot erase the already durable prefix');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(80, 160, 1), true, 'the uncovered older prefix remains refreshable instead of becoming Infinity coverage');
   });
 
   test('YO!stats accepts the server-selected retained resolution for a wide range', () => {

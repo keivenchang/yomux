@@ -42110,13 +42110,16 @@ function applyJsDebugHistoryCoverage(coverage) {
   }
   if (coverage.coveredEnd > 0) state.loadedEndSeconds = Math.max(Number(state.loadedEndSeconds) || 0, coverage.coveredEnd);
   state.resolutionSeconds = coverage.resolutionSeconds;
-  const satisfiedStart = coverage.hasMoreOlder
-    ? coverage.coveredStart
-    : Math.max(0, Number(state.targetStartSeconds) || coverage.requestedStart || coverage.coveredStart);
-  const satisfiedEnd = coverage.mode === 'live'
+  // A live cursor response is only a delta, not proof that the older prefix is
+  // present.  Keep the server's exact durable interval: marking it through
+  // Infinity was what let a later partial response erase visible CPU points.
+  const satisfiedStart = coverage.coveredStart;
+  // Only an explicitly complete live response can satisfy the moving tail.
+  // A partial live delta retains its exact durable interval above.
+  const satisfiedEnd = coverage.complete && coverage.mode === 'live'
     ? Infinity
-    : Math.max(satisfiedStart, coverage.coveredEnd, Number(state.targetEndSeconds) || coverage.requestedEnd || 0);
-  if (satisfiedEnd > satisfiedStart) {
+    : coverage.coveredEnd;
+  if (coverage.complete && satisfiedEnd > satisfiedStart) {
     state.coverageIntervals = mergeJsDebugHistoryCoverageIntervals([
       ...state.coverageIntervals,
       {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds, sourceResolutionSeconds: coverage.sourceResolutionSeconds},
@@ -45913,6 +45916,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
     if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
+    if (readinessRequest && !coverage.complete) throw new Error('stats history response provided incomplete coverage');
     const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
       ? payload.history.coverage
       : null;
