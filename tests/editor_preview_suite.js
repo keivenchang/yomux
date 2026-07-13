@@ -409,7 +409,7 @@ function statsHistoryCoverageForRequest(url, overrides = {}) {
   const requestedEnd = Number(requestUrl.searchParams.get('history_end'));
   const resolutionSeconds = Number(requestUrl.searchParams.get('history_resolution'));
   const live = requestedEnd === 0;
-  return {
+  const coverage = {
     mode: live ? 'live' : 'older',
     requested_start: requestedStart,
     requested_end: requestedEnd,
@@ -421,6 +421,15 @@ function statsHistoryCoverageForRequest(url, overrides = {}) {
     next_older_end: 0,
     ...overrides,
   };
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'intervals')) {
+    coverage.intervals = coverage.covered_end > coverage.covered_start ? [{
+      start: coverage.covered_start,
+      end: coverage.covered_end,
+      resolution_seconds: coverage.resolution_seconds,
+      source_resolution_seconds: coverage.source_resolution_seconds || 0,
+    }] : [];
+  }
+  return coverage;
 }
 
 function tmuxWindowButtonElement(session, index, active = false) {
@@ -5820,7 +5829,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    assert.equal(sampleUrl.searchParams.get('token_consumer'), '1', 'visible YO!stats polling opts into slower server token scans');
 	    assert.equal(body.client_id, sampleUrl.searchParams.get('client_id'), 'YO!stats history posts the same per-tab client id');
 	    assert.ok(body.records.some(record => record.api_count === 1), 'YO!stats history posts browser API counters for this client');
-	    assert.equal(api.jsDebugEventsForTest().length, 1, 'regular debug event recording remains enabled');
+	    assert.equal(api.jsDebugEventsForTest().filter(event => event.type === 'api').length, 1, 'regular debug event recording remains enabled alongside coverage diagnostics');
 	    const coreUtilsSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 	    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 	    assert.ok(/const apiDebugEnabled = jsDebugCollectionEnabled[\s\S]*const startedAt = apiDebugEnabled \? jsDebugPerformanceNow\(\) : 0[\s\S]*const method = apiDebugEnabled \? jsDebugRequestMethod\(requestOptions\) : ''[\s\S]*const requestBytes = apiDebugEnabled \? jsDebugRequestBytes\(url, requestOptions\) : 0/.test(coreUtilsSource), 'apiFetch skips debug metadata work before fetch when debug collection is disabled');
@@ -5942,6 +5951,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(503, 597, 1), true, 'a disjoint zoom does not inherit another window\'s fine resolution');
     api.setJsDebugHistoryReadinessForTest('ready', {
       coverageIntervals: [
+        {startSeconds: 100, endSeconds: 1000, resolutionSeconds: 5},
+        {startSeconds: 200, endSeconds: 300, resolutionSeconds: 1},
+        {startSeconds: 400, endSeconds: 500, resolutionSeconds: 1},
+      ],
+      requestCoverageIntervals: [
         {startSeconds: 100, endSeconds: 1000, resolutionSeconds: 5},
         {startSeconds: 200, endSeconds: 300, resolutionSeconds: 1},
         {startSeconds: 400, endSeconds: 500, resolutionSeconds: 1},
@@ -6188,10 +6202,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const secondUrl = new URL(requests[1], 'http://localhost');
     assert.equal(firstUrl.searchParams.get('history_end'), '0', 'the first page uses the live-history sentinel');
     assert.equal(secondUrl.searchParams.get('history_end'), String(Number(firstUrl.searchParams.get('history_start')) + 300), 'the continuation stops at the backend next-older cursor');
-    assert.equal(api.jsDebugHistoryReadinessForTest().phase, 'ready', 'readiness clears only after the final page paints');
+    const finalReadiness = api.jsDebugHistoryReadinessForTest();
+    assert.equal(finalReadiness.phase, 'ready', 'readiness clears only after the final page paints');
+    assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(Number(firstUrl.searchParams.get('history_start')), finalReadiness.targetEndSeconds, 1), false, 'the older page joins the retained live suffix instead of replacing it');
   });
 
-  await testAsync('YO!stats renders terminal partial history instead of discarding token data', async () => {
+  await testAsync('YO!stats renders interval-list history instead of classifying partial shapes', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
     await flushAsyncWork();
@@ -6222,6 +6238,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
           complete: false,
           has_more_older: false,
           next_older_end: 0,
+          intervals: [{start: requestedStart + 60, end: Math.floor(Date.now() / 1000), resolution_seconds: 1}],
         }),
       }}));
     });
@@ -6232,11 +6249,88 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const summary = api.debugGraphBucketSummaryForTest();
     const html = api.debugPanelHtmlForTest();
     assert.equal(requests.length, 1, 'known-unavailable older prefix does not retry forever');
-    assert.equal(state.phase, 'ready', 'usable partial availability reaches ready after painting');
+    assert.equal(state.phase, 'ready', 'a valid interval list reaches ready after painting regardless of its gap shape');
     assert.ok(summary.rawBuckets + summary.rollupBuckets > 0, 'returned token records are retained');
     assert.ok(html.includes('Agent tokens/min') && html.includes('8881:0:codex'), 'Agent token chart renders the partial response');
-    assert.equal(html.includes('Could not load history'), false, 'usable partial availability does not cover the chart with an error');
-    assert.ok(api.jsDebugEventsForTest().some(event => event.type === 'stats_history' && /terminal partial coverage accepted/.test(String(event.message))), 'Logs names the accepted partial-availability path');
+    assert.equal(html.includes('Could not load history'), false, 'a valid partial interval list does not cover the chart with an error');
+    assert.ok(api.jsDebugEventsForTest().some(event => event.type === 'stats_history' && /coverage accepted: requested .*global=1 interval/.test(String(event.message))), 'Logs summarize the requested and received interval spans');
+  });
+
+  await testAsync('YO!stats accepts prefix, suffix, middle, multi, and empty coverage shapes with honest gaps', async () => {
+    const cases = [
+      {name: 'prefix', intervals: (start, end, span) => [{start: start + span, end}], gaps: 1},
+      {name: 'suffix', intervals: (start, end, span) => [{start, end: end - span}], gaps: 1},
+      {name: 'middle', intervals: (start, end, span) => [{start, end: start + span}, {start: start + (2 * span), end}], gaps: 1},
+      {name: 'multi', intervals: (start, end, span) => [{start, end: start + span}, {start: start + (2 * span), end: start + (3 * span)}, {start: start + (4 * span), end}], gaps: 2},
+      {name: 'empty', intervals: () => [], gaps: 1},
+    ];
+    for (const scenario of cases) {
+      const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+      await flushAsyncWork();
+      api.stopJsDebugStatsPollingForTest();
+      api.resetJsDebugHistoryReadinessForTest();
+      api.setFetchForTest(url => {
+        const parsed = new URL(String(url), 'http://localhost');
+        const start = Number(parsed.searchParams.get('history_start'));
+        const end = Math.ceil(Date.now() / 1000);
+        const span = Math.max(1, Math.floor((end - start) / 5));
+        const intervals = scenario.intervals(start, end, span).map((interval, index) => ({...interval, resolution_seconds: 1, epoch_id: `wake-${index + 1}`}));
+        return Promise.resolve(jsonResponse({history: {
+          sequence: 1,
+          latest_sequence: 1,
+          records: [],
+          coverage: statsHistoryCoverageForRequest(url, {
+            covered_start: intervals.length ? intervals[0].start : 0,
+            covered_end: intervals.length ? intervals.at(-1).end : 0,
+            complete: false,
+            intervals,
+            store_intervals: {server: intervals, agent_tokens: intervals},
+          }),
+        }}));
+      });
+      await api.pollJsDebugStatsSampleForTest();
+      for (let index = 0; index < 4; index += 1) await flushAsyncWork();
+      const state = api.jsDebugHistoryReadinessForTest();
+      assert.equal(state.phase, 'ready', `${scenario.name} interval coverage is data, not an error branch`);
+      assert.equal(state.error, '', `${scenario.name} coverage leaves no error reason`);
+      const domain = {startMs: state.targetStartSeconds * 1000, endMs: state.targetEndSeconds * 1000};
+      assert.equal(api.debugGraphHistoryCoverageGapRunsForTest({key: 'cpu'}, domain).length, scenario.gaps, `${scenario.name} coverage paints its honest uncovered regions`);
+      assert.equal(api.debugPanelHtmlForTest().includes('Could not load history'), false, `${scenario.name} coverage does not show the history error overlay`);
+      const diagnostic = api.jsDebugEventsForTest().find(event => event.type === 'stats_history' && /coverage accepted:/.test(String(event.message)));
+      assert.ok(/requested \[.*global=.*stores: agent_tokens=.*server=.*epochs=/.test(String(diagnostic?.message)), `${scenario.name} diagnostic summarizes request, global/store intervals, and derived epoch boundaries`);
+    }
+  });
+
+  test('YO!stats uses each store family coverage instead of rendering silent zeros', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const domain = {startMs: 100_000, endMs: 500_000};
+    const full = [{startSeconds: 100, endSeconds: 500, resolutionSeconds: 1, sourceResolutionSeconds: 0}];
+    const split = [
+      {startSeconds: 100, endSeconds: 200, resolutionSeconds: 1, sourceResolutionSeconds: 0},
+      {startSeconds: 300, endSeconds: 500, resolutionSeconds: 1, sourceResolutionSeconds: 0},
+    ];
+    api.setJsDebugHistoryReadinessForTest('ready', {
+      coverageIntervals: full,
+      requestCoverageIntervals: full,
+      storeCoverageIntervals: {cpu: full, system_memory: split, gpu: [], agent_status: full, agent_tokens: split, cost: []},
+    });
+    assert.equal(api.debugGraphHistoryCoverageGapRunsForTest({key: 'cpu'}, domain).length, 0, 'server coverage keeps CPU confident');
+    assert.deepStrictEqual(canonical(api.debugGraphHistoryCoverageGapRunsForTest({key: 'memory'}, domain)), [{startMs: 200_000, endMs: 300_000}], 'memory uses its own cadence/store interval instead of borrowing CPU coverage');
+    assert.deepStrictEqual(canonical(api.debugGraphHistoryCoverageGapRunsForTest({key: 'gpuUtil'}, domain)), [{startMs: 100_000, endMs: 500_000}], 'GPU shows no data when its independent store has no covered interval');
+    assert.equal(api.debugGraphHistoryCoverageGapRunsForTest({key: 'activity'}, domain).length, 0, 'status uses its own full coverage');
+    assert.deepStrictEqual(canonical(api.debugGraphHistoryCoverageGapRunsForTest({key: 'agentTokens'}, domain)), [{startMs: 200_000, endMs: 300_000}], 'agent tokens expose the store-specific middle gap instead of zero');
+    assert.equal((api.debugGraphHistoryCoverageGapRectsHtmlForTest({key: 'agentTokens'}, domain).match(/data-js-debug-history-no-data-range=/g) || []).length, 1, 'the token gap is visible in the shared SVG overlay');
+    api.setDebugGraphModelTokenDimensionForTest('input');
+    assert.deepStrictEqual(canonical(api.debugGraphHistoryCoverageGapRunsForTest({key: 'modelTokens'}, domain)), [{startMs: 100_000, endMs: 500_000}], 'cost-backed model dimensions expose empty cost coverage across the answered range');
+  });
+
+  test('YO!stats rejects only malformed interval coverage, while an empty list remains valid', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const envelope = {mode: 'live', requested_start: 100, requested_end: 500, covered_start: 100, covered_end: 500, resolution_seconds: 1};
+    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: envelope}), null, 'a compatibility envelope without the required interval list is malformed');
+    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: [{start: 100, end: 90, resolution_seconds: 1}]}}), null, 'a reversed interval is malformed');
+    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: Array.from({length: 257}, (_item, index) => ({start: index, end: index + 1, resolution_seconds: 1}))}}), null, 'an unbounded interval list is malformed');
+    assert.deepStrictEqual(canonical(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: []}}).intervals), [], 'an explicit empty interval list is valid coverage');
   });
 
   await testAsync('YO!stats widening the range queues an older-history fetch behind an in-flight poll', async () => {

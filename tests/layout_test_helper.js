@@ -1256,6 +1256,8 @@ globalThis.__layoutTestApi = {
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
+  debugGraphHistoryCoverageGapRunsForTest: debugGraphHistoryCoverageGapRuns,
+  debugGraphHistoryCoverageGapRectsHtmlForTest: debugGraphHistoryCoverageGapRectsHtml,
   debugGraphHeldProvenanceTextForTest: debugGraphHeldProvenanceText,
   debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
@@ -1287,6 +1289,7 @@ globalThis.__layoutTestApi = {
     };
   },
   jsDebugHistoryReadinessForTest: jsDebugHistoryReadinessSnapshot,
+  normalizedJsDebugHistoryCoverageForTest: normalizedJsDebugHistoryCoverage,
   setJsDebugHistoryReadinessForTest: setJsDebugHistoryReadiness,
   applyJsDebugHistoryCoverageForTest: applyJsDebugHistoryCoverage,
   jsDebugHistoryCoverageNeedsRefreshForTest: jsDebugHistoryCoverageNeedsRefresh,

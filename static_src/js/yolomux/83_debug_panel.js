@@ -22,6 +22,7 @@ const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older',
 const jsDebugHistoryOlderOverlayDelayMs = 120;
 const jsDebugHistoryRetryInitialDelayMs = 10_000;
 const jsDebugHistoryRetryMaxDelayMs = 5 * 60_000;
+const jsDebugHistoryCoverageIntervalLimit = 256;
 const jsDebugHistoryReadiness = {
   phase: 'idle',
   requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
@@ -34,6 +35,8 @@ const jsDebugHistoryReadiness = {
   loadedEndSeconds: 0,
   resolutionSeconds: 0,
   coverageIntervals: [],
+  requestCoverageIntervals: [],
+  storeCoverageIntervals: {},
   attemptCount: 0,
   error: '',
   generation: 0,
@@ -460,6 +463,8 @@ function jsDebugHistoryReadinessSnapshot() {
     loadedEndSeconds: state.loadedEndSeconds,
     resolutionSeconds: state.resolutionSeconds,
     coverageIntervals: state.coverageIntervals.map(interval => ({...interval})),
+    requestCoverageIntervals: state.requestCoverageIntervals.map(interval => ({...interval})),
+    storeCoverageIntervals: Object.fromEntries(Object.entries(state.storeCoverageIntervals || {}).map(([key, intervals]) => [key, intervals.map(interval => ({...interval}))])),
     attemptCount: state.attemptCount,
     error: state.error,
     generation: state.generation,
@@ -512,7 +517,7 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
   const wasBusy = jsDebugHistoryReadinessBusy(state);
   const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
   clearJsDebugHistoryOverlayTimer();
-  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs', 'nextAutoRetryAtMs']) {
+  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'requestCoverageIntervals', 'storeCoverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs', 'nextAutoRetryAtMs']) {
     if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
   }
   state.phase = nextPhase;
@@ -566,22 +571,92 @@ function jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, reque
 function normalizedJsDebugHistoryCoverage(history = {}) {
   const raw = history?.coverage;
   if (!raw || typeof raw !== 'object') return null;
+  const fallbackResolution = Number(raw.resolution_seconds);
+  const fallbackSourceResolution = Number(raw.source_resolution_seconds);
+  const normalizeIntervals = intervals => {
+    if (!Array.isArray(intervals) || intervals.length > jsDebugHistoryCoverageIntervalLimit) return null;
+    const normalized = [];
+    for (const interval of intervals) {
+      if (!interval || typeof interval !== 'object' || Array.isArray(interval)) return null;
+      const startSeconds = Number(interval.start ?? interval.start_seconds);
+      const endSeconds = Number(interval.end ?? interval.end_seconds);
+      const resolutionSeconds = Number(interval.resolution_seconds ?? interval.resolution ?? fallbackResolution);
+      const sourceResolutionSeconds = Number(interval.source_resolution_seconds ?? interval.source_resolution ?? fallbackSourceResolution) || 0;
+      if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return null;
+      if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return null;
+      if (!Number.isFinite(sourceResolutionSeconds) || sourceResolutionSeconds < 0) return null;
+      normalized.push({
+        startSeconds,
+        endSeconds,
+        resolutionSeconds,
+        sourceResolutionSeconds,
+        ...(interval.epoch_id != null ? {epochId: String(interval.epoch_id)} : {}),
+      });
+    }
+    return mergeJsDebugHistoryCoverageIntervals(normalized);
+  };
+  const intervals = normalizeIntervals(raw.intervals);
+  if (!intervals) return null;
+  const rawStores = raw.store_intervals ?? raw.family_intervals ?? {};
+  if (!rawStores || typeof rawStores !== 'object' || Array.isArray(rawStores)) return null;
+  const storeIntervals = {};
+  for (const [key, value] of Object.entries(rawStores)) {
+    const normalized = normalizeIntervals(value);
+    if (!normalized) return null;
+    storeIntervals[String(key)] = normalized;
+  }
+  const intervalStart = intervals.length ? Math.min(...intervals.map(interval => interval.startSeconds)) : 0;
+  const intervalEnd = intervals.length ? Math.max(...intervals.map(interval => interval.endSeconds)) : 0;
   const coverage = {
     mode: raw.mode === 'older' ? 'older' : 'live',
     requestedStart: Number(raw.requested_start),
     requestedEnd: Number(raw.requested_end),
-    coveredStart: Number(raw.covered_start),
-    coveredEnd: Number(raw.covered_end),
-    resolutionSeconds: Number(raw.resolution_seconds),
-    sourceResolutionSeconds: Number(raw.source_resolution_seconds),
+    coveredStart: intervalStart,
+    coveredEnd: intervalEnd,
+    resolutionSeconds: Number.isFinite(fallbackResolution) && fallbackResolution > 0 ? fallbackResolution : (intervals[0]?.resolutionSeconds || 1),
+    sourceResolutionSeconds: Number.isFinite(fallbackSourceResolution) && fallbackSourceResolution > 0 ? fallbackSourceResolution : 0,
     complete: raw.complete === true,
     hasMoreOlder: raw.has_more_older === true,
     nextOlderEnd: Number(raw.next_older_end),
+    intervals,
+    storeIntervals,
+    epochs: Array.isArray(raw.epochs) ? raw.epochs.slice(0, jsDebugHistoryCoverageIntervalLimit) : [],
   };
-  if (!Number.isFinite(coverage.coveredStart) || !Number.isFinite(coverage.coveredEnd) || coverage.coveredEnd < coverage.coveredStart) return null;
   if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = 1;
   if (!Number.isFinite(coverage.sourceResolutionSeconds) || coverage.sourceResolutionSeconds <= 0) coverage.sourceResolutionSeconds = 0;
   return coverage;
+}
+
+function jsDebugHistoryIntervalSummary(intervals) {
+  const values = Array.isArray(intervals) ? intervals : [];
+  if (!values.length) return '0 intervals';
+  const start = Math.min(...values.map(interval => Number(interval.startSeconds)));
+  const end = Math.max(...values.map(interval => Number(interval.endSeconds)));
+  return `${values.length} interval${values.length === 1 ? '' : 's'} [${Math.floor(start)}..${Math.ceil(end)}]`;
+}
+
+function recordJsDebugHistoryCoverageDiagnostic(coverage, request) {
+  const requestStart = Number(request?.targetStartSeconds ?? coverage?.requestedStart);
+  const requestEnd = Number(request?.targetEndSeconds ?? coverage?.requestedEnd);
+  const stores = Object.entries(coverage?.storeIntervals || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, intervals]) => `${key}=${jsDebugHistoryIntervalSummary(intervals)}`)
+    .join(', ') || 'compatibility-global';
+  const explicitEpochs = Array.isArray(coverage?.epochs) ? coverage.epochs : [];
+  const intervalEpochs = [...(coverage?.intervals || []), ...Object.values(coverage?.storeIntervals || {}).flat()]
+    .filter(interval => interval?.epochId != null)
+    .map(interval => ({id: interval.epochId, start: interval.startSeconds, end: interval.endSeconds}));
+  const epochRows = explicitEpochs.length ? explicitEpochs : intervalEpochs;
+  const epochIds = new Set(epochRows.map(epoch => String(epoch?.id ?? epoch?.epoch_id ?? 'boundary')));
+  const epochStarts = epochRows.map(epoch => Number(epoch?.start ?? epoch?.start_seconds)).filter(Number.isFinite);
+  const epochEnds = epochRows.map(epoch => Number(epoch?.end ?? epoch?.end_seconds)).filter(Number.isFinite);
+  const epochSummary = epochRows.length
+    ? `${epochIds.size}${epochStarts.length && epochEnds.length ? ` [${Math.floor(Math.min(...epochStarts))}..${Math.ceil(Math.max(...epochEnds))}]` : ''}`
+    : '0';
+  recordJsDebugStatsDiagnostic(
+    'info',
+    `coverage accepted: requested [${Math.floor(requestStart)}..${Math.ceil(requestEnd)}], global=${jsDebugHistoryIntervalSummary(coverage?.intervals)}, stores: ${stores}, epochs=${epochSummary}`,
+  );
 }
 
 function mergeJsDebugHistoryCoverageIntervals(intervals) {
@@ -592,28 +667,48 @@ function mergeJsDebugHistoryCoverageIntervals(intervals) {
     const start = Number(interval?.startSeconds);
     const end = Number(interval?.endSeconds);
     if (!Number.isFinite(resolution) || resolution <= 0 || !Number.isFinite(start) || end <= start) continue;
-    const key = `${resolution}:${sourceResolution}`;
+    const epochId = interval?.epochId == null ? '' : String(interval.epochId);
+    const key = `${resolution}:${sourceResolution}:${epochId}`;
     if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution, sourceResolutionSeconds: sourceResolution});
+    grouped.get(key).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution, sourceResolutionSeconds: sourceResolution, ...(epochId ? {epochId} : {})});
   }
   const output = [];
-  for (const [resolution, items] of grouped.entries()) {
+  for (const items of grouped.values()) {
     items.sort((left, right) => left.startSeconds - right.startSeconds || right.endSeconds - left.endSeconds);
     for (const item of items) {
       const previous = output.at(-1);
-      if (previous?.resolutionSeconds === resolution && previous.sourceResolutionSeconds === sourceResolution && item.startSeconds <= previous.endSeconds) {
+      if (previous?.resolutionSeconds === item.resolutionSeconds && previous.sourceResolutionSeconds === item.sourceResolutionSeconds && previous.epochId === item.epochId && item.startSeconds <= previous.endSeconds) {
         previous.endSeconds = Math.max(previous.endSeconds, item.endSeconds);
       } else {
         output.push({...item});
       }
     }
   }
-  return output;
+  return output.sort((left, right) => left.startSeconds - right.startSeconds || left.endSeconds - right.endSeconds);
 }
 
-function applyJsDebugHistoryCoverage(coverage) {
+function jsDebugHistoryReplaceIntervals(existing, replacement, startSeconds, endSeconds) {
+  const kept = (existing || []).flatMap(interval => {
+    if (interval.endSeconds <= startSeconds || interval.startSeconds >= endSeconds) return [interval];
+    const pieces = [];
+    if (interval.startSeconds < startSeconds) pieces.push({...interval, endSeconds: startSeconds});
+    if (interval.endSeconds > endSeconds) pieces.push({...interval, startSeconds: endSeconds});
+    return pieces;
+  });
+  return mergeJsDebugHistoryCoverageIntervals([...kept, ...(replacement || [])]);
+}
+
+function applyJsDebugHistoryCoverage(coverage, request = null) {
   if (!coverage) return jsDebugHistoryReadinessSnapshot();
   const state = jsDebugHistoryReadiness;
+  const actualIntervals = Array.isArray(coverage.intervals)
+    ? coverage.intervals
+    : (coverage.coveredEnd > coverage.coveredStart ? [{
+        startSeconds: coverage.coveredStart,
+        endSeconds: coverage.coveredEnd,
+        resolutionSeconds: coverage.resolutionSeconds,
+        sourceResolutionSeconds: coverage.sourceResolutionSeconds,
+      }] : []);
   if (coverage.coveredStart > 0) {
     state.loadedStartSeconds = Number(state.loadedStartSeconds) > 0
       ? Math.min(Number(state.loadedStartSeconds), coverage.coveredStart)
@@ -621,19 +716,30 @@ function applyJsDebugHistoryCoverage(coverage) {
   }
   if (coverage.coveredEnd > 0) state.loadedEndSeconds = Math.max(Number(state.loadedEndSeconds) || 0, coverage.coveredEnd);
   state.resolutionSeconds = coverage.resolutionSeconds;
-  // A live cursor response is only a delta, not proof that the older prefix is
-  // present.  Keep the server's exact durable interval: marking it through
-  // Infinity was what let a later partial response erase visible CPU points.
-  const satisfiedStart = coverage.coveredStart;
-  // Only an explicitly complete live response can satisfy the moving tail.
-  // A partial live delta retains its exact durable interval above.
-  const satisfiedEnd = coverage.complete && coverage.mode === 'live'
-    ? Infinity
-    : coverage.coveredEnd;
-  if (coverage.complete && satisfiedEnd > satisfiedStart) {
-    state.coverageIntervals = mergeJsDebugHistoryCoverageIntervals([
-      ...state.coverageIntervals,
-      {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds, sourceResolutionSeconds: coverage.sourceResolutionSeconds},
+  const targetStart = Number(request?.targetStartSeconds ?? coverage.requestedStart);
+  const targetEnd = Number(request?.targetEndSeconds ?? coverage.requestedEnd);
+  const intervalStart = actualIntervals.length ? Math.min(...actualIntervals.map(interval => interval.startSeconds)) : targetStart;
+  const requestStart = coverage.mode === 'older'
+    ? Number(coverage.requestedStart)
+    : (coverage.hasMoreOlder ? intervalStart : targetStart);
+  const olderEnd = Number(coverage.requestedEnd);
+  const requestEnd = coverage.mode === 'older' && olderEnd > requestStart
+    ? olderEnd
+    : (targetEnd > requestStart ? targetEnd : Math.max(coverage.coveredEnd, requestStart));
+  if (requestEnd > requestStart) {
+    state.coverageIntervals = jsDebugHistoryReplaceIntervals(state.coverageIntervals, actualIntervals, requestStart, requestEnd);
+    const storeKeys = new Set([...Object.keys(state.storeCoverageIntervals || {}), ...Object.keys(coverage.storeIntervals || {})]);
+    const nextStores = {...state.storeCoverageIntervals};
+    for (const key of storeKeys) {
+      const replacement = Object.prototype.hasOwnProperty.call(coverage.storeIntervals || {}, key)
+        ? coverage.storeIntervals[key]
+        : actualIntervals;
+      nextStores[key] = jsDebugHistoryReplaceIntervals(nextStores[key] || [], replacement, requestStart, requestEnd);
+    }
+    state.storeCoverageIntervals = nextStores;
+    state.requestCoverageIntervals = mergeJsDebugHistoryCoverageIntervals([
+      ...state.requestCoverageIntervals,
+      {startSeconds: requestStart, endSeconds: requestEnd, resolutionSeconds: coverage.resolutionSeconds, sourceResolutionSeconds: coverage.sourceResolutionSeconds},
     ]);
   }
   if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd)) {
@@ -642,29 +748,8 @@ function applyJsDebugHistoryCoverage(coverage) {
   return jsDebugHistoryReadinessSnapshot();
 }
 
-function jsDebugHistorySatisfiedCoverage(coverage, request) {
-  if (!coverage || coverage.complete) return coverage;
-  // `complete:false` can mean the durable store simply does not have samples
-  // for the older prefix yet (fresh install, restart, or intentionally sparse
-  // sampling).  When statsd explicitly says there is no older page, that gap
-  // is known-unavailable rather than a failed request.  Render the records it
-  // did return and satisfy this client domain so the UI does not discard valid
-  // Agent/Model token history and retry the same unavailable prefix forever.
-  if (coverage.mode !== 'live' || coverage.hasMoreOlder) return null;
-  const targetStart = Number(request?.targetStartSeconds);
-  const targetEnd = Number(request?.targetEndSeconds);
-  if (!Number.isFinite(targetStart) || !Number.isFinite(targetEnd) || targetEnd <= targetStart) return null;
-  if (!(coverage.coveredStart > 0) || !(coverage.coveredEnd > coverage.coveredStart)) return null;
-  return {
-    ...coverage,
-    complete: true,
-    coveredStart: Math.min(targetStart, coverage.coveredStart),
-    coveredEnd: Math.max(targetEnd, coverage.coveredEnd),
-  };
-}
-
 function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
-  const intervals = jsDebugHistoryReadiness.coverageIntervals
+  const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
     .filter(interval => Number(interval.resolutionSeconds) <= Math.max(maxResolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
     .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
   let cursor = startSeconds;
@@ -682,7 +767,7 @@ function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResoluti
 }
 
 function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
-  const resolutions = [...new Set(jsDebugHistoryReadiness.coverageIntervals.map(interval => Number(interval.resolutionSeconds)))]
+  const resolutions = [...new Set(jsDebugHistoryReadiness.requestCoverageIntervals.map(interval => Number(interval.resolutionSeconds)))]
     .filter(resolution => Number.isFinite(resolution) && resolution > 0)
     .sort((left, right) => left - right);
   return resolutions.find(resolution => jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolution)) ?? Infinity;
@@ -731,6 +816,8 @@ function resetJsDebugHistoryReadiness() {
     loadedEndSeconds: 0,
     resolutionSeconds: 0,
     coverageIntervals: [],
+    requestCoverageIntervals: [],
+    storeCoverageIntervals: {},
     attemptCount: 0,
     error: '',
     generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
@@ -1920,11 +2007,14 @@ function debugGraphRemoveCoarserServerBuckets(startSeconds, endSeconds, resoluti
 function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, replaceCoverage = null} = {}) {
   if (!history || typeof history !== 'object') return;
   if (replaceCoverage) {
-    debugGraphRemoveCoarserServerBuckets(
-      replaceCoverage.covered_start,
-      replaceCoverage.covered_end,
-      replaceCoverage.resolution_seconds,
-    );
+    const replacements = Array.isArray(replaceCoverage) ? replaceCoverage : [replaceCoverage];
+    for (const interval of replacements) {
+      debugGraphRemoveCoarserServerBuckets(
+        interval.start ?? interval.start_seconds ?? interval.covered_start,
+        interval.end ?? interval.end_seconds ?? interval.covered_end,
+        interval.resolution_seconds ?? interval.resolution,
+      );
+    }
   }
   // Compact local fine buckets before applying an authoritative server coarse bucket. Applying
   // first would merge the same measurements a second time at the 1h/2h tier boundaries.
@@ -3247,6 +3337,69 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
   }).join('');
 }
 
+function jsDebugHistoryCoverageFamilyForGroup(group) {
+  if (group?.key === 'activity') return 'agent_status';
+  if (group?.key === 'agentTokens') return 'agent_tokens';
+  if (group?.key === 'modelTokens') return jsDebugGraphModelTokenDimension === 'output' ? 'agent_tokens' : 'cost';
+  if (group?.key === 'cpu') return 'cpu';
+  if (group?.key === 'memory') return 'system_memory';
+  if (group?.key === 'gpuUtil' || group?.key === 'gpuMemory') return 'gpu';
+  return '';
+}
+
+function jsDebugHistoryCoverageIntervalsForFamily(family) {
+  const stores = jsDebugHistoryReadiness.storeCoverageIntervals || {};
+  const aliases = family === 'cpu' ? ['cpu', 'server', 'raw', 'buckets']
+    : family === 'system_memory' ? ['system_memory', 'memory']
+      : family === 'gpu' ? ['gpu', 'gpu_metrics']
+    : family === 'agent_status' ? ['agent_status', 'status']
+      : family === 'agent_tokens' ? ['agent_tokens', 'tokens']
+        : family === 'cost' ? ['cost', 'cost_atoms', 'usage_atoms'] : [];
+  for (const key of aliases) {
+    if (Object.prototype.hasOwnProperty.call(stores, key)) return stores[key];
+  }
+  return jsDebugHistoryReadiness.coverageIntervals;
+}
+
+function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = []) {
+  const family = jsDebugHistoryCoverageFamilyForGroup(group);
+  if (!family) return [];
+  const requestedRanges = (jsDebugHistoryReadiness.requestCoverageIntervals || []).map(interval => ({
+    startMs: Number(interval.startSeconds) * 1000,
+    endMs: Number(interval.endSeconds) * 1000,
+  }));
+  const coveredRanges = jsDebugHistoryCoverageIntervalsForFamily(family).map(interval => ({
+    startMs: Number(interval.startSeconds) * 1000,
+    endMs: Number(interval.endSeconds) * 1000,
+  }));
+  const gaps = [];
+  for (const requested of debugGraphMergeTimeRanges(requestedRanges, domain)) {
+    gaps.push(...debugGraphComplementTimeRanges(coveredRanges, requested));
+  }
+  const mergedGaps = debugGraphMergeTimeRanges(gaps, domain);
+  if (!alreadyPaintedRanges.length) return mergedGaps;
+  return debugGraphMergeTimeRanges(
+    mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
+    domain,
+  );
+}
+
+function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = []) {
+  const family = jsDebugHistoryCoverageFamilyForGroup(group);
+  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges).map((range, index) => {
+    const x1 = debugGraphXForTime(range.startMs, domain);
+    const x2 = debugGraphXForTime(range.endMs, domain);
+    return `<g data-js-debug-history-coverage-family="${esc(family)}">${debugGraphPlotOverlayRectHtml(
+      'js-debug-no-data-range js-debug-history-no-data-range',
+      'data-js-debug-history-no-data-range',
+      index,
+      x1,
+      Math.max(1.5, x2 - x1),
+      t('debug.noCommunicationData'),
+    )}</g>`;
+  }).join('');
+}
+
 function debugGraphAgentStatusNoDataRuns(buckets, domain) {
   const ranges = debugGraphBucketRanges(buckets);
   const statusRanges = ranges
@@ -3806,6 +3959,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
+          ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [])}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
@@ -4737,23 +4891,16 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
     if (readinessRequest && !coverage) {
-      recordJsDebugStatsDiagnostic('error', 'coverage rejected: response omitted the required coverage envelope');
-      throw new Error('stats history response omitted coverage');
+      recordJsDebugStatsDiagnostic('error', 'coverage rejected: response omitted or malformed the required interval list');
+      throw new Error('stats history response has malformed coverage intervals');
     }
-    const satisfiedCoverage = readinessRequest ? jsDebugHistorySatisfiedCoverage(coverage, readinessRequest) : coverage;
-    if (readinessRequest && !coverage.complete && !satisfiedCoverage && !coverage.hasMoreOlder) {
-      recordJsDebugStatsDiagnostic('warning', 'coverage rejected: partial response has no usable retained interval');
-      throw new Error('stats history response provided unusable partial coverage');
-    }
-    if (readinessRequest && coverage && !coverage.complete && satisfiedCoverage) {
-      recordJsDebugStatsDiagnostic('warning', 'terminal partial coverage accepted; older retained history is unavailable');
-    }
+    if (readinessRequest) recordJsDebugHistoryCoverageDiagnostic(coverage, readinessRequest);
     if (coverage?.mode === 'older' && Number(coverage.sourceResolutionSeconds || 0) >= 60) {
       recordJsDebugStatsDiagnostic('info', `history range served from ${coverage.sourceResolutionSeconds}s retained rollup`);
     }
-    const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
-      ? payload.history.coverage
-      : null;
+    const replaceCoverage = coverage?.intervals.filter(interval => (
+      jsDebugHistoryCoverageResolutionForRange(interval.startSeconds, interval.endSeconds) > interval.resolutionSeconds
+    )) || null;
     const applyStartedAt = performanceNow();
     recordJsDebugStatsSample(payload, {
       forceGraphRefresh: forceGraphRefresh || needsHistoryCoverage,
@@ -4761,10 +4908,10 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       advanceHistoryCursor: coverage?.mode !== 'older',
       replaceCoverage,
     });
-    if (satisfiedCoverage) applyJsDebugHistoryCoverage(satisfiedCoverage);
+    if (coverage) applyJsDebugHistoryCoverage(coverage, readinessRequest);
     recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
     if (readinessRequest) {
-      if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {
+      if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd) && coverage.nextOlderEnd > readinessRequest.targetStartSeconds) {
         jsDebugStatsPollState.pending = true;
         jsDebugStatsPollState.pendingForceGraphRefresh = true;
         return;

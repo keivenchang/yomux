@@ -1968,6 +1968,7 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
                 covered_start: Number(url.searchParams.get('history_start')),
                 covered_end: Math.floor(now / 1000),
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: Number(url.searchParams.get('history_start')), end: Math.floor(now / 1000), resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true,
                 has_more_older: false,
                 next_older_end: 0,
@@ -2065,6 +2066,7 @@ def test_debug_graph_terminal_partial_history_renders_agent_and_model_tokens(bro
                 covered_start: coveredStart, covered_end: coveredEnd,
                 complete: false, has_more_older: false, next_older_end: 0,
                 resolution_seconds: 1, source_resolution_seconds: 1,
+                intervals: [{start: coveredStart, end: coveredEnd, resolution_seconds: 1, source_resolution_seconds: 1}],
                 source_records: 1, returned_records: 1,
               },
             },
@@ -2143,6 +2145,7 @@ def test_debug_graph_one_four_twenty_four_hour_ranges_paint_full_width_without_r
                 covered_start: start, covered_end: end,
                 complete: true, has_more_older: false, next_older_end: 0,
                 resolution_seconds: duration, source_resolution_seconds: duration,
+                intervals: [{start, end, resolution_seconds: duration, source_resolution_seconds: duration}],
                 source_records: 2, returned_records: 2,
               },
             }});
@@ -2299,6 +2302,7 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
                 covered_start: Number(url.searchParams.get('history_start')),
                 covered_end: nowSeconds,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: Number(url.searchParams.get('history_start')), end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true,
                 has_more_older: false,
                 next_older_end: 0,
@@ -4052,6 +4056,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
                 mode: 'live', requested_start: requestedStart, requested_end: 0,
                 covered_start: requestedStart, covered_end: nowSeconds,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: requestedStart, end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true, has_more_older: false, next_older_end: 0,
               },
             }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
@@ -4089,6 +4094,68 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
     assert metrics["separateTokenCount"] == 0, metrics
     assert "8002:1:codex" in metrics["legendLabels"], metrics
     assert metrics["barCount"] == 1, metrics
+
+
+def test_debug_graph_store_coverage_paints_token_gap_without_shading_cpu(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setJsDebugHistoryReadiness === 'function' && typeof renderDebugPanels === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        resetJsDebugHistoryReadiness();
+        const end = Math.ceil(Date.now() / 1000);
+        const start = end - 900;
+        const gapStart = start + 300;
+        const gapEnd = start + 420;
+        const interval = (left, right) => ({startSeconds: left, endSeconds: right, resolutionSeconds: 1, sourceResolutionSeconds: 0});
+        const full = [interval(start, end)];
+        debugGraphApplyServerHistory({sequence: 1, latest_sequence: 1, records: [{
+          start, duration: 1, sequence: 1,
+          system_cpu_total_percent: 10, system_cpu_count: 1,
+          tokens_per_agent_total: 60, agent_token_samples: 1,
+          agent_token_rates: [{key: 'fixture|0|codex', label: 'fixture:0:codex', total: 60, tokens: 60, seconds: 60, samples: 1}],
+        }]});
+        setJsDebugHistoryReadiness('ready', {
+          targetStartSeconds: start,
+          targetEndSeconds: end,
+          coverageIntervals: full,
+          requestCoverageIntervals: full,
+          storeCoverageIntervals: {
+            cpu: full,
+            agent_status: full,
+            agent_tokens: [interval(start, gapStart), interval(gapEnd, end)],
+            cost: [],
+          },
+        });
+        jsDebugGraphRangeSeconds = 900;
+        jsDebugGraphZoomDomain = {startMs: start * 1000, endMs: end * 1000};
+        setDebugGraphChartVisible('agentTokens', true);
+        setDebugGraphChartVisible('cpu', true);
+        renderDebugPanels({force: true});
+        const tokenChart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+        const cpuChart = document.querySelector('[data-js-debug-chart="cpu"]');
+        const tokenRects = [...(tokenChart?.querySelectorAll('[data-js-debug-history-no-data-range]') || [])].map(rect => ({
+          x: Number(rect.getAttribute('x')),
+          width: Number(rect.getAttribute('width')),
+          family: rect.closest('[data-js-debug-history-coverage-family]')?.dataset.jsDebugHistoryCoverageFamily || '',
+        }));
+        return {
+          tokenRects,
+          cpuRects: cpuChart?.querySelectorAll('[data-js-debug-history-no-data-range]').length || 0,
+          errorVisible: Boolean(document.querySelector('[data-js-debug-history-retry]')),
+        };
+        """
+    )
+    assert metrics["errorVisible"] is False, metrics
+    assert metrics["cpuRects"] == 0, metrics
+    assert len(metrics["tokenRects"]) == 1, metrics
+    assert metrics["tokenRects"][0]["family"] == "agent_tokens", metrics
+    assert 70 < metrics["tokenRects"][0]["width"] < 90, metrics
 
 
 def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_history_fetch(browser, tmp_path):
@@ -4146,6 +4213,7 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
                 mode: 'older', requested_start: tokenStart, requested_end: normalEnd,
                 covered_start: tokenStart, covered_end: normalEnd,
                 resolution_seconds: 5, complete: true, has_more_older: false, next_older_end: 0,
+                intervals: [{start: tokenStart, end: normalEnd, resolution_seconds: 5}],
               },
               agent_token_history: {
                 sequence: 50,
@@ -4242,6 +4310,7 @@ def test_debug_graph_server_restart_refetches_complete_history_without_waiting_f
               covered_start: Number(url.searchParams.get('history_start')),
               covered_end: nowSeconds,
               resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              intervals: [{start: Number(url.searchParams.get('history_start')), end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
               complete: true,
               has_more_older: false,
               next_older_end: 0,
@@ -4527,6 +4596,7 @@ def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browse
                     covered_start: requestedStart,
                     covered_end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                    intervals: [{start: requestedStart, end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                     complete: true,
                 has_more_older: false,
                 next_older_end: 0,
@@ -4663,6 +4733,7 @@ def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(bro
                 covered_start: Number(url.searchParams.get('history_start')),
                 covered_end: nowSeconds,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: Number(url.searchParams.get('history_start')), end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true,
                 has_more_older: false,
                 next_older_end: 0,
