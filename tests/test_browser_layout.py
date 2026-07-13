@@ -1958,6 +1958,56 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
     assert result["finishedAt"] - result["startedAt"] < 3000, result
 
 
+def test_debug_graph_stats_sse_push_advances_live_tail_without_poll(browser, tmp_path):
+    """A durable SSE sample paints the live tail without waiting for polling."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyJsDebugStatsSamplePush === 'function'
+              && typeof clearJsDebugGraphData === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const before = Number(graph.dataset.jsDebugGraphRenderedAt || 0);
+        const originalFetch = window.fetch;
+        let polls = 0;
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/stats-sample') polls += 1;
+          return originalFetch(input, options);
+        };
+        const now = Math.floor(Date.now() / 1000);
+        const applied = applyJsDebugStatsSamplePush({
+          sequence: 901,
+          sample: {time: now, cpu_percent: 7, system_cpu_percent: 19},
+          record: {
+            start: now, duration: 1, sequence: 901,
+            cpu_total_percent: 7, cpu_count: 1,
+            system_cpu_total_percent: 19, system_cpu_count: 1,
+          },
+        });
+        window.setTimeout(() => {
+          const after = Number(graph.dataset.jsDebugGraphRenderedAt || 0);
+          const charts = graph.querySelectorAll('[data-js-debug-chart]').length;
+          window.fetch = originalFetch;
+          done({applied, before, after, charts, polls});
+        }, 900);
+        """
+    )
+    assert result["applied"] is True, result
+    assert result["after"] > result["before"], result
+    assert result["charts"] == 6, result
+    assert result["polls"] == 0, result
+
+
 def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediately(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
