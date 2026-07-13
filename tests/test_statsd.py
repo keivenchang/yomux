@@ -1712,6 +1712,131 @@ def test_statsd_history_contract_distinguishes_empty_complete_and_partial_covera
         service.store.close()
 
 
+def test_statsd_coverage_preserves_middle_sleep_hole_and_cross_store_epochs(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        for sample_time, epoch in ((100, "before-sleep"), (101, "before-sleep"), (200, "after-wake"), (201, "after-wake")):
+            for family, record in (
+                ("cpu", {"cpu_total_percent": 1, "cpu_count": 1}),
+                ("agent_status", {"agent_activity_samples": 1, "idle_agent_total": 1}),
+                # A checked transcript set with no delta is measured zero, not
+                # an absent token sample.
+                ("agent_tokens", {}),
+            ):
+                result = service.merge_server_records([{
+                    "time": sample_time,
+                    **record,
+                    "_stats_coverage": {
+                        "family": family,
+                        "epoch_id": f"{family}:{epoch}",
+                        "cadence_seconds": 1,
+                        "owner_generation": 7 if epoch == "before-sleep" else 8,
+                    },
+                }], now=sample_time, compact=False, refresh_rollups=False)
+                assert result["ok"] is True
+
+        history = service.handle({
+            "action": "history", "start": 90, "end": 220,
+            "token_resolution_seconds": 10,
+            "token_history_start": 90,
+            "token_history_end": 220,
+        })
+        coverage = history["coverage"]
+        expected_spans = [(100, 102), (200, 202)]
+        assert [(item["start"], item["end"]) for item in coverage["intervals"]] == expected_spans
+        assert coverage["complete"] is False
+        assert (coverage["covered_start"], coverage["covered_end"]) == (100, 202)
+        for family in ("cpu", "agent_status", "agent_tokens", "cost"):
+            facts = coverage["stores"][family]
+            assert [(item["start"], item["end"]) for item in facts["intervals"]] == expected_spans
+            assert facts["epoch_count"] == 2
+            assert coverage["store_intervals"][family] == facts["intervals"]
+        assert coverage["store_intervals"]["server"] == coverage["intervals"]
+        assert coverage["store_intervals"]["rollups"] == coverage["intervals"]
+        raw_epochs = [
+            epoch for epoch in coverage["epochs"]
+            if "raw" in epoch["families"]
+        ]
+        assert [(epoch["start"], epoch["end"], epoch["owner_generation"]) for epoch in raw_epochs] == [
+            (100, 102, 7), (200, 202, 8),
+        ]
+        assert all("cpu" in epoch["families"] for epoch in raw_epochs)
+        assert coverage["epochs_truncated"] is False
+        token_coverage = history["agent_token_history"]["coverage"]
+        assert [(item["start"], item["end"]) for item in token_coverage["intervals"]] == expected_spans
+        assert token_coverage["complete"] is False
+    finally:
+        service.store.close()
+
+
+def test_statsd_raw_coverage_never_merges_adjacent_owner_generations(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        for sample_time, generation in ((100, 7), (101, 8)):
+            service.merge_server_records([{
+                "time": sample_time,
+                "cpu_count": 1,
+                "cpu_total_percent": 1,
+                "_stats_coverage": {
+                    "family": "cpu",
+                    "epoch_id": f"cpu-owner-{generation}",
+                    "cadence_seconds": 1,
+                    "owner_generation": generation,
+                },
+            }], now=sample_time, compact=False, refresh_rollups=False)
+        coverage = service.handle({"action": "history", "start": 100, "end": 102})["coverage"]
+        assert [(item["start"], item["end"], item["epoch_id"]) for item in coverage["intervals"]] == [
+            (100, 101, "cpu-owner-7"),
+            (101, 102, "cpu-owner-8"),
+        ]
+        assert coverage["complete"] is True
+        service._compact_history(4100)
+        compacted = service.handle({"action": "history", "start": 100, "end": 102})["coverage"]
+        assert [(item["start"], item["end"], item["epoch_id"]) for item in compacted["intervals"]] == [
+            (100, 101, "cpu-owner-7"),
+            (101, 102, "cpu-owner-8"),
+        ]
+    finally:
+        service.store.close()
+
+
+def test_stats_coverage_read_only_reader_and_legacy_database_derive_holes(tmp_path):
+    database = tmp_path / "stats.sqlite3"
+    writer = stats_store.StatsStore(database)
+    writer.open()
+    first = _bucket(start=100, duration=10, sequence=1)
+    second = _bucket(start=200, duration=10, sequence=2)
+    for bucket in (first, second):
+        bucket["agent_activity_samples"] = 1
+        bucket["agent_token_samples"] = 1
+        bucket["cost_summary"] = {
+            "components": [{"event_id": str(bucket["start"])}],
+            "priced_components": 1,
+            "unpriced_components": 0,
+        }
+        writer.upsert_bucket(bucket)
+    # Simulate a v2 database exactly: no migration is allowed on the reader.
+    writer.connection.execute("DROP TABLE stats_coverage_intervals")
+    writer.connection.commit()
+    writer.close()
+
+    reader = statsd.StatsReaderService(tmp_path / "reader.sock", database)
+    try:
+        response, encoded = reader.handle_with_binary({"action": "history", "start": 90, "end": 220})
+        assert encoded == b"" and response["ok"] is True
+        facts = response["coverage"]
+        expected = [(100, 110), (200, 210)]
+        for family in ("raw", "cpu", "agent_status", "agent_tokens", "cost"):
+            intervals = facts["stores"][family]["intervals"]
+            assert [(item["start"], item["end"]) for item in intervals] == expected
+            assert all(item["source"] == "legacy-derived" for item in intervals)
+        assert reader.engine.store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stats_coverage_intervals'"
+        ).fetchone() is None
+    finally:
+        reader.engine.store.close()
+
+
 def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_path):
     """Dense retained history stays exact, bounded, and responsive."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")

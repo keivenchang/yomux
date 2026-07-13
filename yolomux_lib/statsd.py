@@ -44,7 +44,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 19
+STATSD_PROTOCOL_VERSION = 20
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -1045,6 +1045,19 @@ class PersistentStatsService:
             start = int(math.floor(sample_time / duration) * duration)
             bucket = self.store.bucket(start, duration) or stats_store.empty_bucket(start, duration)
             record_changed = False
+            coverage = record.get("_stats_coverage") if isinstance(record.get("_stats_coverage"), dict) else {}
+            coverage_family = str(coverage.get("family") or "").strip()
+            coverage_epoch = str(coverage.get("epoch_id") or "").strip()
+            coverage_cadence = self._positive_finite(coverage.get("cadence_seconds"))
+            try:
+                coverage_generation = max(0, int(coverage.get("owner_generation") or 0))
+            except (TypeError, ValueError):
+                coverage_generation = 0
+            coverage_valid = bool(
+                coverage_family in stats_store.STATS_COVERAGE_FAMILIES
+                and coverage_epoch
+                and coverage_cadence
+            )
             for field in stats_store.SERVER_FIELDS:
                 value = self._positive_finite(record.get(field))
                 if value:
@@ -1069,6 +1082,10 @@ class PersistentStatsService:
                     record_changed = True
             record_changed = self._merge_usage_components(bucket, record.get("usage_atoms")) or record_changed
             record_changed = self._merge_host_metrics(bucket, record.get("host_metrics")) or record_changed
+            # A successful zero-valued sample is still coverage.  Persist an
+            # empty bucket marker so charts can distinguish measured zero from
+            # a sampler outage, without inflating any aggregate count.
+            record_changed = record_changed or coverage_valid
             process = record.get("process")
             if isinstance(process, dict):
                 process_id = str(process.get("id") or "").strip()
@@ -1098,7 +1115,26 @@ class PersistentStatsService:
             next_sequence += 1
             bucket["server_sequence"] = next_sequence
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
-            self.store.upsert_bucket(bucket)
+            coverage_samples: list[dict[str, Any]] = []
+            if coverage_valid:
+                if coverage_family == "agent_tokens":
+                    coverage_families = ("agent_tokens", "cost")
+                elif coverage_family == "cpu":
+                    coverage_families = ("cpu", "raw")
+                else:
+                    coverage_families = (coverage_family,)
+                for family in coverage_families:
+                    coverage_start = max(0, int(math.floor(sample_time)))
+                    coverage_cadence_seconds = max(1, int(math.ceil(coverage_cadence)))
+                    coverage_samples.append({
+                        "family": family,
+                        "start": coverage_start,
+                        "end": coverage_start + coverage_cadence_seconds,
+                        "cadence": coverage_cadence_seconds,
+                        "epoch_id": coverage_epoch,
+                        "owner_generation": coverage_generation,
+                    })
+            self.store.upsert_bucket_with_coverage(bucket, coverage_samples)
             if refresh_rollups:
                 self._refresh_persisted_rollups(sample_time)
             else:
@@ -1254,6 +1290,9 @@ class PersistentStatsService:
         if stale_rollup is not None:
             self.store.delete_rollup(*stale_rollup)
             return {"ok": True, "pending": True, "processed": 1}
+        # Epoch intervals are independent of raw-row compaction, but obey the
+        # same retention window once the row pass has converged.
+        self.store.retain_after(cutoff)
         next_now = float(state.get("next_now") or 0.0)
         self.retention_compaction = (
             {"now": next_now, "next_now": 0.0, "phase": "buckets"}
@@ -2548,7 +2587,11 @@ class PersistentStatsService:
             self._merge_bucket(target, source)
             changed = changed or key != (start, duration)
         if changed:
-            self.store.replace_buckets([compacted[key] for key in sorted(compacted)])
+            self.store.replace_buckets(
+                [compacted[key] for key in sorted(compacted)],
+                preserve_coverage=True,
+            )
+            self.store.retain_after(cutoff)
 
     def import_legacy_history_once(self, state_dir: Path | None = None) -> dict[str, Any]:
         """Import the legacy v4 snapshots once before public stats cutover."""
@@ -2936,8 +2979,19 @@ class PersistentStatsService:
         while max_points and len(records) > max_points:
             effective_resolution = max(effective_resolution + 1, math.ceil(effective_resolution * len(records) / max_points))
             records = encode_records(effective_resolution)
-        covered_start = max(start or available_start, available_start) if available_start else 0
-        covered_end = min(end or available_end, available_end) if available_end else 0
+        intervals = coverage_facts["intervals"]
+        covered_start = int(intervals[0]["start"]) if intervals else 0
+        covered_end = int(intervals[-1]["end"]) if intervals else 0
+        requested_start = start or covered_start
+        requested_end = end or covered_end
+        coverage_cursor = requested_start
+        for interval in intervals:
+            if int(interval["end"]) <= coverage_cursor:
+                continue
+            if int(interval["start"]) > coverage_cursor:
+                break
+            coverage_cursor = max(coverage_cursor, int(interval["end"]))
+        interval_complete = bool(intervals and coverage_cursor >= requested_end)
         bounded_older = bool(end)
         coverage = {
             "mode": "older" if bounded_older else "live",
@@ -2947,7 +3001,7 @@ class PersistentStatsService:
             "available_end": available_end,
             "covered_start": covered_start,
             "covered_end": covered_end,
-            "complete": bool(covered_start and covered_end and (not start or covered_start <= start) and (not end or covered_end >= end)),
+            "complete": interval_complete,
             "has_more_older": bool(available_start and covered_start and available_start < covered_start),
             "next_older_end": covered_start if available_start and covered_start and available_start < covered_start else 0,
             "resolution_seconds": effective_resolution,
@@ -2957,6 +3011,11 @@ class PersistentStatsService:
             "returned_records": len(records),
             "cursor": after_sequence if bounded_older else generation,
             "latest_cursor": generation,
+            "intervals": intervals,
+            "store_intervals": coverage_facts["store_intervals"],
+            "stores": coverage_facts["stores"],
+            "epochs": coverage_facts["epochs"],
+            "epochs_truncated": coverage_facts["epochs_truncated"],
         }
         payload = {
             "sequence": coverage["cursor"],
@@ -2985,6 +3044,25 @@ class PersistentStatsService:
                 "include_agent_tokens": True,
             }
             token_payload = self._encoded_history(token_request)
+            token_coverage = copy.deepcopy(token_payload["coverage"])
+            token_facts = token_coverage.get("stores", {}).get("agent_tokens", {})
+            token_intervals = list(token_facts.get("intervals") or [])
+            token_coverage["intervals"] = token_intervals
+            token_coverage["covered_start"] = int(token_facts.get("covered_start") or 0)
+            token_coverage["covered_end"] = int(token_facts.get("covered_end") or 0)
+            token_coverage["available_start"] = token_coverage["covered_start"]
+            token_coverage["available_end"] = token_coverage["covered_end"]
+            token_cursor = token_history_start or token_coverage["covered_start"]
+            token_target = token_history_end or token_coverage["covered_end"]
+            for interval in token_intervals:
+                if int(interval["end"]) <= token_cursor:
+                    continue
+                if int(interval["start"]) > token_cursor:
+                    break
+                token_cursor = max(token_cursor, int(interval["end"]))
+            token_coverage["complete"] = bool(token_intervals and token_cursor >= token_target)
+            token_coverage["has_more_older"] = False
+            token_coverage["next_older_end"] = 0
             payload["agent_token_history"] = {
                 "sequence": token_payload["sequence"],
                 "latest_sequence": token_payload["latest_sequence"],
@@ -2994,7 +3072,7 @@ class PersistentStatsService:
                 ],
                 "resolution_seconds": token_request["resolution_seconds"],
                 "snapshot": token_request["after_sequence"] == 0 and token_history_end <= 0,
-                "coverage": token_payload["coverage"],
+                "coverage": token_coverage,
             }
         self._encoded_query_cache = {cache_key: (copy.deepcopy(payload), time.monotonic())}
         self.last_history_profile = {

@@ -601,7 +601,13 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
     assert all(start <= record["start"] < start + 15 for record in older["records"])
     assert older["sequence"] == 0
     assert older["latest_sequence"] == latest_sequence
-    assert older["coverage"] == {
+    coverage = dict(older["coverage"])
+    intervals = coverage.pop("intervals")
+    stores = coverage.pop("stores")
+    store_intervals = coverage.pop("store_intervals")
+    epochs = coverage.pop("epochs")
+    assert coverage.pop("epochs_truncated") is False
+    assert coverage == {
         "mode": "older",
         "requested_start": start,
         "requested_end": start + 15,
@@ -620,6 +626,10 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
         "cursor": 0,
         "latest_cursor": latest_sequence,
     }
+    assert [(item["start"], item["end"]) for item in intervals] == [(start, start + 15)]
+    assert store_intervals["raw"] == intervals
+    assert stores["raw"]["interval_count"] == 1
+    assert epochs
     assert older["agent_token_history"]["sequence"] == 0
     assert older["agent_token_history"]["snapshot"] is False
     assert len(live["records"]) == 15
@@ -2564,6 +2574,54 @@ def test_stats_metric_families_have_independent_named_cadences():
         assert specs["agent_tokens"][1]() == 10.0
     finally:
         webapp.control_server.stop()
+
+
+def test_stats_sampler_wall_discontinuity_splits_forward_and_backward_epochs():
+    assert app_module.stats_sampler_wall_discontinuity(
+        attempt_at=8 * 3600 + 1010, scheduled_at=1010, cadence=10, attempts=2
+    ) is True
+    assert app_module.stats_sampler_wall_discontinuity(
+        attempt_at=900, scheduled_at=1010, cadence=10, attempts=2
+    ) is True
+    assert app_module.stats_sampler_wall_discontinuity(
+        attempt_at=1011, scheduled_at=1010, cadence=10, attempts=2
+    ) is False
+    assert app_module.stats_sampler_wall_discontinuity(
+        attempt_at=8 * 3600 + 1010, scheduled_at=1010, cadence=10, attempts=1
+    ) is False
+
+
+def test_agent_token_scheduler_persists_zero_sample_with_epoch_coverage(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    submitted = []
+    webapp.stats_history_service.scheduler_generation = 4
+    webapp.stats_metric_thread_context.generation = 4
+    webapp.stats_metric_thread_context.scheduled_time = 1000.0
+    webapp.stats_metric_thread_context.coverage_family = "agent_tokens"
+    webapp.stats_metric_thread_context.coverage_epoch_id = "pid:4:agent_tokens:2"
+    webapp.stats_metric_thread_context.coverage_cadence_seconds = 60.0
+    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
+    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", lambda *_args: [])
+    monkeypatch.setattr(
+        webapp.stats_client,
+        "merge_server_records",
+        lambda records, **_kwargs: submitted.extend(records) or {"ok": True},
+    )
+    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args: None)
+    try:
+        webapp.record_stats_agent_token_sample()
+    finally:
+        webapp.control_server.stop()
+
+    assert submitted == [{
+        "time": 1000.0,
+        "_stats_coverage": {
+            "family": "agent_tokens",
+            "epoch_id": "pid:4:agent_tokens:2",
+            "cadence_seconds": 60.0,
+            "owner_generation": 4,
+        },
+    }]
 
 
 def test_token_consumer_wakes_only_idle_token_family_while_cpu_keeps_ticking(monkeypatch):

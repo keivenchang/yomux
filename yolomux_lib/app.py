@@ -259,6 +259,14 @@ from .yoagent.session_summaries import YoagentSummaryWorkerRecord
 
 
 logger = logging.getLogger(__name__)
+
+
+def stats_sampler_wall_discontinuity(*, attempt_at: float, scheduled_at: float, cadence: float, attempts: int) -> bool:
+    """Classify suspend/wake or a wall-clock correction as an epoch split."""
+
+    return attempts > 1 and abs(float(attempt_at) - float(scheduled_at)) > max(2.0, float(cadence) * 2.0)
+
+
 ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS = {"manual", "refresh", "force"}
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
@@ -2503,6 +2511,7 @@ class TmuxWebtermApp:
         next_deadline = time.monotonic()
         schedule_anchor_monotonic = next_deadline
         schedule_anchor_wall = time.time()
+        epoch_number = 1
         wake_event = self.stats_history_service.scheduler_wake_events[family]
         while not stop_event.is_set() and generation == self.stats_history_service.scheduler_generation:
             wait_seconds = max(0.0, next_deadline - time.monotonic())
@@ -2539,13 +2548,32 @@ class TmuxWebtermApp:
                 if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
                     break
                 self.stats_metric_thread_context.generation = generation
+                scheduled_wall = schedule_anchor_wall + next_deadline - schedule_anchor_monotonic
+                # A suspend or wall-clock correction is an epoch boundary,
+                # not one enormous continuously-covered sample. Re-anchor the
+                # post-wake deadline so neither timestamps nor held values
+                # bridge the discontinuity.
+                if stats_sampler_wall_discontinuity(
+                    attempt_at=attempt_at,
+                    scheduled_at=scheduled_wall,
+                    cadence=interval,
+                    attempts=attempts,
+                ):
+                    epoch_number += 1
+                    next_deadline = started
+                    schedule_anchor_monotonic = started
+                    schedule_anchor_wall = attempt_at
+                    scheduled_wall = attempt_at
+                self.stats_metric_thread_context.coverage_family = family
+                self.stats_metric_thread_context.coverage_epoch_id = (
+                    f"{os.getpid()}:{generation}:{family}:{epoch_number}"
+                )
+                self.stats_metric_thread_context.coverage_cadence_seconds = interval
                 # Tie persisted timestamps to the monotonic deadline phase.
                 # Actual wall-clock attempt times can jitter across integer
                 # boundaries even when deadlines are exactly one second apart,
                 # producing a false gap followed by a double-sample bucket.
-                self.stats_metric_thread_context.scheduled_time = (
-                    schedule_anchor_wall + next_deadline - schedule_anchor_monotonic
-                )
+                self.stats_metric_thread_context.scheduled_time = scheduled_wall
                 collector()
             except Exception as exc:  # each family survives and reports its own failure
                 error = str(exc)[:500]
@@ -2555,6 +2583,9 @@ class TmuxWebtermApp:
             runtime = max(0.0, time.monotonic() - started)
             self.stats_metric_thread_context.generation = None
             self.stats_metric_thread_context.scheduled_time = None
+            self.stats_metric_thread_context.coverage_family = None
+            self.stats_metric_thread_context.coverage_epoch_id = None
+            self.stats_metric_thread_context.coverage_cadence_seconds = None
             with self.stats_history_service.scheduler_lock:
                 previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
                 successes = int(previous.get("successes") or 0) + (0 if error else 1)
@@ -2599,6 +2630,7 @@ class TmuxWebtermApp:
 
     def merge_stats_family_record(self, family: str, record: dict[str, Any], sample: dict[str, Any]) -> dict[str, Any]:
         self.assert_stats_metric_write_allowed()
+        record = self.stats_record_with_sampler_coverage(family, record)
         now = float(record.get("time") or sample.get("time") or time.time())
         merged = self.stats_client.merge_server_records(
             [record], now=now, compact=False, refresh_rollups=False,
@@ -2614,6 +2646,29 @@ class TmuxWebtermApp:
                 trigger=f"stats-{family}", cache="ready",
             )
         return merged
+
+    def stats_record_with_sampler_coverage(self, family: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Attach the current independent scheduler epoch to one durable delta."""
+
+        epoch_id = getattr(self.stats_metric_thread_context, "coverage_epoch_id", None)
+        context_family = getattr(self.stats_metric_thread_context, "coverage_family", None)
+        cadence = getattr(self.stats_metric_thread_context, "coverage_cadence_seconds", None)
+        generation = getattr(self.stats_metric_thread_context, "generation", None)
+        if context_family != family or not epoch_id or not cadence or generation is None:
+            return record
+        return {
+            **record,
+            "_stats_coverage": {
+                "family": family,
+                "epoch_id": str(epoch_id),
+                "cadence_seconds": float(cadence),
+                "owner_generation": int(generation),
+            },
+        }
+
+    def stats_metric_scheduled_time(self) -> float:
+        scheduled = getattr(self.stats_metric_thread_context, "scheduled_time", None)
+        return float(scheduled) if scheduled is not None else time.time()
 
     def assert_stats_metric_write_allowed(self) -> None:
         """Reject a slow collector result after its elected-owner generation ended."""
@@ -2644,7 +2699,7 @@ class TmuxWebtermApp:
         self.merge_stats_family_record("cpu", record, sample)
 
     def record_stats_agent_status_sample(self) -> None:
-        sample_time = time.time()
+        sample_time = self.stats_metric_scheduled_time()
         rows = self.stats_agent_window_rows()
         record = self.stats_agent_activity_record_from_rows(rows, sample_time, include_token_rates=False)
         if record is None:
@@ -2659,26 +2714,30 @@ class TmuxWebtermApp:
         self.merge_stats_family_record("agent_status", record, self.latest_stats_sample())
 
     def record_stats_gpu_sample(self) -> None:
-        sample_time = time.time()
+        sample_time = self.stats_metric_scheduled_time()
         self.merge_stats_family_record(
             "gpu", {"time": sample_time, "host_metrics": stats_gpu_metrics()}, self.latest_stats_sample()
         )
 
     def record_stats_system_memory_sample(self) -> None:
-        sample_time = time.time()
+        sample_time = self.stats_metric_scheduled_time()
         self.merge_stats_family_record(
             "system_memory", {"time": sample_time, "host_metrics": stats_system_memory_metrics()}, self.latest_stats_sample()
         )
 
     def record_stats_agent_token_sample(self) -> None:
-        sample_time = time.time()
+        sample_time = self.stats_metric_scheduled_time()
         rows = self.stats_agent_window_rows()
         records = self.stats_agent_token_records_for_rows(rows, sample_time)
         self.assert_stats_metric_write_allowed()
-        if records:
-            merged = self.stats_client.merge_server_records(records, now=sample_time)
-            if not merged.get("ok"):
-                raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
+        # Token deltas may contain recovered historical timestamps. Keep those
+        # data writes untouched and append exactly one current sampler marker;
+        # otherwise recovery could backdate the new epoch across an old gap.
+        records = list(records)
+        records.append(self.stats_record_with_sampler_coverage("agent_tokens", {"time": sample_time}))
+        merged = self.stats_client.merge_server_records(records, now=sample_time)
+        if not merged.get("ok"):
+            raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
         self.assert_stats_metric_write_allowed()
         self.statsd_migrate_usage_atom_history(rows, sample_time)
 
