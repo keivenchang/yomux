@@ -913,7 +913,13 @@ class PersistentStatsService:
                 changed = True
         return changed
 
-    def merge_server_records(self, records: list[dict[str, Any]], *, now: float | None = None) -> dict[str, Any]:
+    def merge_server_records(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        now: float | None = None,
+        compact: bool = True,
+    ) -> dict[str, Any]:
         """Apply owner-only server, process, token, and host deltas durably."""
         if len(records) > STATS_HISTORY_POST_MAX_RECORDS:
             raise ValueError(f"records limit is {STATS_HISTORY_POST_MAX_RECORDS}")
@@ -991,7 +997,8 @@ class PersistentStatsService:
             self.store.upsert_bucket(bucket)
             changed += 1
         if changed:
-            self._compact_history(sample_now)
+            if compact:
+                self._compact_history(sample_now)
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
 
@@ -1327,7 +1334,7 @@ class PersistentStatsService:
             persist_state=False,
         )
         records = [*claimed.get("records", []), *atom_records]
-        merged = self.merge_server_records(records, now=sample_time) if records else {"ok": True, "changed": 0, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
+        merged = self._merge_agent_token_scan_records(records, sample_time)
         # Commit the counter baseline only after every derived record is
         # durable. A failed merge must remain retryable on the next scan.
         self._set_agent_token_state(claimed["state"])
@@ -1339,6 +1346,39 @@ class PersistentStatsService:
         claimed["persisted_records"] = len(records)
         claimed["merge"] = merged
         return claimed
+
+    def _merge_agent_token_scan_records(self, records: list[dict[str, Any]], sample_time: float) -> dict[str, Any]:
+        """Merge recovery atoms in bounded RPC-sized batches before advancing state.
+
+        A transcript recovery can legitimately emit more usage atoms than the
+        public history request limit.  It still runs in the statsd owner, so
+        split it here rather than relaxing the request bound shared by browser
+        clients.  Exceptions deliberately propagate: the caller only commits
+        the token counter baseline after every batch is durable.
+        """
+
+        if not records:
+            return {"ok": True, "changed": 0, "sequence": int(self.store.diagnostics().get("sequence") or 0), "batches": 0}
+        changed = 0
+        sequence = int(self.store.diagnostics().get("sequence") or 0)
+        batches = 0
+        for start in range(0, len(records), STATS_HISTORY_POST_MAX_RECORDS):
+            result = self.merge_server_records(
+                records[start : start + STATS_HISTORY_POST_MAX_RECORDS],
+                now=sample_time,
+                compact=False,
+            )
+            changed += int(result.get("changed") or 0)
+            sequence = int(result.get("sequence") or sequence)
+            batches += 1
+        if changed:
+            # A recovery may span many request-sized batches.  Compact only
+            # once after its final durable write so the single stats writer
+            # remains responsive instead of repeatedly compacting the entire
+            # history database for every 1,000 records.
+            self._compact_history(sample_time)
+            self._encoded_query_cache.clear()
+        return {"ok": True, "changed": changed, "sequence": sequence, "batches": batches}
 
     def claim_agent_token_deltas_from_rows(
         self,

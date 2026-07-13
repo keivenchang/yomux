@@ -1214,6 +1214,29 @@ def test_statsd_agent_token_scan_does_not_advance_state_when_record_merge_fails(
     service.store.close()
 
 
+def test_statsd_agent_token_scan_batches_recovery_atoms_without_advancing_state_early(monkeypatch, tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    batches = []
+    compactions = []
+
+    def merge(records, *, now, compact):
+        batches.append((len(records), now, compact))
+        return {"ok": True, "changed": len(records), "sequence": len(batches)}
+
+    monkeypatch.setattr(service, "merge_server_records", merge)
+    monkeypatch.setattr(service, "_compact_history", lambda now: compactions.append(now))
+    atoms = [{"time": 1060, "usage_atoms": []} for _ in range(statsd.STATS_HISTORY_POST_MAX_RECORDS + 1)]
+
+    result = service._persist_agent_token_scan([], atoms, set(), 1060, {})
+
+    assert batches == [(statsd.STATS_HISTORY_POST_MAX_RECORDS, 1060, False), (1, 1060, False)]
+    assert compactions == [1060]
+    assert result["persisted_records"] == statsd.STATS_HISTORY_POST_MAX_RECORDS + 1
+    assert result["merge"] == {"ok": True, "changed": statsd.STATS_HISTORY_POST_MAX_RECORDS + 1, "sequence": 2, "batches": 2}
+    assert service._agent_token_state() == {}
+    service.store.close()
+
+
 def test_statsd_history_profile_separates_sqlite_query_and_assembly(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     service.store.upsert_bucket(_bucket(sequence=1))
