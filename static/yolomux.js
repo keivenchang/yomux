@@ -41582,6 +41582,7 @@ let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveFrame = 0;
 let jsDebugGraphLiveFrameLastMs = 0;
 let jsDebugCostAgeNextRefreshAtMs = 0;
+let jsDebugCostPanelNextRefreshAtMs = 0;
 let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
@@ -47178,7 +47179,7 @@ function yoCostPanelHtml() {
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refresh = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
   const ageLabel = debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
-  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-data-age" data-js-yocost-data-age>${esc(ageLabel)}${refresh}</div>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-data-age" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${refresh}</div>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
 }
 
 function openYoCostTranscriptPreview(event) {
@@ -47258,7 +47259,7 @@ function renderYoCostPanels({force = false} = {}) {
   const visible = typeof document !== 'undefined'
     && document.visibilityState !== 'hidden'
     && itemIsActivePaneTab(yocostItemId);
-  if (!force && (!visible || nowMs < jsDebugCostAgeNextRefreshAtMs)) return false;
+  if (!force && (!visible || nowMs < jsDebugCostPanelNextRefreshAtMs)) return false;
   for (const panel of document.querySelectorAll('.js-yocost-panel')) {
     const body = panel.querySelector('.js-yocost-body');
     const scroll = body?.querySelector('.js-yocost-scroll');
@@ -47270,7 +47271,10 @@ function renderYoCostPanels({force = false} = {}) {
     }
     bindYoCostPanel(panel);
   }
-  jsDebugCostAgeNextRefreshAtMs = nowMs + debugCostAgeRefreshDelayMs();
+  const delayMs = debugCostAgeRefreshDelayMs();
+  jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
+  jsDebugCostAgeNextRefreshAtMs = nowMs + delayMs;
+  syncDebugGraphLiveTicker();
   return true;
 }
 
@@ -47416,17 +47420,53 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
 }
 
 function preserveDebugGraphBodyControls(graph, nextBody) {
-  const selectors = ['[data-js-debug-model-token-dimension-select]'];
+  const selectors = ['[data-js-debug-model-token-dimension-select]', '[data-js-debug-chart-close]'];
   for (const selector of selectors) {
-    const current = graph.querySelector(selector);
-    const replacement = nextBody.querySelector(selector);
-    if (current && replacement) replacement.replaceWith(current);
+    const currentByKey = new Map([...graph.querySelectorAll(selector)].map(control => [
+      control.dataset.jsDebugChartClose || control.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens',
+      control,
+    ]));
+    for (const replacement of nextBody.querySelectorAll(selector)) {
+      const key = replacement.dataset.jsDebugChartClose || replacement.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens';
+      const current = currentByKey.get(key);
+      if (!current) continue;
+      for (const attribute of [...replacement.attributes]) current.setAttribute(attribute.name, attribute.value);
+      for (const attribute of [...current.attributes]) {
+        if (!replacement.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+      }
+      replacement.replaceWith(current);
+    }
   }
 }
 
 function debugGraphLiveMarkers() {
   if (typeof document === 'undefined') return [];
   return [...document.querySelectorAll('[data-js-debug-live-tail]')].filter(marker => !marker.closest('[hidden]') && marker.getClientRects().length > 0);
+}
+
+function debugCostAgeLabels() {
+  if (typeof document === 'undefined' || !itemIsActivePaneTab(yocostItemId)) return [];
+  return [...document.querySelectorAll('[data-js-yocost-data-age-label]')].filter(label => !label.closest('[hidden]') && label.getClientRects().length > 0);
+}
+
+function debugCostAgeLabelText(nowMs = Date.now()) {
+  const refreshedAtMs = Math.max(Number(jsDebugStatsPollState.lastSampleAtMs) || 0, Number(jsDebugPricingRefreshState.lastRequestedAtMs) || 0);
+  const ageSeconds = refreshedAtMs > 0 ? Math.max(0, Math.floor((nowMs - refreshedAtMs) / 1000)) : null;
+  const age = ageSeconds === null ? t('common.notAvailable') : ageSeconds < 60 ? `${ageSeconds}s ago` : relativeTimeFormat(ageSeconds);
+  return debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
+}
+
+function refreshDebugCostAgeLabels(nowMs = Date.now()) {
+  const labels = debugCostAgeLabels();
+  if (!labels.length || nowMs < jsDebugCostAgeNextRefreshAtMs) return false;
+  const text = debugCostAgeLabelText(nowMs);
+  labels.forEach(label => { label.textContent = text; });
+  jsDebugCostAgeNextRefreshAtMs = nowMs + debugCostAgeRefreshDelayMs();
+  return true;
+}
+
+function debugGraphLiveTickerNeeded() {
+  return debugGraphLiveMarkers().length > 0 || debugCostAgeLabels().length > 0;
 }
 
 function stopDebugGraphLiveTicker() {
@@ -47439,10 +47479,12 @@ function debugGraphLiveFrameTick(frameMs = performanceNow()) {
   jsDebugGraphLiveFrame = 0;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const markers = debugGraphLiveMarkers();
-  if (!markers.length) return;
+  const ageLabels = debugCostAgeLabels();
+  if (!markers.length && !ageLabels.length) return;
   if (frameMs - jsDebugGraphLiveFrameLastMs >= 50) {
     jsDebugGraphLiveFrameLastMs = frameMs;
     const nowMs = Date.now();
+    refreshDebugCostAgeLabels(nowMs);
     for (const marker of markers) {
       const startMs = Number(marker.dataset.jsDebugLiveStartMs);
       const endMs = Number(marker.dataset.jsDebugLiveEndMs);
@@ -47465,7 +47507,7 @@ function debugGraphLiveFrameTick(frameMs = performanceNow()) {
 }
 
 function syncDebugGraphLiveTicker() {
-  if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined' || document.visibilityState === 'hidden' || !debugGraphLiveMarkers().length) {
+  if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined' || document.visibilityState === 'hidden' || !debugGraphLiveTickerNeeded()) {
     stopDebugGraphLiveTicker();
     return;
   }

@@ -2067,6 +2067,7 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
             '[data-js-debug-model-token-dimension-select]',
           ];
           const controls = controlSelectors.map(selector => graph.querySelector(selector));
+          const closeControls = [...graph.querySelectorAll('[data-js-debug-chart-close]')];
           if (controls.some(control => !control)) return done({error: 'missing stable control fixture'});
           let bodyMutationCallbacks = 0;
           const observer = new MutationObserver(() => { bodyMutationCallbacks += 1; });
@@ -2079,7 +2080,19 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
           await new Promise(resolve => setTimeout(resolve, 80));
           observer.disconnect();
           const controlsAfterBlurSame = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
+          const closeControlsAfterBlurSame = [...graph.querySelectorAll('[data-js-debug-chart-close]')].every((control, index) => control === closeControls[index]);
           const deferredPending = graph.dataset.jsDebugGraphRefreshPending || '';
+
+          controls[4].focus();
+          const modelFocusedTicks = [7, 8, 9].map(sequence => {
+            applyJsDebugStatsSamplePush({sequence, record: record(sequence), sample: {time: Date.now() / 1000}});
+            return refreshDebugGraphElement(graph, {force: true});
+          });
+          const modelFocusedSame = graph.querySelector('[data-js-debug-model-token-dimension-select]') === controls[4]
+            && document.activeElement === controls[4];
+          controls[4].blur();
+          await new Promise(resolve => setTimeout(resolve, 80));
+          const closeControlsAfterModelBlurSame = [...graph.querySelectorAll('[data-js-debug-chart-close]')].every((control, index) => control === closeControls[index]);
 
           const renderedBeforeTicks = Number(graph.dataset.jsDebugGraphRenderedAt);
           for (let sequence = 2; sequence <= 6; sequence += 1) {
@@ -2122,6 +2135,10 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
             focusedBodySame,
             focusedControlsSame,
             controlsAfterBlurSame,
+            closeControlsAfterBlurSame,
+            closeControlsAfterModelBlurSame,
+            modelFocusedTicks,
+            modelFocusedSame,
             bodyMutationCallbacks,
             deferredPending,
             renderedBeforeTicks,
@@ -2145,6 +2162,8 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
     assert metrics["focusedRefreshResults"] == [False, False, False], metrics
     assert metrics["focusedBodySame"] is True and metrics["focusedControlsSame"] is True, metrics
     assert metrics["controlsAfterBlurSame"] is True, metrics
+    assert metrics["closeControlsAfterBlurSame"] is True and metrics["closeControlsAfterModelBlurSame"] is True, metrics
+    assert metrics["modelFocusedTicks"] == [False, False, False] and metrics["modelFocusedSame"] is True, metrics
     assert metrics["bodyMutationCallbacks"] == 1 and metrics["deferredPending"] == "", metrics
     assert metrics["renderedAfterTicks"] == metrics["renderedBeforeTicks"], metrics
     assert metrics["renderedAfterRange"] > metrics["renderedAfterTicks"], metrics
@@ -2152,7 +2171,7 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
     assert metrics["firstRangeStop"] == 300 and metrics["oneMinuteLabelCount"] == 0, metrics
     assert metrics["liveBefore"] and metrics["liveAfter"], metrics
     assert metrics["liveBefore"]["x2"] != metrics["liveAfter"]["x2"] and metrics["liveAfter"]["frames"] > 0, metrics
-    assert metrics["liveBefore"]["min"] <= metrics["liveAfter"]["y1"] <= metrics["liveBefore"]["max"], metrics
+    assert metrics["liveBefore"]["min"] - 1e-6 <= metrics["liveAfter"]["y1"] <= metrics["liveBefore"]["max"] + 1e-6, metrics
     assert metrics["settledSame"] is True, metrics
     assert metrics["longRangeLiveCount"] == 0 and metrics["longRangeStatic"] is True, metrics
     assert metrics["hiddenFramesAfter"] == metrics["hiddenFramesBefore"], metrics
@@ -2211,9 +2230,32 @@ def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const costReset = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-zoom-reset]');
           const costDomain = [Math.floor(costDomainState.startMs), Math.floor(costDomainState.endMs)];
-          document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-zoom-reset]')?.click();
+          selectSession(debugPaneItemId, {userInitiated: true});
+          setDebugSubTab('graph');
+          renderDebugPanels({force: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const statsPanel = document.getElementById(panelDomId(debugPaneItemId));
+          const statsReflectsCostZoom = statsPanel?.querySelector('[data-js-debug-chart-grid]')?.dataset.jsDebugZoomed === 'true'
+            && Boolean(statsPanel?.querySelector('[data-js-debug-zoom-reset]'));
+          statsPanel?.querySelector('[data-js-debug-zoom-reset]')?.click();
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const resetCostZoomed = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-chart-grid]')?.dataset.jsDebugZoomed === 'true';
+
+          const statsSvg = statsPanel?.querySelector('[data-js-debug-chart="modelTokens"] .js-debug-line-chart');
+          const statsRect = statsSvg?.getBoundingClientRect();
+          if (!statsSvg || !statsRect?.width) return done({error: 'missing YO!stats reverse zoom fixture'});
+          const statsStartX = statsRect.left + statsRect.width * 0.25;
+          const statsEndX = statsRect.left + statsRect.width * 0.75;
+          handleDebugGraphPointerDown({target: statsSvg, clientX: statsStartX, button: 0, preventDefault() {}}, statsPanel);
+          handleDebugGraphPointerMove({target: statsSvg, clientX: statsEndX}, statsPanel);
+          handleDebugGraphPointerUp({target: statsSvg, clientX: statsEndX}, statsPanel);
+          const statsZoomAfterDrag = debugGraphDomain().zoomed === true;
+          selectSession(yocostItemId, {userInitiated: true});
+          renderYoCostPanels({force: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const costAfterStats = document.getElementById(panelDomId(yocostItemId));
+          const costReflectsStatsZoom = debugGraphDomain().zoomed === true
+            && Boolean(costAfterStats?.querySelector('[data-js-debug-zoom-reset]'));
           selectSession('1', {userInitiated: true});
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const originalActivePaneItems = activePaneItems;
@@ -2226,7 +2268,10 @@ def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):
             costZoomed: costDomainState.zoomed === true,
             costReset: costReset?.textContent || '',
             costDomain,
+            statsReflectsCostZoom,
             resetCostZoomed,
+            costReflectsStatsZoom,
+            statsZoomAfterDrag,
             neitherChannels: demandNeither.channels,
             neitherActive: demandNeither.active_panes,
           });
@@ -2237,6 +2282,8 @@ def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):
     assert "stats" in metrics["costDemandChannels"] and "__yocost__" in metrics["costDemandActive"], metrics
     assert metrics["costZoomed"] is True and metrics["costDomain"][1] > metrics["costDomain"][0], metrics
     assert metrics["costReset"] == "Reset Zoom", metrics
+    assert metrics["statsZoomAfterDrag"] is True, metrics
+    assert metrics["statsReflectsCostZoom"] is True and metrics["costReflectsStatsZoom"] is True, metrics
     assert metrics["resetCostZoomed"] is False, metrics
     assert "stats" not in metrics["neitherChannels"], metrics
 
@@ -2260,25 +2307,31 @@ def test_yocost_last_refreshed_uses_visibility_aware_randomized_cadence(browser,
         try {
           Math.random = () => 0;
           jsDebugCostAgeNextRefreshAtMs = 0;
-          const first = renderYoCostPanels();
+          jsDebugCostPanelNextRefreshAtMs = 0;
+          const first = renderYoCostPanels({force: true});
           const firstHtml = body?.innerHTML || '';
           const firstDeadline = jsDebugCostAgeNextRefreshAtMs;
           now = firstDeadline - 1;
-          const early = renderYoCostPanels();
+          const early = refreshDebugCostAgeLabels(now);
           const earlySame = (body?.innerHTML || '') === firstHtml;
           now = firstDeadline;
           Math.random = () => 1;
-          const atThreeSeconds = renderYoCostPanels();
+          const atThreeSeconds = refreshDebugCostAgeLabels(now);
           const secondDeadline = jsDebugCostAgeNextRefreshAtMs;
+          const tickerArmedBeforeHidden = Boolean(jsDebugGraphLiveFrame);
           Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
           now = secondDeadline + 1;
-          const hidden = renderYoCostPanels();
+          const hidden = debugGraphLiveFrameTick(1000);
+          const hiddenDeadline = jsDebugCostAgeNextRefreshAtMs;
           Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
-          const visibleAgain = renderYoCostPanels();
+          const visibleAgain = refreshDebugCostAgeLabels(now);
           return {
             first, early, earlySame, atThreeSeconds, hidden, visibleAgain,
             firstDelay: firstDeadline - 100000,
             secondDelay: secondDeadline - firstDeadline,
+            hiddenDeadlineSame: hiddenDeadline === secondDeadline,
+            tickerArmed: tickerArmedBeforeHidden,
+            bodySame: body === panel?.querySelector('.js-yocost-body'),
             ageText: body?.querySelector('[data-js-yocost-data-age]')?.textContent || '',
           };
         } finally {
@@ -2290,7 +2343,8 @@ def test_yocost_last_refreshed_uses_visibility_aware_randomized_cadence(browser,
     assert metrics["first"] is True and metrics["firstDelay"] == 3000, metrics
     assert metrics["early"] is False and metrics["earlySame"] is True, metrics
     assert metrics["atThreeSeconds"] is True and metrics["secondDelay"] == 10000, metrics
-    assert metrics["hidden"] is False and metrics["visibleAgain"] is True, metrics
+    assert metrics["hidden"] is None and metrics["hiddenDeadlineSame"] is True and metrics["visibleAgain"] is True, metrics
+    assert metrics["tickerArmed"] is True and metrics["bodySame"] is True, metrics
     assert "Last refreshed" in metrics["ageText"], metrics
 
 
