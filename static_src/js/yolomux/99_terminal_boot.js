@@ -223,12 +223,16 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
+// Overflow reuses the shared definitions above (and the one direct interrupt definition) instead
+// of creating parallel key definitions that could drift from their terminal-byte behavior.
+const terminalMobileAccessoryMoreActions = Object.freeze(['command-p', 'home', 'end', 'delete', 'shift-tab', 'interrupt', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r']);
 const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
-// Backspace uses its existing terminal-byte definition; the utility column ends in Alt/Cmd.
+// Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
 const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift']);
+const terminalMobileAccessoryBottomActions = Object.freeze(['alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -499,9 +503,10 @@ function terminalMobileAccessoryHtml(session) {
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
   const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
   const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
+  const bottomKeys = terminalMobileAccessoryBottomActions.map(key).join('');
   // The overflow button remains the rightmost control in both palette states. Keeping the return
   // target in one physical corner avoids a touch user hunting for it after the content switches.
-  const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
+  const moreKeys = [...terminalMobileAccessoryMoreActions.map(key), key('more')].join('');
   const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
   return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
@@ -510,6 +515,7 @@ function terminalMobileAccessoryHtml(session) {
       </div>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
       <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
+      <div class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom">${bottomKeys}</div>
       <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
     </div>`;
 }

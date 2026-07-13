@@ -3704,7 +3704,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
       const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
-      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"/.test(keyboardHtml), 'the touch palette keeps Ctrl-C above bottom Alt/Cmd and exposes Backspace beside Tab/Ctrl-B');
+      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"[\s\S]*mobile-terminal-keyrow-bottom[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*mobile-terminal-keyrow--more[\s\S]*data-terminal-mobile-key="interrupt"/.test(keyboardHtml), 'the touch palette keeps Esc/Ctrl/Shift left, places Alt/Cmd in a bottom row, and exposes direct Ctrl-C in overflow');
       assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 
