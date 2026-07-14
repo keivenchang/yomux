@@ -79,7 +79,7 @@ STATSD_ROLLUP_MAINTENANCE_PAGE_ROWS = 4
 STATSD_ROLLUP_MAINTENANCE_BUDGET_SECONDS = 0.08
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
-STATS_AGENT_TOKEN_SCHEMA_VERSION = 4
+STATS_AGENT_TOKEN_SCHEMA_VERSION = 5
 STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_samples")
 STATS_COST_COMPONENT_DIMENSION_FIELDS = (
     "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
@@ -621,6 +621,76 @@ def cost_summary_response(value: Any) -> dict[str, Any]:
         "active_catalog_revision": max(0, int(raw.get("active_catalog_revision") or 0)),
         "freshness": _usage_atom_text(raw.get("freshness"), default="unknown", limit=80),
     }
+
+
+def agent_token_rates_response(value: Any, cost_value: Any) -> list[dict[str, Any]]:
+    """Attach tmux-attributed billable dimensions without replacing Output.
+
+    Generated output tokens remain authoritative in ``agent_token_rates``.
+    Attributed cost atoms supply only Input and Cache dimensions; ``all`` adds
+    those dimensions to the exact generated-output counter.  Keeping an
+    explicit availability bit and zero map lets the client distinguish an
+    atom-less agent from a measured zero instead of dropping that agent.
+    """
+
+    raw_rates = value if isinstance(value, dict) else {}
+    raw_summary = cost_value if isinstance(cost_value, dict) else {}
+    attributed: dict[str, dict[str, Any]] = {}
+    for component in raw_summary.get("components", []):
+        if not isinstance(component, dict):
+            continue
+        if str(component.get("unit") or "tokens").lower() != "tokens":
+            continue
+        if str(component.get("modality") or "text").lower() != "text":
+            continue
+        key = str(component.get("tmux_key") or "").strip()
+        if not key:
+            continue
+        row = attributed.setdefault(key, {
+            "label": str(component.get("tmux_label") or key),
+            "input": 0.0,
+            "cache_read": 0.0,
+            "cache_write": 0.0,
+        })
+        if component.get("tmux_label"):
+            row["label"] = str(component["tmux_label"])
+        quantity = _usage_atom_number(component.get("quantity"))
+        cache_role = str(component.get("cache_role") or "none").lower()
+        direction = str(component.get("direction") or "unknown").lower()
+        if cache_role == "read":
+            row["cache_read"] += quantity
+        elif cache_role in {"write", "write_5m", "write_1h"}:
+            row["cache_write"] += quantity
+        elif direction == "input":
+            row["input"] += quantity
+
+    result: list[dict[str, Any]] = []
+    for key in sorted(set(raw_rates) | set(attributed)):
+        raw = raw_rates.get(key) if isinstance(raw_rates.get(key), dict) else {}
+        exact_output = float(raw.get("tokens") or 0.0)
+        dimensions = attributed.get(key)
+        available = dimensions is not None
+        billable_tokens = {
+            "input": float(dimensions.get("input") or 0.0) if available else 0.0,
+            "cache_read": float(dimensions.get("cache_read") or 0.0) if available else 0.0,
+            "cache_write": float(dimensions.get("cache_write") or 0.0) if available else 0.0,
+            "all": 0.0,
+        }
+        if available:
+            billable_tokens["all"] = exact_output + billable_tokens["input"] + billable_tokens["cache_read"] + billable_tokens["cache_write"]
+        result.append({
+            "key": key,
+            "label": str(raw.get("label") or (dimensions or {}).get("label") or key),
+            "total": float(raw.get("total") or 0.0),
+            "samples": float(raw.get("samples") or 0.0),
+            "tokens": exact_output,
+            "seconds": float(raw.get("seconds") or 0.0),
+            "source": str(raw.get("source") or ""),
+            "model_rates": copy.deepcopy(raw.get("model_rates") if isinstance(raw.get("model_rates"), dict) else {}),
+            "billable_available": available,
+            "billable_tokens": billable_tokens,
+        })
+    return result
 
 
 def _tmux_usage_fields_from_row(row: dict[str, Any], *, key: str = "", label: str = "", kind: str = "") -> dict[str, str]:
@@ -2736,20 +2806,9 @@ class PersistentStatsService:
             },
         }
         if include_agent_tokens:
-            record["agent_token_rates"] = [
-                {
-                    "key": key,
-                    "label": str(value.get("label") or key),
-                    "total": float(value.get("total") or 0.0),
-                    "samples": float(value.get("samples") or 0.0),
-                    "tokens": float(value.get("tokens") or 0.0),
-                    "seconds": float(value.get("seconds") or 0.0),
-                    "source": str(value.get("source") or ""),
-                    "model_rates": copy.deepcopy(value.get("model_rates") if isinstance(value.get("model_rates"), dict) else {}),
-                }
-                for key, value in sorted((bucket.get("agent_token_rates") or {}).items())
-                if isinstance(value, dict)
-            ]
+            record["agent_token_rates"] = agent_token_rates_response(
+                bucket.get("agent_token_rates"), bucket.get("cost_summary")
+            )
             record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
         return record

@@ -528,6 +528,86 @@ def test_statsd_persists_projected_usage_atoms_in_normal_and_compact_token_histo
     service.store.close()
 
 
+def test_statsd_agent_billable_dimensions_reconcile_with_tmux_cost_atoms_in_normal_and_compact_history(tmp_path):
+    service = statsd.PersistentStatsService(
+        tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FakePricingCatalog()
+    )
+
+    def atom(event_id, tmux_key, direction, quantity, *, cache_role="none", label=""):
+        session, window, kind = tmux_key.split("|")
+        return {
+            "event_id": event_id,
+            "timestamp": 1000,
+            "source": "rollout",
+            "provider": "openai",
+            "model": "gpt-5.6",
+            "direction": direction,
+            "modality": "text",
+            "cache_role": cache_role,
+            "unit": "tokens",
+            "quantity": quantity,
+            "telemetry_complete": True,
+            "tmux_key": tmux_key,
+            "tmux_label": label or f"{session}:{window}",
+            "tmux_session": session,
+            "tmux_window": window,
+            "tmux_window_label": window,
+            "agent_kind": kind,
+        }
+
+    service.merge_server_records([{
+        "time": 1000,
+        "tokens_per_agent_total": 35,
+        "agent_token_samples": 1,
+        "agent_token_rates": [
+            {"key": "s|0|codex", "label": "s:0", "total": 30, "samples": 1, "tokens": 30, "seconds": 60},
+            {"key": "s|2|claude", "label": "s:2", "total": 5, "samples": 1, "tokens": 5, "seconds": 60},
+        ],
+        "usage_atoms": [
+            atom("s0-input", "s|0|codex", "input", 100),
+            atom("s0-cache-read", "s|0|codex", "input", 20, cache_role="read"),
+            atom("s0-cache-write", "s|0|codex", "input", 10, cache_role="write_5m"),
+            atom("s0-output", "s|0|codex", "output", 30),
+            # This tmux window has atoms but no generated-token counter. It
+            # must still be representable in the Agent token payload.
+            atom("s1-input", "s|1|codex", "input", 7, label="s:1"),
+        ],
+    }], now=1000)
+
+    normal = service.handle({"action": "history"})["records"][0]
+    compact = service.handle({"action": "history", "token_resolution_seconds": 60})["agent_token_history"]["records"][0]
+
+    for record in (normal, compact):
+        rates = {rate["key"]: rate for rate in record["agent_token_rates"]}
+        by_agent = {row["tmux_key"]: row for row in record["cost_summary"]["tmux_windows"]}
+
+        assert rates["s|0|codex"]["tokens"] == 30, "Output stays on the exact generated-token path"
+        assert rates["s|0|codex"]["billable_available"] is True
+        assert rates["s|0|codex"]["billable_tokens"] == {
+            "input": 100.0, "cache_read": 20.0, "cache_write": 10.0, "all": 160.0,
+        }
+        assert rates["s|0|codex"]["billable_tokens"]["all"] == pytest.approx(
+            by_agent["s|0|codex"]["input_tokens"]
+            + by_agent["s|0|codex"]["cache_tokens"]
+            + by_agent["s|0|codex"]["output_tokens"]
+        )
+
+        assert rates["s|1|codex"]["tokens"] == 0
+        assert rates["s|1|codex"]["billable_available"] is True
+        assert rates["s|1|codex"]["billable_tokens"] == {
+            "input": 7.0, "cache_read": 0.0, "cache_write": 0.0, "all": 7.0,
+        }
+
+        assert rates["s|2|claude"]["tokens"] == 5
+        assert rates["s|2|claude"]["billable_available"] is False
+        assert rates["s|2|claude"]["billable_tokens"] == {
+            "input": 0.0, "cache_read": 0.0, "cache_write": 0.0, "all": 0.0,
+        }
+
+    assert normal["agent_token_rates"] == compact["agent_token_rates"]
+    service.store.close()
+
+
 def test_statsd_cost_summary_exposes_lower_upper_bounds_for_unpriced_usage():
     catalog = _EstimatedPricingCatalog()
     known = statsd.projected_usage_component({
@@ -884,7 +964,7 @@ def test_statsd_live_claim_persists_delta_before_returning_compact_response(tmp_
     assert claimed["persisted_records"] > 0
     assert len(json.dumps(claimed)) < 256 * 1024
     assert sum(record["tokens_per_agent_total"] for record in history["records"]) == pytest.approx(20)
-    assert sum(sum(rate["model_rates"]["gpt-5.6"]["tokens"] for rate in record["agent_token_rates"]) for record in history["records"]) == pytest.approx(20)
+    assert sum(sum(rate["model_rates"].get("gpt-5.6", {}).get("tokens", 0) for rate in record["agent_token_rates"]) for record in history["records"]) == pytest.approx(20)
     cost_source = next(record["cost_summary"]["sources"][0] for record in history["records"] if record.get("cost_summary", {}).get("sources"))
     assert cost_source["tmux_key"] == "s|0|codex"
     assert cost_source["tmux_label"] == "s:0"
