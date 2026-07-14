@@ -856,6 +856,39 @@ class StatsStore:
             "epochs_truncated": epochs_truncated,
         }
 
+    def coverage_integrity_report(self) -> dict[str, Any]:
+        """Read-only durable coverage self-check for boot/on-demand monitoring.
+
+        Returns the count of cross-epoch overlapping pairs and inverted rows per
+        family so the system can detect a broken coverage table itself instead
+        of waiting for a blank chart.  ``ok`` is True when the disjointness
+        invariant holds.
+        """
+
+        connection = self._connection()
+        overlaps = int(connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals a "
+            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+            "AND a.end > b.start AND b.end > a.start"
+        ).fetchone()[0])
+        inverted = int(connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals WHERE end <= start"
+        ).fetchone()[0])
+        offenders = [
+            {"family": str(row[0]), "overlaps": int(row[1])}
+            for row in connection.execute(
+                "SELECT a.family, COUNT(*) FROM stats_coverage_intervals a "
+                "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+                "AND a.end > b.start AND b.end > a.start GROUP BY a.family"
+            ).fetchall()
+        ]
+        return {
+            "ok": overlaps == 0 and inverted == 0,
+            "overlapping_pairs": overlaps,
+            "inverted_rows": inverted,
+            "families": offenders,
+        }
+
     def retain_after(self, cutoff_time: float) -> int:
         connection = self._connection()
         with connection:

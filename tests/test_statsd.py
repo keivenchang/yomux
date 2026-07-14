@@ -378,6 +378,30 @@ def test_stats_store_coverage_is_always_disjoint_under_random_owner_churn(tmp_pa
     reopened.close()
 
 
+def test_coverage_integrity_report_detects_and_clears_overlaps(tmp_path):
+    path = tmp_path / "stats.sqlite3"
+    store = stats_store.StatsStore(path)
+    connection = store._connection()
+    with connection:
+        for epoch_id, start, end in [("o1", 1000, 1300), ("o2", 1290, 1600)]:
+            connection.execute(
+                "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
+                " VALUES('cpu',?,?,?,10,1,'sampler')",
+                (epoch_id, start, end),
+            )
+    # A live process that never restarts still holds the injected overlap.
+    report = store.coverage_integrity_report()
+    assert report["ok"] is False
+    assert report["overlapping_pairs"] == 1
+    assert report["families"] == [{"family": "cpu", "overlaps": 1}]
+    store.close()
+    # Reopening runs the durable repair; the self-check then reports healthy.
+    reopened = stats_store.StatsStore(path)
+    healthy = reopened.coverage_integrity_report()
+    assert healthy == {"ok": True, "overlapping_pairs": 0, "inverted_rows": 0, "families": []}
+    reopened.close()
+
+
 def test_usage_atom_backfill_status_is_complete_when_version_marker_matches(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     # A stale status JSON left at "pending" must not override the authoritative
