@@ -1227,16 +1227,18 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.js-debug-live-tail {
-  stroke: color-mix(in srgb, var(--active-accent-bright) 72%, transparent);
-  stroke-width: 1.6;
-  stroke-linecap: round;
+.js-debug-live-pulse.heartbeat-pulse {
+  fill: rgb(var(--active-accent-rgb) / 0.14);
   pointer-events: none;
-  opacity: 0.8;
+  animation-name: agent-status-opacity-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
 }
-body.theme-light .js-debug-live-tail {
-  stroke: color-mix(in srgb, var(--active-accent) 82%, var(--text));
-  opacity: 0.72;
+body.theme-light .js-debug-live-pulse.heartbeat-pulse {
+  fill: rgb(var(--active-accent-rgb) / 0.1);
 }
 .js-debug-hover-line {
   opacity: 0;

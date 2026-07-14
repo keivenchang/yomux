@@ -20332,7 +20332,7 @@ function agentWindowActivityRecord(key, create = false) {
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
-const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
+const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse';
 const agentWindowActivityPulseAnimationNames = new Set([
   'attention-ring-fade',
   'agent-status-acknowledgement-fade',
@@ -20410,9 +20410,10 @@ function clearAgentWindowTransitionPulseRefresh(key) {
 function mutationTouchesAgentWindowActivity(mutation) {
   for (const node of mutation?.addedNodes || []) {
     if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.classList?.contains?.('js-debug-live-pulse')) return true;
     if (node?.classList?.contains?.('status-indicator') && (node.classList.contains('heartbeat-pulse') || node.classList.contains('attention-pulse'))) return true;
     if (node?.querySelector?.('.agent-window-activity')) return true;
-    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse')) return true;
+    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse')) return true;
   }
   return false;
 }
@@ -20463,7 +20464,7 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
     : attentionAnimationDelay(nowMs);
   for (const node of nodes) {
     if (!node?.style) continue;
-    if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
+    if (!node.classList?.contains?.('status-indicator') && !node.classList?.contains?.('js-debug-live-pulse') && !node.querySelector?.('.agent-window-status-dot')) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
     if (localDelay) node.style.removeProperty('--attention-animation-delay');
     syncAgentWindowPulseAnimationCurrentTime(node, nowMs);
@@ -45733,7 +45734,7 @@ function debugGraphHeldProvenanceText(provenance) {
   return `↳ ${debugGraphExactTimeLabel(sampleTimeMs)} · n=${debugSystemNumber(sampleCount)}`;
 }
 
-function debugGraphLiveTailHtml(groupSeries, buckets, domain, axisMax, scale, nowMs = Date.now()) {
+function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now()) {
   if (domain?.zoomed || Number(domain?.rangeSeconds) > 3600 || !buckets.length) return '';
   const index = buckets.length - 1;
   const bucket = buckets[index];
@@ -45746,16 +45747,12 @@ function debugGraphLiveTailHtml(groupSeries, buckets, domain, axisMax, scale, no
     return Number.isFinite(value) ? [Math.max(0, value)] : [];
   });
   if (!values.length) return '';
-  const chartMax = Math.max(1, Number(axisMax) || 1);
-  const valueMin = Math.min(...values);
-  const valueMax = Math.max(...values);
-  const valueAverage = values.reduce((total, value) => total + value, 0) / values.length;
   const xStart = debugGraphXForTime(startMs, domain);
-  const xEnd = debugGraphXForTime(Math.min(nowMs, startMs + durationMs), domain);
-  const yMin = debugGraphPlotYForValue(valueMax, chartMax, scale);
-  const yMax = debugGraphPlotYForValue(valueMin, chartMax, scale);
-  const y = debugGraphPlotYForValue(valueAverage, chartMax, scale);
-  return `<line class="js-debug-live-tail" data-js-debug-live-tail data-js-debug-live-start-ms="${esc(startMs)}" data-js-debug-live-end-ms="${esc(startMs + durationMs)}" data-js-debug-live-x-start="${esc(xStart)}" data-js-debug-live-x-limit="${esc(debugGraphXForTime(startMs + durationMs, domain))}" data-js-debug-live-y-min="${esc(yMin)}" data-js-debug-live-y-max="${esc(yMax)}" x1="${esc(xStart)}" x2="${esc(xEnd)}" y1="${esc(y)}" y2="${esc(y)}" vector-effect="non-scaling-stroke"></line>`;
+  const xLimit = debugGraphXForTime(startMs + durationMs, domain);
+  const width = Math.max(0.5, xLimit - xStart);
+  // The live bucket owns one fixed geometry for its whole lifetime. Only the shared agent-status
+  // opacity clock changes its paint; no per-frame x/y mutation or independent timing is allowed.
+  return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
@@ -45826,7 +45823,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
-          ${debugGraphLiveTailHtml(groupSeries, buckets, domain, axisMax, plotScale)}
+          ${debugGraphLivePulseHtml(groupSeries, buckets, domain)}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
@@ -47893,11 +47890,6 @@ function preserveDebugGraphBodyControls(graph, nextBody) {
   }
 }
 
-function debugGraphLiveMarkers() {
-  if (typeof document === 'undefined') return [];
-  return [...document.querySelectorAll('[data-js-debug-live-tail]')].filter(marker => !marker.closest('[hidden]') && marker.getClientRects().length > 0);
-}
-
 function debugCostAgeLabels() {
   if (typeof document === 'undefined' || !itemIsActivePaneTab(yocostItemId)) return [];
   return [...document.querySelectorAll('[data-js-yocost-data-age-label]')].filter(label => !label.closest('[hidden]') && label.getClientRects().length > 0);
@@ -47920,7 +47912,7 @@ function refreshDebugCostAgeLabels(nowMs = Date.now()) {
 }
 
 function debugGraphLiveTickerNeeded() {
-  return debugGraphLiveMarkers().length > 0 || debugCostAgeLabels().length > 0;
+  return debugCostAgeLabels().length > 0;
 }
 
 function stopDebugGraphLiveTicker() {
@@ -47932,30 +47924,11 @@ function stopDebugGraphLiveTicker() {
 function debugGraphLiveFrameTick(frameMs = performanceNow()) {
   jsDebugGraphLiveFrame = 0;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
-  const markers = debugGraphLiveMarkers();
   const ageLabels = debugCostAgeLabels();
-  if (!markers.length && !ageLabels.length) return;
+  if (!ageLabels.length) return;
   if (frameMs - jsDebugGraphLiveFrameLastMs >= 50) {
     jsDebugGraphLiveFrameLastMs = frameMs;
-    const nowMs = Date.now();
-    refreshDebugCostAgeLabels(nowMs);
-    for (const marker of markers) {
-      const startMs = Number(marker.dataset.jsDebugLiveStartMs);
-      const endMs = Number(marker.dataset.jsDebugLiveEndMs);
-      const xStart = Number(marker.dataset.jsDebugLiveXStart);
-      const xLimit = Number(marker.dataset.jsDebugLiveXLimit);
-      const yMin = Number(marker.dataset.jsDebugLiveYMin);
-      const yMax = Number(marker.dataset.jsDebugLiveYMax);
-      const ratio = Math.max(0, Math.min(1, (nowMs - startMs) / Math.max(1, endMs - startMs)));
-      const x = xStart + ((xLimit - xStart) * ratio);
-      const middle = (yMin + yMax) / 2;
-      const amplitude = Math.max(0, yMax - yMin) * 0.08;
-      const y = Math.max(yMin, Math.min(yMax, middle + (Math.sin(frameMs / 180) * amplitude)));
-      marker.setAttribute('x2', x.toFixed(2));
-      marker.setAttribute('y1', y.toFixed(2));
-      marker.setAttribute('y2', y.toFixed(2));
-      marker.dataset.jsDebugLiveFrame = String(Number(marker.dataset.jsDebugLiveFrame || 0) + 1);
-    }
+    refreshDebugCostAgeLabels(Date.now());
   }
   jsDebugGraphLiveFrame = requestAnimationFrame(debugGraphLiveFrameTick);
 }
@@ -48006,6 +47979,7 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
     delete graph.dataset.jsDebugGraphRefreshPending;
+    if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
     syncDebugGraphLiveTicker();
   } finally {
     clientPerfEnd(perf);

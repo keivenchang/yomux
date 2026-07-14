@@ -455,7 +455,7 @@ function agentWindowActivityRecord(key, create = false) {
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
-const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
+const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse';
 const agentWindowActivityPulseAnimationNames = new Set([
   'attention-ring-fade',
   'agent-status-acknowledgement-fade',
@@ -533,9 +533,10 @@ function clearAgentWindowTransitionPulseRefresh(key) {
 function mutationTouchesAgentWindowActivity(mutation) {
   for (const node of mutation?.addedNodes || []) {
     if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.classList?.contains?.('js-debug-live-pulse')) return true;
     if (node?.classList?.contains?.('status-indicator') && (node.classList.contains('heartbeat-pulse') || node.classList.contains('attention-pulse'))) return true;
     if (node?.querySelector?.('.agent-window-activity')) return true;
-    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse')) return true;
+    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse')) return true;
   }
   return false;
 }
@@ -586,7 +587,7 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
     : attentionAnimationDelay(nowMs);
   for (const node of nodes) {
     if (!node?.style) continue;
-    if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
+    if (!node.classList?.contains?.('status-indicator') && !node.classList?.contains?.('js-debug-live-pulse') && !node.querySelector?.('.agent-window-status-dot')) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
     if (localDelay) node.style.removeProperty('--attention-animation-delay');
     syncAgentWindowPulseAnimationCurrentTime(node, nowMs);

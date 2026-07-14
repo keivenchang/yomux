@@ -2480,7 +2480,7 @@ def test_debug_graph_delivery_cadence_scales_with_shared_range(browser, tmp_path
     assert "stats" not in metrics["historicalZoom"]["channels"], metrics
 
 
-def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(browser, tmp_path):
+def test_debug_graph_controls_are_stable_and_live_edge_uses_shared_static_pulse(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -2576,32 +2576,71 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
 
           setDebugGraphRange(300);
           refreshDebugGraphElement(graph, {force: true});
-          const live = graph.querySelector('[data-js-debug-live-tail]');
+          const referenceHost = document.createElement('span');
+          referenceHost.innerHTML = agentWindowStatusDotHtmlForTone('working', {pulse: true, label: 'pulse reference'});
+          document.body.append(referenceHost);
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          scheduleAgentWindowActivityAnimationSync(document);
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const live = graph.querySelector('[data-js-debug-live-pulse]');
+          const reference = referenceHost.querySelector('.agent-window-status-dot');
+          const first = value => String(value || '').split(',')[0].trim();
+          const animationMetrics = node => {
+            const style = getComputedStyle(node);
+            const name = first(style.animationName);
+            const animation = node.getAnimations().find(item => item.animationName === name);
+            return {
+              name,
+              duration: first(style.animationDuration),
+              delay: first(style.animationDelay),
+              timingFunction: first(style.animationTimingFunction),
+              iterations: first(style.animationIterationCount),
+              direction: first(style.animationDirection),
+              playState: animation?.playState || '',
+              currentTime: Number(animation?.currentTime),
+            };
+          };
+          const rgba = value => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1;
+            canvas.height = 1;
+            const context = canvas.getContext('2d');
+            context.clearRect(0, 0, 1, 1);
+            context.fillStyle = value;
+            context.fillRect(0, 0, 1, 1);
+            return [...context.getImageData(0, 0, 1, 1).data];
+          };
+          const paint = theme => {
+            document.body.classList.toggle('theme-light', theme === 'light');
+            document.body.classList.toggle('theme-dark', theme === 'dark');
+            const fill = getComputedStyle(live).fill;
+            const accentProbe = document.createElement('span');
+            accentProbe.style.color = 'rgb(var(--active-accent-rgb))';
+            document.body.append(accentProbe);
+            const accent = getComputedStyle(accentProbe).color;
+            accentProbe.remove();
+            return {fill, rgba: rgba(fill), accentRgba: rgba(accent)};
+          };
           const settledBefore = [...graph.querySelectorAll('[data-js-debug-series], [data-js-debug-moving-average]')].map(node => node.getAttribute('points'));
-          const liveBefore = live ? {x2: live.getAttribute('x2'), y1: Number(live.getAttribute('y1')), min: Number(live.dataset.jsDebugLiveYMin), max: Number(live.dataset.jsDebugLiveYMax)} : null;
+          const liveBefore = live ? {x: live.getAttribute('x'), y: live.getAttribute('y'), width: live.getAttribute('width'), height: live.getAttribute('height')} : null;
+          const liveAnimation = live ? animationMetrics(live) : null;
+          const referenceAnimation = reference ? animationMetrics(reference) : null;
+          const darkPaint = live ? paint('dark') : null;
+          const lightPaint = live ? paint('light') : null;
           await new Promise(resolve => setTimeout(resolve, 180));
-          const liveAfter = live ? {x2: live.getAttribute('x2'), y1: Number(live.getAttribute('y1')), frames: Number(live.dataset.jsDebugLiveFrame || 0)} : null;
+          const liveAfter = live ? {x: live.getAttribute('x'), y: live.getAttribute('y'), width: live.getAttribute('width'), height: live.getAttribute('height')} : null;
           const settledAfter = [...graph.querySelectorAll('[data-js-debug-series], [data-js-debug-moving-average]')].map(node => node.getAttribute('points'));
+          const retiredMovingCount = graph.querySelectorAll('[data-js-debug-live-tail], .js-debug-live-tail').length;
+          referenceHost.remove();
 
           setDebugGraphRange(4 * 60 * 60);
-          const longRangeLiveCount = graph.querySelectorAll('[data-js-debug-live-tail]').length;
+          const longRangeLiveCount = graph.querySelectorAll('[data-js-debug-live-pulse]').length;
           const longRangeBody = graph.querySelector('[data-js-debug-graph-body]').innerHTML;
           const staticDeadline = performance.now() + 120;
           await window.__yolomuxTestWaitFor(() => performance.now() >= staticDeadline, {
             timeoutMs: 500, intervalMs: 10, description: 'long-range static graph observation',
           });
           const longRangeStatic = graph.querySelector('[data-js-debug-graph-body]').innerHTML === longRangeBody;
-
-          setDebugGraphRange(300);
-          const hiddenLive = graph.querySelector('[data-js-debug-live-tail]');
-          await new Promise(resolve => setTimeout(resolve, 100));
-          const hiddenFramesBefore = Number(hiddenLive?.dataset.jsDebugLiveFrame || 0);
-          Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
-          document.dispatchEvent(new Event('visibilitychange'));
-          await new Promise(resolve => setTimeout(resolve, 150));
-          const hiddenFramesAfter = Number(hiddenLive?.dataset.jsDebugLiveFrame || 0);
-          Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
-          document.dispatchEvent(new Event('visibilitychange'));
 
           done({
             focusedRefreshResults,
@@ -2622,11 +2661,14 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
             oneMinuteLabelCount: [...graph.querySelectorAll('[data-js-debug-range-control] *')].filter(node => node.textContent?.trim() === '1m').length,
             liveBefore,
             liveAfter,
+            liveAnimation,
+            referenceAnimation,
+            darkPaint,
+            lightPaint,
+            retiredMovingCount,
             settledSame: JSON.stringify(settledBefore) === JSON.stringify(settledAfter),
             longRangeLiveCount,
             longRangeStatic,
-            hiddenFramesBefore,
-            hiddenFramesAfter,
           });
         })().catch(error => done({error: String(error?.stack || error)}));
         """
@@ -2643,11 +2685,28 @@ def test_debug_graph_controls_are_stable_and_live_tail_is_visibility_scoped(brow
     assert metrics["controlIdentityAfterTicks"] is True, metrics
     assert metrics["firstRangeStop"] == 300 and metrics["oneMinuteLabelCount"] == 0, metrics
     assert metrics["liveBefore"] and metrics["liveAfter"], metrics
-    assert metrics["liveBefore"]["x2"] != metrics["liveAfter"]["x2"] and metrics["liveAfter"]["frames"] > 0, metrics
-    assert metrics["liveBefore"]["min"] - 1e-6 <= metrics["liveAfter"]["y1"] <= metrics["liveBefore"]["max"] + 1e-6, metrics
+    assert metrics["liveBefore"] == metrics["liveAfter"], metrics
+    assert float(metrics["liveBefore"]["width"]) > 0 and float(metrics["liveBefore"]["height"]) > 0, metrics
+    assert metrics["retiredMovingCount"] == 0, metrics
+    pulse = metrics["liveAnimation"]
+    reference = metrics["referenceAnimation"]
+    assert pulse["name"] == reference["name"] == "agent-status-opacity-pulse", (pulse, reference)
+    assert pulse["duration"] == reference["duration"], metrics
+    assert pulse["delay"] == reference["delay"], metrics
+    assert pulse["timingFunction"] == reference["timingFunction"], metrics
+    assert pulse["iterations"] == reference["iterations"] == "infinite", metrics
+    assert pulse["direction"] == reference["direction"] == "normal", metrics
+    assert pulse["playState"] in {"pending", "running"} and reference["playState"] in {"pending", "running"}, metrics
+    assert pulse["currentTime"] > 0, pulse
+    for theme in ("darkPaint", "lightPaint"):
+        paint = metrics[theme]
+        # Canvas un-premultiplication rounds low-alpha RGB channels; keep the tolerance below one
+        # 8-bit quantization step at the 0.10 theme alpha.
+        assert max(abs(actual - expected) for actual, expected in zip(paint["rgba"][:3], paint["accentRgba"][:3])) <= 12, metrics
+        assert 0 < paint["rgba"][3] <= 46, metrics
+    assert metrics["darkPaint"]["rgba"][3] > metrics["lightPaint"]["rgba"][3], metrics
     assert metrics["settledSame"] is True, metrics
     assert metrics["longRangeLiveCount"] == 0 and metrics["longRangeStatic"] is True, metrics
-    assert metrics["hiddenFramesAfter"] == metrics["hiddenFramesBefore"], metrics
 
 
 def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):

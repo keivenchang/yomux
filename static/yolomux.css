@@ -3730,7 +3730,8 @@ html.status-pulse-disabled .ci-indicator.pr-status-failing {
 }
 /* Green play is continuous work, not the optional broad status animation. It must keep its shared
    opacity pulse even when attention/cooldown animation is disabled in Preferences. */
-html.status-pulse-disabled .status-indicator--dot.status-indicator--working.heartbeat-pulse {
+html.status-pulse-disabled .status-indicator--dot.status-indicator--working.heartbeat-pulse,
+html.status-pulse-disabled .js-debug-live-pulse.heartbeat-pulse {
   animation-name: agent-status-opacity-pulse !important;
   animation-duration: var(--pulse-duration) !important;
   animation-delay: var(--attention-animation-delay, 0s) !important;
@@ -5565,16 +5566,18 @@ body :is(
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.js-debug-live-tail {
-  stroke: color-mix(in srgb, var(--active-accent-bright) 72%, transparent);
-  stroke-width: 1.6;
-  stroke-linecap: round;
+.js-debug-live-pulse.heartbeat-pulse {
+  fill: rgb(var(--active-accent-rgb) / 0.14);
   pointer-events: none;
-  opacity: 0.8;
+  animation-name: agent-status-opacity-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
 }
-body.theme-light .js-debug-live-tail {
-  stroke: color-mix(in srgb, var(--active-accent) 82%, var(--text));
-  opacity: 0.72;
+body.theme-light .js-debug-live-pulse.heartbeat-pulse {
+  fill: rgb(var(--active-accent-rgb) / 0.1);
 }
 .js-debug-hover-line {
   opacity: 0;
