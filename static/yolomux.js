@@ -43916,23 +43916,19 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   // A display set has one bar width. Its scale must therefore accommodate the
   // coarsest retained source in the whole domain, not merely the tier at its
   // left edge. This also covers server history overlapping the live raw tail.
+  // The retained-tier minimum (`debugGraphMinimumDisplayResolutionMs`) already
+  // coarsens to the server's authoritative resolution for the domain from the
+  // ACTUALLY-LOADED source buckets. Do NOT additionally clamp to
+  // `jsDebugHistoryCoverageResolutionForRange`: that scans the last request's
+  // coverage intervals, which can be STALE from a wider range (e.g. a 24h fetch
+  // whose old tail is 600s), and would wrongly coarsen a 10s pick at 1h to 600s
+  // when the 1h fetch is rejected/pending — the reported "10s does nothing / shows
+  // 600s" regression. One resolution per view still holds via the retained tier.
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  // Coarsen-until-covered: never render a finer resolution than the finest one
-  // whose coverage spans the WHOLE domain. A family whose older span is only
-  // retained at a coarser tier (e.g. system_memory / service_load at ≥1h) must
-  // render the full range at one resolution instead of a half-empty chart, so
-  // clamp UP to the coverage resolution for the range. Infinity (a genuine
-  // no-data gap fillable at no resolution) does not coarsen — those spans paint
-  // as red no-data at the otherwise-chosen resolution.
-  const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionForRange(
-    Math.floor(Number(domain?.startMs) / 1000),
-    Math.ceil(Number(domain?.endMs) / 1000),
-  );
-  const coverageMs = Number.isFinite(coverageResolutionSeconds) ? coverageResolutionSeconds * 1000 : 0;
   const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
   if (overrideMs > 0) {
-    let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs, coverageMs);
+    let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
     // Point-cap: an explicit override that would render more than the budget of buckets
     // for this domain is clamped UP to the finest universe choice that stays within the
     // cap. The label reads back this effective (coarser) value so the render never blows
@@ -43946,7 +43942,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
     }
     return effectiveMs;
   }
-  return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs, coverageMs);
+  return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs);
 }
 
 function debugGraphSourceBuckets(domain) {
