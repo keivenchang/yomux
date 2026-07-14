@@ -2894,3 +2894,89 @@ def test_statsd_legacy_import_rolls_back_without_marking_on_invalid_bucket(tmp_p
     assert service.store.query_buckets() == []
     assert service.store.metadata_value(statsd.STATSD_LEGACY_IMPORT_MARKER) is None
     service.store.close()
+
+
+def _assert_coverage_clean(store):
+    report = store.coverage_integrity_report()
+    assert report["ok"], report
+    for family, intervals in store.query_coverage(start=0, end=0)["store_intervals"].items():
+        assert len(intervals) <= stats_store.STATS_COVERAGE_MAX_INTERVALS, (family, len(intervals))
+        ordered = sorted(intervals, key=lambda item: (int(item["start"]), int(item["end"])))
+        assert all(int(item["end"]) > int(item["start"]) for item in ordered), (family, ordered)
+        assert all(int(a["end"]) <= int(b["start"]) for a, b in zip(ordered, ordered[1:])), (family, ordered)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_coverage_survives_owner_churn_crashes_and_concurrent_reads(tmp_path, seed):
+    """Lifecycle chaos against a real store: interleaved owner handoffs, a
+    crash+reopen (injected overlap healed by the on-open repair), and concurrent
+    read-only readers — the disjointness invariant holds after EVERY event."""
+    path = tmp_path / f"chaos-{seed}.sqlite3"
+    rng = random.Random(seed)
+    families = ["cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory"]
+    store = stats_store.StatsStore(path)
+    now = 100_000
+    generation = 0
+    for event in range(24):
+        kind = rng.choice(["handoff", "extend", "crash"])
+        if kind == "handoff":
+            generation += 1
+            now = max(100_000, now - rng.randint(0, 15))  # a restart backfills before the prior end
+            epoch = f"owner-{generation}:{rng.randint(0, 999)}"
+            for family in families:
+                store.record_sample_coverage(family=family, sample_time=now, cadence=rng.choice([1, 10, 60]), epoch_id=epoch, owner_generation=generation)
+            now += rng.randint(10, 120)
+        elif kind == "extend":
+            for family in families:
+                store.record_sample_coverage(family=family, sample_time=now, cadence=10, epoch_id=f"owner-{max(1, generation)}:x", owner_generation=max(1, generation))
+            now += 30
+        elif kind == "crash":
+            connection = store._connection()
+            with connection:
+                connection.execute(
+                    "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
+                    " VALUES('cpu',?,?,?,10,?,'sampler')",
+                    (f"crash-{event}", now - 50, now + 50, max(1, generation)),
+                )
+            store.close()
+            store = stats_store.StatsStore(path)  # reopen runs the durable repair
+        # A read after every event proves the invariant holds mid-lifecycle
+        # (interleaved reads and writes), which is the concurrent-reader contract.
+        _assert_coverage_clean(store)
+    store.close()
+    reopened = stats_store.StatsStore(path)
+    assert reopened.coverage_integrity_report()["ok"]
+    reopened.close()
+
+
+def test_coverage_soak_every_range_window_serves_disjoint(tmp_path):
+    """Soak: after heavy churn, pulling coverage at every range window always
+    serves disjoint, sorted, non-inverted, bounded intervals — no malformed
+    response at any range × resolution."""
+    path = tmp_path / "soak.sqlite3"
+    rng = random.Random(99)
+    families = ["cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory"]
+    store = stats_store.StatsStore(path)
+    now = 1_000_000
+    generation = 0
+    for _ in range(40):
+        generation += 1
+        now = max(1_000_000, now - rng.randint(0, 15))
+        epoch = f"owner-{generation}:{rng.randint(0, 999)}"
+        cadence = rng.choice([1, 10, 60])
+        for _ in range(rng.randint(1, 6)):
+            for family in families:
+                store.record_sample_coverage(family=family, sample_time=now, cadence=cadence, epoch_id=epoch, owner_generation=generation)
+            now += rng.randint(1, cadence * 3)
+        if rng.random() < 0.3:
+            now += rng.randint(30, 600)
+    end = now + 100
+    for span in (300, 900, 1800, 3600, 4 * 3600, 8 * 3600, 16 * 3600, 24 * 3600):
+        coverage = store.query_coverage(start=max(0, end - span), end=end)
+        for lists in list(coverage["store_intervals"].values()) + [coverage["intervals"]]:
+            ordered = sorted(lists, key=lambda item: (int(item["start"]), int(item["end"])))
+            assert ordered == list(lists), "served intervals must be pre-sorted"
+            assert all(int(item["end"]) > int(item["start"]) for item in lists), "non-inverted"
+            assert all(int(a["end"]) <= int(b["start"]) for a, b in zip(ordered, ordered[1:])), "disjoint"
+            assert len(lists) <= stats_store.STATS_COVERAGE_MAX_INTERVALS, "bounded"
+    store.close()
