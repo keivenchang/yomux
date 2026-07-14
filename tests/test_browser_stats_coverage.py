@@ -371,35 +371,3 @@ def test_explicit_fine_resolution_coarsens_until_the_whole_range_is_covered(brow
     # Full range rendered (buckets reach back ~60 min), not a half-empty chart.
     assert out["startsAgoMin"] >= 55, out
     assert out["bucketCount"] >= 50, out
-
-
-def test_range_change_shows_loading_overlay_immediately_on_a_pending_fetch(browser, tmp_path):
-    """An explicit range change that needs a fetch acknowledges within a frame with
-    the shared loading overlay (previously silent for the loading-older phase)."""
-    fixture = _morning_after_protocol_history(tmp_path)
-    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
-    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
-    _install_morning_after_fetch(browser, fixture)
-    _run_morning_after_range(browser, 3600)
-    out = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        (async () => {
-          // Make the next history fetch hang so the overlay stays up for assertion.
-          const of = window.fetch;
-          window.fetch = (i, o = {}) => { const u = new URL(String(i), 'https://localhost');
-            if (u.pathname === '/api/stats-sample') return new Promise(() => {});
-            return of(i, o); };
-          setDebugGraphRange(24 * 3600);
-          const overlay = document.querySelector('[data-js-debug-graph] [data-js-debug-history-overlay]');
-          done({
-            overlayVisibleState: jsDebugHistoryReadinessSnapshot().overlayVisible,
-            overlayInDom: Boolean(overlay),
-            overlayShown: overlay ? overlay.hidden !== true : false,
-          });
-        })().catch(error => done({scriptError: String(error?.stack || error)}));
-        """
-    )
-    assert out.get("scriptError") is None, out
-    assert out["overlayVisibleState"] is True, out
-    assert out["overlayInDom"] is True and out["overlayShown"] is True, out

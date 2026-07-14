@@ -6749,15 +6749,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   // automatic-retry backoff make a newly requested domain appear ready while
   // no request is queued.
   const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
-  if (requestedHistory) {
-    // An explicit user range change must acknowledge within a frame with the
-    // shared dimmed loading overlay — even when only older data is missing
-    // (`loading-older` is otherwise silent to avoid flashing on passive tail
-    // repairs). Same immediate-overlay treatment as a Resolution change.
-    jsDebugHistoryReadiness.overlayVisible = true;
-    clearJsDebugHistoryOverlayTimer();
-    syncJsDebugHistoryReadinessSurfaces();
-  } else if (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error') {
+  if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
     setJsDebugHistoryReadiness('ready', {
       requestedRangeSeconds: jsDebugGraphRangeSeconds,
       requestedStartSeconds,

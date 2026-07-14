@@ -27,6 +27,7 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
+from yolomux_lib import server_logs
 from yolomux_lib.local_services import stats_store
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
@@ -13335,7 +13336,6 @@ def test_indexed_repo_discovery_is_submitted_to_jobd_and_consumed_as_a_snapshot(
 
 
 def test_stats_coverage_integrity_self_check_surfaces_violation_to_logs(monkeypatch, tmp_path):
-    from yolomux_lib import server_logs
     database = tmp_path / "stats.sqlite3"
     store = stats_store.StatsStore(database)
     connection = store._connection()
