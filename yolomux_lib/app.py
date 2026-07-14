@@ -112,6 +112,7 @@ from .search_indexer import SearchIndexerClient
 from .jobd import JobClient
 from .pricing_catalog import PricingCatalog
 from .pricing_catalog import PricingRefreshCoordinator
+from . import statsd
 from .statsd import StatsClient
 from .statsd import normalized_usage_atom
 from .drop_actions import run_drop_action
@@ -2994,6 +2995,41 @@ class TmuxWebtermApp:
             "max_points": max(0, history_max_points),
         }
 
+    def check_stats_coverage_integrity(self) -> dict[str, Any] | None:
+        """Read-only durable-coverage self-check that surfaces violations to Logs.
+
+        The system detects a corrupt coverage table itself (the class that once
+        blanked YO!stats) instead of waiting for a blank chart. It runs web-side
+        because the operator log ring is per-process (statsd is a separate
+        process); a violation is emitted at error level, deduped, so it is one
+        Logs line rather than a flood. On-open durable repair still heals the
+        table, so this is a monitoring backstop.
+        """
+        try:
+            store = statsd.StatsStore(statsd.default_database_path(), read_only=True)
+            store.open()
+            try:
+                report = store.coverage_integrity_report()
+            finally:
+                store.close()
+        except Exception:  # noqa: BLE001 - a monitoring check must never break serving
+            return None
+        if not report.get("ok"):
+            offenders = ", ".join(
+                f"{item.get('family')}({item.get('overlaps')})" for item in report.get("families", [])
+            )
+            emit_server_log(
+                "error",
+                "statsd",
+                f"stats coverage integrity violated: {report.get('overlapping_pairs')} overlapping "
+                f"interval pair(s), {report.get('inverted_rows')} inverted row(s)"
+                + (f" [{offenders}]" if offenders else ""),
+                category="coverage",
+                dedupe_key="stats-coverage-integrity",
+                dedupe_seconds=300.0,
+            )
+        return report
+
     def stats_sample_payload(
         self,
         since: int = 0,
@@ -3009,6 +3045,10 @@ class TmuxWebtermApp:
         history_max_points: int = 0,
         include_history: bool = True,
     ) -> dict[str, Any]:
+        # Monitoring backstop: a deduped read-only coverage self-check surfaces a
+        # corrupt durable coverage table to the Logs tab (at most one line / 5 min).
+        if include_history:
+            self.check_stats_coverage_integrity()
         sample, shared_stats, endpoint_profile, build_started = self.stats_sample_context(token_consumer=token_consumer)
         encode_started = time.perf_counter()
         history = self.stats_client.history(**self.stats_sample_history_query(

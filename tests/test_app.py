@@ -13332,3 +13332,31 @@ def test_indexed_repo_discovery_is_submitted_to_jobd_and_consumed_as_a_snapshot(
     assert webapp.job_client.submissions[0][2]["priority"] == "maintenance"
     assert webapp.indexed_repo_roots_snapshot() == [str(tmp_path / "repo")]
     assert len(webapp.job_client.submissions) == 1
+
+
+def test_stats_coverage_integrity_self_check_surfaces_violation_to_logs(monkeypatch, tmp_path):
+    from yolomux_lib import server_logs
+    database = tmp_path / "stats.sqlite3"
+    store = stats_store.StatsStore(database)
+    connection = store._connection()
+    with connection:
+        for epoch_id, start, end in (("o1", 1000, 1300), ("o2", 1290, 1600)):
+            connection.execute(
+                "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
+                " VALUES('cpu',?,?,?,10,1,'sampler')",
+                (epoch_id, start, end),
+            )
+    store.close()
+    # Point the read-only check at the corrupt fixture DB (no repair on read-only open).
+    monkeypatch.setattr(statsd, "default_database_path", lambda: database)
+    server_logs.SERVER_LOGS.clear()
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    report = webapp.check_stats_coverage_integrity()
+    assert report is not None and report["ok"] is False and report["overlapping_pairs"] == 1, report
+    coverage_errors = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage" and entry["level"] == "error"]
+    assert coverage_errors, server_logs.server_logs_payload()
+    assert "coverage integrity violated" in coverage_errors[0]["message"]
+    # Deduped: a second immediate check must not emit a second line.
+    webapp.check_stats_coverage_integrity()
+    coverage_errors_after = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage"]
+    assert len(coverage_errors_after) == 1, coverage_errors_after
