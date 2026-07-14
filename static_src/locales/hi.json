@@ -273,6 +273,7 @@
   "debug.graph.control.bucketSize": "बाल्टी का आकार ग्राफ़ करें",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "रिज़ॉल्यूशन: {resolution}",
+  "debug.graph.resolution.loadFailed": "{resolution} रिज़ॉल्यूशन लोड नहीं हो सका — पिछले पर वापस कर दिया।",
   "debug.graph.control.size": "आकार",
   "debug.graph.control.timeRange": "सीमा:",
   "debug.graph.control.zoom": "ज़ूम करें",

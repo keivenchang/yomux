@@ -1199,6 +1199,25 @@
     border-radius: var(--radius-sm);
   }
 }
+/* Extreme-narrow last resort. Precedence stays reflow-first: full table on wide, then
+   two-column labeled cards at <=40rem. Below the width where those cards can no longer
+   hold both columns without collision, keep the By-Agent/By-model usage cards at a
+   readable minimum width and let the section scroll horizontally instead of squishing or
+   overlapping text — readable-with-scroll beats unreadable-but-fits. The scroll is the
+   fallback, not the default, so it never triggers at normal-narrow widths (360px still
+   reflows with no scrollbar). Overflow is contained to this section (overflow-x: auto,
+   not the visible the 40rem block sets) so the whole pane never gains a scrollbar, and it
+   is scoped to the usage cards — the compact model/calculation tables stay contained at
+   every width. */
+@container (max-width: 17rem) {
+  .js-debug-cost-agent-usages .js-debug-cost-table-wrap {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+  .js-debug-cost-agent-usages .js-debug-cost-table {
+    min-inline-size: 18rem;
+  }
+}
 .js-debug-range-slider:disabled {
   cursor: not-allowed;
   filter: grayscale(1);

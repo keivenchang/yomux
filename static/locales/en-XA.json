@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "⟦ŠŠÉ·⟧",
   "debug.graph.metric.sse.desc": "⟦ŠŠÉ šáɱƥłéš çóúñť šéřṽéř-šéñť éṽéñť ɱéššáǧéš řéçéíṽéđ ƀý ťĥé ƀřóŵšéř ƥéř šéçóñđ.································⟧",
   "debug.graph.movingAverage": "⟦{label} {count}-šáɱƥłé ɱóṽíñǧ áṽéřáǧé·········⟧",
+  "debug.graph.resolution.loadFailed": "⟦Çóúłđ ñóť łóáđ {resolution} řéšółúťíóñ — řéṽéřťéđ ťó ƥřéṽíóúš.····················⟧",
   "debug.graph.series.agentToken.desc": "⟦Ťřáñšçříƥť óúťƥúť-ťóķéñ řáťé ƒóř áǧéñť {agent}.················⟧",
   "debug.graph.series.allAgentsTotal": "⟦Áłł áǧéñťš ťóťáł······⟧",
   "debug.graph.series.allAgentsTotal.desc": "⟦Ťóťáł ťóķéñ óř áçťíṽíťý šéříéš šúɱɱéđ áçřóšš áłł ķñóŵñ áǧéñťš.·························⟧",

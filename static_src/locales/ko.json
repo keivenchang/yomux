@@ -273,6 +273,7 @@
   "debug.graph.control.bucketSize": "그래프 버킷 크기",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "해상도: {resolution}",
+  "debug.graph.resolution.loadFailed": "{resolution} 해상도를 불러오지 못했습니다 — 이전으로 되돌렸습니다.",
   "debug.graph.control.size": "크기",
   "debug.graph.control.timeRange": "범위:",
   "debug.graph.control.zoom": "줌",

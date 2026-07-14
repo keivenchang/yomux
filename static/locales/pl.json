@@ -311,6 +311,7 @@
   "debug.graph.metric.sse": "Strumień SSE",
   "debug.graph.metric.sse.desc": "Próbki SSE liczą komunikaty server-sent events odbierane przez przeglądarkę na sekundę.",
   "debug.graph.movingAverage": "{label} {count} – średnia krocząca",
+  "debug.graph.resolution.loadFailed": "Nie udało się wczytać rozdzielczości {resolution} — przywrócono poprzednią.",
   "debug.graph.series.agentToken.desc": "Tempo tokenów wyjściowych transkryptu dla agenta {agent}.",
   "debug.graph.series.allAgentsTotal": "Wszyscy agenci razem",
   "debug.graph.series.allAgentsTotal.desc": "Łączna seria tokenów lub aktywności zsumowana dla wszystkich znanych agentów.",

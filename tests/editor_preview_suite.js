@@ -3264,7 +3264,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const definitions = notificationApi.notificationEventDefinitionsForTest();
     const expectedNotificationPolicies = {
       sessionAttention: ['global', 'session'], agentAttention: ['global', 'session'], agentDone: ['global', 'session'], terminalConnection: ['global', 'session'],
-      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], indexCoverage: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined],
+      chatMessage: ['global', 'chat'], yoagentJob: ['global', 'session'], watchedPullRequest: ['global', undefined], update: ['global', undefined], indexCoverage: ['global', undefined], statsResolution: ['global', undefined], startupTip: ['global', undefined], notificationTest: ['global', undefined],
       uploadResult: ['pane', 'session'], fileTransfer: ['pane', 'operation'], fileOpen: ['pane', 'finder'], yoloRules: ['pane', 'preferences'], previewOpen: ['pane', 'operation'],
     };
     for (const [event, [scope, target]] of Object.entries(expectedNotificationPolicies)) {
@@ -4566,31 +4566,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('YO!stats rebuilds resolution choices and clamps stale overrides for every range and zoom', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
+    // Universe is AUTO + 1/10/60/300 only (validity-filtered per range). The oldest
+    // windows offer no explicit pick — AUTO renders their honest retained tier.
     const expected = new Map([
-      [5 * 60, [1, 2, 5, 10, 30]],
-      [15 * 60, [1, 2, 5, 10, 30, 60]],
-      [30 * 60, [10, 30, 60, 120]],
-      [60 * 60, [10, 30, 60, 120, 300]],
-      [2 * 60 * 60, [10, 30, 60, 120, 300, 600]],
-      [4 * 60 * 60, [60, 120, 300, 600]],
-      [8 * 60 * 60, [120, 300, 600]],
-      [16 * 60 * 60, [600]],
-      [24 * 60 * 60, [600]],
+      [5 * 60, [1, 10]],
+      [15 * 60, [1, 10, 60]],
+      [30 * 60, [10, 60]],
+      [60 * 60, [10, 60, 300]],
+      [2 * 60 * 60, [10, 60, 300]],
+      [4 * 60 * 60, [60, 300]],
+      [8 * 60 * 60, [300]],
+      [16 * 60 * 60, []],
+      [24 * 60 * 60, []],
     ]);
     for (const [rangeSeconds, choices] of expected) {
       api.setDebugGraphRangeForTest(rangeSeconds, {render: false});
       assert.deepStrictEqual([...api.debugGraphAvailableResolutionChoicesForTest(now)], choices, `${rangeSeconds}s rebuilds choices from its own retention tier`);
     }
 
-    api.setDebugGraphRangeForTest(24 * 60 * 60, {render: false});
-    api.setDebugGraphResolutionOverrideForTest(600);
+    api.setDebugGraphRangeForTest(2 * 60 * 60, {render: false});
+    api.setDebugGraphResolutionOverrideForTest(300);
     api.debugGraphApplyServerHistoryForTest({sequence: 1, records: [{
       start: Math.floor((now - 600_000) / 1000), duration: 600, sequence: 1, api_count: 1,
     }]});
     api.setDebugGraphRangeForTest(30 * 60, {render: false});
-    assert.equal(api.debugGraphResolutionOverrideForTest(), 120, '24h 600s override clamps to the nearest valid 30m choice');
+    assert.equal(api.debugGraphResolutionOverrideForTest(), 60, '2h 300s override clamps down to the coarsest valid 30m choice');
     const controls = api.debugGraphInnerHtmlForTest(now).match(/data-js-debug-resolution-override[\s\S]*?<\/select>/)?.[0] || '';
-    assert.ok(controls.includes('value="120" selected') && controls.includes('value="10"'), 'the 30m dropdown is rebuilt instead of retaining AUTO-only coarse choices');
+    assert.ok(controls.includes('value="60" selected') && controls.includes('value="10"'), 'the 30m dropdown is rebuilt instead of retaining AUTO-only coarse choices');
 
     api.setDebugGraphZoomDomainForTest(now - (20 * 60 * 60 * 1000), now - (19.5 * 60 * 60 * 1000));
     api.debugGraphInnerHtmlForTest(now);
@@ -4600,13 +4602,28 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const restored = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {
-        'yolomux.stats.ui_preferences.v1': JSON.stringify({rangeSeconds: 30 * 60, resolutionOverrideSeconds: 600}),
+        'yolomux.stats.ui_preferences.v1': JSON.stringify({rangeSeconds: 30 * 60, resolutionOverrideSeconds: 120}),
       },
     });
     restored.debugGraphInnerHtmlForTest(now);
-    assert.equal(restored.debugGraphResolutionOverrideForTest(), 120, 'restoring a stale explicit override clamps it before first paint');
+    assert.equal(restored.debugGraphResolutionOverrideForTest(), 60, 'restoring a stale out-of-set override rounds up into the valid 30m menu before first paint');
     const saved = JSON.parse(restored.storageValueForTest('yolomux.stats.ui_preferences.v1'));
-    assert.equal(saved.resolutionOverrideSeconds, 120, 'the clamped restored choice replaces the stale persisted value');
+    assert.equal(saved.resolutionOverrideSeconds, 60, 'the clamped restored choice replaces the stale persisted value');
+  });
+
+  test('YO!stats caps an over-budget explicit resolution override at the render point budget', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 10_000) * 10_000;
+    api.setDebugGraphRangeForTest(2 * 60 * 60, {render: false});
+    api.setDebugGraphResolutionOverrideForTest(10);
+    // 10s is a legitimate pick for a 2h range, so the dropdown keeps showing it.
+    assert.equal(api.debugGraphResolutionOverrideForTest(), 10, '10s stays the selected explicit pick at 2h');
+    const summary = api.debugGraphBucketSummaryForTest(now);
+    // But 2h at 10s = 720 buckets, over the 600-point render budget: the effective
+    // rendered resolution (the label) clamps UP to 60s (120 buckets) so the render never
+    // blows past the budget even though the picker still offers the finer request.
+    assert.equal(summary.resolutionSeconds, 60, 'the over-budget 10s override renders at the capped 60s resolution');
+    assert.ok((2 * 60 * 60) / summary.resolutionSeconds <= 600, 'the capped effective resolution stays within the render point budget');
   });
 
   test('YO!stats ignores a fully covered coarse boundary bucket when choosing 30-minute resolution', () => {
@@ -4636,7 +4653,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(summary.resolutionSeconds, 30, 'fine coverage across the visible domain restores the automatic thirty-second display scale');
     assert.deepStrictEqual([...summary.displayBucketSeconds], [30], 'the preserved out-of-view portion of the coarse boundary bucket cannot force visible bars to ten minutes');
     const controls = api.debugGraphInnerHtmlForTest(now).match(/data-js-debug-resolution-override[\s\S]*?<\/select>/)?.[0] || '';
-    for (const value of [10, 30, 60, 120]) assert.ok(controls.includes(`value="${value}"`), `the 30-minute resolution selector offers ${value}s`);
+    for (const value of [10, 60]) assert.ok(controls.includes(`value="${value}"`), `the 30-minute resolution selector offers ${value}s`);
+    for (const value of [1, 30, 120, 300]) assert.ok(!controls.includes(`value="${value}"`), `the simplified universe drops ${value}s from the 30-minute selector`);
     assert.ok(controls.includes('<option value="0" selected>AUTO</option>'), 'the 30-minute selector remains on AUTO while offering manual resolutions');
   });
 
@@ -6318,6 +6336,62 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     const debugSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(debugSource.includes("clientPerfStart('statsHistoryRender')"), 'retained chart rendering uses the shared phase counter owner');
+  });
+
+  await testAsync('YO!stats resolution change shows the shared overlay on a fetch and reverts with a toast on failure', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.setDebugGraphRangeForTest(15 * 60, {render: false});
+    // Only the recent tail is covered, so switching resolution needs an older-history fetch
+    // while the already-loaded tail stays visible under the overlay.
+    api.setJsDebugHistoryReadinessForTest('ready', {
+      loadedStartSeconds: nowSeconds - 60, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+      coverageIntervals: [{startSeconds: nowSeconds - 60, endSeconds: nowSeconds + 3600, resolutionSeconds: 1}],
+      requestCoverageIntervals: [{startSeconds: nowSeconds - 60, endSeconds: nowSeconds + 3600, resolutionSeconds: 1}],
+    });
+    const toasts = [];
+    api.setShowToastForTest((title, _lines, options = {}) => { toasts.push({title, options}); return null; });
+    let rejectHistory = true;
+    api.setFetchForTest(() => (rejectHistory ? Promise.reject(new Error('history unavailable')) : Promise.resolve(jsonResponse({history: {sequence: 1, records: []}}))));
+
+    api.setDebugGraphResolutionOverrideForTest(60);
+    // Immediate (≤1-frame) acknowledgement: the target value is selected and the shared
+    // dimmed overlay is already visible before the fetch resolves — no 120ms debounce wait.
+    assert.equal(api.debugGraphResolutionOverrideForTest(), 60, 'the control reflects the target resolution immediately');
+    let state = api.jsDebugHistoryReadinessForTest();
+    assert.ok(['loading-older', 'loading-initial', 'retrying'].includes(state.phase), 'a fetch-backed resolution change enters a loading phase');
+    assert.equal(state.overlayVisible, true, 'the shared loading overlay appears within the frame, not after the older-load debounce');
+    assert.ok(api.debugPanelHtmlForTest().includes('value="60" selected'), 'the dropdown shows the requested resolution while it loads');
+
+    await api.pollJsDebugStatsSampleForTest();
+    for (let index = 0; index < 4; index += 1) await flushAsyncWork();
+    assert.equal(api.debugGraphResolutionOverrideForTest(), 0, 'a failed resolution fetch reverts the control to its previous value');
+    assert.ok(toasts.some(toast => /resolution/i.test(String(toast.title)) && String(toast.options.className || '').includes('danger')), 'the revert surfaces a danger toast, never a silent snap-back');
+  });
+
+  await testAsync('YO!stats resolution change to already-cached buckets swaps instantly with no overlay', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    api.setDebugGraphRangeForTest(15 * 60, {render: false});
+    // The whole domain is already covered client-side, so a resolution change is a pure
+    // in-memory re-projection with no fetch and no overlay.
+    api.setJsDebugHistoryReadinessForTest('ready', {
+      loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+      coverageIntervals: [{startSeconds: 0, endSeconds: nowSeconds + 3600, resolutionSeconds: 1}],
+      requestCoverageIntervals: [{startSeconds: 0, endSeconds: nowSeconds + 3600, resolutionSeconds: 1}],
+    });
+    let fetched = false;
+    api.setFetchForTest(() => { fetched = true; return Promise.resolve(jsonResponse({history: {sequence: 1, records: []}})); });
+    api.setDebugGraphResolutionOverrideForTest(60);
+    const state = api.jsDebugHistoryReadinessForTest();
+    assert.equal(api.debugGraphResolutionOverrideForTest(), 60, 'the cached switch still reflects the new resolution');
+    assert.equal(state.phase, 'ready', 'a cached resolution swap keeps the ready state');
+    assert.equal(state.overlayVisible, false, 'a cached resolution swap shows no loading overlay');
+    assert.equal(fetched, false, 'a cached resolution swap issues no history fetch');
   });
 
   await testAsync('YO!stats missing history coverage reaches error instead of retrying forever', async () => {

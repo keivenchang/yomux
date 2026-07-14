@@ -273,6 +273,7 @@
   "debug.graph.control.bucketSize": "Grootte van de graafbak",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Resolutie: {resolution}",
+  "debug.graph.resolution.loadFailed": "Resolutie {resolution} kon niet worden geladen — teruggezet naar de vorige.",
   "debug.graph.control.size": "Grootte",
   "debug.graph.control.timeRange": "Bereik:",
   "debug.graph.control.zoom": "Vergroten",

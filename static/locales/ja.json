@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE ストリーム",
   "debug.graph.metric.sse.desc": "SSE サンプルは、ブラウザが受信したサーバー送信イベント数/秒を数えます。",
   "debug.graph.movingAverage": "{label} {count} サンプル移動平均",
+  "debug.graph.resolution.loadFailed": "解像度 {resolution} を読み込めませんでした。前の設定に戻しました。",
   "debug.graph.series.agentToken.desc": "エージェント {agent} のトランスクリプト出力トークン率。",
   "debug.graph.series.allAgentsTotal": "すべてのエージェントの合計",
   "debug.graph.series.allAgentsTotal.desc": "既知の全エージェントで合計したトークンまたはアクティビティの系列。",

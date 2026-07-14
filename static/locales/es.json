@@ -305,6 +305,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "Las muestras SSE cuentan mensajes de eventos del servidor recibidos por el navegador por segundo.",
   "debug.graph.movingAverage": "{label} {count}-promedio móvil de muestra",
+  "debug.graph.resolution.loadFailed": "No se pudo cargar la resolución {resolution}; se restauró la anterior.",
   "debug.graph.series.agentToken.desc": "Tasa de tokens de salida de transcripción del agente {agent}.",
   "debug.graph.series.allAgentsTotal": "Todos los agentes en total",
   "debug.graph.series.allAgentsTotal.desc": "Serie total de tokens o actividad sumada entre todos los agentes conocidos.",

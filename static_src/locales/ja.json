@@ -273,6 +273,7 @@
   "debug.graph.control.bucketSize": "グラフバケットサイズ",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "解像度: {resolution}",
+  "debug.graph.resolution.loadFailed": "解像度 {resolution} を読み込めませんでした。前の設定に戻しました。",
   "debug.graph.control.size": "サイズ",
   "debug.graph.control.timeRange": "範囲:",
   "debug.graph.control.zoom": "ズーム",

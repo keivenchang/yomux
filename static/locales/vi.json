@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "Luồng SSE",
   "debug.graph.metric.sse.desc": "Mẫu SSE đếm thông điệp sự kiện do máy chủ gửi mà trình duyệt nhận mỗi giây.",
   "debug.graph.movingAverage": "{label} {count}-mẫu trung bình động",
+  "debug.graph.resolution.loadFailed": "Không thể tải độ phân giải {resolution} — đã khôi phục về trước đó.",
   "debug.graph.series.agentToken.desc": "Tốc độ token đầu ra bản ghi cho tác nhân {agent}.",
   "debug.graph.series.allAgentsTotal": "Tổng số nhân viên",
   "debug.graph.series.allAgentsTotal.desc": "Chuỗi token hoặc hoạt động tổng cộng được cộng trên tất cả tác nhân đã biết.",

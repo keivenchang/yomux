@@ -279,6 +279,7 @@
   "debug.graph.control.bucketSize": "Dimensione del contenitore del grafico",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Risoluzione: {resolution}",
+  "debug.graph.resolution.loadFailed": "Impossibile caricare la risoluzione {resolution}: ripristinata la precedente.",
   "debug.graph.control.size": "Dimensione",
   "debug.graph.control.timeRange": "Intervallo:",
   "debug.graph.control.zoom": "Ingrandimento",

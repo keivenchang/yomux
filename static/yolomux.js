@@ -11749,6 +11749,7 @@ const notificationEventDefinitions = Object.freeze({
   watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
   update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
   indexCoverage: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true, dismissOnly: true}),
+  statsResolution: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true}),
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
   notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
   // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
@@ -41631,6 +41632,11 @@ const jsDebugLogsState = {
 };
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugGraphResolutionOverrideSeconds = 0;
+// When a Resolution change needs a history fetch, this holds the value to restore and the
+// history generation to match so a stale response cannot revert a newer request. Cleared
+// on the matching ready (success) or error (revert + toast). Null when the last change was
+// served from cache (instant, no overlay).
+let jsDebugGraphPendingResolutionChange = null;
 let jsDebugGraphChartLayout = 0;
 const jsDebugStatsPollState = {
   inFlight: false,
@@ -41692,7 +41698,20 @@ const jsDebugGraphRangeOptions = Object.freeze([
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
 const jsDebugGraphMaxDisplayPoints = 120;
 const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
-const jsDebugGraphResolutionChoices = Object.freeze(jsDebugGraphDisplayBucketMs.map(value => value / 1000));
+// User-directed Resolution picker universe. Deliberately DECOUPLED from the AUTO
+// effective-resolution set (jsDebugGraphDisplayBucketMs): each of these four values
+// maps 1:1 onto a stored tier (raw 1s + persisted 10/60/300s rollups) so an explicit
+// pick is served straight from a precomputed tier with no server-side re-aggregation.
+// AUTO/effective clamping may still RENDER coarser values (e.g. 600s for the oldest
+// retention windows) — that honest retained resolution is shown in the label, not the
+// picker. Persisted/deeplinked out-of-set overrides normalize into this set.
+const jsDebugGraphResolutionChoices = Object.freeze([1, 10, 60, 300]);
+// Rendered-point cap for EXPLICIT overrides. AUTO is already bounded by
+// jsDebugGraphMaxDisplayPoints; an explicit override that would render more than this
+// many buckets for the current domain is clamped up to the finest universe choice that
+// stays within budget (the label then shows the effective, coarser value). This is what
+// keeps a fine override from ballooning render time + RAM on a wide domain.
+const jsDebugGraphOverridePointCap = 600;
 const jsDebugGraphTiers = Object.freeze([
   Object.freeze({maxAgeMs: 30 * 60 * 1000, bucketMs: 1000}),
   Object.freeze({maxAgeMs: 2 * 60 * 60 * 1000, bucketMs: 10 * 1000}),
@@ -42114,6 +42133,7 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
     state.loadingStartedAtMs = 0;
   }
   syncJsDebugHistoryReadinessSurfaces();
+  resolveDebugGraphResolutionChange(state);
   return jsDebugHistoryReadinessSnapshot();
 }
 
@@ -43810,9 +43830,12 @@ function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGrap
   const choices = debugGraphAvailableResolutionChoices(domain, nowMs);
   if (!choices.length) return 0;
   if (choices.includes(requested)) return requested;
-  return choices.reduce((nearest, candidate) => (
-    Math.abs(candidate - requested) < Math.abs(nearest - requested) ? candidate : nearest
-  ), choices[0]);
+  // Normalize an out-of-set persisted/deeplinked value (e.g. a legacy 30/120/600s
+  // override) or a now-invalid prior-range value by rounding UP to the nearest coarser
+  // valid choice — never render finer than the request implied. If nothing coarser is
+  // available for this range (the request was coarser than the whole menu), fall back to
+  // the coarsest offered choice.
+  return choices.find(candidate => candidate >= requested) ?? choices[choices.length - 1];
 }
 
 function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
@@ -43838,7 +43861,21 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
   const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
-  if (overrideMs > 0) return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
+  if (overrideMs > 0) {
+    let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
+    // Point-cap: an explicit override that would render more than the budget of buckets
+    // for this domain is clamped UP to the finest universe choice that stays within the
+    // cap. The label reads back this effective (coarser) value so the render never blows
+    // past the point budget even when the picker offers a finer value.
+    const budgetMs = domainSpanMs / jsDebugGraphOverridePointCap;
+    if (effectiveMs < budgetMs) {
+      const cappedMs = jsDebugGraphResolutionChoices
+        .map(seconds => seconds * 1000)
+        .find(candidateMs => candidateMs >= budgetMs) ?? jsDebugGraphResolutionChoices[jsDebugGraphResolutionChoices.length - 1] * 1000;
+      effectiveMs = Math.max(effectiveMs, cappedMs);
+    }
+    return effectiveMs;
+  }
   return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs);
 }
 
@@ -48159,10 +48196,64 @@ function setDebugGraphRange(value, {render = true} = {}) {
 
 function setDebugGraphResolutionOverride(value) {
   loadJsDebugStatsUiPreferences();
+  const previousSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
   const seconds = Math.max(0, Number(value) || 0);
-  jsDebugGraphResolutionOverrideSeconds = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
+  jsDebugGraphResolutionOverrideSeconds = normalized;
+  saveJsDebugStatsUiPreferences();
+  // Immediate ≤1-frame acknowledgement: the control + Resolution label reflect the target
+  // value now, before any fetch resolves.
+  refreshDebugGraphSurfaces();
+  if (normalized === previousSeconds) {
+    jsDebugGraphPendingResolutionChange = null;
+    return;
+  }
+  // Cached/instant path: when the domain's buckets are already client-side (the common
+  // case, since a resolution change is an in-memory re-aggregation) no fetch is needed and
+  // the swap is instant with no overlay. Only when the change genuinely needs finer/coarser
+  // history do we show the shared dimmed loading overlay over the still-visible old data and
+  // arm a generation-guarded revert-on-failure.
+  const fetching = requestJsDebugHistoryForCurrentDomain();
+  if (!fetching) {
+    jsDebugGraphPendingResolutionChange = null;
+    return;
+  }
+  jsDebugGraphPendingResolutionChange = {previousSeconds, generation: Number(jsDebugHistoryReadiness.generation || 0)};
+  // An explicit user action must acknowledge within a frame, so surface the shared overlay
+  // immediately rather than after the older-load debounce that avoids flashing on passive
+  // tail repairs.
+  jsDebugHistoryReadiness.overlayVisible = true;
+  clearJsDebugHistoryOverlayTimer();
+  syncJsDebugHistoryReadinessSurfaces();
+}
+
+// Resolve a pending Resolution-change fetch. Generation-guarded so a stale history response
+// can neither clear nor revert a newer request. On success the overlay clears through the
+// normal ready path; on failure the control reverts to its previous value with a danger
+// toast (never a silent snap-back) and the chart returns to that cached resolution.
+function resolveDebugGraphResolutionChange(state) {
+  const pending = jsDebugGraphPendingResolutionChange;
+  if (!pending || Number(state.generation) !== Number(pending.generation)) return;
+  if (state.phase === 'ready') {
+    jsDebugGraphPendingResolutionChange = null;
+    return;
+  }
+  if (state.phase !== 'error') return;
+  jsDebugGraphPendingResolutionChange = null;
+  const revertedSeconds = normalizedDebugGraphResolutionOverrideSeconds(pending.previousSeconds, debugGraphDomain(), Date.now());
+  jsDebugGraphResolutionOverrideSeconds = revertedSeconds;
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
+  const label = revertedSeconds > 0 ? `${revertedSeconds}s` : 'AUTO';
+  // A toast is user feedback, never a state-machine dependency: its rendering must not be
+  // able to throw back into the readiness transition that invoked this resolver.
+  try {
+    emitNotification('statsResolution', {
+      title: t('debug.graph.resolution.loadFailed', {resolution: label}),
+      className: 'danger-alert toast',
+      coalesceKey: 'statsResolution',
+    });
+  } catch (_) {}
 }
 
 function setDebugGraphChartLayout(value) {

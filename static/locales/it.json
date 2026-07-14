@@ -305,6 +305,7 @@
   "debug.graph.metric.sse": "Flusso SSE",
   "debug.graph.metric.sse.desc": "I campioni SSE contano i messaggi evento inviati dal server ricevuti dal browser al secondo.",
   "debug.graph.movingAverage": "{label} {count} media mobile a campione",
+  "debug.graph.resolution.loadFailed": "Impossibile caricare la risoluzione {resolution}: ripristinata la precedente.",
   "debug.graph.series.agentToken.desc": "Tasso di token di output della trascrizione per l’agente {agent}.",
   "debug.graph.series.allAgentsTotal": "Tutti gli agenti in totale",
   "debug.graph.series.allAgentsTotal.desc": "Serie totale di token o attività sommata su tutti gli agenti noti.",
