@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "SSE नमूने प्रति सेकंड ब्राउज़र को मिले सर्वर-भेजे इवेंट संदेश गिनते हैं।",
   "debug.graph.movingAverage": "{label} {count}-नमूना मूविंग औसत",
+  "debug.graph.noDataRecorded": "कोई डेटा रिकॉर्ड नहीं किया गया",
   "debug.graph.series.agentToken.desc": "एजेंट {agent} के लिए ट्रांसक्रिप्ट आउटपुट-टोकन दर।",
   "debug.graph.series.allAgentsTotal": "कुल मिलाकर सभी एजेंट",
   "debug.graph.series.allAgentsTotal.desc": "सभी ज्ञात एजेंटों में जोड़ी गई कुल टोकन या गतिविधि श्रृंखला।",

@@ -248,6 +248,7 @@
   "debug.errors": "JS hatalar",
   "debug.events": "Etkinlikleri",
   "debug.graph.agentStatus.noData": "Aracı durumu örneği yok",
+  "debug.graph.noDataRecorded": "Kaydedilen veri yok",
   "debug.graph.badConnection": "Kötü bağlantı: {duration} için veri toplanmadı.",
   "debug.graph.chart.agentStatus": "Ajan durumu",
   "debug.graph.chart.agentStatus.desc": "YOLOmux durum örneklerinden ajan pencerelerini çalışıyor, dikkat, geçiş ve boşta durumlarına göre sayar.",

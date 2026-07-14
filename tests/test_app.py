@@ -177,6 +177,38 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
+def test_record_service_load_records_every_known_service_including_idle(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "resources": {"cpu_percent": 12.0, "rss_bytes": 2048}})
+        # A running service whose first-sample CPU delta is not yet known.
+        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 4322, "resources": {"cpu_percent": None, "rss_bytes": 4096}})
+        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {"service": "stats-reader", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {"time": 100.0, "pid": 999, "cpu_percent": 5.0, "rss_bytes": 8192})
+        monkeypatch.setattr(webapp, "stats_metric_scheduled_time", lambda: 100.0)
+        captured = {}
+        monkeypatch.setattr(webapp, "merge_stats_family_record", lambda family, record, sample: captured.update(family=family, record=record))
+        webapp.record_stats_service_load_sample()
+    finally:
+        webapp.control_server.stop()
+
+    assert captured["family"] == "service_load"
+    services = captured["record"]["host_metrics"]["service_load"]
+    # Every known service — running or idle — plus the web process is present so
+    # the Servers Load chart shows all series instead of only web.
+    assert set(services) == {"indexd", "statsd", "stats-reader", "jobd", "approvald", "web"}
+    # Idle spawn-on-demand services read as an honest zero with no RSS series.
+    assert services["jobd"]["cpu_total_percent"] == 0.0 and "rss_total_bytes" not in services["jobd"]
+    # A running service contributes real CPU%/RSS.
+    assert services["indexd"]["cpu_total_percent"] == 12.0 and services["indexd"]["rss_total_bytes"] == 2048.0
+    # First-sample-unknown CPU still yields a present series (0) with real RSS.
+    assert services["statsd"]["cpu_total_percent"] == 0.0 and services["statsd"]["rss_total_bytes"] == 4096.0
+    # The web process is always recorded from the primary sample.
+    assert services["web"]["cpu_total_percent"] == 5.0 and services["web"]["rss_total_bytes"] == 8192.0
+
+
 def test_session_http_guards_use_shared_decorator():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 

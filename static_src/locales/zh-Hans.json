@@ -248,6 +248,7 @@
   "debug.errors": "JS 错误",
   "debug.events": "事件",
   "debug.graph.agentStatus.noData": "无代理状态样本",
+  "debug.graph.noDataRecorded": "未记录数据",
   "debug.graph.badConnection": "连接不佳：{duration} 内未收集数据",
   "debug.graph.chart.agentStatus": "代理状态",
   "debug.graph.chart.agentStatus.desc": "按工作、注意、过渡和空闲状态统计代理窗口，来源为优!统计状态采样。",

@@ -248,6 +248,7 @@
   "debug.errors": "जेएस त्रुटियाँ",
   "debug.events": "घटनाएँ",
   "debug.graph.agentStatus.noData": "एजेंट-स्थिति नमूना नहीं है",
+  "debug.graph.noDataRecorded": "कोई डेटा रिकॉर्ड नहीं किया गया",
   "debug.graph.badConnection": "ख़राब कनेक्शन: {duration} के लिए कोई डेटा एकत्र नहीं किया गया",
   "debug.graph.chart.agentStatus": "एजेंट की स्थिति",
   "debug.graph.chart.agentStatus.desc": "YOLOmux स्थिति नमूनों से एजेंट विंडो को काम, ध्यान, संक्रमण और निष्क्रिय स्थिति में गिनता है।",

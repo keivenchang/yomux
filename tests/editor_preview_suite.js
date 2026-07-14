@@ -5858,18 +5858,44 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const html = api.debugLogsInnerHtmlForTest();
     assert.ok(html.includes('used lsof fallback') && html.includes('client exploded'), 'Logs merges server warnings and client errors');
-    for (const level of ['info', 'warning', 'debug', 'error']) {
-      assert.ok(html.includes(`data-level="${level}"`), `Logs renders the ${level} level row`);
-      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="true"`), `Logs exposes an active ${level} filter`);
+    // Fresh state defaults to warning+error visible; the chatty info/debug levels
+    // are hidden but one click away (DOIT.logs-hide-info-by-default).
+    for (const level of ['warning', 'error']) {
+      assert.ok(html.includes(`data-level="${level}"`), `Logs renders the ${level} level row by default`);
+      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="true"`), `Logs exposes an active ${level} filter by default`);
     }
+    for (const level of ['info', 'debug']) {
+      assert.equal(html.includes(`data-level="${level}"`), false, `Logs hides the ${level} level row by default`);
+      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="false"`), `Logs leaves the ${level} filter off by default`);
+    }
+    assert.equal(html.includes('>ready<') || html.includes('ready</'), false, 'the default view hides the info "ready" message');
     assert.ok(/data-js-debug-subtab="graph"[\s\S]*data-js-debug-subtab="events"[\s\S]*data-js-debug-subtab="system"[\s\S]*data-js-debug-subtab="logs"/.test(api.debugPanelHtmlForTest()), 'Logs is the fourth YO!stats sub-tab after System');
+    // Enabling Info is one toggle away and surfaces the recorded info rows; the
+    // recording buffer is unchanged (display-only filter).
+    api.setJsDebugLogLevelsForTest(['warning', 'error', 'info']);
+    const withInfo = api.debugLogsInnerHtmlForTest();
+    assert.ok(withInfo.includes('data-level="info"') && withInfo.includes('ready'), 'enabling Info surfaces the recorded info rows');
     api.setJsDebugLogLevelsForTest(['warning']);
     const warningOnly = api.debugLogsInnerHtmlForTest();
     assert.ok(warningOnly.includes('used lsof fallback'), 'warning filter retains warnings');
     assert.equal(warningOnly.includes('ready'), false, 'warning filter hides info');
     assert.equal(warningOnly.includes('client exploded'), false, 'warning filter hides client errors');
     assert.match(api.debugLogsTextForClipboardForTest(), /WARNING.*sessions\/process-discovery.*used lsof fallback/, 'Logs copy text includes level, source, category, and message');
-    assert.ok(/const jsDebugLogsState = \{[\s\S]*payload: \[\][\s\S]*levels: new Set\(jsDebugLogLevels\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Logs uses one bounded server/client viewer state owner');
+    // A chosen level selection persists across a browser reload; a stored
+    // selection is honored over the warning+error default.
+    const savedLevels = api.storageValueForTest('yolomux.stats.ui_preferences.v1');
+    assert.match(savedLevels, /"logLevels":\["warning"\]/, 'the chosen level selection is persisted to browser preferences');
+    const reloaded = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      localStorage: {'yolomux.stats.ui_preferences.v1': savedLevels},
+    });
+    reloaded.setJsDebugLogsPayloadForTest([
+      {id: 1, timestamp: 100, level: 'info', source: 'server', category: 'boot', message: 'ready'},
+      {id: 2, timestamp: 101, level: 'warning', source: 'sessions', category: 'process-discovery', message: 'used lsof fallback'},
+    ]);
+    const reloadedHtml = reloaded.debugLogsInnerHtmlForTest();
+    assert.ok(reloadedHtml.includes('used lsof fallback'), 'a persisted warning-only selection is honored after reload');
+    assert.equal(reloadedHtml.includes('ready'), false, 'the persisted selection keeps info hidden after reload');
+    assert.ok(/const jsDebugLogsState = \{[\s\S]*payload: \[\][\s\S]*levels: new Set\(jsDebugLogDefaultLevels\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Logs uses one bounded server/client viewer state owner defaulting to warning+error');
   });
 
   test('YO!stats hover guides sync across charts and drag-select zooms with reset', () => {
@@ -6587,6 +6613,72 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal((api.debugGraphHistoryCoverageGapRectsHtmlForTest({key: 'agentTokens'}, domain).match(/data-js-debug-history-no-data-range=/g) || []).length, 1, 'the token gap is visible in the shared SVG overlay');
     api.setDebugGraphModelTokenDimensionForTest('input');
     assert.deepStrictEqual(canonical(api.debugGraphHistoryCoverageGapRunsForTest({key: 'modelTokens'}, domain)), [{startMs: 100_000, endMs: 500_000}], 'cost-backed model dimensions expose empty cost coverage across the answered range');
+  });
+
+  test('YO!stats red no-data box spans never-recorded prefixes and drops owner-churn micro-gaps', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const domain = {startMs: now - (24 * 60 * 60 * 1000), endMs: now};
+    const startS = Math.floor(domain.startMs / 1000);
+    const endS = Math.floor(domain.endMs / 1000);
+    const firstS = startS + (3 * 60 * 60); // CPU's first-ever durable sample, 3h into the range.
+    const midS = Math.floor((firstS + endS) / 2);
+    // CPU recorded continuously from its first sample to now, broken only by the
+    // 1-2s sampler micro-break at an owner/epoch handoff (server restart).
+    const cpuIntervals = [
+      {startSeconds: firstS, endSeconds: midS, resolutionSeconds: 1, sourceResolutionSeconds: 0},
+      {startSeconds: midS + 2, endSeconds: endS, resolutionSeconds: 1, sourceResolutionSeconds: 0},
+    ];
+    const requested = [{startSeconds: startS, endSeconds: endS, resolutionSeconds: 1, sourceResolutionSeconds: 0}];
+    api.setJsDebugHistoryReadinessForTest('ready', {
+      coverageIntervals: cpuIntervals,
+      requestCoverageIntervals: requested,
+      // system_memory has no store key at all: it was never recorded.
+      storeCoverageIntervals: {cpu: cpuIntervals, raw: cpuIntervals},
+    });
+    const cpuGaps = api.debugGraphHistoryCoverageGapRunsForTest({key: 'cpu'}, domain);
+    assert.equal(cpuGaps.length, 1, 'CPU renders one full-span red box (the never-recorded prefix), not per-restart hairlines');
+    assert.ok(cpuGaps[0].startMs <= domain.startMs + 1000 && Math.abs(cpuGaps[0].endMs - (firstS * 1000)) <= 2000, 'the CPU red box spans the pre-first-sample window');
+    const memoryGaps = api.debugGraphHistoryCoverageGapRunsForTest({key: 'memory'}, domain);
+    assert.equal(memoryGaps.length, 1, 'a never-recorded family paints a red box instead of borrowing CPU coverage');
+    assert.ok(memoryGaps[0].startMs <= domain.startMs + 1000 && memoryGaps[0].endMs >= domain.endMs - 1000, 'the never-recorded memory red box spans the whole selected range');
+    assert.ok(api.debugGraphHistoryCoverageGapRectsHtmlForTest({key: 'memory'}, domain).includes('js-debug-history-no-data-range'), 'the never-recorded box uses the shared durable no-data overlay');
+  });
+
+  test('YO!stats percent charts round the Y-axis to nice steps', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    // Servers Load is percent without a fixed 0-100 axis, so its max must round
+    // (100 -> mid 50, 50 -> mid 25) instead of the raw data max (88.3 / 44.1).
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent'}, 88.3), 100);
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent'}, 44.1), 50);
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent'}, 12), 20);
+    // A fixed-max percent chart (CPU) keeps its 0-100 axis.
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent', fixedMax: 100}, 40), 100);
+  });
+
+  test('YO!stats live-edge pulse marks every live chart including sparse/no-data edges', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const liveDomain = {startMs: now - (5 * 60 * 1000), endMs: now, rangeSeconds: 300, zoomed: false};
+    // A sparse chart (e.g. Model tokens/min) has no data bucket at the live edge;
+    // the pulse must still mark the ongoing cell so every live chart looks live.
+    assert.ok(api.debugGraphLivePulseHtmlForTest([], [], liveDomain, now).includes('data-js-debug-live-pulse'), 'the live pulse renders on a live chart with no edge data');
+    assert.equal(api.debugGraphLivePulseHtmlForTest([], [], {...liveDomain, rangeSeconds: 2 * 60 * 60}, now), '', 'the pulse is suppressed on coarse (>1h) ranges');
+    assert.equal(api.debugGraphLivePulseHtmlForTest([], [], {...liveDomain, zoomed: true}, now), '', 'the pulse is suppressed on a zoomed view');
+  });
+
+  test('YO!stats slides only short live ranges with the wall clock', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.clearDebugGraphZoomForTest();
+    api.setDebugGraphRangeForTest(5 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), true, 'a 5m live view slides with the wall clock');
+    api.setDebugGraphRangeForTest(30 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), true, 'a 30m live view still slides');
+    api.setDebugGraphRangeForTest(60 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), false, 'ranges above 30m stay static (range-scaled cadence)');
+    api.setDebugGraphRangeForTest(5 * 60);
+    api.setDebugGraphZoomDomainForTest(Date.now() - 60000, Date.now());
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), false, 'a zoomed view stays static regardless of range');
   });
 
   test('YO!stats rejects only malformed interval coverage, while an empty list remains valid', () => {

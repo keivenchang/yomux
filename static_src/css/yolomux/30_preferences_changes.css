@@ -1464,6 +1464,9 @@ body.theme-light .js-debug-live-pulse.heartbeat-pulse {
   fill: rgb(var(--js-debug-bad-connection-rgb) / 0.12);
   pointer-events: none;
 }
+.js-debug-history-no-data-range {
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.18);
+}
 .js-debug-graph--hovering .js-debug-hover-line {
   opacity: 1;
 }

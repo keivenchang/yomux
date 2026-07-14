@@ -254,6 +254,7 @@
   "debug.errors": "שגיאות JS",
   "debug.events": "אירועים",
   "debug.graph.agentStatus.noData": "אין דגימת מצב סוכן",
+  "debug.graph.noDataRecorded": "לא נרשמו נתונים",
   "debug.graph.badConnection": "חיבור גרוע: לא נאספו נתונים עבור {duration}",
   "debug.graph.chart.agentStatus": "סטטוס סוכן",
   "debug.graph.chart.agentStatus.desc": "סופר חלונות סוכן לפי מצב: עובד, תשומת לב, מעבר ולא פעיל מדגימות מצב של YOLOmux.",

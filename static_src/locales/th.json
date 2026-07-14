@@ -248,6 +248,7 @@
   "debug.errors": "ข้อผิดพลาด JS",
   "debug.events": "เหตุการณ์",
   "debug.graph.agentStatus.noData": "ไม่มีตัวอย่างสถานะเอเจนต์",
+  "debug.graph.noDataRecorded": "ไม่มีข้อมูลที่บันทึกไว้",
   "debug.graph.badConnection": "การเชื่อมต่อไม่ดี: ไม่มีการรวบรวมข้อมูลสําหรับ {duration}",
   "debug.graph.chart.agentStatus": "สถานะตัวแทน โทเค็นตัวแทน",
   "debug.graph.chart.agentStatus.desc": "นับหน้าต่างเอเจนต์ตามสถานะ: กำลังทำงาน ต้องสนใจ กำลังเปลี่ยนผ่าน และว่าง จากตัวอย่างสถานะ YOLOmux",

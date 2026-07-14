@@ -248,6 +248,7 @@
   "debug.errors": "JS 오류",
   "debug.events": "이벤트",
   "debug.graph.agentStatus.noData": "에이전트 상태 샘플 없음",
+  "debug.graph.noDataRecorded": "기록된 데이터 없음",
   "debug.graph.badConnection": "잘못된 연결: {duration}에 대해 수집된 데이터가 없습니다.",
   "debug.graph.chart.agentStatus": "에이전트 상태",
   "debug.graph.chart.agentStatus.desc": "YOLOmux 상태 샘플에서 에이전트 창을 작업, 주의, 전환, 유휴 상태별로 셉니다.",

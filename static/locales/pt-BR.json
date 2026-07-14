@@ -305,6 +305,7 @@
   "debug.graph.metric.sse": "Fluxo SSE",
   "debug.graph.metric.sse.desc": "Amostras de SSE contam mensagens de eventos enviados pelo servidor recebidas pelo navegador por segundo.",
   "debug.graph.movingAverage": "{label} {count} média móvel de amostra",
+  "debug.graph.noDataRecorded": "Nenhum dado registrado",
   "debug.graph.series.agentToken.desc": "Taxa de tokens de saída da transcrição para o agente {agent}.",
   "debug.graph.series.allAgentsTotal": "Total de todos os agentes",
   "debug.graph.series.allAgentsTotal.desc": "Série total de tokens ou atividade somada entre todos os agentes conhecidos.",

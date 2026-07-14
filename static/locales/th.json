@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "ตัวอย่าง SSE นับข้อความเหตุการณ์จากเซิร์ฟเวอร์ที่เบราว์เซอร์ได้รับต่อวินาที",
   "debug.graph.movingAverage": "{label} {count} - ค่าเฉลี่ยเคลื่อนที่ตัวอย่าง",
+  "debug.graph.noDataRecorded": "ไม่มีข้อมูลที่บันทึกไว้",
   "debug.graph.series.agentToken.desc": "อัตราโทเค็นเอาต์พุตทรานสคริปต์ของเอเจนต์ {agent}.",
   "debug.graph.series.allAgentsTotal": "รวมตัวแทนทั้งหมด",
   "debug.graph.series.allAgentsTotal.desc": "ชุดโทเค็นหรือกิจกรรมรวมที่บวกจากเอเจนต์ที่รู้จักทั้งหมด.",

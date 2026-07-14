@@ -10,9 +10,11 @@ import pytest
 from yolomux_lib import approvald
 from yolomux_lib import jobd
 from yolomux_lib import statsd
+from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services import runtime
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
+from yolomux_lib.local_services.registry import parse_ps_cpu_seconds
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +95,58 @@ def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     assert registry._spawn() is not None
     args, _kwargs = starts[0]
     assert args[args.index("--idle-seconds") + 1] == "0.5"
+
+
+def test_parse_ps_cpu_seconds_covers_ps_time_shapes():
+    assert parse_ps_cpu_seconds("0:00.00") == 0.0
+    assert parse_ps_cpu_seconds("1:30") == 90.0
+    assert parse_ps_cpu_seconds("2:03:04") == 7384.0
+    assert parse_ps_cpu_seconds("1-02:03:04") == 93784.0
+    assert parse_ps_cpu_seconds("") is None
+    assert parse_ps_cpu_seconds("garbage") is None
+
+
+def test_registry_resources_reads_cpu_and_rss_via_ps_without_proc(tmp_path, monkeypatch):
+    # macOS/BSD have no /proc; the per-service CPU/RSS probe was Linux-only, so
+    # every service reported `—` and the Servers Load chart was empty on macOS.
+    monkeypatch.setattr(registry_mod.platform, "system", lambda: "Darwin")
+    outputs = iter(["  2048   0:01.00\n", "  4096   0:03.00\n"])
+
+    class FakeCompleted:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(args, **_kwargs):
+        assert args[0] == "ps" and args[-1] == "4321"
+        return FakeCompleted(next(outputs))
+
+    monkeypatch.setattr(registry_mod.subprocess, "run", fake_run)
+    clock_values = iter([100.0, 101.0])
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", 1),
+        clock=lambda: next(clock_values),
+    )
+
+    first = registry.resources(4321)
+    assert first == {"cpu_percent": None, "rss_bytes": 2048 * 1024}
+    second = registry.resources(4321)
+    # 2 cumulative CPU seconds elapsed over 1 wall-clock second -> 200%.
+    assert second["cpu_percent"] == 200.0
+    assert second["rss_bytes"] == 4096 * 1024
+    assert registry.resources(0) == {"cpu_percent": None, "rss_bytes": None}
+
+
+def test_registry_resources_returns_none_when_ps_reports_no_such_pid(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry_mod.platform, "system", lambda: "Darwin")
+
+    class FakeCompleted:
+        stdout = ""
+
+    monkeypatch.setattr(registry_mod.subprocess, "run", lambda *_args, **_kwargs: FakeCompleted())
+    registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", 1))
+
+    assert registry.resources(999999) == {"cpu_percent": None, "rss_bytes": None}
 
 
 def test_registry_health_request_identifies_expected_service_protocol(tmp_path, monkeypatch):

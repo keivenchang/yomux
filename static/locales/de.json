@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "SSE-Stichproben zählen vom Browser empfangene Server-Sent-Event-Meldungen pro Sekunde.",
   "debug.graph.movingAverage": "{label} {count} – gleitender Stichprobendurchschnitt",
+  "debug.graph.noDataRecorded": "Keine Daten aufgezeichnet",
   "debug.graph.series.agentToken.desc": "Transcript-Ausgabe-Tokenrate für Agent {agent}.",
   "debug.graph.series.allAgentsTotal": "Alle Agenten insgesamt",
   "debug.graph.series.allAgentsTotal.desc": "Gesamte Token- oder Aktivitätsreihe über alle bekannten Agenten summiert.",

@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "SSE örnekleri, tarayıcının aldığı sunucu gönderimli olay iletilerini saniye başına sayar.",
   "debug.graph.movingAverage": "{label} {count}-örneklem hareketli ortalaması",
+  "debug.graph.noDataRecorded": "Kaydedilen veri yok",
   "debug.graph.series.agentToken.desc": "Ajan {agent} için transcript çıktı belirteci hızı.",
   "debug.graph.series.allAgentsTotal": "Tüm ajanlar toplamı",
   "debug.graph.series.allAgentsTotal.desc": "Bilinen tüm ajanlarda toplanan toplam belirteç veya etkinlik serisi.",

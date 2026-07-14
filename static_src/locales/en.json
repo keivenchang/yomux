@@ -248,6 +248,7 @@
   "debug.errors": "JS errors",
   "debug.events": "Events",
   "debug.graph.agentStatus.noData": "No agent-status sample",
+  "debug.graph.noDataRecorded": "No data recorded",
   "debug.graph.badConnection": "Bad connection: no data collected for {duration}",
   "debug.graph.chart.agentStatus": "Agent status",
   "debug.graph.chart.agentStatus.desc": "Counts agent windows by status: working, attention, transition, and idle from YOLOmux agent state samples.",
