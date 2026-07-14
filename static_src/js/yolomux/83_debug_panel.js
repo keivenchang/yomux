@@ -1461,6 +1461,17 @@ function debugGraphMergeAgentTokenRates(target, source, multiplier = 1) {
     existing.samples += Number(item?.samples || 0) * scale;
     existing.tokens += Number(item?.tokens || 0) * scale;
     existing.seconds += Number(item?.seconds || 0) * scale;
+    existing.billableAvailable = existing.billableAvailable === true || item?.billableAvailable === true;
+    if (!existing.billableTokens || typeof existing.billableTokens !== 'object') {
+      existing.billableTokens = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    if (!existing.billableSamples || typeof existing.billableSamples !== 'object') {
+      existing.billableSamples = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    for (const dimension of ['input', 'cacheRead', 'cacheWrite', 'all']) {
+      existing.billableTokens[dimension] += Number(item?.billableTokens?.[dimension] || 0) * scale;
+      existing.billableSamples[dimension] += Number(item?.billableSamples?.[dimension] || 0) * scale;
+    }
     if (!(existing.modelRates instanceof Map)) existing.modelRates = new Map();
     const sourceModelRates = item?.modelRates instanceof Map
       ? item.modelRates
@@ -2039,6 +2050,23 @@ function debugGraphApplyServerAgentTokenRates(bucket, rates) {
     if (Number.isFinite(samples)) existing.samples = Math.max(Number(existing.samples || 0), Math.max(0, samples));
     if (Number.isFinite(tokens)) existing.tokens = Math.max(Number(existing.tokens || 0), Math.max(0, tokens));
     if (Number.isFinite(seconds)) existing.seconds = Math.max(Number(existing.seconds || 0), Math.max(0, seconds));
+    const billable = item.billable_tokens && typeof item.billable_tokens === 'object' ? item.billable_tokens : {};
+    const billableSamples = item.billable_samples && typeof item.billable_samples === 'object' ? item.billable_samples : {};
+    existing.billableAvailable = existing.billableAvailable === true || item.billable_available === true;
+    if (!existing.billableTokens || typeof existing.billableTokens !== 'object') {
+      existing.billableTokens = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    if (!existing.billableSamples || typeof existing.billableSamples !== 'object') {
+      existing.billableSamples = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    existing.billableTokens.input = Math.max(Number(existing.billableTokens.input || 0), Math.max(0, Number(billable.input) || 0));
+    existing.billableTokens.cacheRead = Math.max(Number(existing.billableTokens.cacheRead || 0), Math.max(0, Number(billable.cache_read) || 0));
+    existing.billableTokens.cacheWrite = Math.max(Number(existing.billableTokens.cacheWrite || 0), Math.max(0, Number(billable.cache_write) || 0));
+    existing.billableTokens.all = Math.max(Number(existing.billableTokens.all || 0), Math.max(0, Number(billable.all) || 0));
+    existing.billableSamples.input = Math.max(Number(existing.billableSamples.input || 0), Math.max(0, Number(billableSamples.input) || 0));
+    existing.billableSamples.cacheRead = Math.max(Number(existing.billableSamples.cacheRead || 0), Math.max(0, Number(billableSamples.cache_read) || 0));
+    existing.billableSamples.cacheWrite = Math.max(Number(existing.billableSamples.cacheWrite || 0), Math.max(0, Number(billableSamples.cache_write) || 0));
+    existing.billableSamples.all = Math.max(Number(existing.billableSamples.all || 0), Math.max(0, Number(billableSamples.all) || 0));
     if (!(existing.modelRates instanceof Map)) existing.modelRates = new Map();
     const modelRates = item.model_rates && typeof item.model_rates === 'object' && !Array.isArray(item.model_rates)
       ? Object.entries(item.model_rates)
@@ -2370,11 +2398,21 @@ function debugGraphAgentTokenBucketValue(bucket, item) {
   return Number(item?.samples || 0) > 0 ? Number(item.total || 0) / Number(item.samples || 1) : 0;
 }
 
+function debugGraphAgentTokenBucketDimensionValue(bucket, item, dimension = jsDebugGraphModelTokenDimension) {
+  if (dimension === 'output') return debugGraphAgentTokenBucketValue(bucket, item);
+  const quantity = Math.max(0, Number(item?.billableTokens?.[dimension]) || 0);
+  return quantity / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
+}
+
 function debugGraphAgentTokenDisplayedSum(buckets) {
   let total = 0;
   for (const bucket of buckets || []) {
     if (!(bucket?.agentTokenRates instanceof Map)) continue;
     for (const item of bucket.agentTokenRates.values()) {
+      if (jsDebugGraphModelTokenDimension !== 'output') {
+        if (item?.billableAvailable === true) total += Math.max(0, Number(item?.billableTokens?.[jsDebugGraphModelTokenDimension]) || 0);
+        continue;
+      }
       const tokens = Number(item?.tokens);
       if (Number.isFinite(tokens) && tokens >= 0) {
         total += tokens;
@@ -2767,6 +2805,7 @@ function debugGraphHistoryOverlayHtml(state = jsDebugHistoryReadiness) {
 }
 
 function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
+  const selectedAgentDimension = dimension === 'agent' ? jsDebugGraphModelTokenDimension : 'output';
   const tokenItems = new Map();
   for (const bucket of buckets) {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
@@ -2774,7 +2813,9 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       if (dimension === 'agent') {
         const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
         existing.label = item?.label || existing.label;
-        existing.samples += Number(item?.samples || 0);
+        existing.samples += selectedAgentDimension === 'output'
+          ? Number(item?.samples || 0)
+          : (item?.billableAvailable === true ? 1 : 0);
         tokenItems.set(String(key), existing);
         continue;
       }
@@ -2807,7 +2848,10 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       color: visuals[index].color,
       value: bucket => {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-        if (dimension === 'agent') return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
+        if (dimension === 'agent') {
+          if (!tokenItem) return 0;
+          return debugGraphAgentTokenBucketDimensionValue(bucket, tokenItem, selectedAgentDimension);
+        }
         let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
           for (const agentRate of bucket.agentTokenRates.values()) {
@@ -2821,6 +2865,7 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       hasData: bucket => {
         if (dimension === 'agent') {
           const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+          if (selectedAgentDimension !== 'output') return tokenItem?.billableAvailable === true;
           return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
         }
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
@@ -2831,6 +2876,7 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       sampleCount: bucket => {
         if (dimension === 'agent') {
           const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+          if (selectedAgentDimension !== 'output') return Math.max(0, Number(tokenItem?.billableSamples?.[selectedAgentDimension]) || 0);
           return Math.max(0, Number(tokenItem?.samples) || 0);
         }
         let samples = 0;
@@ -4203,6 +4249,13 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     ? ''
     : `<span class="js-debug-chart-summary"${debugGraphExplainAttrs(displayedSummary.text, displayedSummary.descKey, {attribute: 'data-js-debug-summary-desc'})} data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
+  const agentBillableUnavailable = group.key === 'agentTokens'
+    && jsDebugGraphModelTokenDimension !== 'output'
+    && !buckets.some(bucket => [...(bucket?.agentTokenRates?.values?.() || [])].some(rate => rate?.billableAvailable === true));
+  const chartUnavailable = gpuUnavailable || agentBillableUnavailable;
+  const chartUnavailableText = agentBillableUnavailable
+    ? debugGraphCostText('debug.graph.agentTokens.billableUnavailable', 'No billable breakdown for this window')
+    : t('finder.dateMode.none');
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
   const modelDimensionControl = group.key === 'modelTokens'
@@ -4219,9 +4272,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
         ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
-      ${gpuUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
-    ${gpuUnavailable ? `<div class="js-debug-chart-unavailable" data-js-debug-gpu-unavailable="${esc(group.key)}">${esc(t('finder.dateMode.none'))}</div>` : `<div class="js-debug-chart-body">
+    ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
       ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
@@ -4243,7 +4296,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       </div>
       ${debugGraphXAxisHtml(domain)}
     </div>`}
-    ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time><span data-js-debug-hover-source-separator aria-hidden="true" hidden> · </span><span data-js-debug-hover-source hidden></span></div>'}
+    ${chartUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time><span data-js-debug-hover-source-separator aria-hidden="true" hidden> · </span><span data-js-debug-hover-source hidden></span></div>'}
   </section>`;
 }
 
@@ -4259,7 +4312,10 @@ function debugGraphUsesLogScale(group, seriesItems) {
 function debugGraphTokenAxisDescriptor(buckets) {
   const values = (buckets || []).map(bucket => {
     let total = 0;
-    for (const rate of bucket?.agentTokenRates?.values?.() || []) total += debugGraphAgentTokenBucketValue(bucket, rate);
+    for (const rate of bucket?.agentTokenRates?.values?.() || []) {
+      if (jsDebugGraphModelTokenDimension !== 'output' && rate?.billableAvailable !== true) continue;
+      total += debugGraphAgentTokenBucketDimensionValue(bucket, rate);
+    }
     // Model input/cache can legitimately exceed generated output. The shared
     // descriptor must include the selected Model chart while remaining one
     // exact axis for both token charts.

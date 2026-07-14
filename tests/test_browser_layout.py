@@ -4379,6 +4379,64 @@ def test_debug_token_hover_reports_real_bucket_span_samples_and_gaps(browser, tm
     assert "0 tokens" not in metrics["gap"]["text"].lower(), metrics
 
 
+def test_debug_agent_billable_dimensions_reconcile_and_label_atomless_windows(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerAgentTokenRates === 'function' && typeof debugGraphSeriesData === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const makeRate = (key, output, available, billable) => ({
+          key, label: key.replaceAll('|', ':'), total: output, samples: output > 0 ? 1 : 0,
+          tokens: output, seconds: 60, model_rates: {},
+          billable_available: available,
+          billable_tokens: billable,
+          billable_samples: available ? {input: 1, cache_read: 1, cache_write: 1, all: 4} : {input: 0, cache_read: 0, cache_write: 0, all: 0},
+        });
+        const bucket = debugGraphNewBucket(Date.now() - 60000, 60000);
+        debugGraphApplyServerAgentTokenRates(bucket, [
+          makeRate('s|0|codex', 30, true, {input: 100, cache_read: 20, cache_write: 10, all: 160}),
+          makeRate('s|1|codex', 0, true, {input: 7, cache_read: 0, cache_write: 0, all: 7}),
+          makeRate('s|2|claude', 5, false, {input: 0, cache_read: 0, cache_write: 0, all: 0}),
+        ]);
+        const valuesFor = dimension => {
+          jsDebugGraphModelTokenDimension = dimension;
+          return debugGraphSeriesData([bucket])
+            .filter(series => series.agentTokenSeries === true)
+            .map(series => ({key: series.agentTokenKey, value: series.values[0]}))
+            .sort((left, right) => left.key.localeCompare(right.key));
+        };
+        const output = valuesFor('output');
+        const all = valuesFor('all');
+        const input = valuesFor('input');
+        const cacheRead = valuesFor('cacheRead');
+        const cacheWrite = valuesFor('cacheWrite');
+        const atomless = debugGraphNewBucket(Date.now(), 60000);
+        debugGraphApplyServerAgentTokenRates(atomless, [makeRate(
+          's|2|claude', 5, false, {input: 0, cache_read: 0, cache_write: 0, all: 0}
+        )]);
+        const group = jsDebugGraphChartGroups.find(item => item.key === 'agentTokens');
+        jsDebugGraphModelTokenDimension = 'all';
+        const emptyHtml = debugGraphChartHtml(
+          group, debugGraphSeriesData([atomless]),
+          {startMs: atomless.startMs, endMs: atomless.startMs + 60000, rangeSeconds: 60, zoomed: false},
+          [atomless]
+        );
+        jsDebugGraphModelTokenDimension = 'output';
+        return {output, all, input, cacheRead, cacheWrite, emptyHtml};
+        """
+    )
+    assert sum(item["value"] for item in metrics["output"]) == 35, metrics
+    assert metrics["all"] == [{"key": "s|0|codex", "value": 160}, {"key": "s|1|codex", "value": 7}], metrics
+    assert sum(item["value"] for item in metrics["all"]) == 167, metrics
+    assert sum(item["value"] for item in metrics["input"]) == 107, metrics
+    assert sum(item["value"] for item in metrics["cacheRead"]) == 20, metrics
+    assert sum(item["value"] for item in metrics["cacheWrite"]) == 10, metrics
+    assert "no billable breakdown for this window" in metrics["emptyHtml"].lower(), metrics
+
+
 def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(

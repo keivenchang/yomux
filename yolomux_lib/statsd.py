@@ -651,18 +651,25 @@ def agent_token_rates_response(value: Any, cost_value: Any) -> list[dict[str, An
             "input": 0.0,
             "cache_read": 0.0,
             "cache_write": 0.0,
+            "input_samples": 0,
+            "cache_read_samples": 0,
+            "cache_write_samples": 0,
         })
         if component.get("tmux_label"):
             row["label"] = str(component["tmux_label"])
         quantity = _usage_atom_number(component.get("quantity"))
+        samples = max(1, int(component.get("count") or 0))
         cache_role = str(component.get("cache_role") or "none").lower()
         direction = str(component.get("direction") or "unknown").lower()
         if cache_role == "read":
             row["cache_read"] += quantity
+            row["cache_read_samples"] += samples
         elif cache_role in {"write", "write_5m", "write_1h"}:
             row["cache_write"] += quantity
+            row["cache_write_samples"] += samples
         elif direction == "input":
             row["input"] += quantity
+            row["input_samples"] += samples
 
     result: list[dict[str, Any]] = []
     for key in sorted(set(raw_rates) | set(attributed)):
@@ -678,6 +685,15 @@ def agent_token_rates_response(value: Any, cost_value: Any) -> list[dict[str, An
         }
         if available:
             billable_tokens["all"] = exact_output + billable_tokens["input"] + billable_tokens["cache_read"] + billable_tokens["cache_write"]
+        output_samples = max(0, int(raw.get("samples") or 0))
+        billable_samples = {
+            "input": int(dimensions.get("input_samples") or 0) if available else 0,
+            "cache_read": int(dimensions.get("cache_read_samples") or 0) if available else 0,
+            "cache_write": int(dimensions.get("cache_write_samples") or 0) if available else 0,
+            "all": 0,
+        }
+        if available:
+            billable_samples["all"] = output_samples + billable_samples["input"] + billable_samples["cache_read"] + billable_samples["cache_write"]
         result.append({
             "key": key,
             "label": str(raw.get("label") or (dimensions or {}).get("label") or key),
@@ -689,6 +705,7 @@ def agent_token_rates_response(value: Any, cost_value: Any) -> list[dict[str, An
             "model_rates": copy.deepcopy(raw.get("model_rates") if isinstance(raw.get("model_rates"), dict) else {}),
             "billable_available": available,
             "billable_tokens": billable_tokens,
+            "billable_samples": billable_samples,
         })
     return result
 

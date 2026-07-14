@@ -586,6 +586,9 @@ def test_statsd_agent_billable_dimensions_reconcile_with_tmux_cost_atoms_in_norm
         assert rates["s|0|codex"]["billable_tokens"] == {
             "input": 100.0, "cache_read": 20.0, "cache_write": 10.0, "all": 160.0,
         }
+        assert rates["s|0|codex"]["billable_samples"] == {
+            "input": 1, "cache_read": 1, "cache_write": 1, "all": 4,
+        }
         assert rates["s|0|codex"]["billable_tokens"]["all"] == pytest.approx(
             by_agent["s|0|codex"]["input_tokens"]
             + by_agent["s|0|codex"]["cache_tokens"]
@@ -597,11 +600,17 @@ def test_statsd_agent_billable_dimensions_reconcile_with_tmux_cost_atoms_in_norm
         assert rates["s|1|codex"]["billable_tokens"] == {
             "input": 7.0, "cache_read": 0.0, "cache_write": 0.0, "all": 7.0,
         }
+        assert rates["s|1|codex"]["billable_samples"] == {
+            "input": 1, "cache_read": 0, "cache_write": 0, "all": 1,
+        }
 
         assert rates["s|2|claude"]["tokens"] == 5
         assert rates["s|2|claude"]["billable_available"] is False
         assert rates["s|2|claude"]["billable_tokens"] == {
             "input": 0.0, "cache_read": 0.0, "cache_write": 0.0, "all": 0.0,
+        }
+        assert rates["s|2|claude"]["billable_samples"] == {
+            "input": 0, "cache_read": 0, "cache_write": 0, "all": 0,
         }
 
     assert normal["agent_token_rates"] == compact["agent_token_rates"]
