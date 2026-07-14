@@ -3771,6 +3771,17 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             statsVisible: jsDebugStatsPanelVisible(),
             dataAge: yocostPanel?.querySelector('[data-js-yocost-data-age]')?.textContent || '',
             refreshButton: yocostPanel?.querySelector('[data-js-debug-cost-refresh]')?.textContent || '',
+            controls: (() => {
+              const toolbar = yocostPanel?.querySelector('.js-yocost-controls');
+              const toolbarRect = toolbar?.getBoundingClientRect();
+              const children = [...(toolbar?.children || [])].map(node => node.getBoundingClientRect());
+              const rangeRect = toolbar?.querySelector('[data-js-debug-range-control]')?.getBoundingClientRect();
+              return {
+                rows: new Set(children.map(rect => Math.round(rect.top + (rect.height / 2)))).size,
+                rangeRatio: toolbarRect?.width ? rangeRect.width / toolbarRect.width : 1,
+                contained: Boolean(toolbarRect && children.every(rect => rect.left >= toolbarRect.left - 1 && rect.right <= toolbarRect.right + 1)),
+              };
+            })(),
             headings: [...(popover?.querySelectorAll('h1, h2') || [])].map(node => node.textContent.trim()),
             pricingSourcesLast: (() => {
               const sections = [...(popover?.querySelectorAll('.js-debug-cost-details-section') || [])];
@@ -3784,6 +3795,8 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             usageHeaderRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] thead th') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
             usageRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr').length || 0,
             usageGrandRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tfoot tr').length || 0,
+            usageModelIcons: popover?.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-icon .agent-icon').length || 0,
+            calculationColumns: popover?.querySelectorAll('[data-js-debug-cost-table="calculation"] thead th').length || 0,
             usageRowAria: popover?.querySelector('[data-js-debug-cost-table="model"] tbody tr')?.getAttribute('aria-label') || '',
             usageMetricTexts: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child .js-debug-cost-table-metric') || [])].map(node => node.textContent.trim()),
             usageMetricRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
@@ -3971,6 +3984,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["popover"]["tokenChartKeys"] == ["agentTokens", "modelTokens"], metrics
     assert metrics["popover"]["chartsAboveReport"] is True and metrics["popover"]["rangeControl"] is True and metrics["popover"]["resolutionControl"] is True, metrics
     assert metrics["popover"]["statsVisible"] is True and "Last refreshed" in metrics["popover"]["dataAge"] and metrics["popover"]["refreshButton"] == "Refresh", metrics
+    assert metrics["popover"]["controls"]["rangeRatio"] <= 1 and metrics["popover"]["controls"]["contained"], metrics
     assert 895 <= metrics["yocostControls"]["rangeSeconds"] <= 905, metrics
     assert metrics["yocostControls"]["rangeSliderValue"] == str(metrics["yocostControls"]["targetRangeIndex"]), metrics
     assert 895 <= metrics["yocostControls"]["statsRangeSeconds"] <= 905, metrics
@@ -3988,7 +4002,8 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert "javascript:alert" not in metrics["popover"]["pricingSourcesText"], metrics
     assert metrics["popover"]["usageTitle"] == "Model Usages" and metrics["popover"]["usageRows"] == 1 and metrics["popover"]["usageGrandRows"] == 1, metrics
     assert metrics["popover"]["usageHeaderLabels"] == ["Model", "Input", "Cached", "Output", "Other", "Total"], metrics
-    assert metrics["popover"]["usageMetricTexts"] == ["60 tokens$0.0120", "60 tokens$0.0180", "60 tokens$0.0300", "0$0", "180 tokens$0.0600"], metrics
+    assert metrics["popover"]["usageMetricTexts"] == ["60$0.0120", "60$0.0180", "60$0.0300", "0$0", "180$0.0600"], metrics
+    assert metrics["popover"]["usageModelIcons"] == 1 and metrics["popover"]["calculationColumns"] == 6, metrics
     assert all(label in metrics["popover"]["usageRowAria"] for label in ("gpt-5.6-terra", "Input 60 tokens $0.0120", "Cached 60 tokens $0.0180", "Output 60 tokens $0.0300", "Other 0 $0", "Total 180 tokens $0.0600")), metrics
     assert len(metrics["popover"]["usageHeaderRects"]) == len(metrics["popover"]["usageMetricRects"]) == 6, metrics
     for header_rect, row_rect in zip(metrics["popover"]["usageHeaderRects"], metrics["popover"]["usageMetricRects"]):
@@ -4335,7 +4350,7 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return typeof debugGraphCostUnknownUsageHtml === 'function' && typeof debugSystemRolesHtml === 'function';"
+            "return typeof debugGraphCostUnknownUsageHtml === 'function' && typeof debugGraphCostModelUsageChartHtml === 'function' && typeof debugGraphCostComponentDetailsHtml === 'function' && typeof debugSystemRolesHtml === 'function';"
         )
     )
     metrics = browser.execute_script(
@@ -4375,6 +4390,14 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
         fixture.style.background = 'var(--panel)';
         fixture.innerHTML = `
           <section data-responsive-audit="cost" class="js-yocost-panel">
+            <div class="js-yocost-graphs"><div class="js-yocost-controls">
+              <span>Last refreshed 9s ago</span>${debugGraphRangeControlsHtml(Date.now())}${debugGraphResolutionLabelHtml(Date.now())}<button type="button">Refresh</button>
+            </div></div>
+            ${debugGraphCostModelUsageChartHtml([
+              {provider: 'anthropic', model: 'claude-fable-5', effort: 'unknown', input_tokens: 10, cache_tokens: 1000000, output_tokens: 1400, token_quantity: 1001410},
+              {provider: 'openai', model: 'gpt-5.6-sol', effort: 'medium', input_tokens: 11600, cache_tokens: 1400000, output_tokens: 1900, token_quantity: 1413500},
+            ], summary.components, {report: true})}
+            ${debugGraphCostComponentDetailsHtml(summary.components)}
             ${debugGraphCostUnknownUsageHtml(summary)}
             ${debugGraphCostSourceTreeHtml(summary.sources)}
           </section>
@@ -4416,6 +4439,9 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
             const cost = fixture.querySelector('[data-responsive-audit="cost"]');
             const system = fixture.querySelector('[data-responsive-audit="system"]');
             const sourceTable = cost.querySelector('[data-js-debug-cost-table="source"]');
+            const controls = cost.querySelector('.js-yocost-controls');
+            const modelTable = cost.querySelector('[data-js-debug-cost-table="model"]');
+            const calculationTable = cost.querySelector('[data-js-debug-cost-table="calculation"]');
             const visibleUnpricedRows = [...cost.querySelectorAll('[data-js-debug-cost-table="unpriced"] tbody tr')];
             const unpricedClassRows = [...cost.querySelectorAll('[data-js-debug-unpriced-class]')];
             const disclosureRect = unpricedDisclosure?.getBoundingClientRect();
@@ -4428,6 +4454,23 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
               costScrollContained: [...cost.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
               systemScrollContained: [...system.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
               sourceCells,
+              controlRows: new Set([...controls.children].map(node => { const rect = node.getBoundingClientRect(); return Math.round(rect.top + (rect.height / 2)); })).size,
+              controlsContained: [...controls.children].every(node => {
+                const child = node.getBoundingClientRect();
+                const parent = controls.getBoundingClientRect();
+                return child.left >= parent.left - 1 && child.right <= parent.right + 1;
+              }),
+              rangeRatio: controls.clientWidth ? controls.querySelector('[data-js-debug-range-control]').getBoundingClientRect().width / controls.clientWidth : 1,
+              modelHeaderCount: modelTable?.tHead?.rows[0]?.cells.length || 0,
+              modelCellCounts: [...(modelTable?.tBodies[0]?.rows || [])].map(row => row.cells.length),
+              modelText: modelTable?.textContent || '',
+              modelIcons: modelTable?.querySelectorAll('.js-debug-cost-model-icon .agent-icon').length || 0,
+              calculationHeaderCount: calculationTable?.tHead?.rows[0]?.cells.length || 0,
+              calculationCellCounts: [...(calculationTable?.tBodies[0]?.rows || [])].map(row => row.cells.length),
+              compactTablesContained: [modelTable, calculationTable].every(table => {
+                const wrap = table?.closest('.js-debug-cost-table-wrap');
+                return Boolean(wrap && (width > 360 || wrap.scrollWidth <= wrap.clientWidth + 1));
+              }),
               visibleUnpricedRowCount: visibleUnpricedRows.length,
               visibleUnpricedText: visibleUnpricedRows.map(row => row.textContent.trim()),
               unpricedClassRowCount: unpricedClassRows.length,
@@ -4451,6 +4494,13 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
     )
     assert all(not item["costFindings"] and not item["systemFindings"] for item in metrics["layouts"]), metrics
     assert all(item["costScrollContained"] and item["systemScrollContained"] for item in metrics["layouts"]), metrics
+    assert all(item["modelHeaderCount"] == 6 and item["modelCellCounts"] == [6, 6] for item in metrics["layouts"]), metrics
+    assert all(item["calculationHeaderCount"] == 6 and item["calculationCellCounts"] == [6] * 6 for item in metrics["layouts"]), metrics
+    assert all(item["modelIcons"] == 2 and "1M" in item["modelText"] and "1.0M tokens" not in item["modelText"] for item in metrics["layouts"]), metrics
+    assert all(item["compactTablesContained"] for item in metrics["layouts"]), metrics
+    assert all(item["controlsContained"] for item in metrics["layouts"]), metrics
+    wide_controls = [{key: item[key] for key in ("theme", "width", "controlRows", "rangeRatio", "controlsContained")} for item in metrics["layouts"] if item["width"] == 1200]
+    assert all(item["controlRows"] == 1 and item["rangeRatio"] <= 0.41 for item in wide_controls), wide_controls
     assert metrics["disclosureDefaultOpen"] is False, metrics
     assert metrics["disclosureAriaLabel"] == "Unpriced model/classes: 6", metrics
     assert all(item["visibleUnpricedRowCount"] == 3 for item in metrics["layouts"]), metrics

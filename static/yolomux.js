@@ -44112,7 +44112,10 @@ function debugGraphNiceAxisMax(value, unit) {
 
 function debugGraphTokenNumberText(value) {
   const number = Math.max(0, Number(value) || 0);
-  if (number >= 1000 * 1000) return `${(number / 1000 / 1000).toFixed(number >= 100 * 1000 * 1000 ? 0 : 1)}M`;
+  if (number >= 1000 * 1000) {
+    const millions = number / 1000 / 1000;
+    return `${millions.toFixed(Number.isInteger(millions) || number >= 100 * 1000 * 1000 ? 0 : 1)}M`;
+  }
   if (number >= 1000) return `${(number / 1000).toFixed(number >= 100 * 1000 ? 0 : 1)}k`;
   if (Number.isInteger(number)) return String(number);
   return number >= 100 ? number.toFixed(0) : number.toFixed(number >= 10 ? 1 : 2);
@@ -46068,6 +46071,24 @@ function debugGraphCostModelLabel(row) {
   return effort ? `${label} · ${effort}` : label;
 }
 
+function debugGraphCostModelAgentKind(row) {
+  const identity = [row?.provider, row?.model, row?.label].map(value => String(value || '').toLowerCase()).join(' ');
+  if (identity.includes('anthropic') || identity.includes('claude')) return 'claude';
+  if (identity.includes('openai') || identity.includes('gpt') || identity.includes('codex')) return 'codex';
+  return '';
+}
+
+function debugGraphCostModelIdentityHtml(row, {showProvider = false, secondaryHtml = ''} = {}) {
+  const model = String(row?.model || row?.label || row?.source || row?.agent || row?.key || 'unknown');
+  const effort = String(row?.effort || '').trim();
+  const provider = String(row?.provider || '').trim();
+  const meta = [showProvider ? provider : '', effort].filter(Boolean).join(' · ');
+  const kind = debugGraphCostModelAgentKind(row);
+  const icon = kind ? `<span class="js-debug-cost-model-icon" aria-hidden="true">${agentIcon(kind)}</span>` : '';
+  const secondary = meta || secondaryHtml ? `<span class="js-debug-cost-model-meta">${meta ? `<small>${esc(meta)}</small>` : ''}${secondaryHtml}</span>` : '';
+  return `<span class="js-debug-cost-model-identity">${icon}<span class="js-debug-cost-model-copy"><strong>${esc(model)}</strong>${secondary}</span></span>`;
+}
+
 function debugGraphCostUsageTokensText(tokens) {
   const value = Math.max(0, Number(tokens) || 0);
   return value > 0 ? debugGraphTokensText(value) : '0';
@@ -46110,10 +46131,10 @@ function debugGraphCostPricingSourceEntries(components, modelRow = null) {
   return [...links].map(([url, label]) => ({url, label}));
 }
 
-function debugGraphCostPricingLinksHtml(components, modelRow = null) {
+function debugGraphCostPricingLinksHtml(components, modelRow = null, {compact = false} = {}) {
   const links = debugGraphCostPricingSourceEntries(components, modelRow);
   if (!links.length) return '';
-  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`).join(' · ')}</span>`;
+  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"${compact ? ` aria-label="${esc(`${label} pricing`)}"` : ''}>${esc(compact ? debugGraphCostText('debug.cost.pricing', 'pricing') : label)}</a>`).join(' · ')}</span>`;
 }
 
 function debugGraphCostAllPricingSourcesHtml(components) {
@@ -46128,7 +46149,8 @@ function debugGraphCostAllPricingSourcesHtml(components) {
 function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null} = {}) {
   const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
   const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
-  return `<span class="js-debug-cost-table-metric"><strong>${esc(debugGraphCostUsageTokensText(tokens))}</strong><small>${esc(cost)}</small></span>`;
+  const exactTokens = `${Math.max(0, Number(tokens) || 0).toLocaleString()} tokens`;
+  return `<span class="js-debug-cost-table-metric" title="${esc(exactTokens)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong><small>${esc(cost)}</small></span>`;
 }
 
 function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = []} = {}) {
@@ -46144,13 +46166,14 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   const rowHtml = row => {
     const breakdown = debugGraphCostBreakdownItems(row);
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
-    const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row) : '';
+    const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row, {compact: true}) : '';
     const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostUsageUsdText(debugGraphCostMicroUsd(row), totalTokens)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostUsageUsdText(item.microUsd, item.tokens)}`).join('; ')}`;
-    return `<tr aria-label="${esc(accessible)}"><th scope="row"><strong>${esc(labelFor(row))}</strong>${pricingLinks}</th>${breakdown.map(item => `<td>${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td>${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong>${esc(labelFor(row))}</strong>`;
+    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
   };
   const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td>${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td>${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
@@ -46228,17 +46251,18 @@ function debugGraphCostComponentSortHeaderHtml(key, label) {
 function debugGraphCostComponentDetailsHtml(rows) {
   if (!rows.length) return '';
   const headers = [
-    ['provider', 'Provider'], ['model', 'Model'], ['effort', 'Effort'], ['direction', 'Direction'],
-    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')], ['modality', 'Modality'], ['unit', 'Unit'],
-    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['rate', debugGraphCostText('debug.cost.rate', 'Rate')],
-    ['cost', debugGraphCostText('debug.cost.estimated', 'Cost')], ['effective', debugGraphCostText('debug.cost.effective', 'Effective')],
-    ['source', debugGraphCostText('debug.cost.source', 'Pricing source')],
+    ['provider', 'Provider'], ['model', 'Model'], ['direction', debugGraphCostText('debug.cost.usageClass', 'Usage class')],
+    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['cost', debugGraphCostText('debug.cost.rateAndCost', 'Rate / cost')],
+    ['effective', debugGraphCostText('debug.cost.pricing', 'Pricing')],
   ];
   return `<section class="js-debug-cost-details-section">
     <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
     <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
       const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      return `<tr><td>${esc(String(row?.provider || '—'))}</td><td>${esc(String(row?.model || '—'))}</td><td>${esc(String(row?.effort || '—'))}</td><td>${esc(String(row?.direction || '—'))}</td><td>${esc(String(row?.cache_role || '—'))}</td><td>${esc(String(row?.modality || '—'))}</td><td>${esc(String(row?.unit || '—'))}</td><td>${esc(debugGraphTokensText(row?.quantity))}</td><td>${esc(debugGraphCostComponentRateText(row))}</td><td>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</td><td>${esc(String(row?.effective_from || '—'))}</td><td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</td></tr>`;
+      const usageClass = [row?.direction, row?.cache_role].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
+      const usageMeta = [row?.modality, row?.unit].map(value => String(value || '').trim()).filter(Boolean).join(' · ');
+      const exactQuantity = `${Math.max(0, Number(row?.quantity) || 0).toLocaleString()} ${String(row?.unit || 'units')}`;
+      return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell"><strong>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</strong><small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;
     }).join('')}</tbody></table></div>
   </section>`;
 }
@@ -47628,7 +47652,7 @@ function yoCostPanelHtml() {
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refresh = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
   const ageLabel = debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
-  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-data-age" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${refresh}</div>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
 }
 
 function openYoCostTranscriptPreview(event) {

@@ -5636,10 +5636,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(multiAgentHtml.includes('one:0:codex') && multiAgentHtml.includes('two:1:claude') && multiAgentHtml.includes('Grand total'), 'the multi-agent table retains both agents and one grand total');
     const multiModelHtml = api.debugGraphCostModelUsageChartHtmlForTest([
       {provider: 'openai', model: 'gpt-a', input_tokens: 1, input_micro_usd: 10, output_tokens: 2, output_micro_usd: 20, token_quantity: 3, micro_usd: 30},
-      {provider: 'anthropic', model: 'claude-b', cache_tokens: 4, cache_micro_usd: 40, other_tokens: 5, other_micro_usd: 50, token_quantity: 9, micro_usd: 90},
+      {provider: 'anthropic', model: 'claude-b', effort: 'unknown', cache_tokens: 1000000, cache_micro_usd: 40, other_tokens: 5, other_micro_usd: 50, token_quantity: 1000005, micro_usd: 90},
     ], [], {report: true});
     assert.equal((multiModelHtml.match(/<tr aria-label=/g) || []).length, 2, 'every distinct model renders one semantic row');
     for (const model of ['gpt-a', 'claude-b']) assert.match(multiModelHtml, new RegExp(`aria-label="[^"]*${model}[^"]*Total[^"]*Input[^"]*Cached[^"]*Output[^"]*Other`), `${model} exposes every token-and-cost class plus Total`);
+    assert.ok(multiModelHtml.includes('js-debug-cost-model-icon') && multiModelHtml.includes('agent-icon codex') && multiModelHtml.includes('agent-icon claude'), 'GPT and Claude model rows reuse the shared AI symbols');
+    assert.ok(multiModelHtml.includes('js-debug-cost-model-meta') && multiModelHtml.includes('<small>unknown</small>') && multiModelHtml.includes('<strong>1M</strong>') && !multiModelHtml.includes('<strong>1.0M tokens</strong>'), 'model identity uses two compact lines and exact millions collapse to 1M in token cells');
+    const calculationSection = reportHtml.slice(reportHtml.indexOf('data-js-debug-cost-table="calculation"'), reportHtml.indexOf('</table>', reportHtml.indexOf('data-js-debug-cost-table="calculation"')));
+    const calculationHeader = calculationSection.slice(calculationSection.indexOf('<thead>'), calculationSection.indexOf('</thead>'));
+    const calculationFirstRow = calculationSection.slice(calculationSection.indexOf('<tr>', calculationSection.indexOf('<tbody>')), calculationSection.indexOf('</tr>', calculationSection.indexOf('<tbody>')));
+    assert.equal((calculationHeader.match(/<th /g) || []).length, 6, 'Cost calculation groups twelve low-level fields into six resilient columns');
+    assert.equal((calculationFirstRow.match(/<td /g) || []).length, 6, 'each calculation record follows the six-column grouped contract');
+    assert.ok(calculationHeader.includes('Usage class') && calculationHeader.includes('Rate / cost') && calculationHeader.includes('Pricing'), 'grouped calculation headers describe the combined values honestly');
     const sourceTreeIndex = reportHtml.indexOf('Agent and source attribution');
     const pricingSourcesIndex = reportHtml.indexOf('Pricing sources');
     const pricingSourcesSection = reportHtml.slice(pricingSourcesIndex, reportHtml.indexOf('</article>', pricingSourcesIndex));

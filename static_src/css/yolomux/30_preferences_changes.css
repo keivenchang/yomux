@@ -870,6 +870,10 @@
 .js-debug-cost-table {
   min-inline-size: 100%;
 }
+.js-debug-cost-table th,
+.js-debug-cost-table td {
+  padding-inline: var(--space-5);
+}
 .js-debug-cost-unpriced-disclosure {
   margin-block-start: var(--space-5);
   border-block-start: 1px solid var(--line);
@@ -948,6 +952,72 @@
 .js-debug-cost-table-metric small {
   color: var(--muted);
 }
+.js-debug-cost-model-identity {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+.js-debug-cost-model-icon {
+  flex: none;
+  margin-block-start: var(--space-1);
+}
+.js-debug-cost-model-icon .agent-icon {
+  inline-size: 1.15em;
+  min-inline-size: 1.15em;
+  block-size: 1.15em;
+  margin: 0;
+  padding: 0;
+  vertical-align: 0;
+}
+.js-debug-cost-model-icon .agent-icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+.js-debug-cost-model-copy,
+.js-debug-cost-stacked-cell {
+  display: grid;
+  gap: var(--space-1);
+  min-inline-size: 0;
+}
+.js-debug-cost-model-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-inline-size: 0;
+}
+.js-debug-cost-model-meta .js-debug-cost-pricing-links {
+  flex: none;
+  margin-inline-start: 0;
+}
+.js-debug-cost-model-copy strong,
+.js-debug-cost-model-copy small,
+.js-debug-cost-stacked-cell strong,
+.js-debug-cost-stacked-cell small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-model-copy small,
+.js-debug-cost-stacked-cell small {
+  color: var(--muted);
+  font-weight: 500;
+}
+.js-debug-cost-table[data-js-debug-cost-table="model"] th:first-child {
+  inline-size: auto;
+  max-inline-size: 24ch;
+  white-space: normal;
+}
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(2),
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(3),
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(5),
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
+  text-align: start;
+}
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
+  white-space: normal;
+}
 .js-debug-cost-transcript-link {
   display: block;
   min-inline-size: 22ch;
@@ -1016,15 +1086,118 @@
   overflow: auto;
   overscroll-behavior: contain;
 }
-.js-yocost-data-age {
+.js-yocost-graphs {
+  container-type: inline-size;
+}
+.js-yocost-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-5);
   margin-block-end: var(--space-6);
   color: var(--muted);
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-yocost-controls > [data-js-yocost-data-age-label],
+.js-yocost-controls > .js-debug-resolution-label,
+.js-yocost-controls > button {
+  flex: none;
+}
+.js-yocost-controls > .js-debug-range-slider-control {
+  flex: 1 1 20ch;
+  max-inline-size: 40%;
+}
+.js-yocost-controls > button {
+  margin-inline-start: auto;
+}
+@container (max-width: 40rem) {
+  .js-yocost-controls > .js-debug-range-slider-control {
+    flex-basis: 100%;
+    max-inline-size: 100%;
+    order: 2;
+  }
+  .js-yocost-controls > .js-debug-resolution-label {
+    order: 3;
+  }
+  .js-yocost-controls > button {
+    order: 1;
+  }
+}
+@container (max-width: 40rem) {
+  .js-debug-cost-usage-table-section .js-debug-cost-table-wrap,
+  .js-debug-cost-details-section .js-debug-cost-component-table {
+    overflow-x: visible;
+  }
+  .js-debug-cost-usage-table-section .js-debug-cost-table,
+  .js-debug-cost-component-table,
+  .js-debug-cost-usage-table-section thead,
+  .js-debug-cost-usage-table-section tbody,
+  .js-debug-cost-usage-table-section tfoot,
+  .js-debug-cost-component-table thead,
+  .js-debug-cost-component-table tbody {
+    display: block;
+    inline-size: 100%;
+    min-inline-size: 0;
+  }
+  .js-debug-cost-usage-table-section thead {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .js-debug-cost-usage-table-section tbody,
+  .js-debug-cost-component-table tbody {
+    display: grid;
+    gap: var(--space-5);
+  }
+  .js-debug-cost-usage-table-section tbody tr,
+  .js-debug-cost-usage-table-section tfoot tr,
+  .js-debug-cost-component-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    inline-size: 100%;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
+  .js-debug-cost-usage-table-section tbody th,
+  .js-debug-cost-usage-table-section tfoot th {
+    grid-column: 1 / -1;
+    max-inline-size: none;
+  }
+  .js-debug-cost-usage-table-section th,
+  .js-debug-cost-usage-table-section td,
+  .js-debug-cost-component-table td {
+    inline-size: auto;
+    padding: var(--space-4);
+    border-block-end: 0;
+  }
+  .js-debug-cost-usage-table-section td,
+  .js-debug-cost-component-table td {
+    display: grid;
+    gap: var(--space-2);
+    min-inline-size: 0;
+    text-align: start;
+  }
+  .js-debug-cost-usage-table-section td::before,
+  .js-debug-cost-component-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+  }
+  .js-debug-cost-component-table thead tr {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-block-end: var(--space-5);
+  }
+  .js-debug-cost-component-table thead th {
+    display: block;
+    inline-size: auto;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
 }
 .js-debug-range-slider:disabled {
   cursor: not-allowed;
@@ -1045,6 +1218,7 @@
   line-height: 1.5;
 }
 .js-debug-cost-details-section {
+  container-type: inline-size;
   margin-top: var(--space-10);
 }
 .js-debug-cost-details-section h2 {
