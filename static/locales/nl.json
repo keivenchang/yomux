@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE-stroom",
   "debug.graph.metric.sse.desc": "SSE-samples tellen server-sent event-berichten die de browser per seconde ontvangt.",
   "debug.graph.movingAverage": "{label} {count}-steekproef voortschrijdend gemiddelde",
+  "debug.graph.resolution.loadFailed": "Resolutie {resolution} kon niet worden geladen — teruggezet naar de vorige.",
   "debug.graph.series.agentToken.desc": "Transcript-uitvoer-tokenrate voor agent {agent}.",
   "debug.graph.series.allAgentsTotal": "Alle agenten in totaal",
   "debug.graph.series.allAgentsTotal.desc": "Totale token- of activiteitsreeks opgeteld over alle bekende agents.",

@@ -275,6 +275,7 @@
   "debug.graph.control.bucketSize": "Graph bucket size",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Resolution: {resolution}",
+  "debug.graph.resolution.loadFailed": "Could not load {resolution} resolution — reverted to previous.",
   "debug.graph.control.size": "Size",
   "debug.graph.control.timeRange": "Range:",
   "debug.graph.control.zoom": "Zoom",

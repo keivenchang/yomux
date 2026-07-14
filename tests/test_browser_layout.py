@@ -2870,8 +2870,8 @@ def test_debug_stats_and_yocost_resolution_choices_follow_every_range(browser, t
           results.push({rangeSeconds, stats, cost});
         }
 
-        setDebugGraphRange(24 * 60 * 60, {render: false});
-        setDebugGraphResolutionOverride(600);
+        setDebugGraphRange(2 * 60 * 60, {render: false});
+        setDebugGraphResolutionOverride(300);
         const now = Date.now();
         debugGraphApplyServerHistory({sequence: 77, records: [{
           start: Math.floor((now - 600000) / 1000), duration: 600, sequence: 77, api_count: 1,
@@ -2886,16 +2886,18 @@ def test_debug_stats_and_yocost_resolution_choices_follow_every_range(browser, t
         return {results, stale: {stats: staleStats, cost: staleCost}};
         """
     )
+    # Universe is AUTO + 1/10/60/300 only, validity-filtered per range (>= retained tier,
+    # >= 10s once a range spans 30m+, and >= 10 rendered points). No 2/5/30/120/600s picks.
     expected = {
-        5 * 60: [0, 1, 2, 5, 10, 30],
-        15 * 60: [0, 1, 2, 5, 10, 30, 60],
-        30 * 60: [0, 10, 30, 60, 120],
-        60 * 60: [0, 10, 30, 60, 120, 300],
-        2 * 60 * 60: [0, 10, 30, 60, 120, 300, 600],
-        4 * 60 * 60: [0, 60, 120, 300, 600],
-        8 * 60 * 60: [0, 120, 300, 600],
-        16 * 60 * 60: [0, 600],
-        24 * 60 * 60: [0, 600],
+        5 * 60: [0, 1, 10],
+        15 * 60: [0, 1, 10, 60],
+        30 * 60: [0, 10, 60],
+        60 * 60: [0, 10, 60, 300],
+        2 * 60 * 60: [0, 10, 60, 300],
+        4 * 60 * 60: [0, 60, 300],
+        8 * 60 * 60: [0, 300],
+        16 * 60 * 60: [0],
+        24 * 60 * 60: [0],
     }
     assert [item["rangeSeconds"] for item in metrics["results"]] == list(expected), metrics
     for item in metrics["results"]:
@@ -2904,11 +2906,18 @@ def test_debug_stats_and_yocost_resolution_choices_follow_every_range(browser, t
             control = item[surface]
             assert control["choices"] == choices, (item, surface)
             assert control["selected"] in choices, (item, surface)
-            assert control["displayed"] in choices[1:], (item, surface)
+            # The AUTO effective resolution (label) is the honest retained value: always a
+            # positive number, and never finer than the finest explicit choice on offer.
+            assert control["displayed"] > 0, (item, surface)
+            if len(choices) > 1:
+                assert control["displayed"] >= choices[1], (item, surface)
+    # An out-of-range override (300s picked at 2h) must normalize into the narrower 30m
+    # menu instead of lingering as a phantom coarse option — it rounds down to 60s (the
+    # coarsest 30m choice), never retaining 300s or snapping silently to AUTO.
     for surface in ("stats", "cost"):
         control = metrics["stale"][surface]
         assert control["choices"] == expected[30 * 60], metrics
-        assert control["selected"] == 120, metrics
+        assert control["selected"] == 60, metrics
 
 
 def test_yocost_last_refreshed_uses_visibility_aware_randomized_cadence(browser, tmp_path):
@@ -4520,6 +4529,69 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
     assert metrics["source"]["path"] == metrics["transcript"], metrics
     assert metrics["source"]["middleParts"] == 2, metrics
     assert all(item["sourceCells"][0] > min(item["sourceCells"][1:]) for item in metrics["layouts"] if item["width"] >= 720), metrics
+
+
+def test_yocost_by_agent_cards_scroll_horizontally_at_extreme_narrow_instead_of_squishing(browser, tmp_path):
+    """Extreme-narrow last resort: below the two-column card floor the By Agent section
+    scrolls sideways (contained) rather than squishing/overlapping; normal-narrow reflows."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphCostTmuxBreakdownHtml === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const summary = {tmuxWindows: [
+          {tmux_label: 'orchestrator-worktree-alpha:codex-planning-window', token_quantity: 4200000, input_tokens: 120000, cache_tokens: 3900000, output_tokens: 180000, input_micro_usd: 1490000, cache_micro_usd: 10450000, output_micro_usd: 1520000, upper_micro_usd: 13460000},
+          {tmux_label: 'orchestrator-worktree-beta:claude-review-window', token_quantity: 2100000, input_tokens: 60000, cache_tokens: 1950000, output_tokens: 90000, input_micro_usd: 745000, cache_micro_usd: 5225000, output_micro_usd: 760000, upper_micro_usd: 6730000},
+        ]};
+        const fixture = document.createElement('div');
+        fixture.style.position = 'fixed';
+        fixture.style.inset = '0 auto auto 0';
+        fixture.style.zIndex = '99999';
+        fixture.style.background = 'var(--panel)';
+        fixture.innerHTML = `<section class="js-yocost-panel">${debugGraphCostTmuxBreakdownHtml(summary)}</section>`;
+        document.body.append(fixture);
+        const verticalSquish = root => {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const text = String(node.nodeValue || '').replace(/\\s+/g, ' ').trim();
+            const parent = node.parentElement;
+            if (text.length < 6 || !parent || parent.closest('script, style, svg, [hidden]')) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const tops = new Set([...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0).map(rect => Math.round(rect.top)));
+            if (tops.size >= 6 && Array.from(text).length / tops.size <= 2) return true;
+          }
+          return false;
+        };
+        const layouts = [];
+        for (const width of [260, 360]) {
+          fixture.style.width = `${width}px`;
+          const section = fixture.querySelector('.js-debug-cost-agent-usages');
+          const wrap = section.querySelector('.js-debug-cost-table-wrap');
+          layouts.push({
+            width,
+            overflowX: getComputedStyle(wrap).overflowX,
+            scrolls: wrap.scrollWidth > wrap.clientWidth + 1,
+            paneScrolls: fixture.scrollWidth > fixture.clientWidth + 1,
+            squishes: verticalSquish(section),
+          });
+        }
+        fixture.remove();
+        return {layouts};
+        """
+    )
+    narrow = {item["width"]: item for item in metrics["layouts"]}
+    # Extreme-narrow: contained horizontal scroll, never a squish, never a pane scrollbar.
+    assert narrow[260]["overflowX"] == "auto", metrics
+    assert narrow[260]["scrolls"] is True, metrics
+    assert narrow[260]["squishes"] is False, metrics
+    assert narrow[260]["paneScrolls"] is False, metrics
+    # Normal-narrow still reflows to cards with no horizontal scroll.
+    assert narrow[360]["scrolls"] is False, metrics
+    assert narrow[360]["squishes"] is False, metrics
 
 
 def test_debug_token_hover_reports_real_bucket_span_samples_and_gaps(browser, tmp_path):

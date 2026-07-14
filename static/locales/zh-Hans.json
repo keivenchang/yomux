@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "SSE 样本统计浏览器每秒收到的服务器发送事件消息数。",
   "debug.graph.movingAverage": "{label} 的 {count} 个样本移动平均",
+  "debug.graph.resolution.loadFailed": "无法加载 {resolution} 分辨率 — 已还原为上一个。",
   "debug.graph.series.agentToken.desc": "智能体 {agent} 的转录输出令牌速率。",
   "debug.graph.series.allAgentsTotal": "所有代理总计",
   "debug.graph.series.allAgentsTotal.desc": "对所有已知智能体求和的总令牌或活动序列。",

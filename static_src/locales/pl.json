@@ -285,6 +285,7 @@
   "debug.graph.control.bucketSize": "Rozmiar kubełka grafów",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Rozdzielczość: {resolution}",
+  "debug.graph.resolution.loadFailed": "Nie udało się wczytać rozdzielczości {resolution} — przywrócono poprzednią.",
   "debug.graph.control.size": "Rozmiar",
   "debug.graph.control.timeRange": "Zakres:",
   "debug.graph.control.zoom": "Powiększenie",

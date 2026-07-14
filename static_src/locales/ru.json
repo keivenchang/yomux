@@ -285,6 +285,7 @@
   "debug.graph.control.bucketSize": "Размер сегмента графика",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Разрешение: {resolution}",
+  "debug.graph.resolution.loadFailed": "Не удалось загрузить разрешение {resolution} — возврат к предыдущему.",
   "debug.graph.control.size": "Размер",
   "debug.graph.control.timeRange": "Диапазон:",
   "debug.graph.control.zoom": "Увеличить",

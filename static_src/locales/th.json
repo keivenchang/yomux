@@ -273,6 +273,7 @@
   "debug.graph.control.bucketSize": "ขนาดถังกราฟ",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "ความละเอียด: {resolution}",
+  "debug.graph.resolution.loadFailed": "ไม่สามารถโหลดความละเอียด {resolution} — กลับไปใช้ค่าเดิม",
   "debug.graph.control.size": "ขนาด",
   "debug.graph.control.timeRange": "ช่วง:",
   "debug.graph.control.zoom": "การลบ",

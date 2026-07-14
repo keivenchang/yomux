@@ -311,6 +311,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "Выборки SSE считают сообщения server-sent events, полученные браузером, в секунду.",
   "debug.graph.movingAverage": "{label} {count} — образец скользящего среднего",
+  "debug.graph.resolution.loadFailed": "Не удалось загрузить разрешение {resolution} — возврат к предыдущему.",
   "debug.graph.series.agentToken.desc": "Скорость выходных токенов транскрипта для агента {agent}.",
   "debug.graph.series.allAgentsTotal": "Все агенты всего",
   "debug.graph.series.allAgentsTotal.desc": "Общая серия токенов или активности, суммированная по всем известным агентам.",

@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE 스트림",
   "debug.graph.metric.sse.desc": "SSE 샘플은 브라우저가 받은 서버 전송 이벤트 메시지 수/초를 셉니다.",
   "debug.graph.movingAverage": "{label} {count}-표본 이동 평균",
+  "debug.graph.resolution.loadFailed": "{resolution} 해상도를 불러오지 못했습니다 — 이전으로 되돌렸습니다.",
   "debug.graph.series.agentToken.desc": "에이전트 {agent}의 transcript 출력 토큰 속도.",
   "debug.graph.series.allAgentsTotal": "모든 상담원 합계",
   "debug.graph.series.allAgentsTotal.desc": "알려진 모든 에이전트에서 합산한 토큰 또는 활동 시리즈.",

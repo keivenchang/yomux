@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "SSE 樣本統計瀏覽器每秒收到的伺服器傳送事件訊息數。",
   "debug.graph.movingAverage": "{label} 的 {count} 個樣本移動平均",
+  "debug.graph.resolution.loadFailed": "無法載入 {resolution} 解析度 — 已還原為上一個。",
   "debug.graph.series.agentToken.desc": "代理 {agent} 的轉錄輸出權杖速率。",
   "debug.graph.series.allAgentsTotal": "所有代理總計",
   "debug.graph.series.allAgentsTotal.desc": "對所有已知代理加總的總權杖或活動序列。",

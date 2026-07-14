@@ -279,6 +279,7 @@
   "debug.graph.control.bucketSize": "Tamanho do bucket do gráfico",
   "debug.graph.control.charts": "Charts",
   "debug.graph.control.resolution": "Resolução: {resolution}",
+  "debug.graph.resolution.loadFailed": "Não foi possível carregar a resolução {resolution} — revertido para a anterior.",
   "debug.graph.control.size": "Tamanho",
   "debug.graph.control.timeRange": "Intervalo:",
   "debug.graph.control.zoom": "Ampliação",
