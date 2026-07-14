@@ -35,14 +35,16 @@ def test_fresh_catalog_imports_packaged_seed_offline(tmp_path):
 
 def test_fresh_catalog_prices_current_models_with_provenance_and_effective_dates(tmp_path):
     catalog = PricingCatalog(tmp_path)
-    sol = catalog.resolve_rate(provider="openai", model="gpt-5.6-sol", direction="output", timestamp="2026-07-13T00:00:00Z")
-    terra = catalog.resolve_rate(provider="openai", model="gpt-5.6-terra", direction="input", timestamp="2026-07-13T00:00:00Z")
+    # Availability dates, not the seed's checked-at date, must price retained
+    # history from before this YOLOmux release.
+    sol = catalog.resolve_rate(provider="openai", model="gpt-5.6-sol", direction="output", timestamp="2026-07-11T00:00:00Z")
+    terra = catalog.resolve_rate(provider="openai", model="gpt-5.6-terra", direction="input", timestamp="2026-07-11T00:00:00Z")
     sonnet_now = catalog.resolve_rate(provider="anthropic", model="claude-sonnet-5", direction="output", timestamp="2026-08-31T23:59:59Z")
     sonnet_later = catalog.resolve_rate(provider="anthropic", model="claude-sonnet-5", direction="output", timestamp="2026-09-01T00:00:00Z")
-    fable = catalog.resolve_rate(provider="anthropic", model="claude-fable-5", direction="output", timestamp="2026-07-13T00:00:00Z")
+    fable = catalog.resolve_rate(provider="anthropic", model="claude-fable-5", direction="output", timestamp="2026-07-11T00:00:00Z")
 
     assert sol is not None and str(sol.usd) == "30.00" and sol.source_url.startswith("https://developers.openai.com/")
-    assert terra is not None and str(terra.usd) == "2.50" and terra.effective_from == "2026-07-13T00:00:00Z"
+    assert terra is not None and str(terra.usd) == "2.50" and terra.effective_from == "2026-07-09T00:00:00Z"
     assert sonnet_now is not None and str(sonnet_now.usd) == "10.00"
     assert sonnet_later is not None and str(sonnet_later.usd) == "15.00"
     assert fable is not None and str(fable.usd) == "50.00"
