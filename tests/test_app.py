@@ -11926,8 +11926,11 @@ def test_yoagent_chat_serializes_cli_backend_turns(monkeypatch):
             time.sleep(0.05)
             assert started_questions == ["first"]
             release_first.set()
-            first_payload, first_status = first.result(timeout=2)
-            second_payload, second_status = second.result(timeout=2)
+            # Full Mac gates run browser and stats lanes concurrently on a
+            # 10-core, memory-constrained host. Keep this synchronization
+            # bounded without mistaking scheduler delay for deadlock.
+            first_payload, first_status = first.result(timeout=10)
+            second_payload, second_status = second.result(timeout=10)
     finally:
         release_first.set()
         webapp.control_server.stop()

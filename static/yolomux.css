@@ -4965,7 +4965,7 @@ body :is(
   inset: 0;
   display: block;
   min-height: 100%;
-  z-index: 2;
+  z-index: var(--z-layer-control);
   padding: var(--space-12);
   color: var(--text);
   background: var(--inactive-pane-overlay);
@@ -4977,7 +4977,7 @@ body :is(
 .js-debug-history-overlay-message {
   position: sticky;
   top: 50%;
-  z-index: 1;
+  z-index: var(--z-layer-raised);
   display: flex;
   width: max-content;
   max-width: min(100%, 42rem);

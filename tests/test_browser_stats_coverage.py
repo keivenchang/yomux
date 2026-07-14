@@ -199,7 +199,9 @@ def _run_morning_after_range(browser, range_seconds):
           const graph = document.querySelector('[data-js-debug-graph]');
           const modelDimension = graph?.querySelector('[data-js-debug-model-token-dimension-select]');
           if (modelDimension) {
-            modelDimension.value = 'input';
+            // This fixture predates attributed input/cache atoms. Exercise the
+            // exact generated-output history that it actually contains.
+            modelDimension.value = 'output';
             modelDimension.dispatchEvent(new Event('change', {bubbles: true}));
           }
           setDebugGraphChartVisible('modelTokens', true);

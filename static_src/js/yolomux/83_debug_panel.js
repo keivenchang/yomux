@@ -2231,7 +2231,11 @@ function debugGraphAvailableResolutionChoices(domain = debugGraphDomain(), nowMs
   const retainedSeconds = Number.isFinite(domainStartMs)
     ? debugGraphBucketDurationForTime(domainStartMs, nowMs) / 1000
     : jsDebugGraphRawBucketMs / 1000;
-  return jsDebugGraphResolutionChoices.filter(value => value >= retainedSeconds && value * 10 <= rangeSeconds);
+  // A 30-minute-or-longer chart should not offer sub-10-second overrides:
+  // they create hundreds or thousands of mostly empty cells and resurrected
+  // the misleading coarse-boundary menu. Short live ranges retain 1/2/5s.
+  const friendlyMinimumSeconds = rangeSeconds >= 30 * 60 ? 10 : 1;
+  return jsDebugGraphResolutionChoices.filter(value => value >= Math.max(retainedSeconds, friendlyMinimumSeconds) && value * 10 <= rangeSeconds);
 }
 
 function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGraphDomain(), nowMs = Date.now()) {

@@ -2821,7 +2821,7 @@ def test_debug_stats_and_yocost_resolution_choices_follow_every_range(browser, t
     expected = {
         5 * 60: [0, 1, 2, 5, 10, 30],
         15 * 60: [0, 1, 2, 5, 10, 30, 60],
-        30 * 60: [0, 1, 2, 5, 10, 30, 60, 120],
+        30 * 60: [0, 10, 30, 60, 120],
         60 * 60: [0, 10, 30, 60, 120, 300],
         2 * 60 * 60: [0, 10, 30, 60, 120, 300, 600],
         4 * 60 * 60: [0, 60, 120, 300, 600],
@@ -4519,6 +4519,7 @@ def test_debug_token_dimension_switch_repaints_both_surfaces_from_cache_within_o
           const first = await switchAndRead('all');
           await switchAndRead('output');
           const repeated = await switchAndRead('all');
+          setDebugGraphModelTokenDimension('output');
           window.fetch = originalFetch;
           cost.remove();
           done({first, repeated, fetches, initialLoading});
