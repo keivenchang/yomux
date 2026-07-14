@@ -1234,6 +1234,7 @@ globalThis.__layoutTestApi = {
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
   debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
   debugGraphAvailableResolutionChoicesForTest: nowMs => debugGraphAvailableResolutionChoices(debugGraphDomain(nowMs), nowMs),
+  jsDebugGraphRangeOptionsForTest: () => jsDebugGraphRangeOptions.map(option => ({...option})),
   debugGraphResolutionOverrideForTest() { return jsDebugGraphResolutionOverrideSeconds; },
   debugGraphEventRecordsForTest() {
     return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
@@ -1257,6 +1258,14 @@ globalThis.__layoutTestApi = {
   debugGraphTokenAxisDescriptorForTest: nowMs => debugGraphTokenAxisDescriptor(debugGraphAgentTokenDisplayBuckets(nowMs)),
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
+  debugGraphPolylineSegmentCountForTest(values, times, hasDataValues, durations, noDataRanges) {
+    return debugGraphPolylinePointSegments(values, times, 100, {startMs: Math.min(...times) - 1000, endMs: Math.max(...times) + 1000}, hasDataValues, durations || [], 0, false, noDataRanges || null).length;
+  },
+  setJsDebugHistoryCoverageForTest(family, intervals, requestedIntervals) {
+    jsDebugHistoryReadiness.storeCoverageIntervals = jsDebugHistoryReadiness.storeCoverageIntervals || {};
+    jsDebugHistoryReadiness.storeCoverageIntervals[family] = (intervals || []).map(interval => ({startSeconds: interval[0], endSeconds: interval[1], resolutionSeconds: interval[2] || 1}));
+    jsDebugHistoryReadiness.requestCoverageIntervals = (requestedIntervals || []).map(interval => ({startSeconds: interval[0], endSeconds: interval[1], resolutionSeconds: interval[2] || 1}));
+  },
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
   debugGraphHistoryCoverageGapRunsForTest: debugGraphHistoryCoverageGapRuns,
   debugGraphHistoryCoverageGapRectsHtmlForTest: debugGraphHistoryCoverageGapRectsHtml,
@@ -1332,6 +1341,16 @@ globalThis.__layoutTestApi = {
     };
   },
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
+  prefetchJsDebugHistoryFullRetentionForTest: prefetchJsDebugHistoryFullRetention,
+  maybePrefetchJsDebugHistoryForTest: maybePrefetchJsDebugHistory,
+  jsDebugHistoryPrefetchStateForTest() {
+    return {
+      inFlight: jsDebugHistoryPrefetchState.inFlight,
+      didInitial: jsDebugHistoryPrefetchState.didInitial,
+      lastFullPrefetchAtMs: jsDebugHistoryPrefetchState.lastFullPrefetchAtMs,
+    };
+  },
+  setJsDebugStatsFirstSampleReceivedForTest(value) { jsDebugStatsPollState.firstSampleReceived = Boolean(value); },
   pollJsDebugClientHealthForTest: pollJsDebugClientHealth,
   jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
   recordJsDebugClientEventsConnectionStateForTest: recordJsDebugClientEventsConnectionState,

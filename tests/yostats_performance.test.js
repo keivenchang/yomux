@@ -3,13 +3,16 @@
 
 const {
   assert,
+  flushAsyncWork,
   fs,
+  jsonResponse,
   loadYolomux,
   runSuites,
   test,
+  testAsync,
 } = require('./layout_test_helper');
 
-function runYostatsPerformanceSuite() {
+async function runYostatsPerformanceSuite() {
   test('YO!stats holds sparse gauges for display without inventing samples or bridging outages', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000) * 1000;
@@ -287,6 +290,327 @@ function runYostatsPerformanceSuite() {
     }
     const sampleText = measuredMs.map(value => value.toFixed(1)).join(', ');
     assert.ok(medianMs < 300, `24-hour graph HTML median took ${medianMs.toFixed(1)}ms; samples=[${sampleText}]ms`);
+  });
+
+  test('host charts (Server Load, System memory, GPU) render at the 4h / 120s view when their data is present', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 120) * 120 * 1000;
+    const nowSec = now / 1000;
+    const records = [];
+    for (let t = nowSec - (4 * 3600); t <= nowSec; t += 120) {
+      records.push({
+        start: t, duration: 120, sequence: records.length + 1, cpu_total_percent: 20, cpu_count: 1,
+        host_metrics: {
+          system_memory_used_total_bytes: 48e9, system_memory_capacity_total_bytes: 64e9, system_memory_count: 1,
+          service_load: {
+            'web:8881': {label: 'web', cpu_total_percent: 15, cpu_samples: 12, rss_total_bytes: 2e8, rss_samples: 12},
+            idled: {label: 'idled', cpu_total_percent: 0, cpu_samples: 12, rss_total_bytes: 1e8, rss_samples: 12},
+          },
+          // Apple GPU: real memory + a genuine ZERO utilization with a sample count.
+          // Server semantics: *_total_* fields are SUMS across `samples` (client divides).
+          gpu_devices: {'gpu:0': {label: 'GPU 0 (Apple M4 Pro)', util_total_percent: 0, memory_used_total_bytes: 2.9e9 * 14, memory_capacity_total_bytes: 51.5e9 * 14, samples: 14}},
+        },
+      });
+    }
+    api.setDebugGraphRangeForTest(4 * 3600, {render: false});
+    for (const key of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']) api.setDebugGraphChartVisibleForTest(key, true);
+    api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
+    const html = api.debugGraphInnerHtmlForTest(now);
+    const series = api.debugGraphSeriesDataForTest(now);
+    const seriesFor = fragment => series.filter(item => item.key.includes(fragment) && item.displaySamples > 0);
+    // System memory: one continuous line (not an empty axis).
+    assert.equal((html.match(/data-js-debug-series="systemMemory"/g) || []).length, 1, 'System memory draws its line at 4h/120s');
+    // Server Load: both services present as drawn series (idle-zero counts as data).
+    assert.ok(seriesFor('serviceLoad:web:8881').length === 1, 'Server Load renders the active web service');
+    assert.ok(seriesFor('serviceLoad:idled').length === 1, 'a zero-CPU service is still real data');
+    // GPU: a zero-util device with samples is NOT "unavailable"; memory and util both render.
+    assert.equal(/data-js-debug-gpu-unavailable="gpuUtil"/.test(html), false, 'a zero-util GPU with samples is not shown as unavailable');
+    assert.equal(/data-js-debug-gpu-unavailable="gpuMemory"/.test(html), false, 'GPU memory with real data is not shown as unavailable');
+    assert.ok(seriesFor('gpu:gpuMemory:gpu:0').length === 1, 'GPU memory renders its device series');
+    const gpuMem = series.find(item => item.key === 'gpu:gpuMemory:gpu:0');
+    assert.ok(gpuMem.max > 2e9 && gpuMem.max < 4e9, `GPU memory divides the per-sample total (used ~2.9GB, got max=${gpuMem.max})`);
+  });
+
+  test('an unavailable GPU chart explains itself precisely, never the ambiguous generic "None"', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 60) * 60 * 1000;
+    const nowSec = now / 1000;
+    api.setDebugGraphRangeForTest(15 * 60, {render: false});
+    for (const key of ['gpuUtil', 'gpuMemory']) api.setDebugGraphChartVisibleForTest(key, true);
+    // Host with NO GPU telemetry anywhere: cpu-only history.
+    api.debugGraphApplyServerHistoryForTest({sequence: 60, records: Array.from({length: 60}, (_u, i) => ({start: nowSec - 900 + (i * 15), duration: 15, sequence: i + 1, cpu_total_percent: 20 * 15, cpu_count: 15}))});
+    let html = api.debugGraphInnerHtmlForTest(now);
+    assert.match(html, /data-js-debug-gpu-unavailable="gpuUtil"[^>]*>GPU telemetry is not available on this host</, 'a GPU-less host names the real reason');
+    assert.equal(html.includes('>None<'), false, 'the ambiguous generic None label is retired for GPU charts');
+    // Same cache but GPU samples exist OUTSIDE the current window (older span only).
+    api.debugGraphApplyServerHistoryForTest({sequence: 61, records: [{
+      start: nowSec - (2 * 3600), duration: 600, sequence: 61, cpu_total_percent: 20 * 600, cpu_count: 600,
+      host_metrics: {gpu_devices: {'gpu:0': {label: 'GPU 0', util_total_percent: 10, memory_used_total_bytes: 1e9, memory_capacity_total_bytes: 5e10, samples: 1}}},
+    }]});
+    html = api.debugGraphInnerHtmlForTest(now);
+    assert.match(html, /data-js-debug-gpu-unavailable="gpuUtil"[^>]*>No GPU samples in this time window</, 'window-scoped absence is distinguished from a GPU-less host');
+  });
+
+  test('INVARIANT SWEEP: every range x every resolution renders every family with data — never a silent empty chart', () => {
+    // The anti-regression guard for the whole YO!stats matrix. YO!stats regressions have
+    // repeatedly come from one (range x resolution x family) cell breaking while the cells
+    // that had point-tests stayed green. This sweep renders EVERY range option at AUTO plus
+    // EVERY offered resolution override over one realistic graduated-cadence 24h fixture and
+    // asserts the product rule: if a family has ANY data in the visible range it is DRAWN as
+    // one continuous stroke (coarser recording interpolates; it never blanks), and no chart
+    // is ever a silent axes-only shell. If a change blanks any cell, this fails the gate.
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 600) * 600 * 1000;
+    const nowSec = now / 1000;
+    const records = [];
+    const hostMetricsFor = durationSec => ({
+      system_memory_used_total_bytes: 48e9 * Math.max(1, durationSec / 60),
+      system_memory_capacity_total_bytes: 64e9 * Math.max(1, durationSec / 60),
+      system_memory_count: Math.max(1, durationSec / 60),
+      service_load: {
+        'web:8881': {label: 'web', cpu_total_percent: 12 * Math.max(1, durationSec / 10), cpu_samples: Math.max(1, durationSec / 10), rss_total_bytes: 2e8, rss_samples: Math.max(1, durationSec / 10)},
+        statsd: {label: 'statsd', cpu_total_percent: 0, cpu_samples: Math.max(1, durationSec / 10), rss_total_bytes: 1e8, rss_samples: Math.max(1, durationSec / 10)},
+      },
+      gpu_devices: {'gpu:0': {label: 'GPU 0 (Apple M4 Pro)', util_total_percent: 5 * Math.max(1, durationSec / 10), memory_used_total_bytes: 2.9e9 * Math.max(1, durationSec / 10), memory_capacity_total_bytes: 51.5e9 * Math.max(1, durationSec / 10), samples: Math.max(1, durationSec / 10)}},
+    });
+    // Graduated cadence matching the real retention tiers (newest last, ~2700 records).
+    const tiers = [
+      {fromAgo: 24 * 3600, toAgo: 12 * 3600, step: 600},
+      {fromAgo: 12 * 3600, toAgo: 8 * 3600, step: 300},
+      {fromAgo: 8 * 3600, toAgo: 4 * 3600, step: 120},
+      {fromAgo: 4 * 3600, toAgo: 2 * 3600, step: 60},
+      {fromAgo: 2 * 3600, toAgo: 30 * 60, step: 10},
+      {fromAgo: 30 * 60, toAgo: 0, step: 1},
+    ];
+    // The killer regression case (screenshots 006/007): an EMPTY-but-covered middle —
+    // fine data at both edges, no local buckets in between, and no recorded coverage gap
+    // (e.g. after a wide->narrow switch before the middle refetches). Every display over
+    // it must interpolate one continuous line across, never blank or split the stroke.
+    const coarseHoleStartAgo = 20 * 60;
+    const coarseHoleEndAgo = 10 * 60;
+    for (const tier of tiers) {
+      for (let t = nowSec - tier.fromAgo; t < nowSec - tier.toAgo; t += tier.step) {
+        const ago = nowSec - t;
+        if (ago <= coarseHoleStartAgo && ago > coarseHoleEndAgo) continue;
+        const record = {start: t, duration: tier.step, sequence: records.length + 1, cpu_total_percent: 20 * tier.step, cpu_count: tier.step, system_cpu_total_percent: 30 * tier.step, system_cpu_count: tier.step};
+        // Fine 1s buckets carry each family only at its real sampling cadence.
+        if (tier.step >= 10 || t % 10 === 0) {
+          const host = hostMetricsFor(tier.step);
+          if (tier.step < 60 && t % 60 !== 0) {
+            delete host.system_memory_used_total_bytes;
+            delete host.system_memory_capacity_total_bytes;
+            delete host.system_memory_count;
+          }
+          record.host_metrics = host;
+        }
+        records.push(record);
+      }
+    }
+    for (const key of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']) api.setDebugGraphChartVisibleForTest(key, true);
+    api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
+    const failures = [];
+    for (const range of api.jsDebugGraphRangeOptionsForTest()) {
+      api.setDebugGraphRangeForTest(range.seconds, {render: false});
+      const resolutions = [0, ...api.debugGraphAvailableResolutionChoicesForTest(now)];
+      for (const resolution of resolutions) {
+        api.setDebugGraphResolutionOverrideForTest(resolution);
+        const html = api.debugGraphInnerHtmlForTest(now);
+        const cell = `${range.label}@${resolution === 0 ? 'AUTO' : `${resolution}s`}`;
+        const lineCount = key => (html.match(new RegExp(`data-js-debug-series="${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g')) || []).length;
+        const check = (condition, what) => { if (!condition) failures.push(`${cell}: ${what}`); };
+        check(!html.includes('js-debug-graph--empty'), 'graph rendered as empty shell');
+        check(lineCount('systemCpu') === 1, `systemCpu drew ${lineCount('systemCpu')} segments (want 1 continuous)`);
+        check(lineCount('systemMemory') === 1, `systemMemory drew ${lineCount('systemMemory')} segments (want 1 continuous)`);
+        check(lineCount('serviceLoad:web:8881') === 1, 'Server Load web service line missing/broken');
+        check(lineCount('serviceLoad:statsd') === 1, 'a zero-CPU service line missing (zero is data)');
+        check(!/data-js-debug-gpu-unavailable=/.test(html), 'GPU chart claims unavailable despite data');
+        check(lineCount('gpu:gpuMemory:gpu:0') >= 1, 'GPU memory device line missing');
+      }
+    }
+    api.setDebugGraphResolutionOverrideForTest(0);
+    assert.deepEqual(failures, [], `invariant violations:\n${failures.join('\n')}`);
+  });
+
+  function seedShortCurrentView(api, nowSec) {
+    // Establish a ~1h current view with real buckets, like the first landed sample.
+    const shortStart = nowSec - 3600;
+    const records = Array.from({length: 60}, (_unused, index) => ({
+      start: shortStart + (index * 60), duration: 60, sequence: index + 1, cpu_total_percent: 10, cpu_count: 1,
+    }));
+    api.setDebugGraphRangeForTest(3600, {render: false});
+    api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
+    api.setJsDebugStatsFirstSampleReceivedForTest(true);
+  }
+
+  function fullRetentionHistory(nowSec) {
+    // A coarse 24h history covering every range, like the server's per-span tiers return.
+    const wideStart = nowSec - (24 * 3600);
+    const records = Array.from({length: 48}, (_unused, index) => ({
+      start: wideStart + (index * 1800), duration: 1800, sequence: index + 1, cpu_total_percent: 12, cpu_count: 1,
+    }));
+    return {
+      sequence: records.length,
+      records,
+      coverage: {
+        resolution_seconds: 600,
+        requested_start: wideStart,
+        requested_end: nowSec,
+        intervals: [{start: wideStart, end: nowSec, resolution_seconds: 600}],
+        store_intervals: {},
+      },
+    };
+  }
+
+  function wideViewReachMinutes(api, nowMs) {
+    api.setDebugGraphRangeForTest(24 * 3600, {render: false});
+    const buckets = api.debugGraphDisplayBucketsForTest(nowMs);
+    return buckets.length ? Math.round((nowMs - Math.min(...buckets.map(bucket => bucket.startMs))) / 60000) : 0;
+  }
+
+  await testAsync('YO!stats full-retention prefetch silently fills the cache so a wide range renders stale without touching readiness', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const nowMs = nowSec * 1000;
+    seedShortCurrentView(api, nowSec);
+
+    // Before prefetch: switching to 24h only reaches back over the ~1h that is cached.
+    const wideBeforeMin = wideViewReachMinutes(api, nowMs);
+    api.setDebugGraphRangeForTest(3600, {render: false});
+    const readinessBefore = api.jsDebugHistoryReadinessForTest();
+
+    let requests = 0;
+    let requestUrl = null;
+    api.setFetchForTest((url) => {
+      if (String(url).includes('/api/stats-sample')) {
+        requests += 1;
+        requestUrl = String(url);
+        return Promise.resolve(jsonResponse({
+          ok: true, time: nowSec, pid: 1, uptime_seconds: 10, cpu_percent: 12, rss_bytes: 1e8,
+          history: fullRetentionHistory(nowSec),
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const ok = await api.prefetchJsDebugHistoryFullRetentionForTest();
+    await flushAsyncWork();
+
+    assert.equal(ok, true, 'prefetch resolves true after applying the full-retention response');
+    assert.equal(requests, 1, 'prefetch issues exactly one stats-sample request');
+    const historyStart = Number(new URL(requestUrl, 'https://local').searchParams.get('history_start'));
+    const historyEnd = Number(new URL(requestUrl, 'https://local').searchParams.get('history_end'));
+    assert.equal(historyEnd, 0, 'prefetch requests through the live edge (history_end=0)');
+    assert.ok(nowSec - historyStart >= 23 * 3600, `prefetch spans the full retention window (got ${nowSec - historyStart}s)`);
+
+    // Silent: the current view's readiness phase and generation are untouched.
+    const readinessAfter = api.jsDebugHistoryReadinessForTest();
+    assert.equal(readinessAfter.phase, readinessBefore.phase, 'prefetch does not change the readiness phase');
+    assert.equal(readinessAfter.generation, readinessBefore.generation, 'prefetch does not bump the readiness generation');
+
+    // Cache-fill: the 24h view now renders back ~full retention from cache, no poll.
+    const wideAfterMin = wideViewReachMinutes(api, nowMs);
+    assert.ok(wideBeforeMin <= 120, `before prefetch the 24h view only reached ~1h (got ${wideBeforeMin}m)`);
+    assert.ok(wideAfterMin >= 20 * 60, `after prefetch the 24h view reaches ~full retention (got ${wideAfterMin}m)`);
+  });
+
+  test('graph line stays continuous across a covered coarse span and breaks only at a genuine no-data range', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const t0 = 1_000_000_000_000;
+    // Two data clusters ~280s apart at 10s cadence (a covered-but-coarse span between them).
+    const times = [t0, t0 + 10000, t0 + 20000, t0 + 300000, t0 + 310000];
+    const values = [10, 12, 11, 20, 21];
+    const has = [true, true, true, true, true];
+    const durs = [10000, 10000, 10000, 10000, 10000];
+    assert.equal(
+      api.debugGraphPolylineSegmentCountForTest(values, times, has, durs, []),
+      1, 'no genuine gap => one continuous (interpolated) line across the coarse span');
+    const genuineGap = [{startMs: t0 + 30000, endMs: t0 + 295000}];
+    assert.equal(
+      api.debugGraphPolylineSegmentCountForTest(values, times, has, durs, genuineGap),
+      2, 'a real recorded hole between the clusters breaks the line honestly');
+  });
+
+  test('CPU renders one continuous line across an empty-but-covered middle (wide->narrow), and breaks at a real coverage gap', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    const nowSec = now / 1000;
+    const records = [];
+    for (let t = nowSec - 900; t < nowSec - 720; t += 1) records.push({start: t, duration: 1, sequence: records.length + 1, system_cpu_total_percent: 30, system_cpu_count: 1, cpu_total_percent: 40, cpu_count: 1});
+    for (let t = nowSec - 180; t <= nowSec; t += 1) records.push({start: t, duration: 1, sequence: records.length + 1, system_cpu_total_percent: 33, system_cpu_count: 1, cpu_total_percent: 45, cpu_count: 1});
+    api.setDebugGraphRangeForTest(900, {render: false});
+    api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
+
+    // No coverage info: the empty middle is treated as covered -> ONE continuous line.
+    let html = api.debugGraphInnerHtmlForTest(now);
+    assert.equal((html.match(/data-js-debug-series="systemCpu"/g) || []).length, 1, 'empty-but-covered middle draws one continuous CPU line');
+
+    // A genuine coverage gap over the middle -> the line breaks and a red no-data band paints.
+    api.setJsDebugHistoryCoverageForTest(
+      'cpu',
+      [[nowSec - 900, nowSec - 700], [nowSec - 170, nowSec]],
+      [[nowSec - 900, nowSec]],
+    );
+    html = api.debugGraphInnerHtmlForTest(now);
+    assert.equal((html.match(/data-js-debug-series="systemCpu"/g) || []).length, 2, 'a real coverage gap breaks the CPU line into two honest segments');
+    assert.ok((html.match(/data-js-debug-history-coverage-family="cpu"/g) || []).length >= 1, 'the real gap still paints a red no-data band');
+  });
+
+  test('Sparse 60s System-memory gauge draws one continuous line across the covered range and splits at a real gap', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    const nowSec = now / 1000;
+    const records = [];
+    // Memory sampled once per 60s over 15m (sparse gauge), plus dense cpu so the chart renders.
+    // No samples inside the 600s..300s window (a real recorded hole has no data).
+    for (let t = nowSec - 900; t <= nowSec; t += 1) {
+      const rec = {start: t, duration: 1, sequence: records.length + 1, cpu_total_percent: 20, cpu_count: 1};
+      if (t % 60 === 0 && !(t > nowSec - 600 && t < nowSec - 300)) rec.host_metrics = {system_memory_used_total_bytes: 48e9, system_memory_capacity_total_bytes: 64e9, system_memory_count: 1};
+      records.push(rec);
+    }
+    api.setDebugGraphRangeForTest(900, {render: false});
+    api.setDebugGraphChartVisibleForTest('memory', true);
+    api.debugGraphApplyServerHistoryForTest({sequence: records.length, records});
+    const memorySection = () => api.debugGraphInnerHtmlForTest(now).match(/<section[^>]*data-js-debug-chart="memory"[\s\S]*?<\/section>/)?.[0] || '';
+    const memoryLines = () => (memorySection().match(/data-js-debug-series="systemMemory"/g) || []).length;
+    // Sparse samples span the covered edges; the once-per-60s gaps interpolate into one line.
+    assert.equal(memoryLines(), 1, 'a once-per-60s gauge draws one continuous line across the covered range');
+    api.setJsDebugHistoryCoverageForTest(
+      'system_memory',
+      [[nowSec - 900, nowSec - 600], [nowSec - 300, nowSec]],
+      [[nowSec - 900, nowSec]],
+    );
+    assert.equal(memoryLines(), 2, 'a real recorded hole splits the memory line into two honest segments (held value never leaks in)');
+  });
+
+  await testAsync('YO!stats prefetch cadence: waits for the first sample, fires once, then throttles', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const nowSec = Math.floor(Date.now() / 1000);
+    let requests = 0;
+    api.setFetchForTest((url) => {
+      if (String(url).includes('/api/stats-sample')) requests += 1;
+      return Promise.resolve(jsonResponse({
+        ok: true, time: nowSec, pid: 1, uptime_seconds: 10, cpu_percent: 12, rss_bytes: 1e8,
+        history: fullRetentionHistory(nowSec),
+      }));
+    });
+
+    // Before the first sample lands, the cadence gate does nothing.
+    api.maybePrefetchJsDebugHistoryForTest();
+    await flushAsyncWork();
+    assert.equal(requests, 0, 'no prefetch before the first sample is received');
+    assert.equal(api.jsDebugHistoryPrefetchStateForTest().didInitial, false, 'didInitial stays false pre-first-sample');
+
+    // After the first sample, the initial prefetch fires exactly once.
+    api.setJsDebugStatsFirstSampleReceivedForTest(true);
+    api.maybePrefetchJsDebugHistoryForTest();
+    await flushAsyncWork();
+    assert.equal(requests, 1, 'the first armed cadence tick fires the initial prefetch');
+    assert.equal(api.jsDebugHistoryPrefetchStateForTest().didInitial, true, 'didInitial latches after the initial prefetch');
+
+    // A subsequent immediate tick is throttled by the several-minute cadence.
+    api.maybePrefetchJsDebugHistoryForTest();
+    await flushAsyncWork();
+    assert.equal(requests, 1, 'an immediate second tick is throttled, not a per-tick refetch');
   });
 }
 

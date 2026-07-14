@@ -5530,7 +5530,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     );
   });
 
-  test('YO!stats CPU keeps genuine sampling gaps while preserving zero-valued samples', () => {
+  test('YO!stats CPU draws one continuous line across a covered span and breaks only at a real coverage gap', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000 / 5) * 5;
     api.clearJsDebugEventsForTest();
@@ -5538,14 +5538,20 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.debugGraphApplyServerHistoryForTest({sequence: 3, records: [
       {start: now - 50, duration: 5, sequence: 1, system_cpu_total_percent: 0, system_cpu_count: 1},
       {start: now - 45, duration: 5, sequence: 2, system_cpu_total_percent: 20, system_cpu_count: 1},
-      // 40s..25s are genuinely unsampled: do not carry the 20% value forward.
+      // 40s..25s carry no sample: with no recorded coverage gap the line
+      // interpolates across the span (the user always sees a continuous line).
       {start: now - 25, duration: 5, sequence: 3, system_cpu_total_percent: 40, system_cpu_count: 1},
     ]});
-    const cpu = api.debugPanelHtmlForTest().match(/<section[^>]*data-js-debug-chart="cpu"[\s\S]*?<\/section>/)?.[0] || '';
-    assert.equal((cpu.match(/data-js-debug-series="systemCpu"/g) || []).length, 2, 'a true CPU sampling gap splits the line instead of interpolating it');
-    assert.equal(cpu.includes('data-js-debug-agent-status-no-data-range='), false, 'CPU gaps never reuse the Agent-status red sampler overlay');
+    const cpuHtml = () => api.debugPanelHtmlForTest().match(/<section[^>]*data-js-debug-chart="cpu"[\s\S]*?<\/section>/)?.[0] || '';
+    assert.equal((cpuHtml().match(/data-js-debug-series="systemCpu"/g) || []).length, 1, 'a covered-but-unsampled span interpolates into one continuous line');
     const systemCpu = api.debugGraphSeriesDataForTest(now * 1000).find(series => series.key === 'systemCpu');
     assert.ok(systemCpu.hasDataValues.includes(true) && systemCpu.values.includes(0), 'a sampled zero remains data, distinct from an unsampled gap');
+    // A genuinely recorded coverage hole over 40s..25s is honest: the line breaks
+    // there and a red no-data band paints, never the Agent-status sampler overlay.
+    api.setJsDebugHistoryCoverageForTest('cpu', [[now - 55, now - 40], [now - 25, now - 20]], [[now - 55, now - 20]]);
+    const cpu = cpuHtml();
+    assert.equal((cpu.match(/data-js-debug-series="systemCpu"/g) || []).length, 2, 'a real coverage gap splits the CPU line honestly');
+    assert.equal(cpu.includes('data-js-debug-agent-status-no-data-range='), false, 'CPU gaps never reuse the Agent-status red sampler overlay');
   });
 
   test('YO!stats Cost summary is a compact non-chart card that opens YO!cost', () => {
@@ -5675,13 +5681,61 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(pricingSourcesSection.includes('javascript:alert'), false, 'unsafe component source URLs are filtered from the consolidated pricing sources list');
     const costSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(costSource.includes('data-js-debug-cost-refresh') && costSource.includes("/api/pricing-catalog/refresh") && costSource.includes("/api/pricing-catalog', {cache: 'no-store'}") && costSource.includes('readOnlyMode ? \'\'') && costSource.includes('} catch (error) {\n    jsDebugPricingRefreshState.inFlight = false;'), 'the card exposes the server-owned Refresh control only to writable/admin sessions, polls its bounded status, clears a failed request state, and never crawls from the browser');
-    assert.ok(reportHtml.includes('Catalog revision') && reportHtml.includes('>9<') && reportHtml.includes('Catalog freshness') && reportHtml.includes('seed-only') && reportHtml.includes('Priced coverage') && reportHtml.includes('>4/4<') && reportHtml.includes('data-js-debug-cost-table="calculation"') && reportHtml.includes('23.5k tokens') && reportHtml.includes('2026-07-01T00:00:00Z') && reportHtml.includes('Unpriced exclusions') && reportHtml.includes('Estimated API list-price range $0.2560 – $0.3300') && reportHtml.includes('href="https://platform.openai.com/pricing"') && reportHtml.includes('>openai · gpt-5.6-terra<') && reportHtml.includes('data-js-debug-cost-table="source"') && reportHtml.includes('data-js-debug-cost-table="catalog"'), 'the report discloses active catalog state, safe pricing links, by-agent arithmetic, and source attribution in shared tables');
+    // Catalog facts collapsed to one compact status line (rev / freshness / coverage /
+    // unpriced); every fact stays present and the full localized names ride the line's
+    // accessible label. The four-row catalog table is retired.
+    const catalogLine = reportHtml.match(/<p class="js-debug-cost-catalog-line"[^>]*data-js-debug-cost-catalog[^>]*>[\s\S]*?<\/p>/)?.[0] || '';
+    assert.ok(catalogLine.includes('rev 9') && catalogLine.includes('seed-only') && catalogLine.includes('4/4') && catalogLine.includes('unpriced 0'), `the compact catalog line keeps revision, freshness, coverage, and unpriced facts (got: ${catalogLine.slice(0, 200)})`);
+    assert.ok(catalogLine.includes('Catalog revision') && catalogLine.includes('Priced coverage') && catalogLine.includes('Unpriced exclusions'), 'the full localized fact names stay reachable through the accessible label');
+    assert.equal(reportHtml.includes('data-js-debug-cost-table="catalog"'), false, 'the four-row catalog table is retired');
+    assert.ok(reportHtml.includes('data-js-debug-cost-table="calculation"') && reportHtml.includes('23.5k tokens') && reportHtml.includes('2026-07-01T00:00:00Z') && reportHtml.includes('Estimated API list-price range $0.2560 – $0.3300') && reportHtml.includes('href="https://platform.openai.com/pricing"') && reportHtml.includes('>openai · gpt-5.6-terra<') && reportHtml.includes('data-js-debug-cost-table="source"'), 'the report discloses safe pricing links, by-agent arithmetic, and source attribution in shared tables');
     const tmuxSection = reportHtml.slice(reportHtml.indexOf('By Agent'), reportHtml.indexOf('Model Usages'));
     assert.equal((tmuxSection.match(/>s:build</g) || []).length, 1, 'parent and subagent costs under one tmux window render as one combined tmux row');
     assert.ok(tmuxSection.includes('data-js-debug-cost-table="agent"') && tmuxSection.includes('23.5k tokens') && tmuxSection.includes('125k tokens') && tmuxSection.includes('3.7k tokens') && tmuxSection.includes('$0.2560 – $0.3300') && tmuxSection.includes('Grand total'), 'agent row and grand total pair class counts/costs and equal parent plus subagent once');
     assert.ok((reportHtml.match(/data-js-debug-cost-table=/g) || []).length >= 5, 'the Cost report renders every section in a shared table shell without former list/tree caps');
 
     assert.ok(costSource.includes("debugGraphCostRangeUsdText(summary)") && costSource.includes("debug.cost.range") && costSource.includes("'est. —, Σ displayed'"), 'an interval with no priceable component is distinctly unestimated while incomplete priced ranges render as low-high estimates');
+  });
+
+  test('YO!cost report is compact: one heading+range line, one totals line, explained columns, content-sized tables', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const summary = {
+      totalMicroUsd: 2130000, knownMicroUsd: 2130000, lowerMicroUsd: 2130000, upperMicroUsd: 2130000,
+      pricedCount: 3, unpricedCount: 0, complete: true, catalogRevision: 7, freshness: 'seed-only',
+      components: [
+        {provider: 'openai', model: 'gpt-x', direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 9_800_000, micro_usd: 1000000, priced: true},
+        {provider: 'openai', model: 'gpt-x', direction: 'input', modality: 'text', cache_role: 'read', unit: 'tokens', quantity: 1_900_000, micro_usd: 130000, priced: true},
+        {provider: 'openai', model: 'gpt-x', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 400_000, micro_usd: 1000000, priced: true},
+      ],
+      models: [{provider: 'openai', model: 'gpt-x', token_quantity: 12_100_000, input_tokens: 9_800_000, input_micro_usd: 1000000, micro_usd: 2130000}],
+      sources: [], agents: [],
+    };
+    const reportHtml = api.debugGraphCostReportHtmlForTest(summary, {startMs: now - 3600000, endMs: now});
+    // One heading line: the range rides inside the title row; the old full-width range paragraph is gone.
+    const titleRow = reportHtml.match(/<div class="js-debug-cost-report-title">[\s\S]*?<\/div>/)?.[0] || '';
+    assert.ok(titleRow.includes('<h1>') && titleRow.includes('js-debug-cost-report-range'), 'the date range renders beside the report title in one heading row');
+    assert.equal(reportHtml.includes('<p class="meta-muted">'), false, 'the separate full-width range paragraph is retired');
+    // One compact totals line replacing the Summary heading + nested list; exact values stay accessible.
+    const totalsLine = reportHtml.match(/<p class="js-debug-cost-report-totals"[^>]*>([\s\S]*?)<\/p>/);
+    assert.ok(totalsLine, 'the report renders the single compact totals line');
+    assert.ok(/total tokens: .*\(input=.*cache=.*output=.*\)/.test(totalsLine[1]), `totals line carries the token breakdown (got: ${totalsLine[1].slice(0, 140)})`);
+    assert.equal(/other=/.test(totalsLine[1]), false, 'other= is omitted from the compact line when it is zero');
+    assert.match(reportHtml, /data-js-debug-cost-report-totals aria-label="[^"]*9,800,000[^"]*"/, 'exact token counts remain reachable through the accessible label');
+    assert.equal(reportHtml.includes('js-debug-cost-report-list'), false, 'the old Summary bullets/nested list are retired');
+    // Unchanged visible column labels, each explained through the one description owner (title + aria).
+    const modelTable = reportHtml.slice(reportHtml.indexOf('Model Usages'));
+    for (const [label, phrase] of [['Input', 'Newly processed prompt/context tokens'], ['Cached', 'cache READS (hits/refreshes) and cache WRITES'], ['Output', 'Model-generated tokens'], ['Other', 'fits none of Input / Cached / Output'], ['Total', 'counted in exactly one column']]) {
+      assert.ok(modelTable.includes(`</i>${label}</th>`) || modelTable.includes(`>${label}</th>`), `the visible ${label} column label is unchanged`);
+      assert.ok(modelTable.includes(phrase), `${label} column help explains: ${phrase}`);
+    }
+    assert.ok((modelTable.match(/data-js-debug-cost-column-desc="[^"]+"[^>]*>/g) || []).length >= 5 || (modelTable.match(/data-js-debug-cost-column-desc/g) || []).length >= 5, 'all five columns route through the shared explained-header owner');
+    // Cached explanation names the implemented projection (read + write, non-double-counted).
+    assert.ok(reportHtml.includes('not stored cache size or GPU cache occupancy'), 'Cached help distinguishes billing accounting from stored/KV cache size');
+    // Content-sized tables: the shared sizing parent drops the full-width stretch for usage tables.
+    const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.match(css, /\.js-debug-cost-usage-table-section \.js-debug-cost-table \{\n  inline-size: max-content;\n  max-inline-size: 100%;\n  min-inline-size: auto;/, 'usage tables are content-sized through one shared sizing parent');
+    assert.equal(/data-js-debug-cost-table="agent"\][\s\S]{0,200}table-layout: fixed/.test(css), false, 'the stretched fixed shared percent template is retired');
   });
 
   test('YO!stats 24-hour displayed cost range reconciles unknown components exactly once', () => {

@@ -102,7 +102,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
 
 def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -267,7 +267,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
 
 def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -878,7 +878,7 @@ def test_editor_opens_jsonl_table_preview_by_default_and_keeps_raw_edit(browser,
 def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_path):
     browser.set_window_size(1200, 900)
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
-    mermaid_uri = (REPO_ROOT / "static" / "vendor" / "mermaid.min.js").as_uri()
+    mermaid_uri = fixture_asset_url("static", "vendor", "mermaid.min.js")
     mermaid_source = (REPO_ROOT / "docs" / "preview-samples" / "14-mermaid.mmd").read_text(encoding="utf-8")
     assert "flowchart TD" in mermaid_source
     assert "direction LR" in mermaid_source
@@ -3732,7 +3732,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
 
 def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -3851,7 +3851,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
 
 def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -3952,7 +3952,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
 
 def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -4054,7 +4054,7 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
 
 def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     bootstrap = json.dumps(
         {
             "sessions": [],

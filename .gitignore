@@ -12,3 +12,6 @@ DOIT*.md
 # Machine-local Selenium golden baselines and failure diffs. Refresh with
 # YOLOMUX_UPDATE_GOLDENS=1; screenshots are intentionally never source.
 .yolomux-test-goldens/
+
+# Transient browser test fixture pages served from repo root (Chrome 150 HTTP fixtures)
+.browser-fixture-*

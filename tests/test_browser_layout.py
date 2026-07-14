@@ -133,8 +133,8 @@ def test_live_runtime_raw_html_builder_has_no_external_callers():
 def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     source = (REPO_ROOT / "tests" / "browser_helpers" / "browser_layout.py").read_text(encoding="utf-8")
 
-    assert source.count("page.write_text(") == 2  # one static helper plus the distinct full-bundle loader
-    assert source.count("browser.get(page.as_uri())") == 1
+    assert source.count("page.write_text(") == 1  # the single serve_repo_fixture_page write owner
+    assert source.count("serve_repo_fixture_page(") == 3  # one definition plus the two fixture loaders
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
@@ -1870,14 +1870,15 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
 @pytest.mark.boot
 def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
     selected_path = "/home/test/project/state.txt"
-    source_bundle = tmp_path / "yolomux-source.js"
-    source_bundle.write_text(build_asset("yolomux.js"), encoding="utf-8")
+    # Serve the custom bundle over the same http origin as the fixture page; Chrome 150
+    # blocks an http page from loading a file:// subresource.
+    source_bundle = serve_repo_fixture_page("yolomux-source.js", build_asset("yolomux.js"))
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
         "?debug=1&sessions=files,1,debug",
         sessions=["1"],
-        runtime_script_uri=source_bundle.as_uri(),
+        runtime_script_uri=fixture_page_url(source_bundle),
         file_explorer_open_intent="1",
         fs_entries={
             "/home/test": [{"name": "project", "path": "/home/test/project", "kind": "dir"}],
@@ -4578,6 +4579,13 @@ def test_yocost_tables_are_plain_ruled_aligned_and_source_is_single_line(browser
           const src = panel.querySelector('[data-js-debug-cost-table="source"]');
           const srcRow = src?.querySelector('tbody tr');
           const srcLink = src?.querySelector('.js-debug-cost-transcript-link');
+          const agentTable = panel.querySelector('[data-js-debug-cost-table="agent"]');
+          const agentWrap = agentTable?.closest('.js-debug-cost-table-wrap');
+          const titleRow = panel.querySelector('.js-debug-cost-report-title');
+          const titleH1 = titleRow?.querySelector('h1');
+          const rangeSpan = titleRow?.querySelector('.js-debug-cost-report-range');
+          const totalsLine = panel.querySelector('[data-js-debug-cost-report-totals]');
+          const catalogLine = panel.querySelector('[data-js-debug-cost-catalog]');
           done({
             agentCols: headerX('[data-js-debug-cost-table="agent"]'),
             modelCols: headerX('[data-js-debug-cost-table="model"]'),
@@ -4585,19 +4593,34 @@ def test_yocost_tables_are_plain_ruled_aligned_and_source_is_single_line(browser
             sourceRowHeight: srcRow ? Math.round(srcRow.getBoundingClientRect().height) : null,
             sourceMiddleParts: srcLink ? srcLink.querySelectorAll('[data-middle-truncate-part]').length : 0,
             sourceHasTitle: Boolean(srcLink?.title),
+            agentTableWidth: agentTable ? Math.round(agentTable.getBoundingClientRect().width) : null,
+            agentWrapWidth: agentWrap ? Math.round(agentWrap.getBoundingClientRect().width) : null,
+            titleOneLine: Boolean(titleH1 && rangeSpan) && Math.abs(titleH1.getBoundingClientRect().top - rangeSpan.getBoundingClientRect().top) < titleH1.getBoundingClientRect().height,
+            totalsLineText: totalsLine ? totalsLine.textContent : null,
+            catalogLineText: catalogLine ? catalogLine.textContent : null,
+            catalogTableRetired: !panel.querySelector('[data-js-debug-cost-table="catalog"]'),
+            summaryListRetired: !panel.querySelector('.js-debug-cost-report-list'),
           });
         })().catch(error => done({error: String(error?.stack || error)}));
         """
     )
     assert not metrics.get("error"), metrics
-    # By Agent and Model Usages share one column template -> columns line up.
+    # Each usage table keeps its matching six columns; the retired cross-table
+    # stretched template no longer forces the two tables to share one full width.
     assert metrics["agentCols"] and len(metrics["agentCols"]) == len(metrics["modelCols"]) == 6, metrics
-    assert all(abs(a - m) <= 1 for a, m in zip(metrics["agentCols"], metrics["modelCols"])), metrics
     # Plain ruled table: gridlines on BOTH axes.
     assert metrics["borderBottom"] == "1px" and metrics["borderRight"] == "1px", metrics
     # Source path stays a single-line row and middle-truncates with a full-path title.
     assert metrics["sourceRowHeight"] is not None and metrics["sourceRowHeight"] <= 48, metrics
     assert metrics["sourceMiddleParts"] == 2 and metrics["sourceHasTitle"] is True, metrics
+    # Compact report contract: content-sized tables (short content stays narrower than
+    # the wide container), one heading+range line, one totals line, one catalog line.
+    assert metrics["agentTableWidth"] and metrics["agentWrapWidth"], metrics
+    assert metrics["agentTableWidth"] < metrics["agentWrapWidth"] - 40, metrics  # content-sized, not stretched
+    assert metrics["titleOneLine"] is True, metrics
+    assert metrics["totalsLineText"] and "total tokens" in metrics["totalsLineText"] and "input=" in metrics["totalsLineText"], metrics
+    assert metrics["catalogLineText"] and "rev" in metrics["catalogLineText"] and "coverage" in metrics["catalogLineText"], metrics
+    assert metrics["catalogTableRetired"] is True and metrics["summaryListRetired"] is True, metrics
 
 
 def test_yocost_by_agent_cards_scroll_horizontally_at_extreme_narrow_instead_of_squishing(browser, tmp_path):
@@ -5265,7 +5288,9 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
     assert len(metrics["outages"]) == 2 and all(item["width"] > 0 for item in metrics["outages"]), metrics
     assert all("sample" in item["title"].lower() for item in metrics["outages"]), metrics
     assert metrics["transitionBoundary"] > metrics["working"][-1]["x"], metrics
-    assert metrics["cpuSegments"] == 2 and metrics["cpuHasStatusOverlay"] is False, metrics
+    # A covered-but-unsampled CPU span now interpolates into ONE continuous line (no
+    # recorded coverage gap), and CPU never reuses the Agent-status sampler overlay.
+    assert metrics["cpuSegments"] == 1 and metrics["cpuHasStatusOverlay"] is False, metrics
 
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
@@ -19018,7 +19043,7 @@ def test_light_editor_image_backdrop_is_light(browser, tmp_path):
 
 def codemirror_search_panel_fixture_html():
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     return f"""
     <!doctype html>
     <html>

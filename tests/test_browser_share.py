@@ -49,9 +49,13 @@ def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
 
 
 def test_share_mirror_root_transform_and_bundled_fonts_render_in_browser(browser, tmp_path):
-    shutil.copyfile(REPO_ROOT / "static" / "fonts" / "yolomux-ui.woff2", tmp_path / "yolomux-ui.woff2")
-    shutil.copyfile(REPO_ROOT / "static" / "fonts" / "yolomux-mono.woff2", tmp_path / "yolomux-mono.woff2")
-    css = app_css().replace("/static/fonts/yolomux-ui.woff2", "yolomux-ui.woff2").replace("/static/fonts/yolomux-mono.woff2", "yolomux-mono.woff2")
+    # Serve the real bundled fonts over the fixture http origin (the fixture page is now
+    # served from REPO_ROOT, so a tmp_path-relative font url would 404 on Chrome 150).
+    css = app_css().replace(
+        "/static/fonts/yolomux-ui.woff2", fixture_asset_url("static", "fonts", "yolomux-ui.woff2")
+    ).replace(
+        "/static/fonts/yolomux-mono.woff2", fixture_asset_url("static", "fonts", "yolomux-mono.woff2")
+    )
     page = tmp_path / "share-mirror-root-fonts.html"
     load_static_html_fixture(
         browser,
@@ -480,7 +484,7 @@ def test_share_modal_long_active_list_scrolls_inside_dialog(browser, tmp_path):
 
 def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -721,7 +725,7 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
 
 def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     alpha_graph = fixture_work_graph("alpha", "/repo/client-alpha", branch="local-alpha")
     beta_graph = fixture_work_graph("beta", "/repo/client-beta", branch="local-beta")
@@ -827,7 +831,7 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
 
 def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     session_five_graph = fixture_work_graph("5", "/home/test/yolomux.dev1/src", root="/home/test/yolomux.dev1")
     session_six_graph = fixture_work_graph("6", "/home/test/other.dev/src", root="/home/test/other.dev")

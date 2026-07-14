@@ -1,12 +1,16 @@
 from collections.abc import Mapping
 from pathlib import Path
+import atexit
 import difflib
+import functools
 from http import HTTPStatus
+import http.server
 from io import BytesIO
 import json
 import os
 import re
 import shutil
+import socketserver
 import subprocess
 import threading
 import time
@@ -189,6 +193,74 @@ class WebDriverWait(SeleniumWebDriverWait):
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
+
+# Chrome 150 blocks a file:// document from loading file:// subresources in an
+# unrelated directory (net::ERR_ACCESS_DENIED), which broke every fixture that pulls
+# the built bundle / vendor / codemirror assets from REPO_ROOT/static. Serve the repo
+# over a throwaway localhost HTTP origin so fixture pages and their assets are same-
+# origin http:// and load without any web-security flag. Self-contained inline fixtures
+# still work over file://, but routing them through http too is harmless and uniform.
+_FIXTURE_HTTP_BASE: str | None = None
+_FIXTURE_HTTP_LOCK = threading.Lock()
+_FIXTURE_PAGE_SEQ = 0
+
+
+def _fixture_http_base() -> str:
+    global _FIXTURE_HTTP_BASE
+    if _FIXTURE_HTTP_BASE:
+        return _FIXTURE_HTTP_BASE
+    with _FIXTURE_HTTP_LOCK:
+        if _FIXTURE_HTTP_BASE:
+            return _FIXTURE_HTTP_BASE
+        handler = functools.partial(_QuietHttpFixtureHandler, directory=str(REPO_ROOT))
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler)
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        atexit.register(httpd.shutdown)
+        _FIXTURE_HTTP_BASE = f"http://127.0.0.1:{httpd.server_address[1]}"
+        return _FIXTURE_HTTP_BASE
+
+
+class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):  # keep the pytest output clean
+        pass
+
+    def end_headers(self):
+        # Fixtures reuse one filename per type and are overwritten between loads (e.g. a
+        # dark then a light variant). Unlike file://, Chrome caches http responses by URL,
+        # so without no-store the second navigation to the same URL would serve the stale
+        # first page. Force a fresh fetch on every navigation.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        super().end_headers()
+
+
+def fixture_asset_url(*parts: str) -> str:
+    """URL for a repo asset (e.g. static/yolomux.js) served over the fixture HTTP origin."""
+    return f"{_fixture_http_base()}/{'/'.join(parts)}"
+
+
+def serve_repo_fixture_page(filename: str, html: str) -> Path:
+    """Write a fixture page into REPO_ROOT (the served root) and return its Path.
+
+    The page lives at the served root so its absolute fixture_asset_url() assets are
+    same-origin. Each call gets a UNIQUE URL (monotonic sequence): all fixtures now share
+    one http origin, so reusing a URL let Chrome's back/forward cache restore a prior page's
+    live JS state (e.g. share-replay epoch) into the next test. A fresh URL per load avoids
+    that. Removed at process exit; gitignored via .browser-fixture-*."""
+    global _FIXTURE_PAGE_SEQ
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    with _FIXTURE_HTTP_LOCK:
+        _FIXTURE_PAGE_SEQ += 1
+        seq = _FIXTURE_PAGE_SEQ
+    page = REPO_ROOT / f".browser-fixture-{worker}-{seq}-{filename}"
+    page.write_text(html, encoding="utf-8")
+    atexit.register(page.unlink, missing_ok=True)
+    return page
+
+
+def fixture_page_url(page: Path, search: str = "") -> str:
+    """Same-origin http:// URL for a fixture page served from REPO_ROOT."""
+    return f"{_fixture_http_base()}/{page.name}{search}"
 
 _APP_CSS_CACHE: str | None = None
 _APP_ENGLISH_STRINGS_CACHE: Mapping[str, str] | None = None
@@ -770,6 +842,15 @@ def _reset_browser_state(request):
         driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
         driver.delete_all_cookies()
         driver.execute_script("try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}")
+        # Fixtures are now served from ONE http origin (Chrome 150 file:// fix), so unlike the
+        # old per-file opaque file:// origins, IndexedDB / CacheStorage / service-worker state
+        # would bleed across tests in the reused driver. Clear ALL storage types for the origin.
+        try:
+            origin = driver.execute_script("return location.origin;")
+            if origin and origin != "null":
+                driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": origin, "storageTypes": "all"})
+        except Exception:
+            pass
         driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
     except Exception:
         pass
@@ -1118,7 +1199,7 @@ def editor_diff_ref_toolbar_fixture_html():
 
 
 def codemirror_bundle_fixture_html():
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     return f"""
     <!doctype html>
     <html>
@@ -1164,7 +1245,7 @@ def codemirror_todo_diff_overview_texts():
 
 def codemirror_todo_diff_overview_fixture_html():
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -1273,7 +1354,7 @@ def codemirror_todo_diff_overview_fixture_html():
 
 def codemirror_file_explorer_diff_overview_fixture_html():
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -1464,7 +1545,7 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
     the regression asserts the continuation visual row paints visible inserted text.
     """
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -1652,7 +1733,7 @@ def fixture_work_graph(session: str, path: str, *, root: str | None = None, bran
 
 def codemirror_wrap_toggle_fixture_html():
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     strings = dict(app_english_strings())
     bootstrap = json.dumps(
         {
@@ -1992,9 +2073,9 @@ def split_seam_fixture_html():
 def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
-    script_uri = runtime_script_uri or (REPO_ROOT / "static" / "yolomux.js").as_uri()
-    dockview_css_uri = (REPO_ROOT / "static" / "vendor" / "dockview.css").as_uri()
-    dockview_script_uri = (REPO_ROOT / "static" / "vendor" / "dockview-core.noStyle.js").as_uri()
+    script_uri = runtime_script_uri or fixture_asset_url("static", "yolomux.js")
+    dockview_css_uri = fixture_asset_url("static", "vendor", "dockview.css")
+    dockview_script_uri = fixture_asset_url("static", "vendor", "dockview-core.noStyle.js")
     settings = settings or {}
     sessions = sessions or ["1"]
     session_files_payload = session_files_payload or {"session": sessions[0], "files": [], "repos": [], "errors": [], "loaded": True}
@@ -2022,7 +2103,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
             "rules": [],
             "errors": [],
         },
-        "codeMirrorAssetUrl": (REPO_ROOT / "static" / "codemirror.js").as_uri(),
+        "codeMirrorAssetUrl": fixture_asset_url("static", "codemirror.js"),
         # the real page inlines the active locale catalog so t() resolves on the first render
         # (the menu bar paints at boot). Mirror that here so the live-boot menu shows real labels.
         "locale": "en",
@@ -2590,9 +2671,8 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
 
 
 def load_static_html_fixture(browser, tmp_path, filename, html):
-    page = tmp_path / filename
-    page.write_text(html, encoding="utf-8")
-    browser.get(page.as_uri())
+    page = serve_repo_fixture_page(filename, html)
+    browser.get(fixture_page_url(page))
     return page
 
 
@@ -2739,9 +2819,8 @@ def load_split_seam_fixture(browser, tmp_path):
 
 
 def load_live_runtime_boot_fixture(browser, tmp_path, search="", expected_redirect_paths=(), **fixture_kwargs):
-    page = tmp_path / "live-runtime-boot.html"
-    page.write_text(_live_runtime_boot_fixture_html(**fixture_kwargs), encoding="utf-8")
-    fixture_url = page.as_uri() + search
+    page = serve_repo_fixture_page("live-runtime-boot.html", _live_runtime_boot_fixture_html(**fixture_kwargs))
+    fixture_url = fixture_page_url(page, search)
     browser.get(fixture_url)
     wait_for_live_runtime_bundle(
         browser,

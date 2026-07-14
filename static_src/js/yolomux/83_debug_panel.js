@@ -82,6 +82,18 @@ const jsDebugStatsPollState = {
   firstSampleReceived: false,
   lastSampleAtMs: 0,
 };
+// Background prefetch of the full retention window into the shared bucket cache so a
+// range/zoom switch renders cached (stale) content instantly while the normal poll
+// revalidates the switched-to range on top. Pure cache-fill: it never touches the
+// readiness state machine or overlay (the current view owns those).
+const jsDebugHistoryPrefetchState = {
+  inFlight: false,
+  didInitial: false,
+  lastFullPrefetchAtMs: 0,
+  // Bumped whenever the bucket cache is cleared; an in-flight prefetch whose fetch
+  // resolves after a clear must NOT apply its (now stale) buckets.
+  generation: 0,
+};
 const jsDebugStatsUploadState = {
   timer: null,
   worker: null,
@@ -167,6 +179,14 @@ const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
+// Full-retention background prefetch: one request spans the whole retention window and
+// (via the server's per-span tiers) returns a few hundred coarse buckets covering EVERY
+// range, so every range switch renders from cache. The current short range keeps its own
+// fast live cadence (1s SSE / minute poll); this only refreshes the wider windows, which
+// change slowly -> a several-minute cadence keeps them fresh cheaply (the 24h window is
+// re-pulled by the same request but barely moves between pulls).
+const jsDebugHistoryPrefetchRetentionSeconds = Math.floor(jsDebugGraphRetentionMs / 1000);
+const jsDebugHistoryPrefetchIntervalMs = 5 * 60 * 1000;
 const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 // Wall-clock slide cadence for live (<=30m, non-zoomed) views. One render per
 // second advances the axis and drifts content left without a data tick.
@@ -1905,6 +1925,9 @@ function clearJsDebugGraphData() {
   jsDebugStatsAgentTokenSchemaVersion = 0;
   jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
+  // Invalidate any in-flight silent prefetch so its late response cannot repopulate
+  // the cache we just cleared (kept the reload-idempotency of the rendered history).
+  jsDebugHistoryPrefetchState.generation += 1;
 }
 
 function debugGraphBucketForServerRecord(record) {
@@ -2641,6 +2664,21 @@ function debugGraphHostMetricBucketValue(bucket, series) {
 
 function debugGraphHostMetricBucketHasData(bucket, series) {
   return Number(debugGraphHostMetricBucketItem(bucket, series)?.samples || 0) > 0;
+}
+
+// True when any cached bucket (any range) carries a GPU device sample. Distinguishes a
+// host with no GPU telemetry at all from a window that merely lacks GPU samples, so the
+// unavailable state can explain itself precisely. Only consulted when a visible GPU
+// chart has no series for the current window (not on the hot per-bucket render path).
+function debugGraphAnyGpuDeviceSamplesCached() {
+  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
+    for (const bucket of map.values()) {
+      for (const item of bucket?.hostMetrics?.gpuDevices?.values?.() || []) {
+        if (Number(item?.samples || 0) > 0) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function debugGraphMovingAverageValues(values, sampleCount = jsDebugGraphMovingAverageSamples) {
@@ -3506,21 +3544,48 @@ function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues
   return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
 }
 
-function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false) {
+// True when [startMs, endMs) overlaps any genuine no-data range (a real
+// coverage/communication hole), so the line should BREAK there instead of
+// bridging it. Everything not inside such a range is treated as covered — the
+// line stays continuous across it even when the recorded resolution is coarser
+// than the display (linear interpolation between the surrounding real samples).
+function debugGraphTimeInNoDataRange(noDataRanges, startMs, endMs) {
+  if (!Array.isArray(noDataRanges) || !noDataRanges.length) return false;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+  return noDataRanges.some(range => Number(range?.startMs) < endMs && Number(range?.endMs) > startMs);
+}
+
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false, noDataRanges = null, observedValues = null) {
+  // Coverage-aware breaking: when a genuine no-data range list is supplied, an
+  // empty display cell never breaks the line on its own (a covered-but-coarser
+  // span reads as one continuous, linearly interpolated line). The line breaks
+  // only where a real recorded gap lies between two samples. Without a range
+  // list, fall back to the legacy time-threshold behavior.
+  const rangeBreak = Array.isArray(noDataRanges);
   const segments = [];
   let current = [];
   let previousDataEndMs = NaN;
   values.forEach((value, index) => {
-    if (hasDataValues && hasDataValues[index] !== true) {
-      if (gapThresholdMs <= 0 && current.length) {
+    const timeMs = Number(times[index]);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
+    // A HELD (carried-forward, non-observed) value that lands inside a genuine
+    // no-data range is dropped and ends the run, so a held gauge can never leak a
+    // flat line through a real recorded hole. A genuinely OBSERVED sample is always
+    // drawable — coverage never erases a real measurement, it only stops the fill.
+    const observed = !observedValues || observedValues[index] === true;
+    const heldInNoData = rangeBreak && !observed && hasDataValues && hasDataValues[index] === true
+      && debugGraphTimeInNoDataRange(noDataRanges, timeMs, Number.isFinite(timeMs) ? timeMs + durationMs : timeMs + 1);
+    if ((hasDataValues && hasDataValues[index] !== true) || heldInNoData) {
+      if (current.length && (heldInNoData || (!rangeBreak && gapThresholdMs <= 0))) {
         segments.push(current);
         current = [];
       }
       return;
     }
-    const timeMs = Number(times[index]);
-    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
-    if (gapThresholdMs > 0 && current.length && Number.isFinite(previousDataEndMs) && Number.isFinite(timeMs) && timeMs - previousDataEndMs >= gapThresholdMs) {
+    const breakHere = current.length && (rangeBreak
+      ? debugGraphTimeInNoDataRange(noDataRanges, previousDataEndMs, timeMs)
+      : (gapThresholdMs > 0 && Number.isFinite(previousDataEndMs) && Number.isFinite(timeMs) && timeMs - previousDataEndMs >= gapThresholdMs));
+    if (breakHere) {
       segments.push(current);
       current = [];
     }
@@ -3801,6 +3866,25 @@ function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRang
   }).join('');
 }
 
+// The union of every genuine no-data range painted for a chart (real coverage
+// holes, client communication gaps, agent-status gaps, and disconnected spans).
+// These are the ONLY places a series line/area may break; everything else is a
+// covered span the line stays continuous across (interpolating a coarser tier).
+function debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries) {
+  const ranges = [];
+  const statusRuns = group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [];
+  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns));
+  ranges.push(...statusRuns);
+  if (group.noDataOverlay === true) {
+    ranges.push(...debugGraphNoDataRuns(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)));
+  }
+  // A disconnected span is a genuine sampling outage for EVERY series (the gauge
+  // was not observed), so it always breaks the line — not only on charts that
+  // draw the dedicated disconnected overlay.
+  ranges.push(...(Array.isArray(disconnectedRanges) ? disconnectedRanges : debugGraphDisconnectedRanges(overlayBuckets, domain)));
+  return debugGraphMergeTimeRanges(ranges, domain);
+}
+
 function debugGraphAgentStatusNoDataRuns(buckets, domain) {
   const ranges = debugGraphBucketRanges(buckets);
   const statusRanges = ranges
@@ -3846,6 +3930,10 @@ function debugGraphSeriesPlotValues(series) {
 
 function debugGraphSeriesPlotHasDataValues(series) {
   return Array.isArray(series.plotHasDataValues) ? series.plotHasDataValues : (series.hasDataValues || null);
+}
+
+function debugGraphSeriesPlotObservedValues(series) {
+  return Array.isArray(series.plotObservedValues) ? series.plotObservedValues : (series.observedDataValues || null);
 }
 
 function debugGraphSeriesClassKey(series) {
@@ -3934,14 +4022,20 @@ function debugGraphSeriesTokenAgentAttrs(series) {
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
-function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
-  // CPU is sampled best-effort.  Its absent intervals are facts, not zeroes or
-  // a signal to draw a smooth line between the two surrounding samples.
+function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDataRanges = null) {
+  // The line is one continuous, linearly interpolated stroke across every covered
+  // span — a coarser recorded resolution (e.g. 60s data on a 10s chart) never
+  // shows as a gap. It breaks ONLY at genuine no-data ranges (real coverage or
+  // communication holes) supplied by the chart, which stay honest as red no-data
+  // bands. Without a supplied range list (legacy callers) fall back to the old
+  // time-threshold: client metrics break at their communication-gap threshold,
+  // other series at any gap.
+  const rangeAware = Array.isArray(noDataRanges);
   const cpuSeries = series?.processCpu === true || series?.key === 'cpu' || series?.key === 'systemCpu';
   const heldGaugeSeries = Number(series?.displayHoldMs || 0) > 0;
-  const gapThresholdMs = series?.clientMetric === true
+  const gapThresholdMs = rangeAware ? 0 : (series?.clientMetric === true
     ? debugGraphCommunicationGapThresholdMs([series])
-    : ((cpuSeries || heldGaugeSeries) ? 1 : 0);
+    : ((cpuSeries || heldGaugeSeries) ? 1 : 0));
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
@@ -3951,6 +4045,8 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
     series.durations || [],
     gapThresholdMs,
     logScale,
+    rangeAware ? noDataRanges : null,
+    rangeAware ? debugGraphSeriesPlotObservedValues(series) : null,
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
@@ -3958,29 +4054,57 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
   }).join('');
 }
 
-function debugGraphAreaPathHtml(series, chartMax, domain) {
+function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
+  const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
-  const pointIndexes = debugGraphSeriesPlotValues(series)
+  const pointIndexes = values
     .map((_value, index) => index)
     .filter(index => !hasDataValues || hasDataValues[index] === true);
-  const upperPoints = pointIndexes.map(index => debugGraphPointForValue(debugGraphSeriesPlotValues(series)[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
-  if (!upperPoints.length) return '';
+  if (!pointIndexes.length) return '';
   const baseline = jsDebugGraphGeometry.plotBottom;
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
-  const lowerPoints = lowerValues
-    ? pointIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
-    : upperPoints.map(point => [point[0], baseline.toFixed(1)]);
-  const firstLower = lowerPoints[0] || [upperPoints[0][0], baseline.toFixed(1)];
-  const path = [
-    `M ${firstLower[0]},${firstLower[1]}`,
-    ...upperPoints.map(point => `L ${point[0]},${point[1]}`),
-    ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
-    'Z',
-  ].join(' ');
+  // Split the fill into runs broken ONLY at genuine no-data ranges, so a
+  // covered-but-coarser span fills continuously (matching the line) while a real
+  // recorded hole stays an honest gap under its red no-data band.
+  const observedValues = debugGraphSeriesPlotObservedValues(series);
+  const runs = [];
+  let run = [];
+  let previousEndMs = NaN;
+  for (const index of pointIndexes) {
+    const startMs = debugGraphSeriesTimeMs(series, index);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(series.durations?.[index]) || jsDebugGraphRawBucketMs);
+    // Drop a HELD (non-observed) point that lands inside a genuine no-data range so
+    // the fill never leaks into a real hole; a real measurement is always kept.
+    const observed = !observedValues || observedValues[index] === true;
+    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, startMs, Number.isFinite(startMs) ? startMs + durationMs : startMs + 1)) {
+      if (run.length) { runs.push(run); run = []; }
+      continue;
+    }
+    if (run.length && debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, startMs)) {
+      runs.push(run);
+      run = [];
+    }
+    run.push(index);
+    previousEndMs = Number.isFinite(startMs) ? startMs + durationMs : NaN;
+  }
+  if (run.length) runs.push(run);
   const stacked = lowerValues ? ` data-js-debug-area-stacked="${esc(series.key)}"` : '';
-  const plotCurrent = debugGraphSeriesPlotValues(series).at(-1);
+  const plotCurrent = values.at(-1);
   const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
-  return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></path>`;
+  return runs.map(runIndexes => {
+    const upperPoints = runIndexes.map(index => debugGraphPointForValue(values[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
+    const lowerPoints = lowerValues
+      ? runIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
+      : upperPoints.map(point => [point[0], baseline.toFixed(1)]);
+    const firstLower = lowerPoints[0] || [upperPoints[0][0], baseline.toFixed(1)];
+    const path = [
+      `M ${firstLower[0]},${firstLower[1]}`,
+      ...upperPoints.map(point => `L ${point[0]},${point[1]}`),
+      ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
+      'Z',
+    ].join(' ');
+    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></path>`;
+  }).join('');
 }
 
 function debugGraphBarRectsHtml(series, chartMax, domain, logScale = false) {
@@ -4371,6 +4495,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
+  // Series lines/areas stay continuous across every covered span and break only
+  // at these genuine no-data ranges (the same holes painted as red no-data bands).
+  const genuineNoDataRanges = debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true && series.overlayLineOnly !== true);
   const overlayLineSeries = groupSeries.filter(series => series.overlayLineOnly === true);
@@ -4394,13 +4521,21 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     ? ''
     : `<span class="js-debug-chart-summary"${debugGraphExplainAttrs(displayedSummary.text, displayedSummary.descKey, {attribute: 'data-js-debug-summary-desc'})} data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
+  // A GPU chart with no device series must explain itself precisely, never the ambiguous
+  // generic "None" (screenshot 010): distinguish a host with NO GPU telemetry at all from
+  // one whose samples exist outside the current window.
+  const gpuUnavailableText = gpuUnavailable
+    ? (debugGraphAnyGpuDeviceSamplesCached()
+      ? debugGraphCostText('debug.graph.gpuNoWindowSamples', 'No GPU samples in this time window')
+      : debugGraphCostText('debug.graph.gpuUnavailableHost', 'GPU telemetry is not available on this host'))
+    : '';
   const agentBillableUnavailable = group.key === 'agentTokens'
     && jsDebugGraphModelTokenDimension !== 'output'
     && !buckets.some(bucket => [...(bucket?.agentTokenRates?.values?.() || [])].some(rate => rate?.billableAvailable === true));
   const chartUnavailable = gpuUnavailable || agentBillableUnavailable;
   const chartUnavailableText = agentBillableUnavailable
     ? debugGraphCostText('debug.graph.agentTokens.billableUnavailable', 'No billable breakdown for this window')
-    : t('finder.dateMode.none');
+    : gpuUnavailableText;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
   const modelDimensionControl = group.key === 'modelTokens'
@@ -4424,15 +4559,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
-          ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
+          ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain, genuineNoDataRanges)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
           ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
           ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [])}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
-          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${debugGraphLivePulseHtml(groupSeries, buckets, domain)}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
@@ -4538,6 +4673,26 @@ function debugGraphCostClass(item) {
   if (direction.includes('input') || direction.includes('uncached')) return 'input';
   if (direction.includes('output')) return 'output';
   return 'other';
+}
+
+// One description owner for the visible usage columns. The wording states exactly what
+// debugGraphCostClass implements (a mutually exclusive projection: Cached bundles cache
+// READS and WRITES and is separated from Input, so nothing is double-counted), not
+// assumed provider semantics. Rendered via the shared explain-attrs (title + aria) owner.
+function debugGraphCostUsageColumnDescription(key) {
+  const descriptions = {
+    input: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'],
+    cache: ['debug.cost.cached.desc', 'Cumulative prompt-cache token accounting across requests: cache READS (hits/refreshes) and cache WRITES (5m/1h creation) combined. Reused history/tool/system context is counted again on every request, so in long conversations Cached can legitimately dwarf Input. This is billing accounting, not stored cache size or GPU cache occupancy.'],
+    output: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'],
+    other: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost calculation without being added to token totals.'],
+    total: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'],
+  };
+  const entry = descriptions[key];
+  return entry ? debugGraphCostText(entry[0], entry[1]) : '';
+}
+
+function debugGraphCostUsageColumnHeaderAttrs(key, label) {
+  return debugGraphExplainAttrs(label, `debug.cost.${key === 'cache' ? 'cached' : key}.desc`, {attribute: 'data-js-debug-cost-column-desc', desc: debugGraphCostUsageColumnDescription(key)});
 }
 
 function debugGraphCostCompactTotals(summary) {
@@ -4781,7 +4936,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   };
   const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}>${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
@@ -5004,17 +5159,28 @@ function debugGraphCostSourceTreeHtml(rows) {
 }
 
 function debugGraphCostCatalogDetailsHtml(summary) {
+  // One compact catalog-status line replacing the four-row table: every fact
+  // (revision, freshness, priced coverage, unpriced exclusions) stays present
+  // and localized, wraps as meaningful field groups on a narrow pane, and
+  // never stretches four scalars across a wide screen. Unpriced exclusions
+  // keep their warning semantics when nonzero.
   const revision = String(summary.activeCatalogRevision || summary.catalogRevision || '').trim() || '—';
   const freshness = String(summary.freshness || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
   const exclusions = Math.max(0, Number(summary.unpricedCount) || 0);
   const priced = Math.max(0, Number(summary.pricedCount) || 0);
-  const rows = [
-    [debugGraphCostText('debug.cost.catalogRevision', 'Catalog revision'), revision],
-    [debugGraphCostText('debug.cost.freshness', 'Catalog freshness'), freshness],
-    [debugGraphCostText('debug.cost.coverage', 'Priced coverage'), `${priced}/${priced + exclusions}`],
-    [debugGraphCostText('debug.cost.exclusions', 'Unpriced exclusions'), String(exclusions)],
+  const groups = [
+    {label: debugGraphCostText('debug.cost.catalog', 'Catalog'), value: `${debugGraphCostText('debug.cost.rev', 'rev')} ${revision}`},
+    {label: debugGraphCostText('debug.cost.freshnessCompact', 'freshness'), value: freshness.toLowerCase() === freshness ? freshness : freshness.charAt(0).toLowerCase() + freshness.slice(1)},
+    {label: debugGraphCostText('debug.cost.coverageCompact', 'coverage'), value: `${priced}/${priced + exclusions}`},
+    {label: debugGraphCostText('debug.cost.unpricedCompact', 'unpriced'), value: String(exclusions), warning: exclusions > 0},
   ];
-  return `<div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="catalog"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div>`;
+  const accessible = [
+    `${debugGraphCostText('debug.cost.catalogRevision', 'Catalog revision')}: ${revision}`,
+    `${debugGraphCostText('debug.cost.freshness', 'Catalog freshness')}: ${freshness}`,
+    `${debugGraphCostText('debug.cost.coverage', 'Priced coverage')}: ${priced}/${priced + exclusions}`,
+    `${debugGraphCostText('debug.cost.exclusions', 'Unpriced exclusions')}: ${exclusions}`,
+  ].join('; ');
+  return `<p class="js-debug-cost-catalog-line" data-js-debug-cost-catalog aria-label="${esc(accessible)}">${groups.map((group, index) => `<span class="js-debug-cost-catalog-group${group.warning ? ' js-debug-cost-catalog-group--warning' : ''}">${index === 0 ? `${esc(group.label)}: ` : ''}${index > 0 ? `${esc(group.label)} ` : ''}${esc(group.value)}</span>`).join('<span class="js-debug-cost-catalog-separator" aria-hidden="true"> · </span>')}</p>`;
 }
 
 function debugGraphCostBackfillText(summary) {
@@ -5069,18 +5235,33 @@ function debugGraphCostReportHtml(summary, domain) {
   const total = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
   const tokens = debugGraphCostTokenTotals(summary);
   const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
+  // Compact report shell: one heading line carrying the range, one totals line
+  // replacing the old Summary heading + nested list, one catalog status line
+  // replacing the four-row catalog table. Exact values stay reachable through
+  // the accessible labels; nothing about estimate/lower-bound semantics changes.
+  const estimateSentence = !hasEstimatedUsage
+    ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage')
+    : (exact
+      ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total})
+      : hasFiniteRange
+        ? debugGraphCostText('debug.cost.range', `Estimated API list-price range ${total}`, {amount: total})
+        : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total}));
+  const tokenParts = [
+    `${debugGraphCostText('debug.cost.input', 'Input').toLowerCase()}=${debugGraphTokenNumberText(tokens.input)}`,
+    `${debugGraphCostText('debug.cost.cache', 'Cache').toLowerCase()}=${debugGraphTokenNumberText(tokens.cache)}`,
+    `${debugGraphCostText('debug.cost.output', 'Output').toLowerCase()}=${debugGraphTokenNumberText(tokens.output)}`,
+    ...(Math.max(0, Number(tokens.other) || 0) > 0 ? [`${debugGraphCostText('debug.cost.other', 'Other').toLowerCase()}=${debugGraphTokenNumberText(tokens.other)}`] : []),
+  ];
+  const totalsLine = `${estimateSentence}, ${debugGraphCostText('debug.cost.totalTokens', 'total tokens')}: ${debugGraphTokensText(tokens.total)} (${tokenParts.join(', ')})`;
+  const totalsExact = `${debugGraphCostText('debug.cost.totalTokens', 'total tokens')}: ${Math.max(0, Number(tokens.total) || 0).toLocaleString()}; ${['input', 'cache', 'output', 'other'].map(key => `${key}=${Math.max(0, Number(tokens[key]) || 0).toLocaleString()}`).join('; ')}`;
   return `<article class="js-debug-cost-report" aria-label="${esc(title)}">
     <div class="js-debug-cost-report-title">
-      <h1>${esc(title)}</h1>
+      <h1>${esc(title)}</h1><span class="js-debug-cost-report-range meta-muted">${esc(debugGraphCostRangeText(domain))}</span>
     </div>
     <div class="js-debug-cost-report-body">
-      <p class="meta-muted">${esc(debugGraphCostRangeText(domain))}</p>
-      <p>${esc(!hasEstimatedUsage ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage') : (exact ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total}) : hasFiniteRange ? debugGraphCostText('debug.cost.range', `Estimated API list-price range ${total}`, {amount: total}) : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total})))}</p>
-      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.total', 'Summary'))}</h2>
-        <ul class="js-debug-cost-report-list"><li><strong>${esc(debugGraphCostText('debug.cost.total', 'Estimated total'))}:</strong> ${esc(total)}</li><li><strong>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}:</strong> ${esc(debugGraphTokensText(tokens.total))}<ul><li>${esc(`${debugGraphCostText('debug.cost.input', 'Input')}: ${debugGraphTokensText(tokens.input)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.cache', 'Cache')}: ${debugGraphTokensText(tokens.cache)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.output', 'Output')}: ${debugGraphTokensText(tokens.output)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.other', 'Other')}: ${debugGraphTokensText(tokens.other)}`)}</li></ul></li></ul>
-      </section>
+      <p class="js-debug-cost-report-totals" data-js-debug-cost-report-totals aria-label="${esc(`${estimateSentence}; ${totalsExact}`)}">${esc(totalsLine)}</p>
       ${debugGraphCostUnknownUsageHtml(summary)}
-      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.catalogRevision', 'Pricing catalog'))}</h2>${debugGraphCostCatalogDetailsHtml(summary)}</section>
+      ${debugGraphCostCatalogDetailsHtml(summary)}
       ${debugGraphCostTmuxBreakdownHtml(summary)}
       ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true})}
       ${debugGraphCostComponentDetailsHtml(summary.components)}
@@ -5128,7 +5309,7 @@ function debugGraphCostSummaryHtml(buckets, domain) {
       ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
     </div>
     <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
-      ${compactRows.map(([label, value, tokenCount]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
+      ${compactRows.map(([label, value, tokenCount]) => `<div><dt${debugGraphCostUsageColumnHeaderAttrs(String(label).toLowerCase(), debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
     </dl>
     <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-label="${esc(accessible)}">${esc(moreInfo)}</button></span>
   </section>`;
@@ -5326,8 +5507,62 @@ function pollJsDebugStatsOnInterval() {
   // Passive cadence ticks never need to queue behind an explicit range,
   // activation, or initial request. The next full interval is soon enough and
   // avoids a slow request degenerating into an immediate back-to-back fetch.
+  maybePrefetchJsDebugHistory();
   if (jsDebugStatsPollState.inFlight) return;
   return pollJsDebugStatsSample();
+}
+
+// Fire the full-retention prefetch once shortly after the current range lands, then on a
+// slow cadence. Visibility is enforced by the poll loop itself (it stops when hidden) plus
+// the guard inside prefetchJsDebugHistoryFullRetention, so a hidden panel does zero work.
+function maybePrefetchJsDebugHistory() {
+  if (!jsDebugStatsPollState.firstSampleReceived) return;
+  if (jsDebugHistoryPrefetchState.inFlight) return;
+  const nowMs = performanceNow();
+  const due = !jsDebugHistoryPrefetchState.didInitial
+    || (nowMs - Number(jsDebugHistoryPrefetchState.lastFullPrefetchAtMs || 0)) >= jsDebugHistoryPrefetchIntervalMs;
+  if (!due) return;
+  jsDebugHistoryPrefetchState.didInitial = true;
+  void prefetchJsDebugHistoryFullRetention();
+}
+
+// Silent cache-fill of the whole retention window. Populates ONLY the shared bucket Maps
+// (jsDebugGraphRawBuckets / jsDebugGraphRollupBuckets) so a later range switch renders
+// cached content instantly. Deliberately does NOT touch jsDebugHistoryReadiness, the
+// overlay, coverage, or the live cursor: the current view owns loading state, and the
+// normal poll revalidates the switched-to range's fresh tail on top of this cache.
+// Finest-source-wins at render keeps the live 1s/10s tail intact (no replaceCoverage,
+// so no fine buckets are removed).
+async function prefetchJsDebugHistoryFullRetention() {
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) return false;
+  if (jsDebugHistoryPrefetchState.inFlight) return false;
+  if (typeof apiFetchJsonQuiet !== 'function') return false;
+  jsDebugHistoryPrefetchState.inFlight = true;
+  const requestGeneration = jsDebugHistoryPrefetchState.generation;
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const historyStart = Math.max(0, nowSeconds - jsDebugHistoryPrefetchRetentionSeconds);
+    const clientId = jsDebugStatsClientIdForRequest();
+    const payload = await fetchJsDebugStatsJson(
+      `/api/stats-sample?since=0&client_id=${encodeURIComponent(clientId)}&token_consumer=0&history_start=${encodeURIComponent(String(historyStart))}&history_end=0&history_resolution=1&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}`,
+      {cache: 'no-store', timeoutMs: jsDebugStatsHistoryTimeoutMs(jsDebugHistoryPrefetchRetentionSeconds)},
+    );
+    // The cache was cleared (range reset / history clear) while this fetch was in flight:
+    // dropping the stale response keeps the rendered history deterministic.
+    if (jsDebugHistoryPrefetchState.generation !== requestGeneration) return false;
+    const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
+    // A malformed/omitted coverage list only aborts THIS silent fill; it never blanks the
+    // visible chart (unlike the readiness path, which must reject malformed coverage).
+    if (!coverage) return false;
+    debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: false});
+    jsDebugHistoryPrefetchState.lastFullPrefetchAtMs = performanceNow();
+    return true;
+  } catch (error) {
+    recordJsDebugStatsDiagnostic('info', `history prefetch skipped: ${jsDebugErrorText(error)}`);
+    return false;
+  } finally {
+    jsDebugHistoryPrefetchState.inFlight = false;
+  }
 }
 
 function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
@@ -5607,6 +5842,8 @@ async function clearJsDebugServerHistory() {
   const restartPolling = runtimeIntervalActive('debug-stats');
   stopJsDebugStatsPolling();
   jsDebugStatsPollState.firstSampleReceived = false;
+  jsDebugHistoryPrefetchState.didInitial = false;
+  jsDebugHistoryPrefetchState.lastFullPrefetchAtMs = 0;
   jsDebugStatsServerSequence = 0;
   jsDebugStatsServerUptimeSeconds = null;
   jsDebugStatsServerPid = null;
