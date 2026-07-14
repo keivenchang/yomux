@@ -4144,6 +4144,110 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     )
 
 
+def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_all_widths(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphCostUnknownUsageHtml === 'function' && typeof debugSystemRolesHtml === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const transcript = '/Users/keivenc/.codex/sessions/2026/07/11/rollout-2026-07-11T06-08-41-019f514b-5c1d-7be1-8ffb-276b444ede27.jsonl';
+        const summary = {
+          knownMicroUsd: 668830000,
+          upperMicroUsd: 777540000,
+          unpricedCount: 2,
+          unpricedTokenQuantity: 123456789,
+          components: [{provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'input', unit: 'tokens', quantity: 123456789, priced: false}],
+          sources: [{
+            source: transcript,
+            transcript,
+            root_thread_id: 'root',
+            agent_thread_id: 'root',
+            token_quantity: 34200000,
+            input_micro_usd: 1490000,
+            cache_micro_usd: 10450000,
+            output_micro_usd: 1520000,
+            other_micro_usd: 0,
+            lower_micro_usd: 13460000,
+            upper_micro_usd: 13460000,
+          }],
+        };
+        const fixture = document.createElement('div');
+        fixture.style.position = 'fixed';
+        fixture.style.inset = '0 auto auto 0';
+        fixture.style.zIndex = '99999';
+        fixture.style.background = 'var(--panel)';
+        fixture.innerHTML = `
+          <section data-responsive-audit="cost" class="js-yocost-panel">
+            ${debugGraphCostUnknownUsageHtml(summary)}
+            ${debugGraphCostSourceTreeHtml(summary.sources)}
+          </section>
+          <section data-responsive-audit="system" class="js-debug-system-view">
+            ${debugSystemRolesHtml({'a-very-long-distributed-refresh-owner-name': {status: 'follower', refresh_requests: 12345, fallback_count: 2, follower_stale_reads: 1}})}
+            ${debugSystemPerformanceTableHtml([{surface: 'GET /api/a-very-long-endpoint-name', count: 1234, compute_ms_max: 42, payload_bytes_total: 987654}], 'endpoint')}
+          </section>`;
+        document.body.append(fixture);
+
+        const verticalTextFindings = root => {
+          const findings = [];
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const text = String(node.nodeValue || '').replace(/\\s+/g, ' ').trim();
+            const parent = node.parentElement;
+            if (text.length < 6 || !parent || parent.closest('script, style, svg, [hidden]')) continue;
+            const style = getComputedStyle(parent);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const tops = new Set([...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0).map(rect => Math.round(rect.top)));
+            const lines = tops.size;
+            if (lines >= 6 && Array.from(text).length / lines <= 2) {
+              findings.push({text, lines, selector: parent.closest('[data-js-debug-cost-table], .js-debug-system-table')?.outerHTML.slice(0, 120) || parent.tagName});
+            }
+          }
+          return findings;
+        };
+        const layouts = [];
+        for (const theme of ['dark', 'light']) {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          for (const width of [360, 720, 1200]) {
+            fixture.style.width = `${width}px`;
+            const cost = fixture.querySelector('[data-responsive-audit="cost"]');
+            const system = fixture.querySelector('[data-responsive-audit="system"]');
+            const sourceTable = cost.querySelector('[data-js-debug-cost-table="source"]');
+            const sourceCells = [...sourceTable.rows[1].cells].map(cell => cell.getBoundingClientRect().width);
+            layouts.push({
+              theme,
+              width,
+              costFindings: verticalTextFindings(cost),
+              systemFindings: verticalTextFindings(system),
+              costScrollContained: [...cost.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
+              systemScrollContained: [...system.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
+              sourceCells,
+            });
+          }
+        }
+        const link = fixture.querySelector('[data-js-debug-cost-transcript-path]');
+        const source = {
+          text: link?.textContent || '',
+          title: link?.title || '',
+          path: link?.dataset.jsDebugCostTranscriptPath || '',
+          middleParts: link?.querySelectorAll('[data-middle-truncate-part]').length || 0,
+        };
+        fixture.remove();
+        return {layouts, source, transcript};
+        """
+    )
+    assert all(not item["costFindings"] and not item["systemFindings"] for item in metrics["layouts"]), metrics
+    assert all(item["costScrollContained"] and item["systemScrollContained"] for item in metrics["layouts"]), metrics
+    assert metrics["source"]["title"] == metrics["transcript"], metrics
+    assert metrics["source"]["path"] == metrics["transcript"], metrics
+    assert metrics["source"]["middleParts"] == 2, metrics
+    assert all(item["sourceCells"][0] > min(item["sourceCells"][1:]) for item in metrics["layouts"] if item["width"] >= 720), metrics
+
+
 def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(

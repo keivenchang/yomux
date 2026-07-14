@@ -1742,7 +1742,9 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .share-url-primary-head > span,
 .share-users-row span,
 .tab-action-description,
-.terminal-drop-suggestion-label {
+.terminal-drop-suggestion-label,
+.js-debug-system-kv dd,
+.js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

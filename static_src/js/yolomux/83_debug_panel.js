@@ -4656,11 +4656,20 @@ function debugGraphCostTranscriptPath(row) {
   return path;
 }
 
+function debugGraphMiddleTruncatedTextHtml(value, tailLength = 20) {
+  const text = String(value || '');
+  const characters = Array.from(text);
+  const tailSize = Math.max(1, Math.min(characters.length - 1, Math.floor(Number(tailLength) || 20)));
+  if (characters.length <= tailSize + 1) return `<span class="js-debug-responsive-text">${esc(text)}</span>`;
+  const split = characters.length - tailSize;
+  return `<span class="js-debug-responsive-text js-debug-responsive-text--middle"><span class="js-debug-responsive-text-prefix" data-middle-truncate-part="prefix">${esc(characters.slice(0, split).join(''))}</span><span class="js-debug-responsive-text-suffix" data-middle-truncate-part="suffix">${esc(characters.slice(split).join(''))}</span></span>`;
+}
+
 function debugGraphCostSourceLabelHtml(row) {
   const label = debugGraphCostSourceLabel(row);
   const transcript = debugGraphCostTranscriptPath(row);
   if (!transcript) return esc(label);
-  return `<a href="#" class="js-debug-cost-transcript-link" data-js-debug-cost-transcript-path="${esc(transcript)}" title="${esc(transcript)}">${esc(label)}</a>`;
+  return `<a href="#" class="js-debug-cost-transcript-link" data-js-debug-cost-transcript-path="${esc(transcript)}" title="${esc(transcript)}" aria-label="${esc(label)}">${debugGraphMiddleTruncatedTextHtml(label)}</a>`;
 }
 
 function debugGraphCostSourceTreeHtml(rows) {

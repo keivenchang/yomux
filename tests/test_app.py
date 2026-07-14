@@ -600,7 +600,10 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
     assert len(older["records"]) == 15
     assert all(start <= record["start"] < start + 15 for record in older["records"])
     assert older["sequence"] == 0
-    assert older["latest_sequence"] == latest_sequence
+    # The independent sampler may append a bucket between these reads.  A
+    # bounded older response must keep its replay cursor at zero while
+    # reporting the writer generation observed by that response.
+    assert older["latest_sequence"] >= latest_sequence
     coverage = dict(older["coverage"])
     intervals = coverage.pop("intervals")
     stores = coverage.pop("stores")
@@ -624,7 +627,7 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
         "source_records": 15,
         "returned_records": 15,
         "cursor": 0,
-        "latest_cursor": latest_sequence,
+        "latest_cursor": older["latest_sequence"],
     }
     assert [(item["start"], item["end"]) for item in intervals] == [(start, start + 15)]
     assert store_intervals["raw"] == intervals
@@ -633,7 +636,8 @@ def test_stats_history_bounded_older_window_returns_only_missing_records_with_sa
     assert older["agent_token_history"]["sequence"] == 0
     assert older["agent_token_history"]["snapshot"] is False
     assert len(live["records"]) == 15
-    assert live["sequence"] == latest_sequence
+    assert live["sequence"] == live["latest_sequence"]
+    assert live["sequence"] >= older["latest_sequence"]
 
 
 def test_stats_history_compact_tokens_ignore_a_bounded_normal_history_window(tmp_path):

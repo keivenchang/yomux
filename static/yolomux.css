@@ -1743,7 +1743,9 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .share-url-primary-head > span,
 .share-users-row span,
 .tab-action-description,
-.terminal-drop-suggestion-label {
+.terminal-drop-suggestion-label,
+.js-debug-system-kv dd,
+.js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4559,21 +4561,25 @@ body :is(
   display: grid;
   gap: var(--space-5);
   margin: 0;
+  max-width: 100%;
+  overflow-x: auto;
 }
 .js-debug-system-kv > div {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  grid-template-columns: max-content minmax(8rem, 1fr);
   gap: var(--space-8);
   align-items: baseline;
 }
 .js-debug-system-kv dt {
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--muted);
 }
 .js-debug-system-kv dd {
-  min-width: 0;
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--text);
   text-align: end;
   font-family: var(--mono-font);
@@ -4654,10 +4660,13 @@ body :is(
 }
 .js-debug-system-table-wrap {
   max-width: 100%;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: visible;
+  overscroll-behavior-inline: contain;
 }
 .js-debug-system-table {
-  width: 100%;
+  inline-size: max-content;
+  min-inline-size: 100%;
   border-collapse: collapse;
   font: var(--ui-font-size-xs)/1.35 var(--mono-font);
 }
@@ -4667,13 +4676,15 @@ body :is(
   border-block-end: 1px solid var(--line);
   text-align: end;
   white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-system-table th:first-child,
 .js-debug-system-table td:first-child {
-  width: 100%;
+  inline-size: 1%;
   text-align: start;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 .js-debug-system-loading,
 .js-debug-system-empty {
@@ -5137,7 +5148,10 @@ body :is(
   background: var(--js-debug-agent-token-beige);
 }
 .js-debug-cost-model-list > li {
-  overflow-wrap: anywhere;
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-compact {
   display: grid;
@@ -5150,9 +5164,12 @@ body :is(
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-6);
-  min-width: 0;
+  min-width: max-content;
 }
 .js-debug-cost-compact dt {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
 }
@@ -5161,6 +5178,9 @@ body :is(
   color: var(--text);
   font: 700 var(--ui-font-size-xs)/1.15 var(--mono-font);
   text-align: end;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-token-count {
   margin-inline-start: var(--space-4);
@@ -5183,7 +5203,7 @@ body :is(
   max-inline-size: 100%;
 }
 .js-debug-cost-table {
-  min-inline-size: min(100%, var(--dialog-compact-inline-size));
+  min-inline-size: 100%;
 }
 .js-debug-cost-table th:not(:first-child) {
   color: var(--muted);
@@ -5235,7 +5255,41 @@ body :is(
   color: var(--muted);
 }
 .js-debug-cost-transcript-link {
-  overflow-wrap: anywhere;
+  display: block;
+  min-inline-size: 22ch;
+  max-inline-size: 100%;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.js-debug-responsive-text {
+  min-inline-size: 0;
+}
+.js-debug-responsive-text--middle {
+  display: flex;
+  max-inline-size: 100%;
+  white-space: nowrap;
+}
+.js-debug-responsive-text-prefix {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.js-debug-responsive-text-suffix {
+  flex: none;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:first-child,
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:first-child {
+  inline-size: 100%;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:nth-child(2),
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:nth-child(2) {
+  inline-size: max-content;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:last-child,
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:last-child {
+  inline-size: auto;
+  white-space: normal;
+  overflow-wrap: normal;
 }
 .js-debug-cost-report-title {
   flex: none;
@@ -5372,7 +5426,10 @@ body :is(
   margin: var(--space-2) 0 0;
   color: var(--text);
   font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
-  overflow-wrap: anywhere;
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-source-tree {
   display: grid;
@@ -5392,10 +5449,14 @@ body :is(
   margin-inline-start: var(--space-8);
 }
 .js-debug-cost-source-label {
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-source-subtotals {
-  overflow-wrap: anywhere;
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--muted);
   font-family: var(--mono-font);
 }
