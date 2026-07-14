@@ -19345,3 +19345,40 @@ def test_yocost_shows_shared_loading_overlay_on_range_resolution_change(browser,
     assert out["hasChartArea"] is True and out["overlayPresent"] is True, out
     assert out["shownBefore"] is False, out
     assert out["shownAfter"] is True, out
+
+
+def test_servers_load_draws_every_service_across_the_full_range(browser, tmp_path):
+    """Servers Load renders one line per service spanning the whole range."""
+    browser.set_window_size(1280, 800)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const svc = (cpu, lbl) => ({cpu_total_percent: cpu, cpu_samples: 1, cpu_min_percent: cpu, cpu_max_percent: cpu, rss_total_bytes: 1e7, rss_samples: 1, rss_min_bytes: 1e7, rss_max_bytes: 1e7, label: lbl});
+          // 60 one-minute records across the full hour, each carrying service_load.
+          const records = Array.from({length: 60}, (_u, i) => ({
+            start: now - ((59 - i) * 60), duration: 60, sequence: i + 1,
+            host_metrics: {service_load: {statsd: svc(3, 'statsd'), indexd: svc(0.2, 'indexd'), jobd: svc(1.8, 'jobd')}},
+          }));
+          debugGraphApplyServerHistory({sequence: 60, records});
+          setDebugGraphChartVisible('serversLoad', true); setDebugGraphRange(3600); renderDebugPanels({force: true});
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const chart = document.querySelector('[data-js-debug-graph] [data-js-debug-chart="serversLoad"]');
+          const buckets = debugGraphDisplayBuckets();
+          const withSvc = buckets.filter(b => b?.hostMetrics?.serviceLoad && b.hostMetrics.serviceLoad.size > 0);
+          const domain = debugGraphDomain();
+          const firstAgoMin = withSvc.length ? Math.round((domain.endMs - Math.min(...withSvc.map(b => b.startMs))) / 60000) : 0;
+          const lines = chart ? chart.querySelectorAll('path[stroke], polyline, path.js-debug-graph-line').length : -1;
+          done({chartPresent: Boolean(chart), lines, bucketsWithService: withSvc.length, firstAgoMin});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    assert out["chartPresent"] is True, out
+    # One drawn line per service (>=3), spanning back across most of the hour.
+    assert out["lines"] >= 3, out
+    assert out["bucketsWithService"] >= 30 and out["firstAgoMin"] >= 45, out
