@@ -1233,6 +1233,8 @@ globalThis.__layoutTestApi = {
   debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
   debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
+  debugGraphAvailableResolutionChoicesForTest: nowMs => debugGraphAvailableResolutionChoices(debugGraphDomain(nowMs), nowMs),
+  debugGraphResolutionOverrideForTest() { return jsDebugGraphResolutionOverrideSeconds; },
   debugGraphEventRecordsForTest() {
     return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
       id,

@@ -2724,6 +2724,88 @@ def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):
     assert "stats" not in metrics["neitherChannels"], metrics
 
 
+def test_debug_stats_and_yocost_resolution_choices_follow_every_range(browser, tmp_path):
+    """Permanent range sweep: neither shared surface may retain a coarse prior-range menu."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug,1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphRange === 'function' && typeof renderYoCostPanels === 'function' && document.querySelector('[data-js-debug-graph]');"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        setJsDebugHistoryReadiness('ready', {
+          loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+          coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+        });
+        const ranges = debugGraphAvailableRangeOptions().map(option => option.seconds);
+        const readControl = root => {
+          const control = root?.querySelector('[data-js-debug-resolution]');
+          const select = control?.querySelector('[data-js-debug-resolution-override]');
+          return {
+            choices: [...(select?.options || [])].map(option => Number(option.value)),
+            selected: Number(select?.value),
+            displayed: Number(control?.dataset.jsDebugResolutionSeconds),
+          };
+        };
+        const results = [];
+        setDebugGraphResolutionOverride(0);
+        for (const rangeSeconds of ranges) {
+          setDebugGraphRange(rangeSeconds, {render: false});
+          selectSession(debugPaneItemId, {userInitiated: true});
+          setDebugSubTab('graph');
+          renderDebugPanels({force: true});
+          const stats = readControl(document.getElementById(panelDomId(debugPaneItemId)));
+          selectSession(yocostItemId, {userInitiated: true});
+          renderYoCostPanels({force: true});
+          const cost = readControl(document.getElementById(panelDomId(yocostItemId)));
+          results.push({rangeSeconds, stats, cost});
+        }
+
+        setDebugGraphRange(24 * 60 * 60, {render: false});
+        setDebugGraphResolutionOverride(600);
+        const now = Date.now();
+        debugGraphApplyServerHistory({sequence: 77, records: [{
+          start: Math.floor((now - 600000) / 1000), duration: 600, sequence: 77, api_count: 1,
+        }]});
+        setDebugGraphRange(30 * 60, {render: false});
+        selectSession(debugPaneItemId, {userInitiated: true});
+        renderDebugPanels({force: true});
+        const staleStats = readControl(document.getElementById(panelDomId(debugPaneItemId)));
+        selectSession(yocostItemId, {userInitiated: true});
+        renderYoCostPanels({force: true});
+        const staleCost = readControl(document.getElementById(panelDomId(yocostItemId)));
+        return {results, stale: {stats: staleStats, cost: staleCost}};
+        """
+    )
+    expected = {
+        5 * 60: [0, 1, 2, 5, 10, 30],
+        15 * 60: [0, 1, 2, 5, 10, 30, 60],
+        30 * 60: [0, 1, 2, 5, 10, 30, 60, 120],
+        60 * 60: [0, 10, 30, 60, 120, 300],
+        2 * 60 * 60: [0, 10, 30, 60, 120, 300, 600],
+        4 * 60 * 60: [0, 60, 120, 300, 600],
+        8 * 60 * 60: [0, 120, 300, 600],
+        16 * 60 * 60: [0, 600],
+        24 * 60 * 60: [0, 600],
+    }
+    assert [item["rangeSeconds"] for item in metrics["results"]] == list(expected), metrics
+    for item in metrics["results"]:
+        choices = expected[item["rangeSeconds"]]
+        for surface in ("stats", "cost"):
+            control = item[surface]
+            assert control["choices"] == choices, (item, surface)
+            assert control["selected"] in choices, (item, surface)
+            assert control["displayed"] in choices[1:], (item, surface)
+    for surface in ("stats", "cost"):
+        control = metrics["stale"][surface]
+        assert control["choices"] == expected[30 * 60], metrics
+        assert control["selected"] == 120, metrics
+
+
 def test_yocost_last_refreshed_uses_visibility_aware_randomized_cadence(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(

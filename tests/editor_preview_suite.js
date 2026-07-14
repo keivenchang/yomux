@@ -4563,6 +4563,52 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(summary.resolutionSeconds, 600, 'a sixteen-hour range reports the ten-minute retained resolution');
   });
 
+  test('YO!stats rebuilds resolution choices and clamps stale overrides for every range and zoom', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const expected = new Map([
+      [5 * 60, [1, 2, 5, 10, 30]],
+      [15 * 60, [1, 2, 5, 10, 30, 60]],
+      [30 * 60, [1, 2, 5, 10, 30, 60, 120]],
+      [60 * 60, [10, 30, 60, 120, 300]],
+      [2 * 60 * 60, [10, 30, 60, 120, 300, 600]],
+      [4 * 60 * 60, [60, 120, 300, 600]],
+      [8 * 60 * 60, [120, 300, 600]],
+      [16 * 60 * 60, [600]],
+      [24 * 60 * 60, [600]],
+    ]);
+    for (const [rangeSeconds, choices] of expected) {
+      api.setDebugGraphRangeForTest(rangeSeconds, {render: false});
+      assert.deepStrictEqual([...api.debugGraphAvailableResolutionChoicesForTest(now)], choices, `${rangeSeconds}s rebuilds choices from its own retention tier`);
+    }
+
+    api.setDebugGraphRangeForTest(24 * 60 * 60, {render: false});
+    api.setDebugGraphResolutionOverrideForTest(600);
+    api.debugGraphApplyServerHistoryForTest({sequence: 1, records: [{
+      start: Math.floor((now - 600_000) / 1000), duration: 600, sequence: 1, api_count: 1,
+    }]});
+    api.setDebugGraphRangeForTest(30 * 60, {render: false});
+    assert.equal(api.debugGraphResolutionOverrideForTest(), 120, '24h 600s override clamps to the nearest valid 30m choice');
+    const controls = api.debugGraphInnerHtmlForTest(now).match(/data-js-debug-resolution-override[\s\S]*?<\/select>/)?.[0] || '';
+    assert.ok(controls.includes('value="120" selected') && controls.includes('value="10"'), 'the 30m dropdown is rebuilt instead of retaining AUTO-only coarse choices');
+
+    api.setDebugGraphZoomDomainForTest(now - (20 * 60 * 60 * 1000), now - (19.5 * 60 * 60 * 1000));
+    api.debugGraphInnerHtmlForTest(now);
+    assert.equal(api.debugGraphResolutionOverrideForTest(), 0, 'a zoom into ten-minute retained history clamps an impossible explicit choice to AUTO');
+    api.clearDebugGraphZoomForTest({render: false});
+    assert.deepStrictEqual([...api.debugGraphAvailableResolutionChoicesForTest(now)], expected.get(30 * 60), 'zoom reset rebuilds choices for the restored range');
+
+    const restored = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      localStorage: {
+        'yolomux.stats.ui_preferences.v1': JSON.stringify({rangeSeconds: 30 * 60, resolutionOverrideSeconds: 600}),
+      },
+    });
+    restored.debugGraphInnerHtmlForTest(now);
+    assert.equal(restored.debugGraphResolutionOverrideForTest(), 120, 'restoring a stale explicit override clamps it before first paint');
+    const saved = JSON.parse(restored.storageValueForTest('yolomux.stats.ui_preferences.v1'));
+    assert.equal(saved.resolutionOverrideSeconds, 120, 'the clamped restored choice replaces the stale persisted value');
+  });
+
   test('YO!stats ignores a fully covered coarse boundary bucket when choosing 30-minute resolution', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 10_000) * 10_000;

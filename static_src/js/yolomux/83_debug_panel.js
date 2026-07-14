@@ -126,6 +126,7 @@ const jsDebugGraphRangeOptions = Object.freeze([
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
 const jsDebugGraphMaxDisplayPoints = 120;
 const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
+const jsDebugGraphResolutionChoices = Object.freeze(jsDebugGraphDisplayBucketMs.map(value => value / 1000));
 const jsDebugGraphTiers = Object.freeze([
   Object.freeze({maxAgeMs: 30 * 60 * 1000, bucketMs: 1000}),
   Object.freeze({maxAgeMs: 2 * 60 * 60 * 1000, bucketMs: 10 * 1000}),
@@ -367,6 +368,7 @@ function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
 
 function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
+  syncDebugGraphResolutionOverride(nowMs, {persist: true});
   return jsDebugGraphRangeSeconds;
 }
 
@@ -392,6 +394,7 @@ function loadJsDebugStatsUiPreferences() {
   for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
   jsDebugGraphHiddenCharts = hidden;
   jsDebugGraphVisibleCharts = visible;
+  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
 }
 
 function saveJsDebugStatsUiPreferences() {
@@ -868,6 +871,7 @@ function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
 function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphSelectionState = null;
+  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
@@ -2193,6 +2197,34 @@ function debugGraphMinimumDisplayResolutionMs(domain, nowMs = Date.now()) {
   );
 }
 
+function debugGraphAvailableResolutionChoices(domain = debugGraphDomain(), nowMs = Date.now()) {
+  const rangeSeconds = Math.max(1, Number(domain?.rangeSeconds) || 0);
+  const domainStartMs = Number(domain?.startMs);
+  const retainedSeconds = Number.isFinite(domainStartMs)
+    ? debugGraphBucketDurationForTime(domainStartMs, nowMs) / 1000
+    : jsDebugGraphRawBucketMs / 1000;
+  return jsDebugGraphResolutionChoices.filter(value => value >= retainedSeconds && value * 10 <= rangeSeconds);
+}
+
+function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGraphDomain(), nowMs = Date.now()) {
+  const requested = Math.max(0, Number(value) || 0);
+  if (requested === 0) return 0;
+  const choices = debugGraphAvailableResolutionChoices(domain, nowMs);
+  if (!choices.length) return 0;
+  if (choices.includes(requested)) return requested;
+  return choices.reduce((nearest, candidate) => (
+    Math.abs(candidate - requested) < Math.abs(nearest - requested) ? candidate : nearest
+  ), choices[0]);
+}
+
+function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs);
+  if (normalized === jsDebugGraphResolutionOverrideSeconds) return false;
+  jsDebugGraphResolutionOverrideSeconds = normalized;
+  if (persist) saveJsDebugStatsUiPreferences();
+  return true;
+}
+
 function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
   const domainStartMs = Number(domain?.startMs);
   const domainEndMs = Number(domain?.endMs);
@@ -2207,7 +2239,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   // left edge. This also covers server history overlapping the live raw tail.
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  const overrideMs = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0) * 1000;
+  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
   if (overrideMs > 0) return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
   return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs);
 }
@@ -3207,11 +3239,10 @@ function debugGraphSeriesData(buckets) {
 
 function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
+  syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
-  const choices = [1, 2, 5, 10, 30, 60, 120, 300, 600];
-  const retainedSeconds = debugGraphMinimumDisplayResolutionMs(domain, nowMs) / 1000;
-  const availableChoices = choices.filter(value => value >= retainedSeconds && value * 10 <= domain.rangeSeconds);
-  const overrideSeconds = availableChoices.includes(Number(jsDebugGraphResolutionOverrideSeconds)) ? Number(jsDebugGraphResolutionOverrideSeconds) : 0;
+  const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
+  const overrideSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
 
@@ -6457,8 +6488,8 @@ function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
-  saveJsDebugStatsUiPreferences();
   activeJsDebugGraphRangeSeconds();
+  saveJsDebugStatsUiPreferences();
   syncDebugGraphAgentTokenResolution();
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
@@ -6482,7 +6513,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
 function setDebugGraphResolutionOverride(value) {
   loadJsDebugStatsUiPreferences();
   const seconds = Math.max(0, Number(value) || 0);
-  jsDebugGraphResolutionOverrideSeconds = [0, 1, 2, 5, 10, 30, 60, 120, 300, 600].includes(seconds) ? seconds : 0;
+  jsDebugGraphResolutionOverrideSeconds = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
 }
@@ -6702,6 +6733,7 @@ function handleDebugGraphPointerUp(event, panel) {
       startMs: Number(domain.startMs) + (minRatio * spanMs),
       endMs: Number(domain.startMs) + (maxRatio * spanMs),
     };
+    syncDebugGraphResolutionOverride(Date.now(), {persist: true});
     syncJsDebugStatsDeliveryMode();
     refreshDebugGraphSurfaces();
     requestJsDebugHistoryForCurrentDomain();
