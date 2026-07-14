@@ -4483,7 +4483,10 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
               calculationCellCounts: [...(calculationTable?.tBodies[0]?.rows || [])].map(row => row.cells.length),
               compactTablesContained: [modelTable, calculationTable].every(table => {
                 const wrap = table?.closest('.js-debug-cost-table-wrap');
-                return Boolean(wrap && (width > 360 || wrap.scrollWidth <= wrap.clientWidth + 1));
+                // New contract: the compact tables never reflow into stacked
+                // cards; when too narrow they scroll horizontally inside their
+                // own contained overflow-x wrap (the pane never scrolls).
+                return Boolean(wrap && getComputedStyle(wrap).overflowX === 'auto');
               }),
               visibleUnpricedRowCount: visibleUnpricedRows.length,
               visibleUnpricedText: visibleUnpricedRows.map(row => row.textContent.trim()),
@@ -4589,14 +4592,14 @@ def test_yocost_by_agent_cards_scroll_horizontally_at_extreme_narrow_instead_of_
         """
     )
     narrow = {item["width"]: item for item in metrics["layouts"]}
-    # Extreme-narrow: contained horizontal scroll, never a squish, never a pane scrollbar.
-    assert narrow[260]["overflowX"] == "auto", metrics
-    assert narrow[260]["scrolls"] is True, metrics
-    assert narrow[260]["squishes"] is False, metrics
-    assert narrow[260]["paneScrolls"] is False, metrics
-    # Normal-narrow still reflows to cards with no horizontal scroll.
-    assert narrow[360]["scrolls"] is False, metrics
-    assert narrow[360]["squishes"] is False, metrics
+    # No card reflow at any narrow width: the full ruled table stays intact and
+    # its section scrolls horizontally (contained), never squishing or reflowing,
+    # and the pane itself never gains a horizontal scrollbar.
+    for width in (260, 360):
+        assert narrow[width]["overflowX"] == "auto", metrics
+        assert narrow[width]["scrolls"] is True, metrics
+        assert narrow[width]["squishes"] is False, metrics
+        assert narrow[width]["paneScrolls"] is False, metrics
 
 
 def test_debug_token_hover_reports_real_bucket_span_samples_and_gaps(browser, tmp_path):
