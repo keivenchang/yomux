@@ -8901,7 +8901,14 @@ class TmuxWebtermApp:
         approvald = self.approval_client.runtime_status()
         rows = [indexd, statsd, stats_reader, jobd, approvald]
         totals = {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
+        now = time.time()
         for row in rows:
+            # Derive per-service uptime once, here, from the started_at each
+            # runtime_status already reports — one owner for the Local-services
+            # table's Uptime cell instead of adding the field to five
+            # per-service status builders.
+            started_at = float(row.get("started_at") or 0.0)
+            row["uptime_seconds"] = max(0.0, now - started_at) if int(row.get("pid") or 0) > 0 and started_at > 0 else None
             if int(row.get("pid") or 0) > 0:
                 totals["processes"] += 1
             resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}

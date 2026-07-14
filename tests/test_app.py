@@ -177,6 +177,28 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
+def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        now = time.time()
+        # A running service reports a started_at; an idle one has no pid.
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "started_at": now - 42.0, "resources": {"cpu_percent": 1.0, "rss_bytes": 2048}})
+        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "started_at": 0.0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {"service": "stats-reader", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+        services = webapp.runtime_local_services()["services"]
+    finally:
+        webapp.control_server.stop()
+
+    by_name = {row["service"]: row for row in services}
+    # The Local-services table's Uptime cell reads service.uptime_seconds; a
+    # running service must expose it (was absent -> the cell showed an em dash).
+    assert by_name["indexd"]["uptime_seconds"] is not None
+    assert 41.0 <= by_name["indexd"]["uptime_seconds"] <= 60.0
+    assert by_name["statsd"]["uptime_seconds"] is None
+
+
 def test_record_service_load_records_every_known_service_including_idle(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
