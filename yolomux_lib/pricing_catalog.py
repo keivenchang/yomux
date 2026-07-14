@@ -13,7 +13,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import logging
 import os
+import random
 import re
 import sqlite3
 import threading
@@ -43,9 +45,14 @@ SEED_FILENAME = "model_pricing.json"
 MAX_SOURCE_BYTES = 1_000_000
 REFRESH_TIMEOUT_SECONDS = 10.0
 PRICING_STALE_SECONDS = 30 * 24 * 60 * 60
-SOURCE_PRIORITY = {"seed": 1, "official": 2, "override": 3}
+PRICING_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
+PRICING_REFRESH_JITTER_SECONDS = 60 * 60
+PRICING_REFRESH_BACKOFF_INITIAL_SECONDS = 5 * 60
+PRICING_REFRESH_BACKOFF_MAX_SECONDS = 6 * 60 * 60
+SOURCE_PRIORITY = {"seed": 1, "inferred": 2, "official": 3, "override": 4}
 OFFICIAL_SOURCE_HOSTS = frozenset({"platform.openai.com", "developers.openai.com", "openai.com", "www.anthropic.com", "anthropic.com", "platform.claude.com", "ai.google.dev", "cloud.google.com"})
 CORROBORATION_SOURCE_HOSTS = frozenset({"openrouter.ai", "raw.githubusercontent.com", "github.com"})
+logger = logging.getLogger(__name__)
 
 
 class PricingCatalogError(RuntimeError):
@@ -128,6 +135,23 @@ def safe_source_url(value: object) -> str:
     if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443):
         return ""
     return url if (parsed.hostname or "").lower() in OFFICIAL_SOURCE_HOSTS | CORROBORATION_SOURCE_HOSTS else ""
+
+
+def _inferred_family_aliases(model: str) -> tuple[str, ...]:
+    """Return only conservative, provider-visible family aliases.
+
+    Date/build suffixes and the Sol/Terra/Luna deployment suffixes are common
+    telemetry identities, but are not separate price evidence.  No arbitrary
+    prefix or edit-distance matching is permitted.
+    """
+    candidates: list[str] = []
+    dated = re.sub(r"-(?:20\d{2}[-.]?\d{2}[-.]?\d{2}|latest|preview)$", "", model, flags=re.IGNORECASE)
+    if dated != model:
+        candidates.append(dated)
+    variant = re.sub(r"-(?:sol|terra|luna)(?:-(?:latest|preview|20\d{2}[-.]?\d{2}[-.]?\d{2}))?$", "", model, flags=re.IGNORECASE)
+    if variant != model and variant not in candidates:
+        candidates.append(variant)
+    return tuple(candidates)
 
 
 def _canonical_text(value: object, field: str) -> str:
@@ -390,7 +414,18 @@ class PricingCatalog:
         state = "seed-only"
         if official_revision:
             state = "review-needed" if latest_failed else ("stale" if float(latest_check) and float(latest_check) < self.clock() - PRICING_STALE_SECONDS else "fresh")
-        return {"state": state, "seed_revision": int(seed_revision), "catalog_revision": int(official_revision or seed_revision), "database": str(self.paths.database)}
+        return {
+            "state": state,
+            "seed_revision": int(seed_revision),
+            "catalog_revision": int(official_revision or seed_revision),
+            "last_checked_at": float(latest_check),
+            "database": str(self.paths.database),
+        }
+
+    def refresh_due(self, max_age: float = PRICING_STALE_SECONDS) -> bool:
+        status = self.status()
+        checked_at = float(status.get("last_checked_at") or 0)
+        return status["state"] in {"seed-only", "stale", "review-needed"} or checked_at < self.clock() - max_age
 
     def public_payload(self) -> dict[str, Any]:
         """Public metadata only: links/evidence, never provider response bodies."""
@@ -409,18 +444,40 @@ class PricingCatalog:
     def resolve_rate(self, *, provider: str, model: str, direction: str, modality: str = "text", cache_role: str = "none", unit: str = "tokens", profile: str = "default", service_tier: str = "default", timestamp: str = "9999-12-31T23:59:59Z") -> ResolvedRate | None:
         self.open()
         with self._transaction() as connection:
-            # Exact aliases only; never prefix/fuzzy match a model identity.
-            # Official rows are immutable history, but only the newest
-            # accepted official revision is active.  Without this predicate a
-            # model removed from a refreshed provider page would continue to
-            # resolve from an old official revision indefinitely.
-            alias_row = connection.execute("SELECT model, source_kind, revision FROM model_aliases WHERE provider = ? AND alias = ? AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active')) ORDER BY CASE source_kind WHEN 'override' THEN 3 WHEN 'official' THEN 2 ELSE 1 END DESC, revision DESC LIMIT 1", (provider, model)).fetchone()
-            if alias_row is None:
-                return None
-            row = connection.execute("SELECT * FROM price_rates WHERE provider = ? AND model = ? AND direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1 AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active')) ORDER BY CASE source_kind WHEN 'override' THEN 3 WHEN 'official' THEN 2 ELSE 1 END DESC, effective_from DESC, revision DESC LIMIT 1", (provider, alias_row["model"], direction, modality, cache_role, unit, profile, service_tier, timestamp)).fetchone()
+            def find(alias: str, kinds: tuple[str, ...]) -> sqlite3.Row | None:
+                placeholders = ",".join("?" for _ in kinds)
+                alias_row = connection.execute(
+                    f"SELECT model FROM model_aliases WHERE provider = ? AND alias = ? AND source_kind IN ({placeholders}) "
+                    "ORDER BY CASE source_kind WHEN 'override' THEN 4 WHEN 'official' THEN 3 ELSE 1 END DESC, revision DESC LIMIT 1",
+                    (provider, alias, *kinds),
+                ).fetchone()
+                if alias_row is None:
+                    return None
+                return connection.execute(
+                    f"SELECT * FROM price_rates WHERE provider = ? AND model = ? AND direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1 AND source_kind IN ({placeholders}) "
+                    "ORDER BY CASE source_kind WHEN 'override' THEN 4 WHEN 'official' THEN 3 ELSE 1 END DESC, effective_from DESC, revision DESC LIMIT 1",
+                    (provider, alias_row["model"], direction, modality, cache_role, unit, profile, service_tier, timestamp, *kinds),
+                ).fetchone()
+
+            # Explicit identities always win.  Historical official rows remain
+            # eligible so a partial upstream refresh cannot erase coverage.
+            row = find(model, ("override", "official"))
+            source_kind = str(row["source_kind"]) if row is not None else ""
+            if row is None:
+                # Only reviewed, deterministic family forms are inferred.  The
+                # evidence is visibly labelled rather than masquerading as an
+                # exact provider match.
+                for family in _inferred_family_aliases(model):
+                    row = find(family, ("official",))
+                    if row is not None:
+                        source_kind = "inferred"
+                        break
+            if row is None:
+                row = find(model, ("seed",))
+                source_kind = "seed" if row is not None else ""
             if row is None:
                 return None
-            return ResolvedRate(provider, str(row["model"]), model, direction, modality, cache_role, unit, int(row["scale"]), Decimal(str(row["usd"])), str(row["effective_from"]), str(row["source_kind"]), str(row["source_url"]), int(row["revision"]))
+            return ResolvedRate(provider, str(row["model"]), model, direction, modality, cache_role, unit, int(row["scale"]), Decimal(str(row["usd"])), str(row["effective_from"]), source_kind, str(row["source_url"]), int(row["revision"]))
 
     def estimate_rate_band(self, *, provider: str = "unknown", direction: str, modality: str = "text", cache_role: str = "none", unit: str = "tokens", profile: str = "default", service_tier: str = "default", timestamp: str = "9999-12-31T23:59:59Z") -> EstimatedRateBand | None:
         """Return a defensible low/high comparable rate band for unknown models.
@@ -438,12 +495,12 @@ class PricingCatalog:
         provider_clause = " AND provider = ?" if normalized_provider != "unknown" else ""
         with self._transaction() as connection:
             rows = connection.execute(
-                "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1" + provider_clause + " AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
+                "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND profile = ? AND service_tier = ? AND effective_from <= ? AND active = 1" + provider_clause,
                 (direction, modality, cache_role, unit, profile, service_tier, timestamp, *([normalized_provider] if provider_clause else [])),
             ).fetchall()
             if not rows:
                 rows = connection.execute(
-                    "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND effective_from <= ? AND active = 1" + provider_clause + " AND (source_kind != 'official' OR revision = (SELECT MAX(revision) FROM catalog_revisions WHERE kind = 'official' AND status = 'active'))",
+                    "SELECT * FROM price_rates WHERE direction = ? AND modality = ? AND cache_role = ? AND unit = ? AND effective_from <= ? AND active = 1" + provider_clause,
                     (direction, modality, cache_role, unit, timestamp, *([normalized_provider] if provider_clause else [])),
                 ).fetchall()
             rates = [
@@ -520,14 +577,20 @@ class PricingCatalog:
                 # page: selecting one page here would discard the other providers.
                 # Cross-reference adapters remain discovery/audit input and can
                 # veto an exact conflicting component instead of changing a rate.
-                official = [item for adapter, item, _headers, _body in catalogs if adapter.kind == "official"]
+                official = [item for adapter, item, _headers, _body in catalogs if adapter.kind in {"official", "machine"}]
                 if not official:
-                    raise PricingRefreshError("no accepted official pricing catalog")
+                    raise PricingRefreshError("no accepted authoritative pricing catalog")
                 corroboration = [item for adapter, item, _headers, _body in catalogs if adapter.kind == "corroboration"]
                 if any(_catalogs_disagree(candidate, corroboration) for candidate in official):
                     raise PricingRefreshError("pricing source disagreement requires review")
                 chosen = _merge_official_catalogs(official, current_revision=self.status()["catalog_revision"])
                 with self._transaction() as connection:
+                    previous_aliases = {
+                        (str(row["provider"]), str(row["alias"]))
+                        for row in connection.execute("SELECT DISTINCT provider, alias FROM model_aliases WHERE source_kind = 'official'")
+                    }
+                    incoming_aliases = {(model["provider"], alias) for model in chosen["models"] for alias in model["aliases"]}
+                    carried_forward = sorted(f"{provider}/{alias}" for provider, alias in previous_aliases - incoming_aliases)
                     self._import_catalog(connection, chosen, kind="official")
                     for adapter, catalog, response_headers, body in catalogs:
                         # Commit source evidence only with the matching accepted
@@ -535,6 +598,9 @@ class PricingCatalog:
                         # active pricing and audit state untouched.
                         self._record_source_check(connection, adapter.url, response_headers, body, adapter.parser_version, "accepted")
                 result = {"ok": True, "status": "updated", "catalog_revision": int(chosen["catalog_revision"])}
+                if carried_forward:
+                    result["carried_forward_models"] = carried_forward
+                    logger.warning("Pricing refresh omitted %d previously covered aliases; retaining prior official evidence: %s", len(carried_forward), ", ".join(carried_forward[:20]))
                 if failures:
                     result["source_failures"] = failures
             with self._transaction() as connection:
@@ -574,7 +640,7 @@ class PricingSourceAdapter:
     parser_version: str = "1"
 
     def parse(self, body: bytes) -> dict[str, Any]:
-        if self.kind not in {"official", "corroboration"}:
+        if self.kind not in {"official", "machine", "corroboration"}:
             raise PricingRefreshError("unknown pricing source kind")
         return self.parser(body)
 
@@ -731,7 +797,7 @@ def parse_openrouter_prices(body: bytes) -> dict[str, Any]:
 
 
 def parse_litellm_prices(body: bytes) -> dict[str, Any]:
-    """Normalize LiteLLM's model-price map for corroboration/discovery only."""
+    """Normalize LiteLLM's structured model-price map as a bulk fallback."""
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -750,7 +816,9 @@ def parse_litellm_prices(body: bytes) -> dict[str, Any]:
             rates.append({"direction": direction, "modality": "text", "cache_role": cache_role, "unit": "tokens", "scale": 1_000_000, "usd": format(Decimal(_decimal_text(value)) * Decimal(1_000_000), "f"), "effective_from": "1970-01-01T00:00:00Z"})
         if rates:
             provider = str(details.get("litellm_provider") or "litellm")
-            models.append({"provider": provider, "model": model, "aliases": [model], "rates": rates, "source": {"url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "kind": "corroboration"}})
+            models.append({"provider": provider, "model": model, "aliases": [model], "rates": rates, "source": {"url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "kind": "machine"}})
+    if not models:
+        raise PricingCatalogValidationError("LiteLLM price map has no usable models")
     return validate_catalog({"schema_version": 1, "catalog_revision": 1, "models": models})
 
 
@@ -761,7 +829,17 @@ def _merge_official_catalogs(catalogs: list[dict[str, Any]], *, current_revision
     therefore advances monotonically whenever a successful provider set is
     installed, while each parsed model keeps its own source evidence.
     """
-    models = [model for catalog in catalogs for model in catalog["models"]]
+    # Adapters are ordered most authoritative first.  The structured bulk
+    # feed fills gaps, but cannot replace an exact alias from a provider page.
+    models: list[dict[str, Any]] = []
+    claimed: set[tuple[str, str]] = set()
+    for catalog in catalogs:
+        for model in catalog["models"]:
+            aliases = [(model["provider"], alias) for alias in model["aliases"]]
+            if any(alias in claimed for alias in aliases):
+                continue
+            models.append(model)
+            claimed.update(aliases)
     maximum = max(int(catalog["catalog_revision"]) for catalog in catalogs)
     revision = max(maximum, int(current_revision) + 1)
     return validate_catalog({"schema_version": PRICING_SCHEMA_VERSION, "catalog_revision": revision, "models": models})
@@ -789,53 +867,99 @@ def _catalogs_disagree(official: dict[str, Any], corroboration: list[dict[str, A
 
 
 def default_pricing_source_adapters() -> tuple[PricingSourceAdapter, ...]:
-    """Reviewed registrations.  Official pages are authoritative; the JSON
-    feeds are retained strictly as corroboration and model discovery input."""
+    """Reviewed registrations ordered provider pages, bulk JSON, corroboration."""
     return (
         PricingSourceAdapter("openai", "https://developers.openai.com/api/docs/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="openai", source_url="https://developers.openai.com/api/docs/pricing")),
         PricingSourceAdapter("anthropic", "https://platform.claude.com/docs/en/about-claude/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="anthropic", source_url="https://platform.claude.com/docs/en/about-claude/pricing")),
         PricingSourceAdapter("google", "https://ai.google.dev/gemini-api/docs/pricing", "official", lambda body: parse_provider_pricing_table(body, provider="google", source_url="https://ai.google.dev/gemini-api/docs/pricing")),
+        PricingSourceAdapter("litellm", "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "machine", parse_litellm_prices),
         PricingSourceAdapter("openrouter", "https://openrouter.ai/api/v1/models", "corroboration", parse_openrouter_prices),
-        PricingSourceAdapter("litellm", "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "corroboration", parse_litellm_prices),
     )
 
 
 class PricingRefreshCoordinator:
-    """Nonblocking in-process single-flight wrapper for an explicit Refresh.
+    """Nonblocking single-flight wrapper for explicit and periodic refreshes.
 
     Cross-server serialization remains the catalog's durable file lock; a web
     handler merely asks this coordinator to launch the bounded worker and can
     return progress immediately.
     """
 
-    def __init__(self, catalog: PricingCatalog, *, adapters: tuple[PricingSourceAdapter, ...] | None = None, publish: Callable[[str, dict[str, Any]], None] | None = None):
+    def __init__(self, catalog: PricingCatalog, *, adapters: tuple[PricingSourceAdapter, ...] | None = None, publish: Callable[[str, dict[str, Any]], None] | None = None, clock: Callable[[], float] = time.time, random_source: Callable[[], float] = random.random, timer_factory: Callable[[float, Callable[[], None]], Any] = threading.Timer):
         self.catalog = catalog
         self.adapters = default_pricing_source_adapters() if adapters is None else adapters
         self.publish = publish or (lambda _name, _payload: None)
+        self.clock = clock
+        self.random_source = random_source
+        self.timer_factory = timer_factory
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._timer: Any = None
+        self._periodic = False
+        self._failure_count = 0
         self._state: dict[str, Any] = {"status": "idle"}
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._state)
 
-    def start(self) -> dict[str, Any]:
+    def start(self, *, reason: str = "manual") -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return {"ok": True, "coalesced": True, **self._state}
-            self._state = {"status": "running", "started_at": time.time()}
+            self._state = {"status": "running", "started_at": self.clock(), "reason": reason}
             self._thread = threading.Thread(target=self._run, name="yolomux-pricing-refresh", daemon=True)
             self._thread.start()
             return {"ok": True, "coalesced": False, **self._state}
+
+    def start_periodic(self) -> None:
+        """Start only on the elected background owner; never blocks startup."""
+        with self._lock:
+            if self._periodic:
+                return
+            self._periodic = True
+        delay = self.random_source() * PRICING_REFRESH_JITTER_SECONDS if self.catalog.refresh_due() else PRICING_REFRESH_INTERVAL_SECONDS + self.random_source() * PRICING_REFRESH_JITTER_SECONDS
+        self._schedule(delay)
+
+    def stop_periodic(self) -> None:
+        with self._lock:
+            self._periodic = False
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule(self, delay: float) -> None:
+        with self._lock:
+            if not self._periodic:
+                return
+            if self._timer is not None:
+                self._timer.cancel()
+            timer = self.timer_factory(max(0.0, delay), self._periodic_tick)
+            timer.daemon = True
+            self._timer = timer
+            self._state = {**self._state, "next_refresh_at": self.clock() + max(0.0, delay), "failure_count": self._failure_count}
+            timer.start()
+
+    def _periodic_tick(self) -> None:
+        with self._lock:
+            self._timer = None
+        self.start(reason="periodic")
 
     def _run(self) -> None:
         try:
             result = self.catalog.refresh(list(self.adapters))
             with self._lock:
-                self._state = {"status": "done", "finished_at": time.time(), "refresh_status": result.get("status", ""), **{key: value for key, value in result.items() if key != "status"}}
+                self._failure_count = 0
+                self._state = {"status": "done", "finished_at": self.clock(), "refresh_status": result.get("status", ""), **{key: value for key, value in result.items() if key != "status"}}
                 state = dict(self._state)
             self.publish("pricing_catalog_changed", state)
+            self._schedule(PRICING_REFRESH_INTERVAL_SECONDS + self.random_source() * PRICING_REFRESH_JITTER_SECONDS)
         except Exception as exc:
             with self._lock:
-                self._state = {"status": "failed", "finished_at": time.time(), "error": str(exc)}
+                self._failure_count += 1
+                backoff = min(PRICING_REFRESH_BACKOFF_MAX_SECONDS, PRICING_REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** (self._failure_count - 1)))
+                self._state = {"status": "failed", "finished_at": self.clock(), "error": str(exc), "failure_count": self._failure_count, "backoff_seconds": backoff}
+                state = dict(self._state)
+            logger.warning("Pricing catalog refresh failed; retrying in %.0f seconds: %s", backoff, exc)
+            self.publish("pricing_catalog_changed", state)
+            self._schedule(backoff + self.random_source() * min(backoff, PRICING_REFRESH_JITTER_SECONDS))

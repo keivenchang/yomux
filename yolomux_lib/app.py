@@ -3111,6 +3111,7 @@ class TmuxWebtermApp:
         # jobd is started only by the elected scheduler owner.  HTTP handlers
         # can submit/read work but must never create a child process themselves.
         self.job_client.start_for_scheduler()
+        self.pricing_refresh_coordinator.start_periodic()
         if self.stats_client.ensure_started():
             self.start_stats_metric_scheduler()
         else:
@@ -3192,6 +3193,7 @@ class TmuxWebtermApp:
         return payload, HTTPStatus.OK
 
     def demote_background_owner(self) -> None:
+        self.pricing_refresh_coordinator.stop_periodic()
         self.stop_stats_metric_scheduler()
         with self.metadata_warm_lock:
             self.metadata_warm_record.stop_event.set()
@@ -12953,6 +12955,7 @@ class TmuxWebtermApp:
         return self.refresh_auto_approve_cache_sync()
 
     def stop_auto_approve_all(self) -> None:
+        self.pricing_refresh_coordinator.stop_periodic()
         self.stop_stats_metric_scheduler()
         self.approval_client.request({"action": "shutdown"}, timeout=2.5)
         self.background_owner.stop()

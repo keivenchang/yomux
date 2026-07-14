@@ -1,21 +1,94 @@
 {
   "schema_version": 1,
-  "catalog_revision": 1,
-  "generated_at": "2026-07-11T00:00:00Z",
+  "catalog_revision": 2,
+  "generated_at": "2026-07-13T00:00:00Z",
   "models": [
     {
-      "provider": "openai",
-      "model": "gpt-4.1",
-      "aliases": ["gpt-4.1"],
-      "source": {
-        "url": "https://platform.openai.com/docs/pricing",
-        "kind": "official",
-        "checked_at": "2026-07-11T00:00:00Z"
-      },
+      "provider": "openai", "model": "gpt-4.1", "aliases": ["gpt-4.1"],
+      "source": {"url": "https://developers.openai.com/api/docs/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
       "rates": [
         {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "2.00", "effective_from": "2025-01-01T00:00:00Z"},
         {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.50", "effective_from": "2025-01-01T00:00:00Z"},
         {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "8.00", "effective_from": "2025-01-01T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "openai", "model": "gpt-5.6-sol", "aliases": ["gpt-5.6-sol", "gpt-5.6"],
+      "source": {"url": "https://developers.openai.com/api/docs/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "5.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.50", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "6.25", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "30.00", "effective_from": "2026-07-13T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "openai", "model": "gpt-5.6-terra", "aliases": ["gpt-5.6-terra"],
+      "source": {"url": "https://developers.openai.com/api/docs/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "2.50", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.25", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "3.125", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "15.00", "effective_from": "2026-07-13T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "openai", "model": "gpt-5.6-luna", "aliases": ["gpt-5.6-luna"],
+      "source": {"url": "https://developers.openai.com/api/docs/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "1.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.10", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "1.25", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "6.00", "effective_from": "2026-07-13T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "anthropic", "model": "claude-fable-5", "aliases": ["claude-fable-5"],
+      "source": {"url": "https://platform.claude.com/docs/en/about-claude/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "10.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "1.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "12.50", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_1h", "unit": "tokens", "scale": 1000000, "usd": "20.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "50.00", "effective_from": "2026-07-13T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "anthropic", "model": "claude-opus-4-8", "aliases": ["claude-opus-4-8"],
+      "source": {"url": "https://platform.claude.com/docs/en/about-claude/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "5.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.50", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "6.25", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_1h", "unit": "tokens", "scale": 1000000, "usd": "10.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "25.00", "effective_from": "2026-07-13T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "anthropic", "model": "claude-sonnet-5", "aliases": ["claude-sonnet-5"],
+      "source": {"url": "https://platform.claude.com/docs/en/about-claude/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "2.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.20", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "2.50", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_1h", "unit": "tokens", "scale": 1000000, "usd": "4.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "10.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "3.00", "effective_from": "2026-09-01T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.30", "effective_from": "2026-09-01T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "3.75", "effective_from": "2026-09-01T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_1h", "unit": "tokens", "scale": 1000000, "usd": "6.00", "effective_from": "2026-09-01T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "15.00", "effective_from": "2026-09-01T00:00:00Z"}
+      ]
+    },
+    {
+      "provider": "anthropic", "model": "claude-haiku-4-5", "aliases": ["claude-haiku-4-5"],
+      "source": {"url": "https://platform.claude.com/docs/en/about-claude/pricing", "kind": "official", "checked_at": "2026-07-13T00:00:00Z"},
+      "rates": [
+        {"direction": "input", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "1.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "read", "unit": "tokens", "scale": 1000000, "usd": "0.10", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_5m", "unit": "tokens", "scale": 1000000, "usd": "1.25", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "input", "modality": "text", "cache_role": "write_1h", "unit": "tokens", "scale": 1000000, "usd": "2.00", "effective_from": "2026-07-13T00:00:00Z"},
+        {"direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens", "scale": 1000000, "usd": "5.00", "effective_from": "2026-07-13T00:00:00Z"}
       ]
     }
   ]

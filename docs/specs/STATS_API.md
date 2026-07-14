@@ -47,6 +47,21 @@ consumers must not sum overlapping raw and rollup records. A lower-bound or
 truncated cost summary is explicitly incomplete while token counters remain
 independently visible.
 
+Pricing is an offline-first, effective-dated catalog. The packaged seed covers
+current common model families with reviewed HTTPS provenance, check dates, and
+rate effective dates. Provider pricing tables have first priority within a
+refresh; structured LiteLLM JSON fills omitted models, and OpenRouter remains
+corroboration only. Resolution priority is explicit override, exact official
+evidence, visibly labeled conservative family inference, then seed. A partial
+refresh never deletes older official coverage: omitted aliases retain their
+original revision/source evidence and the refresh result and log identify them.
+
+Only the elected background owner schedules catalog refresh. Seed-only or
+stale state receives a jittered startup attempt; success schedules the next
+daily attempt, while failure publishes status and retries with bounded
+exponential backoff. Fetching and parsing run on a daemon worker and never
+block an HTTP request or startup thread.
+
 statsd is the sole SQLite writer. A separate persistent `stats-reader` service
 opens the same WAL database with SQLite `mode=ro` and `PRAGMA query_only=ON`.
 It accepts only `history`, `write_encoded_history`, and
