@@ -329,6 +329,55 @@ def test_stats_store_repairs_preexisting_coverage_overlaps_on_open(tmp_path):
     reopened.close()
 
 
+@pytest.mark.parametrize("seed", range(12))
+def test_stats_store_coverage_is_always_disjoint_under_random_owner_churn(tmp_path, seed):
+    import random
+
+    rng = random.Random(seed)
+    store = stats_store.StatsStore(tmp_path / f"stats-{seed}.sqlite3")
+    families = ["cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory"]
+    now = 100_000
+    time_cursor = now
+    generation = 0
+    # Interleave many sampler owners; each restart backfills a few seconds
+    # before the outgoing owner's finalized end (the live corruption shape),
+    # with occasional crash gaps and short-lived blip owners.
+    for _ in range(rng.randint(6, 20)):
+        generation += 1
+        epoch = f"owner-{generation}:{rng.randint(0, 9999)}"
+        cadence = rng.choice([1, 10, 60])
+        # A restart may rewind the shared clock a little (backfilled samples).
+        time_cursor = max(now, time_cursor - rng.randint(0, 15))
+        for _ in range(rng.randint(1, 8)):
+            for family in families:
+                store.record_sample_coverage(
+                    family=family, sample_time=time_cursor, cadence=cadence,
+                    epoch_id=epoch, owner_generation=generation,
+                )
+            time_cursor += rng.randint(1, cadence * 2)
+        # Occasional crash gap before the next owner.
+        if rng.random() < 0.4:
+            time_cursor += rng.randint(30, 600)
+
+    coverage = store.query_coverage(start=now, end=time_cursor + 100)
+    all_lists = list(coverage["store_intervals"].values()) + [coverage["intervals"]]
+    for intervals in all_lists:
+        ordered = sorted(intervals, key=lambda item: (int(item["start"]), int(item["end"])))
+        assert ordered == list(intervals), "served intervals must be pre-sorted"
+        assert all(int(item["end"]) > int(item["start"]) for item in intervals), "no inverted interval"
+        assert _coverage_overlap_pairs(intervals) == [], "served coverage must be disjoint"
+        assert len(intervals) <= stats_store.STATS_COVERAGE_MAX_INTERVALS
+    # Durable table matches: reopening (which runs repair) leaves it clean.
+    store.close()
+    reopened = stats_store.StatsStore(tmp_path / f"stats-{seed}.sqlite3")
+    durable_overlaps = reopened._connection().execute(
+        "SELECT COUNT(*) FROM stats_coverage_intervals a JOIN stats_coverage_intervals b"
+        " ON a.family=b.family AND a.rowid<b.rowid AND a.end > b.start AND b.end > a.start"
+    ).fetchone()[0]
+    assert durable_overlaps == 0
+    reopened.close()
+
+
 def test_usage_atom_backfill_status_is_complete_when_version_marker_matches(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     # A stale status JSON left at "pending" must not override the authoritative
