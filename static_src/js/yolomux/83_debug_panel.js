@@ -4856,16 +4856,22 @@ function debugGraphCostBackfillText(summary) {
 
 function debugGraphCostUnpricedUsage(summary) {
   const rows = debugGraphCostRows(summary?.components).filter(row => row?.priced === false || Math.max(0, Number(row?.unpriced_count) || 0) > 0);
-  const labels = [...new Set(rows.map(row => {
-    const model = [row?.provider, row?.model].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || debugGraphCostText('debug.cost.unknown', 'Unknown');
+  const classesByKey = new Map();
+  for (const row of rows) {
+    const provider = String(row?.provider || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
+    const model = String(row?.model || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
     const itemClass = debugGraphCostClass(row);
-    return `${model} (${itemClass})`;
-  }))];
+    const key = `${provider}\u0000${model}\u0000${itemClass}`;
+    const current = classesByKey.get(key) || {provider, model, itemClass, tokenQuantity: 0};
+    current.tokenQuantity += Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0));
+    classesByKey.set(key, current);
+  }
+  const classes = [...classesByKey.values()];
   const rowsTokenQuantity = rows.reduce((total, row) => total + Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0)), 0);
   const tokenQuantity = Math.max(0, Number(summary?.unpricedTokenQuantity) || rowsTokenQuantity);
   const knownMicroUsd = debugGraphCostInteger(summary?.knownMicroUsd);
   const upperMicroUsd = Math.max(knownMicroUsd, debugGraphCostInteger(summary?.upperMicroUsd));
-  return {tokenQuantity, worstCaseMicroUsd: upperMicroUsd - knownMicroUsd, labels};
+  return {tokenQuantity, worstCaseMicroUsd: upperMicroUsd - knownMicroUsd, classes};
 }
 
 function debugGraphCostUnknownUsageHtml(summary) {
@@ -4874,10 +4880,15 @@ function debugGraphCostUnknownUsageHtml(summary) {
   const rows = [
     [debugGraphCostText('debug.cost.knownTotal', 'Known priced total'), debugGraphCostUsdText(summary?.knownMicroUsd)],
     [debugGraphCostText('debug.cost.unpricedTokens', 'Unpriced tokens'), debugGraphTokensText(usage.tokenQuantity)],
-    [debugGraphCostText('debug.cost.worstCase', 'Worst-case additional estimate'), debugGraphCostUsdText(usage.worstCaseMicroUsd)],
-    [debugGraphCostText('debug.cost.unpricedModels', 'Unpriced model/classes'), usage.labels.join(', ') || debugGraphCostText('debug.cost.unknown', 'Unknown')],
+    [debugGraphCostText('debug.cost.worstCase', 'Worst-case estimate'), debugGraphCostUsdText(usage.worstCaseMicroUsd)],
   ];
-  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div></section>`;
+  const classesLabel = debugGraphCostText('debug.cost.unpricedModels', 'Unpriced model/classes');
+  const classRows = usage.classes.map(item => {
+    const label = `${item.provider} · ${item.model} · ${item.itemClass}`;
+    return `<tr data-js-debug-unpriced-class><th scope="row">${esc(label)}</th><td>${esc(debugGraphTokensText(item.tokenQuantity))}</td></tr>`;
+  }).join('');
+  const disclosure = usage.classes.length ? `<details class="js-debug-cost-unpriced-disclosure"><summary aria-label="${esc(`${classesLabel}: ${usage.classes.length}`)}"><span>${esc(classesLabel)}</span><strong>${usage.classes.length}</strong></summary><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced-classes"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.modelClass', 'Provider · model · class'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th></tr></thead><tbody>${classRows}</tbody></table></div></details>` : '';
+  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div>${disclosure}</section>`;
 }
 
 function debugGraphCostReportHtml(summary, domain) {

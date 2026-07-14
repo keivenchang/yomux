@@ -5209,6 +5209,35 @@ body :is(
 .js-debug-cost-table {
   min-inline-size: 100%;
 }
+.js-debug-cost-unpriced-disclosure {
+  margin-block-start: var(--space-5);
+  border-block-start: 1px solid var(--line);
+}
+.js-debug-cost-unpriced-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  min-inline-size: 0;
+  padding-block: var(--space-5);
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-cost-unpriced-disclosure > summary span {
+  min-inline-size: 0;
+}
+.js-debug-cost-unpriced-disclosure > summary strong {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-unpriced-disclosure[open] > summary {
+  color: var(--active-control-text);
+}
+.js-debug-cost-unpriced-disclosure > .js-debug-cost-table-wrap {
+  margin-block-start: 0;
+}
 .js-debug-cost-table th:not(:first-child) {
   color: var(--muted);
 }

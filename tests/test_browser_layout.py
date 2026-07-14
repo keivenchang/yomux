@@ -4335,9 +4335,16 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
         const summary = {
           knownMicroUsd: 668830000,
           upperMicroUsd: 777540000,
-          unpricedCount: 2,
-          unpricedTokenQuantity: 123456789,
-          components: [{provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'input', unit: 'tokens', quantity: 123456789, priced: false}],
+          unpricedCount: 6,
+          unpricedTokenQuantity: 21000,
+          components: [
+            {provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'input', cache_role: 'none', unit: 'tokens', quantity: 1000, priced: false},
+            {provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'input', cache_role: 'read', unit: 'tokens', quantity: 2000, priced: false},
+            {provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'output', cache_role: 'none', unit: 'tokens', quantity: 3000, priced: false},
+            {provider: 'anthropic', model: 'another-unknown-model-with-a-long-name', direction: 'input', cache_role: 'none', unit: 'tokens', quantity: 4000, priced: false},
+            {provider: 'anthropic', model: 'another-unknown-model-with-a-long-name', direction: 'output', cache_role: 'none', unit: 'tokens', quantity: 5000, priced: false},
+            {provider: 'example-provider', model: 'third-unknown-model-with-a-long-name', direction: 'input', cache_role: 'write', unit: 'tokens', quantity: 6000, priced: false},
+          ],
           sources: [{
             source: transcript,
             transcript,
@@ -4368,6 +4375,11 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
           </section>`;
         document.body.append(fixture);
 
+        const unpricedDisclosure = fixture.querySelector('.js-debug-cost-unpriced-disclosure');
+        const disclosureDefaultOpen = unpricedDisclosure?.open === true;
+        const disclosureAriaLabel = unpricedDisclosure?.querySelector('summary')?.getAttribute('aria-label') || '';
+        if (unpricedDisclosure) unpricedDisclosure.open = true;
+
         const verticalTextFindings = root => {
           const findings = [];
           const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -4390,11 +4402,14 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
         const layouts = [];
         for (const theme of ['dark', 'light']) {
           document.body.classList.toggle('theme-light', theme === 'light');
-          for (const width of [360, 720, 1200]) {
+          for (const width of [260, 360, 720, 1200]) {
             fixture.style.width = `${width}px`;
             const cost = fixture.querySelector('[data-responsive-audit="cost"]');
             const system = fixture.querySelector('[data-responsive-audit="system"]');
             const sourceTable = cost.querySelector('[data-js-debug-cost-table="source"]');
+            const visibleUnpricedRows = [...cost.querySelectorAll('[data-js-debug-cost-table="unpriced"] tbody tr')];
+            const unpricedClassRows = [...cost.querySelectorAll('[data-js-debug-unpriced-class]')];
+            const disclosureRect = unpricedDisclosure?.getBoundingClientRect();
             const sourceCells = [...sourceTable.rows[1].cells].map(cell => cell.getBoundingClientRect().width);
             layouts.push({
               theme,
@@ -4404,6 +4419,13 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
               costScrollContained: [...cost.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
               systemScrollContained: [...system.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
               sourceCells,
+              visibleUnpricedRowCount: visibleUnpricedRows.length,
+              visibleUnpricedText: visibleUnpricedRows.map(row => row.textContent.trim()),
+              unpricedClassRowCount: unpricedClassRows.length,
+              unpricedClassCellCounts: unpricedClassRows.map(row => row.cells.length),
+              unpricedClassLabels: unpricedClassRows.map(row => row.cells[0]?.textContent.trim()),
+              unpricedClassTokens: unpricedClassRows.map(row => row.cells[1]?.textContent.trim()),
+              disclosureContained: disclosureRect ? disclosureRect.right <= cost.getBoundingClientRect().right + 1 : false,
             });
           }
         }
@@ -4415,11 +4437,26 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
           middleParts: link?.querySelectorAll('[data-middle-truncate-part]').length || 0,
         };
         fixture.remove();
-        return {layouts, source, transcript};
+        return {layouts, source, transcript, disclosureDefaultOpen, disclosureAriaLabel};
         """
     )
     assert all(not item["costFindings"] and not item["systemFindings"] for item in metrics["layouts"]), metrics
     assert all(item["costScrollContained"] and item["systemScrollContained"] for item in metrics["layouts"]), metrics
+    assert metrics["disclosureDefaultOpen"] is False, metrics
+    assert metrics["disclosureAriaLabel"] == "Unpriced model/classes: 6", metrics
+    assert all(item["visibleUnpricedRowCount"] == 3 for item in metrics["layouts"]), metrics
+    assert all(item["visibleUnpricedText"] == ["Known priced total$668.83", "Unpriced tokens21.0k tokens", "Worst-case estimate$108.71"] for item in metrics["layouts"]), metrics
+    assert all(item["unpricedClassRowCount"] == 6 and item["unpricedClassCellCounts"] == [2] * 6 for item in metrics["layouts"]), metrics
+    assert all(item["unpricedClassLabels"] == [
+        "openai · unknown-model-with-a-long-name · input",
+        "openai · unknown-model-with-a-long-name · cache",
+        "openai · unknown-model-with-a-long-name · output",
+        "anthropic · another-unknown-model-with-a-long-name · input",
+        "anthropic · another-unknown-model-with-a-long-name · output",
+        "example-provider · third-unknown-model-with-a-long-name · cache",
+    ] for item in metrics["layouts"]), metrics
+    assert all(item["unpricedClassTokens"] == ["1.0k tokens", "2.0k tokens", "3.0k tokens", "4.0k tokens", "5.0k tokens", "6.0k tokens"] for item in metrics["layouts"]), metrics
+    assert all(item["disclosureContained"] for item in metrics["layouts"]), metrics
     assert metrics["source"]["title"] == metrics["transcript"], metrics
     assert metrics["source"]["path"] == metrics["transcript"], metrics
     assert metrics["source"]["middleParts"] == 2, metrics
