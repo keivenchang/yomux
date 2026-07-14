@@ -170,6 +170,8 @@ const jsDebugStatsCoarsePollMs = 60001;
 const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 // Wall-clock slide cadence for live (<=30m, non-zoomed) views. One render per
 // second advances the axis and drifts content left without a data tick.
+// Display/animation cadence (AGENTS.md timing rule) -> round 1000, not an odd
+// backend poll interval: this only re-paints the view, it never fetches.
 const jsDebugGraphSlideRenderMs = 1000;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;

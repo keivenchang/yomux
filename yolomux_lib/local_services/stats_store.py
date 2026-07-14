@@ -245,44 +245,77 @@ class StatsStore:
         self.connection = connection
 
     @staticmethod
+    def _coverage_overlap_pairs(connection: sqlite3.Connection) -> int:
+        """One owner of the coverage-overlap definition (a self-join count).
+
+        Shared by the durable-repair gate and the integrity self-check so the
+        meaning of "overlap" lives in exactly one place.
+        """
+        return int(connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals a "
+            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+            "AND a.end > b.start AND b.end > a.start"
+        ).fetchone()[0])
+
+    @staticmethod
+    def _clip_disjoint_intervals(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """One owner of the seam rule: clip a start-sorted list to disjoint.
+
+        Where two consecutive intervals overlap the later owner is
+        authoritative, so the earlier interval's ``end`` is clipped to the
+        later interval's ``start`` and any interval that collapses to
+        zero/negative width is dropped.  Mutates and returns the surviving
+        dicts, each keeping its carry-through keys (``epoch_id``, ``rowid`` …),
+        so both the serve path and the durable repair share this rule.
+        """
+        disjoint: list[dict[str, Any]] = []
+        for item in items:
+            if disjoint and int(disjoint[-1]["end"]) > int(item["start"]):
+                disjoint[-1]["end"] = int(item["start"])
+            if disjoint and int(disjoint[-1]["end"]) <= int(disjoint[-1]["start"]):
+                disjoint.pop()
+            if int(item["end"]) <= int(item["start"]):
+                continue
+            disjoint.append(item)
+        return disjoint
+
+    @staticmethod
     def _repair_coverage_overlaps(connection: sqlite3.Connection) -> int:
         """Clip any pre-existing cross-epoch overlaps durably (idempotent).
 
         Databases written before write-time handoff clipping can hold boundary
         overlaps from statsd restarts.  Detection is a cheap self-join; when it
         finds none this is a no-op, so it is safe to run on every open.  Repair
-        mirrors the serve-time rule: the later owner is authoritative, so the
-        earlier interval's ``end`` is clipped to the later interval's ``start``
-        and zero-width rows are removed.
+        applies the shared serve-time seam rule (``_clip_disjoint_intervals``)
+        to each family's rows and writes back only the differences.
         """
 
-        overlaps = connection.execute(
-            "SELECT COUNT(*) FROM stats_coverage_intervals a "
-            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
-            "AND a.end > b.start AND b.end > a.start"
-        ).fetchone()
-        if not overlaps or int(overlaps[0]) == 0:
+        if StatsStore._coverage_overlap_pairs(connection) == 0:
             return 0
         repaired = 0
         families = [row[0] for row in connection.execute(
             "SELECT DISTINCT family FROM stats_coverage_intervals"
         ).fetchall()]
         for family in families:
-            rows = connection.execute(
-                "SELECT rowid,start,end FROM stats_coverage_intervals WHERE family=? ORDER BY start,end",
-                (family,),
-            ).fetchall()
-            prev_rowid = prev_start = prev_end = None
-            for rowid, start, end in rows:
-                if prev_rowid is not None and prev_end > int(start):
-                    clipped = int(start)
-                    if clipped <= int(prev_start):
-                        connection.execute("DELETE FROM stats_coverage_intervals WHERE rowid=?", (prev_rowid,))
-                    else:
-                        connection.execute("UPDATE stats_coverage_intervals SET end=? WHERE rowid=?", (clipped, prev_rowid))
+            rows = [
+                {"rowid": row[0], "start": int(row[1]), "end": int(row[2])}
+                for row in connection.execute(
+                    "SELECT rowid,start,end FROM stats_coverage_intervals WHERE family=? ORDER BY start,end",
+                    (family,),
+                ).fetchall()
+            ]
+            survivors = {
+                item["rowid"]: item
+                for item in StatsStore._clip_disjoint_intervals([dict(row) for row in rows])
+            }
+            for row in rows:
+                survivor = survivors.get(row["rowid"])
+                if survivor is None:
+                    connection.execute("DELETE FROM stats_coverage_intervals WHERE rowid=?", (row["rowid"],))
                     repaired += 1
-                prev_rowid, prev_start, prev_end = rowid, int(start), int(end)
-        connection.execute("DELETE FROM stats_coverage_intervals WHERE end<=start")
+                elif int(survivor["end"]) != row["end"]:
+                    connection.execute("UPDATE stats_coverage_intervals SET end=? WHERE rowid=?", (int(survivor["end"]), row["rowid"]))
+                    repaired += 1
         return repaired
 
     def close(self) -> None:
@@ -666,15 +699,7 @@ class StatsStore:
                 merged[-1]["end"] = max(int(merged[-1]["end"]), int(item["end"]))
                 continue
             merged.append(item)
-        disjoint: list[dict[str, Any]] = []
-        for item in merged:
-            if disjoint and int(disjoint[-1]["end"]) > int(item["start"]):
-                disjoint[-1]["end"] = int(item["start"])
-            if disjoint and int(disjoint[-1]["end"]) <= int(disjoint[-1]["start"]):
-                disjoint.pop()
-            if int(item["end"]) <= int(item["start"]):
-                continue
-            disjoint.append(item)
+        disjoint = StatsStore._clip_disjoint_intervals(merged)
         truncated = len(disjoint) > STATS_COVERAGE_MAX_INTERVALS
         return (disjoint[-STATS_COVERAGE_MAX_INTERVALS:] if truncated else disjoint), truncated
 
@@ -866,11 +891,7 @@ class StatsStore:
         """
 
         connection = self._connection()
-        overlaps = int(connection.execute(
-            "SELECT COUNT(*) FROM stats_coverage_intervals a "
-            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
-            "AND a.end > b.start AND b.end > a.start"
-        ).fetchone()[0])
+        overlaps = self._coverage_overlap_pairs(connection)
         inverted = int(connection.execute(
             "SELECT COUNT(*) FROM stats_coverage_intervals WHERE end <= start"
         ).fetchone()[0])
