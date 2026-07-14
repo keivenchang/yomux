@@ -4970,6 +4970,9 @@ body :is(
   min-width: 0;
   min-height: 0;
 }
+.js-yocost-chart-area {
+  position: relative;
+}
 .js-debug-history-overlay {
   position: absolute;
   inset: 0;

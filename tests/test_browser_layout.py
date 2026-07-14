@@ -19297,3 +19297,51 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     # Every needs-attention pane resolves the red ring color, regardless of focus/yolo-ready state.
     for pid, ring in rings.items():
         assert ring.lower() == ui_pin("paneRingAttention"), f"{pid}: needs-attention pane must keep the red ring, got {ring}"
+
+
+def test_yocost_shows_shared_loading_overlay_on_range_resolution_change(browser, tmp_path):
+    """YO!cost's chart area carries the shared history loading overlay so a
+    range/resolution change dims it and shows Loading, like YO!stats."""
+    browser.set_window_size(1280, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const mk = (i) => ({start: now - ((5 - i) * 60), duration: 60, sequence: i + 1, tokens_per_agent_total: 100 + i, agent_token_samples: 1,
+            agent_token_rates: [{key: 'a|0|codex', label: 'a:0:codex', total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-terra': {total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60}}}],
+            cost_summary: {total_micro_usd: 10000, known_micro_usd: 10000, priced_count: 1, complete: true, unpriced_count: 0,
+              components: [{key: 'output', direction: 'output', quantity: 10, unit: 'tokens', micro_usd: 10000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://a'}],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: '', token_quantity: 10, input_tokens: 0, cache_tokens: 0, output_tokens: 10, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 10000, other_micro_usd: 0, micro_usd: 10000}],
+              sources: [], catalog_revision: 't', freshness: 'verified'}});
+          debugGraphApplyServerHistory({sequence: 6, records: Array.from({length: 6}, (_u, i) => mk(i))});
+          setDebugGraphChartVisible('costSummary', true); setDebugGraphRange(6 * 60); renderDebugPanels({force: true});
+          document.querySelector('[data-js-debug-graph]')?.querySelector('[data-js-debug-summary-group="costSummary"] [data-js-debug-cost-details]')?.click();
+          await window.__yolomuxTestWaitFor(() => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('.js-yocost-chart-area'), {timeoutMs: 3000, intervalMs: 20, description: 'yocost'});
+          const panel = document.getElementById(panelDomId(yocostItemId));
+          const area = panel.querySelector('[data-js-yocost-chart-area]');
+          // Baseline: ready -> overlay hidden on the YO!cost surface.
+          jsDebugHistoryReadiness.overlayVisible = false; jsDebugHistoryReadiness.phase = 'ready';
+          syncJsDebugHistoryReadinessSurfaces();
+          const overlayBefore = area?.querySelector('[data-js-debug-history-overlay]');
+          const shownBefore = overlayBefore ? overlayBefore.hidden !== true : null;
+          // A range/resolution fetch: loading state + sync -> overlay shown here too.
+          jsDebugHistoryReadiness.overlayVisible = true; jsDebugHistoryReadiness.phase = 'loading-initial';
+          syncJsDebugHistoryReadinessSurfaces();
+          const overlayAfter = area?.querySelector('[data-js-debug-history-overlay]');
+          done({
+            hasChartArea: Boolean(area),
+            overlayPresent: Boolean(overlayBefore),
+            shownBefore,
+            shownAfter: overlayAfter ? overlayAfter.hidden !== true : null,
+          });
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    assert out["hasChartArea"] is True and out["overlayPresent"] is True, out
+    assert out["shownBefore"] is False, out
+    assert out["shownAfter"] is True, out

@@ -42120,6 +42120,17 @@ function syncJsDebugHistoryReadinessSurfaces() {
     overlay.hidden = state.overlayVisible !== true;
     if (overlay.innerHTML !== content) overlay.innerHTML = content;
   }
+  // YO!cost chart areas are not [data-js-debug-graph] surfaces (the graph-refresh
+  // loops would rebuild them with YO!stats content); toggle their always-present
+  // shared overlay directly so range/resolution changes show "Loading…" there too.
+  for (const area of document.querySelectorAll('[data-js-yocost-chart-area]')) {
+    area.setAttribute('aria-busy', busy ? 'true' : 'false');
+    area.dataset.jsDebugHistoryState = state.phase;
+    const overlay = area.querySelector('[data-js-debug-history-overlay]');
+    if (!overlay) continue;
+    overlay.hidden = state.overlayVisible !== true;
+    if (overlay.innerHTML !== content) overlay.innerHTML = content;
+  }
 }
 
 function setJsDebugHistoryReadiness(phase, updates = {}) {
@@ -47820,7 +47831,13 @@ function yoCostPanelHtml() {
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refresh = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
   const ageLabel = debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
-  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+  // The YO!cost chart area carries the ONE shared history loading overlay so a
+  // range/resolution change dims it and centers "Loading…" exactly like
+  // YO!stats. It deliberately is NOT a [data-js-debug-graph] surface (those get
+  // rebuilt with YO!stats content by the graph-refresh loops); the readiness
+  // sync toggles this overlay through its own targeted pass.
+  const chartArea = `<div class="js-yocost-chart-area" data-js-yocost-chart-area data-js-debug-history-state="${esc(jsDebugHistoryReadiness.phase)}">${charts}${debugGraphHistoryOverlayHtml()}</div>`;
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${chartArea}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
 }
 
 function openYoCostTranscriptPreview(event) {
@@ -48299,7 +48316,15 @@ function setDebugGraphRange(value, {render = true} = {}) {
   // automatic-retry backoff make a newly requested domain appear ready while
   // no request is queued.
   const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
-  if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
+  if (requestedHistory) {
+    // An explicit user range change must acknowledge within a frame with the
+    // shared dimmed loading overlay — even when only older data is missing
+    // (`loading-older` is otherwise silent to avoid flashing on passive tail
+    // repairs). Same immediate-overlay treatment as a Resolution change.
+    jsDebugHistoryReadiness.overlayVisible = true;
+    clearJsDebugHistoryOverlayTimer();
+    syncJsDebugHistoryReadinessSurfaces();
+  } else if (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error') {
     setJsDebugHistoryReadiness('ready', {
       requestedRangeSeconds: jsDebugGraphRangeSeconds,
       requestedStartSeconds,
