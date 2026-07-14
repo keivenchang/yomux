@@ -1304,6 +1304,8 @@
   "pref.uploads.show_suggestions.label": "Sugerir acciones al soltar un archivo",
   "pref.uploads.subdir.help": "Subdirectorio dentro del directorio de trabajo donde se escriben las subidas arrastradas o pegadas (se crea cuando se necesita). Déjalo vacío para escribir directamente en el directorio de trabajo.",
   "pref.uploads.subdir.label": "Subcarpeta de subida",
+  "pref.uploads.retention_days.help": "Número de días que se conservan las cargas temporales. Los archivos vencidos se eliminan durante una carga posterior.",
+  "pref.uploads.retention_days.label": "Retención de cargas temporales",
   "pref.uploads.suggestion_autorun.help": "Cuando están habilitadas, las sugerencias de shell de solo lectura envían Enter después de insertar el comando generado. Las indicaciones del agente y las acciones con capacidad de escritura aún esperan revisión.",
   "pref.uploads.suggestion_autorun.label": "Sugerencias de shell de solo lectura de ejecución automática",
   "pref.yoagent.backend.auto": "Automático (Codex → Claude)",

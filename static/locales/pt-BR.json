@@ -1317,6 +1317,8 @@
   "pref.uploads.image_action_order.label": "Ordem de ação para colar imagem",
   "pref.uploads.max_bytes.help": "Tamanho máximo de transferência para uploads/downloads no navegador. Downloads ZIP de pastas usam o mesmo limite. Para arquivos grandes, rsync é mais rápido e evita armazenar transferências grandes na memória.",
   "pref.uploads.max_bytes.label": "Limite de transferência de arquivos",
+  "pref.uploads.retention_days.help": "Número de dias de retenção dos uploads temporários. Os arquivos expirados são removidos durante um upload posterior.",
+  "pref.uploads.retention_days.label": "Retenção de uploads temporários",
   "pref.uploads.show_suggestions.help": "Quando um arquivo é solto em um terminal, mostra uma breve sobreposição com ações sugeridas (analisar, encontrar erros, resumir…) e atalhos 1..9. Continue digitando para dispensá-la.",
   "pref.uploads.show_suggestions.label": "Sugerir ações ao soltar um arquivo",
   "pref.uploads.subdir.help": "Subdiretório dentro do diretório de trabalho onde os uploads arrastados ou colados são gravados (criado quando necessário). Deixe vazio para gravar direto no diretório de trabalho.",

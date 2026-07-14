@@ -1304,6 +1304,8 @@
   "pref.uploads.show_suggestions.label": "Sugerir ações ao soltar um arquivo",
   "pref.uploads.subdir.help": "Subdiretório dentro do diretório de trabalho onde os uploads arrastados ou colados são gravados (criado quando necessário). Deixe vazio para gravar direto no diretório de trabalho.",
   "pref.uploads.subdir.label": "Subpasta de upload",
+  "pref.uploads.retention_days.help": "Número de dias de retenção dos uploads temporários. Os arquivos expirados são removidos durante um upload posterior.",
+  "pref.uploads.retention_days.label": "Retenção de uploads temporários",
   "pref.uploads.suggestion_autorun.help": "Quando ativadas, as sugestões de shell somente leitura enviam Enter após inserir o comando gerado. Os prompts do agente e as ações com capacidade de gravação ainda aguardam revisão.",
   "pref.uploads.suggestion_autorun.label": "Sugestões de shell somente leitura de execução automática",
   "pref.yoagent.backend.auto": "Automático (Codex → Claude)",

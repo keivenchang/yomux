@@ -1279,6 +1279,8 @@
   "pref.uploads.show_suggestions.label": "拖放文件时建议操作",
   "pref.uploads.subdir.help": "工作目录下用于保存拖放或粘贴上传文件的子目录（按需创建）。留空则直接写入工作目录。",
   "pref.uploads.subdir.label": "上传子文件夹",
+  "pref.uploads.retention_days.help": "临时上传文件的保留天数。过期文件会在后续上传时删除。",
+  "pref.uploads.retention_days.label": "临时上传保留天数",
   "pref.uploads.suggestion_autorun.help": "启用后，只读 shell 建议会在插入生成的命令后发送 Enter。代理提示和可写操作仍会等待审阅。",
   "pref.uploads.suggestion_autorun.label": "自动运行只读 shell 建议",
   "pref.yoagent.backend.auto": "自动 (Codex → Claude)",

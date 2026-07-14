@@ -1279,6 +1279,8 @@
   "pref.uploads.show_suggestions.label": "파일 드롭 시 작업 제안",
   "pref.uploads.subdir.help": "끌어다 놓거나 붙여넣어 업로드한 파일을 저장할 작업 디렉터리의 하위 폴더(필요할 때 생성). 비워 두면 작업 디렉터리에 바로 저장합니다.",
   "pref.uploads.subdir.label": "업로드 하위 폴더",
+  "pref.uploads.retention_days.help": "임시 업로드를 보관할 일수입니다. 만료된 파일은 이후 업로드 중에 삭제됩니다.",
+  "pref.uploads.retention_days.label": "임시 업로드 보관 기간",
   "pref.uploads.suggestion_autorun.help": "활성화되면 읽기 전용 셸 제안은 생성된 명령을 삽입한 후 Enter를 보냅니다. 에이전트 프롬프트 및 쓰기 가능 작업은 여전히 ​​검토를 기다리고 있습니다.",
   "pref.uploads.suggestion_autorun.label": "읽기 전용 셸 제안 자동 실행",
   "pref.yoagent.backend.auto": "자동 (Codex → Claude)",

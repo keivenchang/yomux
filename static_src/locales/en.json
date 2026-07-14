@@ -1296,6 +1296,8 @@
   "pref.uploads.show_suggestions.label": "Suggest actions on file drop",
   "pref.uploads.subdir.help": "Subdirectory under the working directory where dropped/pasted uploads are written (created on demand). Leave empty to write straight into the working directory.",
   "pref.uploads.subdir.label": "Upload subfolder",
+  "pref.uploads.retention_days.help": "Number of days temporary uploads are retained. Expired files are removed during a later upload.",
+  "pref.uploads.retention_days.label": "Temporary upload retention",
   "pref.uploads.suggestion_autorun.help": "When enabled, read-only shell suggestions send Enter after inserting their generated command. Agent prompts and write-capable actions still wait for review.",
   "pref.uploads.suggestion_autorun.label": "Autorun read-only shell suggestions",
   "pref.yoagent.backend.auto": "Auto (Codex → Claude)",

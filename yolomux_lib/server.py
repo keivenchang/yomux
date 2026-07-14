@@ -1753,9 +1753,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 session=session,
                 status=HTTPStatus.BAD_REQUEST,
             ), HTTPStatus.BAD_REQUEST
+        auth_username = self.auth_identity().username
         if editor_path or base_dir:
-            return self.server.app.upload_editor_files(files, editor_path=editor_path, base_dir=base_dir)
-        return self.server.app.upload_files(session, files)
+            return self.server.app.upload_editor_files(
+                files,
+                editor_path=editor_path,
+                base_dir=base_dir,
+                auth_username=auth_username,
+                session=session or "editor",
+            )
+        return self.server.app.upload_files(session, files, auth_username=auth_username)
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)

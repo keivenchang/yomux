@@ -1304,6 +1304,8 @@
   "pref.uploads.show_suggestions.label": "הצעת פעולות בעת גרירת קובץ",
   "pref.uploads.subdir.help": "תת-תיקייה בתוך תיקיית העבודה שאליה נכתבות העלאות שנגררו או הודבקו (נוצרת לפי הצורך). השאירו ריק כדי לכתוב ישירות לתיקיית העבודה.",
   "pref.uploads.subdir.label": "תיקיית משנה להעלאות",
+  "pref.uploads.retention_days.help": "מספר הימים שבהם נשמרות העלאות זמניות. קבצים שפג תוקפם נמחקים במהלך העלאה מאוחרת יותר.",
+  "pref.uploads.retention_days.label": "שמירת העלאות זמניות",
   "pref.uploads.suggestion_autorun.help": "כאשר מופעל, הצעות מעטפת לקריאה בלבד שולחות Enter לאחר הכנסת הפקודה שנוצרה. הנחיות סוכן ופעולות עם יכולת כתיבה עדיין ממתינות לבדיקה.",
   "pref.uploads.suggestion_autorun.label": "הפעלה אוטומטית של הצעות מעטפת לקריאה בלבד",
   "pref.yoagent.backend.auto": "אוטומטי (Codex → Claude)",

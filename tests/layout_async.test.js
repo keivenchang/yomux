@@ -2661,7 +2661,7 @@ async function runLayoutAsyncSuite() {
       assert.ok(allSent.includes('multi-a.png') && allSent.includes('multi-b.png'), '78.4: both pasted images become text references in the terminal (no attachment)');
     }
 
-    // Markdown editor image paste uploads beside the Markdown file and inserts relative image links into CodeMirror.
+    // Markdown editor image paste inserts the server-owned absolute central-upload paths into CodeMirror.
     {
       const api = loadYolomux('', ['1']);
       const sent = [];
@@ -2696,8 +2696,8 @@ async function runLayoutAsyncSuite() {
         calls.push({url: String(url), method: options.method || 'GET', body: options.body});
         if (String(url).startsWith('/api/upload')) {
           return Promise.resolve(jsonResponse({files: [
-            {path: '/repo/docs/.uploads/one.png', relative_path: '.uploads/one.png'},
-            {path: '/repo/docs/.uploads/two file.png', relative_path: '.uploads/two file.png'},
+            {path: '/tmp/yolomux.alice/uploads/editor/one.png', relative_path: '/tmp/yolomux.alice/uploads/editor/one.png'},
+            {path: '/tmp/yolomux.alice/uploads/editor/two file.png', relative_path: '/tmp/yolomux.alice/uploads/editor/two file.png'},
           ]}));
         }
         return Promise.resolve(jsonResponse({items: [], session: '1'}));
@@ -2720,7 +2720,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(calls[0].url, `/api/upload?editor_path=${encodeURIComponent(path)}`, 'Markdown editor paste uploads with the editor path');
       assert.equal(calls[0].method, 'POST');
       assert.equal(calls[0].body.fields.length, 2, 'Markdown editor paste uploads every image');
-      assert.equal(content, 'hello\n![image](.uploads/one.png)\n![image](.uploads/two%20file.png)', 'Markdown editor paste inserts relative image links at the cursor');
+      assert.equal(content, 'hello\n![image](/tmp/yolomux.alice/uploads/editor/one.png)\n![image](/tmp/yolomux.alice/uploads/editor/two%20file.png)', 'Markdown editor paste inserts absolute central-upload links at the cursor');
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
     }

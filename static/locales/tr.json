@@ -1292,6 +1292,8 @@
   "pref.uploads.image_action_order.label": "Resim yapıştırma eylem sırası",
   "pref.uploads.max_bytes.help": "Tarayıcı yükleme/indirme aktarımı için en büyük boyut. Klasör ZIP indirmeleri aynı sınırı kullanır. Büyük dosyalar için rsync daha hızlıdır ve büyük aktarımların bellekte tamponlanmasını önler.",
   "pref.uploads.max_bytes.label": "Dosya aktarım boyutu sınırı",
+  "pref.uploads.retention_days.help": "Geçici yüklemelerin saklanacağı gün sayısı. Süresi dolan dosyalar sonraki bir yükleme sırasında silinir.",
+  "pref.uploads.retention_days.label": "Geçici yüklemeleri saklama süresi",
   "pref.uploads.show_suggestions.help": "Bir dosya terminale bırakıldığında, önerilen eylemlerin kısa bir üst üste örtüsünü (analiz etmek, hataları bulmak, özetlemek vb.) ve 1..9 kısayollarla gösterin. Yazmaya devam et, geçiştir.",
   "pref.uploads.show_suggestions.label": "Dosya bırakılmasında eylemler öner",
   "pref.uploads.subdir.help": "Çalışma dizininin altındaki alt dizin, burada düşürülmüş/yapıştırılan yüklemeler yazılır (talep üzerine oluşturulur). Boş bırakıp doğrudan çalışma dizinine yaz.",

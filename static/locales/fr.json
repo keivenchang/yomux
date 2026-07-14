@@ -1317,6 +1317,8 @@
   "pref.uploads.image_action_order.label": "Ordre d'action de collage d'image",
   "pref.uploads.max_bytes.help": "Taille maximale de transfert pour les envois/téléchargements du navigateur. Les téléchargements ZIP de dossiers utilisent la même limite. Pour les gros fichiers, rsync est plus rapide et évite de mettre de gros transferts en mémoire.",
   "pref.uploads.max_bytes.label": "Limite de transfert de fichiers",
+  "pref.uploads.retention_days.help": "Nombre de jours de conservation des téléversements temporaires. Les fichiers expirés sont supprimés lors d’un téléversement ultérieur.",
+  "pref.uploads.retention_days.label": "Conservation des téléversements temporaires",
   "pref.uploads.show_suggestions.help": "Quand un fichier est déposé sur un terminal, afficher une courte surcouche d'actions suggérées (analyser, trouver les erreurs, résumer…) avec les raccourcis 1..9. Continuez à taper pour la masquer.",
   "pref.uploads.show_suggestions.label": "Suggérer des actions au dépôt d'un fichier",
   "pref.uploads.subdir.help": "Sous-répertoire du répertoire de travail où sont écrits les fichiers déposés ou collés (créé à la demande). Laisser vide pour écrire directement dans le répertoire de travail.",

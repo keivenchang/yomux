@@ -1292,6 +1292,8 @@
   "pref.uploads.image_action_order.label": "Aktionsreihenfolge zum Einfügen von Bildern",
   "pref.uploads.max_bytes.help": "Maximale Transfergröße für Browser-Uploads und -Downloads. ZIP-Downloads von Ordnern verwenden dieselbe Grenze. Für große Dateien ist rsync schneller und vermeidet das Puffern großer Transfers im Speicher.",
   "pref.uploads.max_bytes.label": "Größenlimit für Dateiübertragungen",
+  "pref.uploads.retention_days.help": "Anzahl der Tage, für die temporäre Uploads gespeichert werden. Abgelaufene Dateien werden bei einem späteren Upload entfernt.",
+  "pref.uploads.retention_days.label": "Aufbewahrung temporärer Uploads",
   "pref.uploads.show_suggestions.help": "Wenn eine Datei auf ein Terminal gezogen wird, ein kurzes Overlay mit vorgeschlagenen Aktionen (analysieren, Fehler finden, zusammenfassen …) und 1..9-Kürzeln anzeigen. Weitertippen blendet es aus.",
   "pref.uploads.show_suggestions.label": "Aktionen beim Ablegen vorschlagen",
   "pref.uploads.subdir.help": "Unterverzeichnis im Arbeitsverzeichnis, in das abgelegte/eingefügte Uploads geschrieben werden (bei Bedarf erstellt). Leer lassen, um direkt ins Arbeitsverzeichnis zu schreiben.",

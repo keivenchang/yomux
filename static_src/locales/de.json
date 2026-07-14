@@ -1279,6 +1279,8 @@
   "pref.uploads.show_suggestions.label": "Aktionen beim Ablegen vorschlagen",
   "pref.uploads.subdir.help": "Unterverzeichnis im Arbeitsverzeichnis, in das abgelegte/eingefügte Uploads geschrieben werden (bei Bedarf erstellt). Leer lassen, um direkt ins Arbeitsverzeichnis zu schreiben.",
   "pref.uploads.subdir.label": "Upload-Unterordner",
+  "pref.uploads.retention_days.help": "Anzahl der Tage, für die temporäre Uploads gespeichert werden. Abgelaufene Dateien werden bei einem späteren Upload entfernt.",
+  "pref.uploads.retention_days.label": "Aufbewahrung temporärer Uploads",
   "pref.uploads.suggestion_autorun.help": "Wenn diese Option aktiviert ist, senden schreibgeschützte Shell-Vorschläge nach dem Einfügen des generierten Befehls die Eingabetaste. Agentenaufforderungen und schreibfähige Aktionen warten noch auf Überprüfung.",
   "pref.uploads.suggestion_autorun.label": "Vorschläge für schreibgeschützte Autorun-Shells",
   "pref.yoagent.backend.auto": "Automatisch (Codex → Claude)",

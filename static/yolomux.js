@@ -40864,7 +40864,7 @@ function preferenceSections() {
     {id: PREFERENCE_SECTION_IDS.uploads, title: t('pref.section.uploads'), items: [
       preferenceSettingItem('uploads.max_bytes', {type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576}),
       preferenceSettingItem('uploads.filename_template', {type: 'text', wide: true}),
-      preferenceSettingItem('uploads.subdir', {type: 'text'}),
+      preferenceSettingItem('uploads.retention_days', {type: 'number', min: 1, max: 365, step: 1}),
       preferenceSettingItem('uploads.show_suggestions', {type: 'boolean'}),
       preferenceSettingItem('uploads.suggestion_autorun', {type: 'boolean'}),
       preferenceSettingItem('uploads.image_action_order', {type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true}),
@@ -67420,7 +67420,7 @@ function insertEditorPasteUploadReferences(editorTarget, files) {
 
 function markdownImageUploadReferences(files) {
   return (files || []).map(file => {
-    const path = file.relative_path || pathBasename(file.path || '') || file.saved_name || '';
+    const path = file.path || file.relative_path || file.saved_name || '';
     if (!path) return '';
     return `![image](${markdownLinkTarget(path)})`;
   }).filter(Boolean);

@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import threading
 import time
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from yolomux_lib import state_services
 from yolomux_lib import statsd
 from yolomux_lib.statsd import StatsClient
 from yolomux_lib import transcripts
+from yolomux_lib import uploads as uploads_module
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
@@ -12779,173 +12781,71 @@ def test_watched_prs_payload_shapes_result_and_logs_truncation_once(monkeypatch)
     assert len(truncation_events()) == 2, "a changed capped state logs again"
 
 
-def test_apply_upload_subdir_defaults_to_dot_uploads(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
+def test_terminal_upload_uses_authenticated_users_central_session_tree(monkeypatch, tmp_path):
+    monkeypatch.setattr(uploads_module, "UPLOAD_TMP_BASE", tmp_path / "tmp")
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"retention_days": 7, "filename_template": "{name}{ext}"}}})
+    webapp = app_module.TmuxWebtermApp(["s"])
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
     try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ".uploads"}}})
-        target = webapp._apply_upload_subdir(tmp_path)
-        assert target == tmp_path / ".uploads"
-        assert target.is_dir()
+        payload, status = webapp.upload_files("s", [UploadedFile(filename="screen.png", content=b"png")], auth_username="alice")
     finally:
         webapp.control_server.stop()
 
-
-def test_apply_upload_subdir_empty_writes_into_cwd(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ""}}})
-        assert webapp._apply_upload_subdir(tmp_path) == tmp_path
-    finally:
-        webapp.control_server.stop()
-
-
-def test_apply_upload_subdir_rejects_escaping_value(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": "../escape"}}})
-        assert webapp._apply_upload_subdir(tmp_path) == tmp_path
-        assert not (tmp_path.parent / "escape").exists()
-    finally:
-        webapp.control_server.stop()
+    target = tmp_path / "tmp" / "yolomux.alice" / "uploads" / "s"
+    assert status == HTTPStatus.OK
+    assert payload["target_dir"] == str(target)
+    assert payload["target_source"] == "central_user_uploads"
+    assert Path(payload["files"][0]["path"]).read_bytes() == b"png"
+    assert stat.S_IMODE(target.parent.parent.stat().st_mode) == 0o700
+    assert not (worktree / ".uploads").exists()
 
 
-def test_apply_upload_subdir_falls_back_when_uncreatable(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ".uploads"}}})
-        base = tmp_path / "afile"
-        base.write_text("not a dir", encoding="utf-8")
-        assert webapp._apply_upload_subdir(base) == base
-    finally:
-        webapp.control_server.stop()
-
-
-def test_upload_base_dir_uses_tmux_cwd_without_agent_discovery(monkeypatch, tmp_path):
-    webapp = object.__new__(app_module.TmuxWebtermApp)
-    pane_cwd = tmp_path / "pane"
-    pane_cwd.mkdir()
-
-    monkeypatch.setattr(app_module, "focus_root_for_session", lambda session: None)
-    monkeypatch.setattr(app_module, "session_workdir", lambda session: Path.home())
-    monkeypatch.setattr(
-        app_module,
-        "discover_sessions",
-        lambda sessions: (_ for _ in ()).throw(AssertionError("upload dir resolution must not discover agents/transcripts")),
-    )
-    monkeypatch.setattr(
-        app_module,
-        "session_work_graph",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("upload dir resolution must not build work graphs")),
-    )
-    tmux_calls = []
-
-    def fake_tmux(args, timeout=None):
-        tmux_calls.append((args, timeout))
-        assert args == ["display-message", "-p", "-t", "s:", "#{pane_current_path}"]
-        assert timeout == 1.0
-        return SimpleNamespace(returncode=0, stdout=f"{pane_cwd}\n", stderr="")
-
-    monkeypatch.setattr(app_module, "tmux", fake_tmux)
-
-    resolved, source = webapp._resolve_upload_base_dir("s")
-
-    assert resolved == pane_cwd
-    assert source == "pane_current_path"
-    assert len(tmux_calls) == 1
-
-
-def test_upload_base_dir_falls_back_without_agent_discovery_when_tmux_cwd_missing(monkeypatch):
-    webapp = object.__new__(app_module.TmuxWebtermApp)
-
-    monkeypatch.setattr(app_module, "focus_root_for_session", lambda session: None)
-    monkeypatch.setattr(app_module, "session_workdir", lambda session: Path.home())
-    monkeypatch.setattr(
-        app_module,
-        "discover_sessions",
-        lambda sessions: (_ for _ in ()).throw(AssertionError("upload dir resolution must not discover agents/transcripts")),
-    )
-    monkeypatch.setattr(app_module, "tmux", lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="missing"))
-
-    resolved, source = webapp._resolve_upload_base_dir("s")
-
-    assert resolved is None
-    assert source == "session_workdir"
-
-
-def test_editor_upload_defaults_to_sibling_dot_uploads(monkeypatch, tmp_path):
+def test_editor_upload_uses_absolute_central_path_not_document_relative(monkeypatch, tmp_path):
+    monkeypatch.setattr(uploads_module, "UPLOAD_TMP_BASE", tmp_path / "tmp")
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"retention_days": 7, "filename_template": "{name}{ext}"}}})
     webapp = app_module.TmuxWebtermApp([])
     docs = tmp_path / "docs"
     docs.mkdir()
     editor_path = docs / "note.md"
     editor_path.write_text("# Note\n", encoding="utf-8")
     try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ".uploads", "filename_template": "{name}{ext}"}}})
-        payload, status = webapp.upload_editor_files([UploadedFile(filename="screen.png", content=b"png")], editor_path=str(editor_path))
+        payload, status = webapp.upload_editor_files(
+            [UploadedFile(filename="screen.png", content=b"png")],
+            editor_path=str(editor_path),
+            auth_username="alice",
+        )
     finally:
         webapp.control_server.stop()
 
+    target = tmp_path / "tmp" / "yolomux.alice" / "uploads" / "editor" / "screen.png"
     assert status == HTTPStatus.OK
-    assert payload["target_dir"] == str(docs / ".uploads")
+    assert payload["target_dir"] == str(target.parent)
     assert payload["base_dir"] == str(docs)
-    assert payload["files"][0]["relative_path"] == ".uploads/screen.png"
-    assert (docs / ".uploads" / "screen.png").read_bytes() == b"png"
+    assert payload["files"][0]["relative_path"] == str(target)
+    assert target.read_bytes() == b"png"
+    assert not (docs / ".uploads").exists()
 
 
-def test_editor_upload_empty_subdir_writes_next_to_markdown(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    editor_path = docs / "note.md"
-    editor_path.write_text("# Note\n", encoding="utf-8")
-    try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": "", "filename_template": "{name}{ext}"}}})
-        payload, status = webapp.upload_editor_files([UploadedFile(filename="screen.png", content=b"png")], editor_path=str(editor_path))
-    finally:
-        webapp.control_server.stop()
+def test_multiple_servers_reserve_shared_upload_names_atomically(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"filename_template": "{name}-{seq}{ext}"}}})
+    target = tmp_path / "uploads"
+    target.mkdir()
+    apps = [object.__new__(app_module.TmuxWebtermApp) for _index in range(8)]
 
-    assert status == HTTPStatus.OK
-    assert payload["target_dir"] == str(docs)
-    assert payload["files"][0]["relative_path"] == "screen.png"
-    assert (docs / "screen.png").read_bytes() == b"png"
+    def save(index):
+        return apps[index]._save_uploaded_files(target, [UploadedFile(filename="same.png", content=str(index).encode("ascii"))])
 
+    with ThreadPoolExecutor(max_workers=len(apps)) as pool:
+        results = list(pool.map(save, range(len(apps))))
 
-def test_editor_upload_escaping_subdir_is_ignored(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": "../escape", "filename_template": "{name}{ext}"}}})
-        payload, status = webapp.upload_editor_files([UploadedFile(filename="../screen.png", content=b"png")], base_dir=str(docs))
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["target_dir"] == str(docs)
-    assert payload["files"][0]["saved_name"] == "screen.png"
-    assert payload["files"][0]["relative_path"] == "screen.png"
-    assert not (tmp_path / "escape").exists()
-    assert (docs / "screen.png").read_bytes() == b"png"
-
-
-def test_editor_upload_filenames_are_sanitized_and_unique(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    uploads = docs / ".uploads"
-    uploads.mkdir()
-    (uploads / "screen-001.png").write_bytes(b"old")
-    try:
-        monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"uploads": {"subdir": ".uploads", "filename_template": "{name}-{seq}{ext}"}}})
-        payload, status = webapp.upload_editor_files([UploadedFile(filename="../../screen.png", content=b"new")], base_dir=str(docs))
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["files"][0]["saved_name"] == "screen-002.png"
-    assert payload["files"][0]["saved_name"].endswith(".png")
-    assert payload["files"][0]["relative_path"] == ".uploads/screen-002.png"
-    assert (uploads / "screen-001.png").read_bytes() == b"old"
-    assert Path(payload["files"][0]["path"]).read_bytes() == b"new"
+    assert all(status == HTTPStatus.OK and error is None for _saved, error, status in results)
+    paths = [Path(saved[0]["path"]) for saved, _error, _status in results]
+    assert len(set(paths)) == len(apps)
+    assert {path.read_text(encoding="ascii") for path in paths} == {str(index) for index in range(len(apps))}
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in paths)
 
 
 def test_self_update_dryrun_is_noop_with_plan():

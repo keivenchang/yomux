@@ -8,8 +8,8 @@ CodeMirror 6 is a third-party editor library with upstream dependency notices re
 
 ## Current paste contract
 
-- Image paste is owned by the focused surface before browser default paste can leak rich image data: a focused Markdown CodeMirror editor uploads through the editor upload route and inserts relative Markdown image links, while a terminal-focused paste uploads through the session route and inserts terminal-safe `[Image #N] '/abs/path'` text.
-- Editor image paste is Markdown-only: `.md` and `.markdown` editors receive `![image](.uploads/name.png)` references relative to the Markdown file's directory; non-Markdown editors, Finder, Preferences, YO!agent, and terminal focus continue through the existing terminal paste path when a terminal target exists.
+- Image paste is owned by the focused surface before browser default paste can leak rich image data: a focused Markdown CodeMirror editor uploads through the editor upload route and inserts absolute Markdown image links, while a terminal-focused paste uploads through the session route and inserts terminal-safe `[Image #N] '/abs/path'` text.
+- Editor image paste is Markdown-only: `.md` and `.markdown` editors receive `![image](/tmp/yolomux.<login-user>/uploads/editor/name.png)` references using the server-returned absolute central-upload path; non-Markdown editors, Finder, Preferences, YO!agent, and terminal focus continue through the existing terminal paste path when a terminal target exists. These links are intentionally temporary rather than document-relative.
 - The editor and terminal paste paths share `dataTransferHasImagePayload` and `dataTransferImageFiles`; File items, File lists, image MIME items, multiple images, and extractable `text/html` data URLs are claimed and uploaded, and unextractable remote `<img>` HTML is still claimed with an error so raw image clipboard data never reaches an agent TUI.
 
 ## Two paths to prototype (behind one toggle, then compare)

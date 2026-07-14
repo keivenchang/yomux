@@ -1279,6 +1279,8 @@
   "pref.uploads.show_suggestions.label": "Đề xuất hành động khi thả tệp",
   "pref.uploads.subdir.help": "Thư mục con trong thư mục làm việc nơi các tải lên bị thả/dán được ghi (tạo theo yêu cầu). Để trống để ghi thẳng vào thư mục làm việc.",
   "pref.uploads.subdir.label": "Tải lên thư mục con",
+  "pref.uploads.retention_days.help": "Số ngày lưu các tệp tải lên tạm thời. Tệp hết hạn được xóa trong một lần tải lên sau đó.",
+  "pref.uploads.retention_days.label": "Thời gian lưu tệp tải lên tạm thời",
   "pref.uploads.suggestion_autorun.help": "Khi được bật, đề xuất shell chỉ đọc sẽ gửi Enter sau khi chèn lệnh được tạo của chúng. Lời nhắc của tổng đài viên và các hành động có khả năng ghi vẫn đang chờ xem xét.",
   "pref.uploads.suggestion_autorun.label": "Đề xuất shell chỉ đọc tự động chạy",
   "pref.yoagent.backend.auto": "Tự động (Codex → Claude)",

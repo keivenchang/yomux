@@ -1292,6 +1292,8 @@
   "pref.uploads.image_action_order.label": "画像貼り付けの操作順序",
   "pref.uploads.max_bytes.help": "ブラウザーでのアップロード/ダウンロード転送の最大サイズ。フォルダーの ZIP ダウンロードにも同じ上限を使います。大きなファイルでは rsync の方が速く、大きな転送をメモリにバッファーしません。",
   "pref.uploads.max_bytes.label": "ファイル転送サイズ上限",
+  "pref.uploads.retention_days.help": "一時アップロードを保持する日数です。期限切れのファイルは後続のアップロード時に削除されます。",
+  "pref.uploads.retention_days.label": "一時アップロードの保持期間",
   "pref.uploads.show_suggestions.help": "ファイルをターミナルにドロップしたとき、提案する操作（分析、エラー検出、要約など）を 1..9 のショートカット付きで短時間オーバーレイ表示します。入力を続けると消えます。",
   "pref.uploads.show_suggestions.label": "ファイルのドロップ時に操作を提案",
   "pref.uploads.subdir.help": "ドロップまたは貼り付けでアップロードしたファイルを書き込む作業ディレクトリ内のサブディレクトリ（必要に応じて作成）。空にすると作業ディレクトリ直下に書き込みます。",

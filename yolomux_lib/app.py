@@ -80,7 +80,6 @@ from .activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
 from .common import ACTIVITY_PATH
 from .common import AGENT_COMMANDS
-from .common import DEFAULT_UPLOAD_SUBDIR
 from .common import EVENT_LOG_PATH
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_EVENT_TAIL_LINES
@@ -131,7 +130,6 @@ from .chat_service import CHAT_YOAGENT_USERNAME
 from .chat_service import ChatService
 from .chat_store import CHAT_TYPING_LEASE_SECONDS
 from .metadata import MetadataCache
-from .metadata import focus_root_for_session
 from .metadata import github_checks_unknown
 from .metadata import git_inventory
 from .metadata import indexed_repo_summaries
@@ -194,6 +192,9 @@ from .state_services import SessionFilesWorkRecord
 from .state_services import StatsHistoryService
 from .state_services import TabberActivityWarmerRecord
 from .uploads import sanitize_upload_filename
+from .uploads import central_upload_target
+from .uploads import UploadRetentionSweeper
+from .uploads import UploadTargetError
 from .uploads import unique_upload_path
 from .web import bootstrap_agent_auth_status as cached_agent_auth_status_snapshot
 from .web import server_string
@@ -203,7 +204,6 @@ from .workdir import agent_auth_status
 from .workdir import available_agent_commands
 from .workdir import available_terminal_commands
 from .workdir import terminal_command
-from .workdir import resolved_upload_dir
 from .workdir import session_workdir
 from .yoagent import backends as yoagent_backends
 from .yoagent import conversation as yoagent_conversation
@@ -1776,6 +1776,7 @@ class TmuxWebtermApp:
         self.stats_history_service = StatsHistoryService()
         self.stats_metric_thread_context = threading.local()
         self.job_client = JobClient()
+        self.upload_retention_sweeper = UploadRetentionSweeper()
         self.approval_client = ApprovalClient()
         self.attention_ack_lock = threading.RLock()
         self.attention_ack_keys: dict[str, float] = {}
@@ -11383,10 +11384,30 @@ class TmuxWebtermApp:
         upload_template = settings_payload().get("settings", {}).get("uploads", {}).get("filename_template")
         for upload in files:
             safe_name = sanitize_upload_filename(upload.filename)
-            path = unique_upload_path(target_dir, safe_name, str(upload_template or ""))
-            try:
-                path.write_bytes(upload.content)
-            except OSError as exc:
+            path: Path | None = None
+            last_error: OSError | None = None
+            for _attempt in range(1000):
+                candidate: Path | None = None
+                try:
+                    candidate = unique_upload_path(target_dir, safe_name, str(upload_template or ""))
+                    with candidate.open("xb") as stream:
+                        stream.write(upload.content)
+                    candidate.chmod(0o600)
+                    path = candidate
+                    break
+                except FileExistsError as exc:
+                    last_error = exc
+                    continue
+                except OSError as exc:
+                    last_error = exc
+                    try:
+                        if candidate is not None:
+                            candidate.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    break
+            if path is None:
+                exc = last_error or OSError("failed to reserve a unique upload filename")
                 diagnostic = f"failed to save {safe_name}: {exc}"
                 return [], {
                     "target_dir": str(target_dir),
@@ -11403,7 +11424,7 @@ class TmuxWebtermApp:
         return saved, None, HTTPStatus.OK
 
     @requires_known_session()
-    def upload_files(self, session: str, files: list[UploadedFile]) -> tuple[dict[str, Any], HTTPStatus]:
+    def upload_files(self, session: str, files: list[UploadedFile], *, auth_username: str = "") -> tuple[dict[str, Any], HTTPStatus]:
         if not files:
             diagnostic = "no files supplied"
             return {
@@ -11417,20 +11438,14 @@ class TmuxWebtermApp:
                 **user_message_payload("upload.error.tooManyFiles", diagnostic, limit=UPLOAD_MAX_FILES),
             }, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
 
-        target_dir, target_source = self.upload_target_dir(session)
-        if target_dir is None:
-            diagnostic = f"upload target not found for {session}"
+        try:
+            target_dir, target_source = self.upload_target_dir(session, auth_username=auth_username)
+        except UploadTargetError as exc:
+            diagnostic = str(exc)
             return {
                 "session": session,
-                "target_source": target_source,
-                **user_message_payload("upload.error.targetNotFound", diagnostic, session=session),
-            }, HTTPStatus.NOT_FOUND
-        if not target_dir.is_dir():
-            diagnostic = f"upload target is not a directory: {target_dir}"
-            return {
-                "session": session,
-                **user_message_payload("upload.error.targetNotDirectory", diagnostic, path=str(target_dir)),
-            }, HTTPStatus.NOT_FOUND
+                **user_message_payload("status.uploadFailed", diagnostic, error=diagnostic),
+            }, HTTPStatus.CONFLICT
 
         saved, error, status = self._save_uploaded_files(target_dir, files)
         if error is not None:
@@ -11456,7 +11471,15 @@ class TmuxWebtermApp:
             "files": saved,
         }, HTTPStatus.OK
 
-    def upload_editor_files(self, files: list[UploadedFile], *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+    def upload_editor_files(
+        self,
+        files: list[UploadedFile],
+        *,
+        editor_path: str = "",
+        base_dir: str = "",
+        auth_username: str = "",
+        session: str = "editor",
+    ) -> tuple[dict[str, Any], HTTPStatus]:
         if not files:
             diagnostic = "no files supplied"
             return user_message_payload("upload.error.noFiles", diagnostic), HTTPStatus.BAD_REQUEST
@@ -11465,37 +11488,24 @@ class TmuxWebtermApp:
             return user_message_payload("upload.error.tooManyFiles", diagnostic, limit=UPLOAD_MAX_FILES), HTTPStatus.REQUEST_ENTITY_TOO_LARGE
         raw_base = str(base_dir or "").strip()
         raw_editor_path = str(editor_path or "").strip()
-        if raw_base:
-            base = Path(raw_base).expanduser()
-            target_source = "editor_base_dir"
-        elif raw_editor_path:
-            base = Path(raw_editor_path).expanduser().parent
-            target_source = "editor_path"
-        else:
+        if not raw_base and not raw_editor_path:
             diagnostic = "missing editor_path or base_dir"
             return user_message_payload("upload.error.editorTargetRequired", diagnostic), HTTPStatus.BAD_REQUEST
-        if not base.is_dir():
-            diagnostic = f"editor upload base is not a directory: {base}"
+        base = Path(raw_base).expanduser() if raw_base else Path(raw_editor_path).expanduser().parent
+        try:
+            target_dir, target_source = self.upload_target_dir(session or "editor", auth_username=auth_username)
+        except UploadTargetError as exc:
+            diagnostic = str(exc)
             return {
                 "base_dir": str(base),
-                **user_message_payload("upload.error.targetNotDirectory", diagnostic, path=str(base)),
-            }, HTTPStatus.NOT_FOUND
-        target_dir = self._apply_upload_subdir(base)
-        if not target_dir.is_dir():
-            diagnostic = f"upload target is not a directory: {target_dir}"
-            return {
-                "base_dir": str(base),
-                **user_message_payload("upload.error.targetNotDirectory", diagnostic, path=str(target_dir)),
-            }, HTTPStatus.NOT_FOUND
+                **user_message_payload("status.uploadFailed", diagnostic, error=diagnostic),
+            }, HTTPStatus.CONFLICT
         saved, error, status = self._save_uploaded_files(target_dir, files)
         if error is not None:
             error["base_dir"] = str(base)
             return error, status
         for item in saved:
-            try:
-                item["relative_path"] = Path(item["path"]).relative_to(base).as_posix()
-            except ValueError:
-                item["relative_path"] = Path(item["path"]).name
+            item["relative_path"] = item["path"]
         self.log_event(
             "",
             "editor_upload",
@@ -11528,48 +11538,14 @@ class TmuxWebtermApp:
     def upload_max_bytes(self) -> int:
         return self.file_transfer_max_bytes()
 
-    def upload_target_dir(self, session: str) -> tuple[Path | None, str]:
-        base, source = self._resolve_upload_base_dir(session)
-        if base is None:
-            return None, source
-        return self._apply_upload_subdir(base), source
-
-    def _apply_upload_subdir(self, base: Path) -> Path:
-        # Uploads default into a `.upload/` subdir of the working dir (keeps the cwd/repo clean and
-        # easy to .gitignore); the `uploads.subdir` setting overrides it, and an empty value writes
-        # straight into the working dir. One owner: every upload routes through upload_target_dir, so
-        # the subdir logic lives only here.
-        subdir = str(settings_payload().get("settings", {}).get("uploads", {}).get("subdir", DEFAULT_UPLOAD_SUBDIR) or "").strip()
-        if not subdir:
-            return base
-        relative = Path(subdir)
-        if relative.is_absolute() or ".." in relative.parts:
-            return base  # never let the setting escape the working dir
-        target = base / relative
+    def upload_target_dir(self, session: str, *, auth_username: str = "") -> tuple[Path, str]:
+        target, user_root = central_upload_target(auth_username, session)
+        retention_days = settings_payload().get("settings", {}).get("uploads", {}).get("retention_days", 7)
         try:
-            target.mkdir(parents=True, exist_ok=True)
-            target.chmod(0o700)
-        except OSError:
-            return base  # fall back to the working dir if the subdir can't be created
-        return target
-
-    def _resolve_upload_base_dir(self, session: str) -> tuple[Path | None, str]:
-        focus_root = focus_root_for_session(session)
-        if focus_root:
-            return Path(focus_root), "session_workdir"
-        workdir = session_workdir(session)
-        resolved, ok = resolved_upload_dir(workdir)
-        if ok:
-            return resolved, "session_workdir"
-
-        result = tmux(["display-message", "-p", "-t", tmux_session_target(session), "#{pane_current_path}"], timeout=1.0)
-        if result.returncode == 0:
-            pane_path = result.stdout.strip()
-            if pane_path:
-                resolved, ok = resolved_upload_dir(Path(pane_path), allow_home=True)
-                if ok:
-                    return resolved, "pane_current_path"
-        return None, "session_workdir"
+            self.upload_retention_sweeper.maybe_prune(user_root, int(retention_days))
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("upload retention sweep failed for %s: %s", user_root, exc)
+        return target, "central_user_uploads"
 
     @requires_known_session()
     def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[AutoApproveState, HTTPStatus]:

@@ -1292,6 +1292,8 @@
   "pref.uploads.image_action_order.label": "Beeldplakvolgorde",
   "pref.uploads.max_bytes.help": "Maximale overdrachtsgrootte voor browseruploads/-downloads. ZIP-downloads van mappen gebruiken dezelfde limiet. Voor grote bestanden is rsync sneller en voorkomt het bufferen van grote overdrachten in het geheugen.",
   "pref.uploads.max_bytes.label": "Limiet voor bestandsoverdracht",
+  "pref.uploads.retention_days.help": "Aantal dagen dat tijdelijke uploads worden bewaard. Verlopen bestanden worden tijdens een latere upload verwijderd.",
+  "pref.uploads.retention_days.label": "Bewaartermijn tijdelijke uploads",
   "pref.uploads.show_suggestions.help": "Wanneer een bestand op een terminal wordt geplaatst, toon dan een korte overlay van voorgestelde acties (analyseren, fouten vinden, samenvatten,...) met 1..9 snelkoppelingen. Blijf typen om het af te sluiten.",
   "pref.uploads.show_suggestions.label": "Suggesties voor acties bij het vervallen van het bestand",
   "pref.uploads.subdir.help": "Submap onder de werkmap waar gedropte/geplakte uploads worden geschreven (op aanvraag aangemaakt). Laat het leeg om direct in de werkmap te schrijven.",

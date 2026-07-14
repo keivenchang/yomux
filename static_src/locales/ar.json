@@ -1379,6 +1379,8 @@
   "pref.uploads.show_suggestions.label": "اقتراح إجراءات عند إسقاط ملف",
   "pref.uploads.subdir.help": "مجلد فرعي داخل دليل العمل تُكتب فيه الملفات المرفوعة بالسحب أو اللصق (يُنشأ عند الحاجة). اتركه فارغًا للكتابة مباشرة في دليل العمل.",
   "pref.uploads.subdir.label": "مجلد فرعي للرفع",
+  "pref.uploads.retention_days.help": "عدد أيام الاحتفاظ بالملفات المرفوعة مؤقتًا. تُحذف الملفات المنتهية أثناء عملية رفع لاحقة.",
+  "pref.uploads.retention_days.label": "مدة الاحتفاظ بالملفات المؤقتة",
   "pref.uploads.suggestion_autorun.help": "عند التمكين، ترسل اقتراحات الصدفة للقراءة فقط Enter بعد إدخال الأمر الذي تم إنشاؤه. لا تزال مطالبات الوكيل والإجراءات القابلة للكتابة في انتظار المراجعة.",
   "pref.uploads.suggestion_autorun.label": "التشغيل التلقائي لاقتراحات Shell للقراءة فقط",
   "pref.yoagent.backend.auto": "تلقائي (Codex → Claude)",

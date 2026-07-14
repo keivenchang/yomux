@@ -1329,6 +1329,8 @@
   "pref.uploads.show_suggestions.label": "Proponuj działania dotyczące dropowania pliku",
   "pref.uploads.subdir.help": "Podkatalog pod katalogiem roboczym, gdzie zapisywane są wrzucone/wklejone pliki (tworzone na żądanie). Zostawić puste, aby zapisać bezpośrednio do katalogu roboczego.",
   "pref.uploads.subdir.label": "Podfolder Upload",
+  "pref.uploads.retention_days.help": "Liczba dni przechowywania tymczasowo przesłanych plików. Wygasłe pliki są usuwane podczas późniejszego przesyłania.",
+  "pref.uploads.retention_days.label": "Przechowywanie tymczasowych plików",
   "pref.uploads.suggestion_autorun.help": "Po włączeniu sugestie powłoki tylko do odczytu wysyłają Enter po wstawieniu wygenerowanego polecenia. Prompty agenta i działania umożliwiające zapis nadal czekają na weryfikację.",
   "pref.uploads.suggestion_autorun.label": "Sugestie dotyczące powłoki tylko do odczytu Autorun",
   "pref.yoagent.backend.auto": "Automatycznie (Codex → Claude)",

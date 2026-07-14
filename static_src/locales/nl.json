@@ -1279,6 +1279,8 @@
   "pref.uploads.show_suggestions.label": "Suggesties voor acties bij het vervallen van het bestand",
   "pref.uploads.subdir.help": "Submap onder de werkmap waar gedropte/geplakte uploads worden geschreven (op aanvraag aangemaakt). Laat het leeg om direct in de werkmap te schrijven.",
   "pref.uploads.subdir.label": "Upload-submap",
+  "pref.uploads.retention_days.help": "Aantal dagen dat tijdelijke uploads worden bewaard. Verlopen bestanden worden tijdens een latere upload verwijderd.",
+  "pref.uploads.retention_days.label": "Bewaartermijn tijdelijke uploads",
   "pref.uploads.suggestion_autorun.help": "Wanneer ingeschakeld, sturen alleen-lezen shellsuggesties Enter nadat hun gegenereerde commando is ingevoegd. Agentprompts en schrijfbare acties wachten nog op beoordeling.",
   "pref.uploads.suggestion_autorun.label": "Suggesties voor Autorun alleen-lezen shell",
   "pref.yoagent.backend.auto": "Automatisch (Codex → Claude)",

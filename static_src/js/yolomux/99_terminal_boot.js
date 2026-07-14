@@ -4108,7 +4108,7 @@ function insertEditorPasteUploadReferences(editorTarget, files) {
 
 function markdownImageUploadReferences(files) {
   return (files || []).map(file => {
-    const path = file.relative_path || pathBasename(file.path || '') || file.saved_name || '';
+    const path = file.path || file.relative_path || file.saved_name || '';
     if (!path) return '';
     return `![image](${markdownLinkTarget(path)})`;
   }).filter(Boolean);

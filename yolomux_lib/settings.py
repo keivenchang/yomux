@@ -16,7 +16,6 @@ from .atomic_file import atomic_write_text
 from .atomic_file import file_lock
 from .common import CONFIG_DIR
 from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
-from .common import DEFAULT_UPLOAD_SUBDIR
 from .common import UPDATE_NOTIFY_LEVELS
 from .common import UPLOAD_MAX_BYTES
 from .locales import LANGUAGE_PREFERENCES
@@ -259,7 +258,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "uploads": {
         "filename_template": DEFAULT_UPLOAD_FILENAME_TEMPLATE,
         "max_bytes": UPLOAD_MAX_BYTES,
-        "subdir": DEFAULT_UPLOAD_SUBDIR,
+        "retention_days": 7,
         "show_suggestions": True,
         "suggestion_autorun": False,
         "image_action_order": list(DEFAULT_IMAGE_DROP_ACTION_ORDER),
@@ -400,6 +399,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("file_explorer", "dir_cache_ms"): (0, 10000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
+    ("uploads", "retention_days"): (1, 365),
     ("share", "ttl_seconds"): (60, 28800),
     ("share", "max_viewers"): (1, 300),
     ("summary", "lookback_seconds"): (60, 24 * 3600),
@@ -407,10 +407,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
 }
 
 # String settings that accept an empty value (most strings revert to their default when blank).
-# `uploads.subdir` empty = write uploads straight into the cwd instead of a `.uploads/` subdir.
-STRING_ALLOW_EMPTY: set[tuple[str, str]] = {
-    ("uploads", "subdir"),
-}
+STRING_ALLOW_EMPTY: set[tuple[str, str]] = set()
 
 SETTING_LIST_LIMITS: dict[tuple[str, str], int] = {
     ("uploads", "image_action_order"): 9,
@@ -578,7 +575,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. File transfer size cap for browser uploads, raw file downloads, and folder zip downloads. Prefer rsync for large files.",
-    ("uploads", "subdir"): "Subdirectory under the session working directory where uploads are written (default .uploads, created on demand). Leave empty to write straight into the working directory.",
+    ("uploads", "retention_days"): "Days, 1-365. Central temporary uploads are removed lazily after this many days. Default 7.",
     ("uploads", "show_suggestions"): "When a file is dropped onto a terminal, show a brief suggestion overlay of actions (analyze, find errors, summarize, …) with 1..9 shortcuts. Keep typing to dismiss it.",
     ("uploads", "suggestion_autorun"): "true/false. Default false. When true, read-only shell drop actions send Enter after inserting the generated command. Agent prompts and write-capable actions never autorun.",
     ("uploads", "image_action_order"): "Image paste/drop action order, one item per line. Prompt rows use 'Popup label: ; prompt text inserted after the image path'. Non-AI rows may use the popup label or a special name such as info. The popup assigns shortcut keys 1-n, up to 9.",
@@ -663,7 +660,7 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("file_explorer", "dir_cache_ms"): "Finder",
     ("file_explorer", "new_entry_highlight_ms"): "Finder",
     ("uploads", "filename_template"): "Uploads/Downloads",
-    ("uploads", "subdir"): "Uploads/Downloads",
+    ("uploads", "retention_days"): "Uploads/Downloads",
     ("uploads", "show_suggestions"): "Uploads/Downloads",
     ("uploads", "suggestion_autorun"): "Uploads/Downloads",
     ("uploads", "image_action_order"): "Uploads/Downloads",
@@ -734,7 +731,6 @@ SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
     ("file_explorer", "index_exclude_dir_names"),
     ("file_explorer", "companion_dirs"),
     ("file_explorer", "index_exclude_paths"),
-    ("uploads", "subdir"),
     ("share", "read_only"),
     ("share", "scheme"),
 }
@@ -748,7 +744,6 @@ SETTING_SENSITIVITY: dict[tuple[str, str], str] = {
     ("file_explorer", "index_exclude_dir_names"): "directory-name-list",
     ("file_explorer", "companion_dirs"): "path-list",
     ("file_explorer", "index_exclude_paths"): "path-list",
-    ("uploads", "subdir"): "path",
     ("github", "watched_prs"): "external-reference-list",
     ("share", "read_only"): "share-access",
     ("share", "scheme"): "share-access",

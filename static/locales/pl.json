@@ -1342,6 +1342,8 @@
   "pref.uploads.image_action_order.label": "Kolejność akcji wklejania obrazów",
   "pref.uploads.max_bytes.help": "Maksymalny rozmiar transferu dla przesyłania/pobierania w przeglądarce. Pobieranie folderów ZIP używa tego samego limitu. Dla dużych plików rsync jest szybszy i unika buforowania dużych transferów w pamięci.",
   "pref.uploads.max_bytes.label": "Limit rozmiaru transferu plików",
+  "pref.uploads.retention_days.help": "Liczba dni przechowywania tymczasowo przesłanych plików. Wygasłe pliki są usuwane podczas późniejszego przesyłania.",
+  "pref.uploads.retention_days.label": "Przechowywanie tymczasowych plików",
   "pref.uploads.show_suggestions.help": "Gdy plik zostanie umieszczony na terminalu, pokaż krótką nakładkę sugerowanych działań (analiza, znajdowanie błędów, streszczenie,...) z 1..9 skrótami. Pisz dalej, żeby to odrzucić.",
   "pref.uploads.show_suggestions.label": "Proponuj działania dotyczące dropowania pliku",
   "pref.uploads.subdir.help": "Podkatalog pod katalogiem roboczym, gdzie zapisywane są wrzucone/wklejone pliki (tworzone na żądanie). Zostawić puste, aby zapisać bezpośrednio do katalogu roboczego.",

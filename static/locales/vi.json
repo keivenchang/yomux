@@ -1292,6 +1292,8 @@
   "pref.uploads.image_action_order.label": "Thứ tự hành động dán hình ảnh",
   "pref.uploads.max_bytes.help": "Kích thước truyền tối đa cho tải lên/tải xuống trong trình duyệt. Tải xuống ZIP thư mục dùng cùng giới hạn này. Với tệp lớn, rsync nhanh hơn và tránh đệm các lần truyền lớn trong bộ nhớ.",
   "pref.uploads.max_bytes.label": "Giới hạn kích thước truyền tệp",
+  "pref.uploads.retention_days.help": "Số ngày lưu các tệp tải lên tạm thời. Tệp hết hạn được xóa trong một lần tải lên sau đó.",
+  "pref.uploads.retention_days.label": "Thời gian lưu tệp tải lên tạm thời",
   "pref.uploads.show_suggestions.help": "Khi một tệp được thả vào thiết bị đầu cuối, hãy hiển thị một lớp phủ ngắn gọn của các hành động được đề xuất (phân tích, tìm lỗi, tóm tắt,...) với 1..9 phím tắt. Tiếp tục gõ để loại bỏ nó.",
   "pref.uploads.show_suggestions.label": "Đề xuất hành động khi thả tệp",
   "pref.uploads.subdir.help": "Thư mục con trong thư mục làm việc nơi các tải lên bị thả/dán được ghi (tạo theo yêu cầu). Để trống để ghi thẳng vào thư mục làm việc.",

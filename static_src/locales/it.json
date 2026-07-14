@@ -1304,6 +1304,8 @@
   "pref.uploads.show_suggestions.label": "Suggerire azioni in caso di archivio",
   "pref.uploads.subdir.help": "sottodirectory sotto la directory di lavoro dove vengono scritti i caricamenti drop/incollati (creati su richiesta). Lascia vuoto per scrivere direttamente nella cartella di lavoro.",
   "pref.uploads.subdir.label": "Sottocartella carica",
+  "pref.uploads.retention_days.help": "Numero di giorni di conservazione dei caricamenti temporanei. I file scaduti vengono rimossi durante un caricamento successivo.",
+  "pref.uploads.retention_days.label": "Conservazione dei caricamenti temporanei",
   "pref.uploads.suggestion_autorun.help": "Quando attivato, i suggerimenti di shell di sola lettura inviano Enter dopo aver inserito il comando generato. I prompt degli agenti e le azioni con capacità di scrittura attendono ancora la revisione.",
   "pref.uploads.suggestion_autorun.label": "Suggerimenti per shell di sola lettura per Autorun",
   "pref.yoagent.backend.auto": "Automatico (Codex → Claude)",

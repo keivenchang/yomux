@@ -1317,6 +1317,8 @@
   "pref.uploads.image_action_order.label": "Ordine delle azioni di incolla immagine",
   "pref.uploads.max_bytes.help": "Dimensione massima di trasferimento per upload/download dal browser. I download ZIP delle cartelle usano lo stesso limite. Per file grandi, rsync è più veloce ed evita di bufferizzare trasferimenti grandi in memoria.",
   "pref.uploads.max_bytes.label": "Limite dimensione trasferimento file",
+  "pref.uploads.retention_days.help": "Numero di giorni di conservazione dei caricamenti temporanei. I file scaduti vengono rimossi durante un caricamento successivo.",
+  "pref.uploads.retention_days.label": "Conservazione dei caricamenti temporanei",
   "pref.uploads.show_suggestions.help": "Quando un file viene inserito su un terminale, mostra una breve sovrapposizione delle azioni suggerite (analizza, trova errori, riassumi,...) con 1..9 scorciatoie. Continua a scrivere per ignorarlo.",
   "pref.uploads.show_suggestions.label": "Suggerire azioni in caso di archivio",
   "pref.uploads.subdir.help": "sottodirectory sotto la directory di lavoro dove vengono scritti i caricamenti drop/incollati (creati su richiesta). Lascia vuoto per scrivere direttamente nella cartella di lavoro.",

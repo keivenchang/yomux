@@ -1304,6 +1304,8 @@
   "pref.uploads.show_suggestions.label": "Suggérer des actions au dépôt d'un fichier",
   "pref.uploads.subdir.help": "Sous-répertoire du répertoire de travail où sont écrits les fichiers déposés ou collés (créé à la demande). Laisser vide pour écrire directement dans le répertoire de travail.",
   "pref.uploads.subdir.label": "Sous-dossier d'envoi",
+  "pref.uploads.retention_days.help": "Nombre de jours de conservation des téléversements temporaires. Les fichiers expirés sont supprimés lors d’un téléversement ultérieur.",
+  "pref.uploads.retention_days.label": "Conservation des téléversements temporaires",
   "pref.uploads.suggestion_autorun.help": "Lorsqu'elles sont activées, les suggestions du shell en lecture seule envoient Enter après avoir inséré leur commande générée. Les invites de l'agent et les actions compatibles en écriture attendent toujours d'être examinées.",
   "pref.uploads.suggestion_autorun.label": "Suggestions de shell à exécution automatique en lecture seule",
   "pref.yoagent.backend.auto": "Automatique (Codex → Claude)",

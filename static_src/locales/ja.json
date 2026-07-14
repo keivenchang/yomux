@@ -1279,6 +1279,8 @@
   "pref.uploads.show_suggestions.label": "ファイルのドロップ時に操作を提案",
   "pref.uploads.subdir.help": "ドロップまたは貼り付けでアップロードしたファイルを書き込む作業ディレクトリ内のサブディレクトリ（必要に応じて作成）。空にすると作業ディレクトリ直下に書き込みます。",
   "pref.uploads.subdir.label": "アップロードのサブフォルダ",
+  "pref.uploads.retention_days.help": "一時アップロードを保持する日数です。期限切れのファイルは後続のアップロード時に削除されます。",
+  "pref.uploads.retention_days.label": "一時アップロードの保持期間",
   "pref.uploads.suggestion_autorun.help": "有効にすると、読み取り専用シェルの提案は、生成されたコマンドを挿入した後に Enter キーを送信します。エージェントのプロンプトと書き込み可能なアクションはまだレビューを待っています。",
   "pref.uploads.suggestion_autorun.label": "自動実行読み取り専用シェルの提案",
   "pref.yoagent.backend.auto": "自動 (Codex → Claude)",

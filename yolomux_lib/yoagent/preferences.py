@@ -81,7 +81,7 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "file_explorer.dir_cache_ms": ("directory cache", "finder cache"),
     "file_explorer.new_entry_highlight_ms": ("new entry highlight", "new file highlight"),
     "uploads.filename_template": ("upload filename template", "upload name template"),
-    "uploads.subdir": ("upload subdir", "upload folder", "upload directory"),
+    "uploads.retention_days": ("upload retention", "upload retention days", "temporary upload lifetime"),
     "uploads.show_suggestions": ("upload suggestions", "drop suggestions", "file action menu"),
     "uploads.suggestion_autorun": ("upload autorun", "drop autorun", "shell autorun"),
     "uploads.image_action_order": ("image action", "image actions", "image action order", "image paste actions", "image drop actions"),
@@ -501,8 +501,6 @@ def unsafe_config_path_value(path: str, value: str) -> bool:
 def string_value_from_question(question: str, path: str) -> str:
     match = re.search(r"\b(?:to|as|use)\s+(.+)$", question, flags=re.IGNORECASE)
     value = match.group(1).strip(" `\"'") if match else ""
-    if path == "uploads.subdir":
-        value = value.split()[0] if value else ""
     return value
 
 
@@ -762,7 +760,7 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "auth": "readonly for reads, admin for writes",
             "locale_keys": {"name": "common.preferences"},
             "backing": "settings_catalog + TmuxWebtermApp.save_settings",
-            "setting_keys": ["appearance.theme", "appearance.tab_width", "updates.notify_level", "uploads.subdir"],
+            "setting_keys": ["appearance.theme", "appearance.tab_width", "updates.notify_level", "uploads.retention_days"],
             "examples": ["what is my tab width?", "set theme to light", "change update notify level to patch"],
         },
         {
@@ -825,8 +823,8 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "auth": "admin for writes",
             "locale_keys": {"auth": "yoagent.capability.auth.adminForWrites"},
             "backing": "settings catalog + drop-action registry",
-            "setting_keys": ["uploads.image_action_order", "uploads.custom_actions", "uploads.subdir"],
-            "examples": ["what are my image paste actions?", "set upload subdir to .uploads"],
+            "setting_keys": ["uploads.image_action_order", "uploads.custom_actions", "uploads.retention_days"],
+            "examples": ["what are my image paste actions?", "set upload retention to 14 days"],
         },
         {
             "key": "share",

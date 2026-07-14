@@ -1292,6 +1292,8 @@
   "pref.uploads.image_action_order.label": "圖片貼上操作順序",
   "pref.uploads.max_bytes.help": "瀏覽器上傳/下載傳輸的最大大小。資料夾 ZIP 下載也使用相同上限。對於大型檔案，rsync 較快且可避免在記憶體中緩衝大型傳輸。",
   "pref.uploads.max_bytes.label": "檔案傳輸大小上限",
+  "pref.uploads.retention_days.help": "暫存上傳檔案的保留天數。過期檔案會在後續上傳時刪除。",
+  "pref.uploads.retention_days.label": "暫存上傳保留天數",
   "pref.uploads.show_suggestions.help": "將檔案拖放到終端機時，短暫顯示建議操作（分析、尋找錯誤、摘要等）的浮層，並附 1..9 快捷鍵。繼續輸入即可關閉。",
   "pref.uploads.show_suggestions.label": "拖放檔案時建議操作",
   "pref.uploads.subdir.help": "工作目錄下用於儲存拖放或貼上上傳檔案的子目錄（按需建立）。留空則直接寫入工作目錄。",

@@ -865,6 +865,38 @@ def test_handle_upload_enforces_live_app_size_limit():
     assert handler.close_connection is True
 
 
+def test_handle_upload_threads_authenticated_yolomux_user_to_all_upload_entry_points():
+    boundary = "upload-test"
+    body = (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"one.png\"\r\n\r\n".encode()
+        + b"png\r\n"
+        + f"--{boundary}--\r\n".encode()
+    )
+    calls = []
+    app = SimpleNamespace(
+        file_transfer_max_bytes=lambda: 1024,
+        upload_files=lambda session, files, **kwargs: calls.append(("terminal", session, files, kwargs)) or ({"ok": True}, HTTPStatus.OK),
+        upload_editor_files=lambda files, **kwargs: calls.append(("editor", "", files, kwargs)) or ({"ok": True}, HTTPStatus.OK),
+    )
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(body)), "Content-Type": f"multipart/form-data; boundary={boundary}"},
+        rfile=io.BytesIO(body),
+        server=SimpleNamespace(app=app),
+        close_connection=False,
+        file_transfer_max_bytes=lambda: app.file_transfer_max_bytes(),
+        auth_identity=lambda: SimpleNamespace(username="alice"),
+    )
+
+    Handler.handle_upload(handler, "6")
+    handler.rfile = io.BytesIO(body)
+    Handler.handle_upload(handler, "", editor_path="/repo/note.md")
+
+    assert calls[0][0:2] == ("terminal", "6")
+    assert calls[0][3] == {"auth_username": "alice"}
+    assert calls[1][0] == "editor"
+    assert calls[1][3] == {"editor_path": "/repo/note.md", "base_dir": "", "auth_username": "alice", "session": "editor"}
+
+
 def test_request_body_reader_owns_content_length_validation():
     # RA6: every POST body reader should route Content-Length parsing through one helper so missing,
     # invalid, non-positive, and oversized bodies cannot drift by route.

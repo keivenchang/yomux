@@ -1279,6 +1279,8 @@
   "pref.uploads.show_suggestions.label": "Dosya bırakılmasında eylemler öner",
   "pref.uploads.subdir.help": "Çalışma dizininin altındaki alt dizin, burada düşürülmüş/yapıştırılan yüklemeler yazılır (talep üzerine oluşturulur). Boş bırakıp doğrudan çalışma dizinine yaz.",
   "pref.uploads.subdir.label": "Alt klasör yükleme",
+  "pref.uploads.retention_days.help": "Geçici yüklemelerin saklanacağı gün sayısı. Süresi dolan dosyalar sonraki bir yükleme sırasında silinir.",
+  "pref.uploads.retention_days.label": "Geçici yüklemeleri saklama süresi",
   "pref.uploads.suggestion_autorun.help": "Etkinleştirildiğinde, yalnızca okunan kabuk önerileri, oluşturulan komutlarını girdikten sonra Enter gönderir. Ajan istmleri ve yazılabilir işlemler hâlâ inceleme bekliyor.",
   "pref.uploads.suggestion_autorun.label": "Autorun only okunabilir kabuk önerileri",
   "pref.yoagent.backend.auto": "Otomatik (Codex → Claude)",
