@@ -371,3 +371,31 @@ def test_explicit_fine_resolution_coarsens_until_the_whole_range_is_covered(brow
     # Full range rendered (buckets reach back ~60 min), not a half-empty chart.
     assert out["startsAgoMin"] >= 55, out
     assert out["bucketCount"] >= 50, out
+
+def test_switching_from_wide_range_does_not_coarsen_short_range_to_stale_resolution(browser, tmp_path):
+    """Regression for '10s@1h shows 600s': after a wide (24h) view establishes a
+    coarse coverage tail, switching to 1h with a 10s override must render at the
+    1h retained tier (not the stale wide-range 600s)."""
+    fixture = _morning_after_protocol_history(tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    _install_morning_after_fetch(browser, fixture)
+    # Establish the wide-range coverage first (its old tail is 600s).
+    _run_morning_after_range(browser, 24 * 3600)
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          setDebugGraphRange(3600, {render: false});
+          setDebugGraphResolutionOverride(10);
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(3);
+          const domain = debugGraphDomain();
+          done({displayResSec: debugGraphDisplayResolutionMs(domain, 0) / 1000});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    # The 1h retained tier is <= 60s; it must NOT be the stale 600s wide-range value.
+    assert out["displayResSec"] <= 60, out
+    assert out["displayResSec"] != 600, out
