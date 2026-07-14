@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -331,8 +332,6 @@ def test_stats_store_repairs_preexisting_coverage_overlaps_on_open(tmp_path):
 
 @pytest.mark.parametrize("seed", range(12))
 def test_stats_store_coverage_is_always_disjoint_under_random_owner_churn(tmp_path, seed):
-    import random
-
     rng = random.Random(seed)
     store = stats_store.StatsStore(tmp_path / f"stats-{seed}.sqlite3")
     families = ["cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory"]
