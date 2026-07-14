@@ -248,6 +248,7 @@
   "debug.errors": "JS-Fehler",
   "debug.events": "Veranstaltungen",
   "debug.graph.agentStatus.noData": "Keine Agentenstatusprobe",
+  "debug.graph.noDataRecorded": "Keine Daten aufgezeichnet",
   "debug.graph.badConnection": "Schlechte Verbindung: Für {duration} wurden keine Daten erfasst",
   "debug.graph.chart.agentStatus": "Agentenstatus",
   "debug.graph.chart.agentStatus.desc": "Zählt Agent-Fenster nach Status: aktiv, Aufmerksamkeit, Übergang und Leerlauf aus YOLOmux-Zustandsproben.",

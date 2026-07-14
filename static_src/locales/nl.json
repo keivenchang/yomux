@@ -248,6 +248,7 @@
   "debug.errors": "JS fouten",
   "debug.events": "Evenementen",
   "debug.graph.agentStatus.noData": "Geen agentstatusmeting",
+  "debug.graph.noDataRecorded": "Geen gegevens vastgelegd",
   "debug.graph.badConnection": "Slechte verbinding: geen gegevens verzameld voor {duration}",
   "debug.graph.chart.agentStatus": "Agentstatus",
   "debug.graph.chart.agentStatus.desc": "Telt agentvensters per status: werkend, aandacht, overgang en inactief uit YOLOmux-statussamples.",

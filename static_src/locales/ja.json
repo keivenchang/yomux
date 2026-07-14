@@ -248,6 +248,7 @@
   "debug.errors": "JSエラー",
   "debug.events": "イベント",
   "debug.graph.agentStatus.noData": "エージェント状態のサンプルなし",
+  "debug.graph.noDataRecorded": "記録されたデータがありません",
   "debug.graph.badConnection": "接続不良: {duration} のデータが収集されません",
   "debug.graph.chart.agentStatus": "エージェントのステータス",
   "debug.graph.chart.agentStatus.desc": "YOLOmux の状態サンプルから、エージェントウィンドウを作業中、注意、遷移、アイドル別に数えます。",

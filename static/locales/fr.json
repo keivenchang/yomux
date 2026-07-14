@@ -305,6 +305,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "Les échantillons SSE comptent les messages server-sent events reçus par le navigateur par seconde.",
   "debug.graph.movingAverage": "{label} {count}-échantillon de moyenne mobile",
+  "debug.graph.noDataRecorded": "Aucune donnée enregistrée",
   "debug.graph.resolution.loadFailed": "Impossible de charger la résolution {resolution} — retour à la précédente.",
   "debug.graph.series.agentToken.desc": "Débit de jetons de sortie de transcription pour l’agent {agent}.",
   "debug.graph.series.allAgentsTotal": "Total de tous les agents",

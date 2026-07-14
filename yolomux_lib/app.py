@@ -2732,21 +2732,30 @@ class TmuxWebtermApp:
         })
         services: dict[str, dict[str, Any]] = {}
         for row in rows:
-            if not isinstance(row, dict) or int(row.get("pid") or 0) <= 0:
+            if not isinstance(row, dict):
                 continue
             key = str(row.get("service") or "").strip()[:128]
+            if not key:
+                continue
+            running = int(row.get("pid") or 0) > 0
             resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
             cpu_percent = resources.get("cpu_percent")
             rss_bytes = resources.get("rss_bytes")
-            item: dict[str, Any] = {"label": key}
-            if isinstance(cpu_percent, (int, float)):
-                cpu = max(0.0, float(cpu_percent))
-                item.update({"cpu_total_percent": cpu, "cpu_min_percent": cpu, "cpu_max_percent": cpu, "cpu_samples": 1})
-            if isinstance(rss_bytes, (int, float)):
+            # Every known service reports each tick so its Servers Load series
+            # always exists and reads honestly: a running service contributes its
+            # real CPU%/RSS, and an idle/not-running spawn-on-demand service an
+            # explicit zero (rather than a missing series that looks like a broken
+            # chart). A service that was never registered simply never appears in
+            # `rows`, so it stays absent.
+            cpu = max(0.0, float(cpu_percent)) if isinstance(cpu_percent, (int, float)) else 0.0
+            item: dict[str, Any] = {
+                "label": key,
+                "cpu_total_percent": cpu, "cpu_min_percent": cpu, "cpu_max_percent": cpu, "cpu_samples": 1,
+            }
+            if running and isinstance(rss_bytes, (int, float)):
                 rss = max(0.0, float(rss_bytes))
                 item.update({"rss_total_bytes": rss, "rss_min_bytes": rss, "rss_max_bytes": rss, "rss_samples": 1})
-            if len(item) > 1:
-                services[key] = item
+            services[key] = item
         self.merge_stats_family_record(
             "service_load",
             {"time": self.stats_metric_scheduled_time(), "host_metrics": {"service_load": services}},

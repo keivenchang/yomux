@@ -39,6 +39,30 @@ LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 
 
+def parse_ps_cpu_seconds(text: str) -> float | None:
+    """Parse a ps cumulative CPU time ([[dd-]hh:]mm:ss[.ff]) into seconds."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    days = 0
+    if "-" in raw:
+        day_part, _, raw = raw.partition("-")
+        try:
+            days = int(day_part)
+        except ValueError:
+            return None
+    try:
+        parts = [float(part) for part in raw.split(":")]
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60.0 + part
+    return seconds + days * 86400.0
+
+
 @dataclass(frozen=True)
 class LocalServiceSpec:
     name: str
@@ -288,22 +312,56 @@ class LocalServiceRegistry:
         }
 
     def resources(self, pid: int) -> dict[str, float | int | None]:
-        """Return best-effort worker CPU/RSS without starting a subprocess."""
+        """Return best-effort worker CPU/RSS without restarting the subprocess.
+
+        Linux reads /proc directly; macOS/BSD have no /proc, so an existing pid's
+        cumulative CPU time and RSS come from a bounded `ps` read (not a worker
+        restart). Without this branch every service reported `—` CPU/Memory and
+        the Servers Load chart was empty on macOS.
+        """
         if pid <= 0:
             return {"cpu_percent": None, "rss_bytes": None}
-        if platform.system() != "Linux":
+        reading = self._read_process_cpu_seconds_and_rss(pid)
+        if reading is None:
             return {"cpu_percent": None, "rss_bytes": None}
-        try:
-            stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
-            statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
-            cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
-            rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
-        except (IndexError, OSError, ValueError):
-            return {"cpu_percent": None, "rss_bytes": None}
+        cpu_seconds, rss_bytes = reading
         now = self.clock()
         previous = self._last_resource_sample
         self._last_resource_sample = (now, cpu_seconds)
         cpu_percent: float | None = None
-        if previous is not None and now > previous[0]:
+        if previous is not None and now > previous[0] and cpu_seconds >= previous[1]:
             cpu_percent = round(max(0.0, (cpu_seconds - previous[1]) / (now - previous[0]) * 100.0), 3)
         return {"cpu_percent": cpu_percent, "rss_bytes": rss_bytes}
+
+    def _read_process_cpu_seconds_and_rss(self, pid: int) -> tuple[float, int] | None:
+        """Return (cumulative CPU seconds, RSS bytes) for an existing pid."""
+        if platform.system() == "Linux":
+            try:
+                stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
+                statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
+                cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
+                rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+            except (IndexError, OSError, ValueError):
+                return None
+            return (cpu_seconds, rss_bytes)
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "rss=,time=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        fields = str(getattr(completed, "stdout", "") or "").split()
+        if len(fields) < 2:
+            return None
+        try:
+            rss_bytes = int(fields[0]) * 1024
+        except ValueError:
+            return None
+        cpu_seconds = parse_ps_cpu_seconds(fields[1])
+        if cpu_seconds is None:
+            return None
+        return (cpu_seconds, rss_bytes)

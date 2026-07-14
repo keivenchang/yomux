@@ -272,6 +272,7 @@
   "debug.errors": "أخطاء JS",
   "debug.events": "الأحداث",
   "debug.graph.agentStatus.noData": "لا توجد عينة لحالة الوكيل",
+  "debug.graph.noDataRecorded": "لا توجد بيانات مسجلة",
   "debug.graph.badConnection": "اتصال سيئ: لم يتم جمع أي بيانات لـ {duration}",
   "debug.graph.chart.agentStatus": "حالة الوكيل",
   "debug.graph.chart.agentStatus.desc": "يعد نوافذ الوكلاء حسب الحالة: يعمل، يحتاج انتباها، في انتقال، أو خامل من عينات حالة YOLOmux.",

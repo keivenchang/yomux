@@ -305,6 +305,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "דגימות SSE סופרות הודעות אירועי שרת שהדפדפן מקבל בכל שנייה.",
   "debug.graph.movingAverage": "{label} {count}-ממוצע נע לדוגמה",
+  "debug.graph.noDataRecorded": "לא נרשמו נתונים",
   "debug.graph.resolution.loadFailed": "לא ניתן לטעון את הרזולוציה {resolution} — הוחזר לקודמת.",
   "debug.graph.series.agentToken.desc": "קצב אסימוני פלט תמליל עבור הסוכן {agent}.",
   "debug.graph.series.allAgentsTotal": "כל הסוכנים בסך הכל",

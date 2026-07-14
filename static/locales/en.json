@@ -299,6 +299,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "SSE samples count server-sent event messages received by the browser per second.",
   "debug.graph.movingAverage": "{label} {count}-sample moving average",
+  "debug.graph.noDataRecorded": "No data recorded",
   "debug.graph.resolution.loadFailed": "Could not load {resolution} resolution — reverted to previous.",
   "debug.graph.series.agentToken.desc": "Transcript output-token rate for agent {agent}.",
   "debug.graph.series.allAgentsTotal": "All agents total",

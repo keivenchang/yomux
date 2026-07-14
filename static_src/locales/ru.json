@@ -260,6 +260,7 @@
   "debug.errors": "JS-ошибки",
   "debug.events": "События",
   "debug.graph.agentStatus.noData": "Нет образца состояния агента",
+  "debug.graph.noDataRecorded": "Данные не записаны",
   "debug.graph.badConnection": "Плохое соединение: данные для {duration} не собраны.",
   "debug.graph.chart.agentStatus": "Статус агента",
   "debug.graph.chart.agentStatus.desc": "Считает окна агентов по состоянию: работа, внимание, переход и простой на основе выборок YOLOmux.",

@@ -254,6 +254,7 @@
   "debug.errors": "Erros JS",
   "debug.events": "Eventos",
   "debug.graph.agentStatus.noData": "Sem amostra de status do agente",
+  "debug.graph.noDataRecorded": "Nenhum dado registrado",
   "debug.graph.badConnection": "Conexão ruim: nenhum dado coletado para {duration}",
   "debug.graph.chart.agentStatus": "Status do agente",
   "debug.graph.chart.agentStatus.desc": "Conta janelas de agentes por estado: trabalhando, atenção, transição e ocioso a partir de amostras do YOLOmux.",

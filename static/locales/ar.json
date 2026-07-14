@@ -323,6 +323,7 @@
   "debug.graph.metric.sse": "SSE",
   "debug.graph.metric.sse.desc": "تعد عينات SSE رسائل أحداث الخادم التي يتلقاها المتصفح في الثانية.",
   "debug.graph.movingAverage": "{label} {count}-المتوسط المتحرك للعينة",
+  "debug.graph.noDataRecorded": "لا توجد بيانات مسجلة",
   "debug.graph.resolution.loadFailed": "تعذر تحميل دقة {resolution} — تمت العودة إلى السابقة.",
   "debug.graph.series.agentToken.desc": "معدل رموز مخرجات النص للوكيل {agent}.",
   "debug.graph.series.allAgentsTotal": "جميع الوكلاء المجموع",

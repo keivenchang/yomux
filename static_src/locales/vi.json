@@ -248,6 +248,7 @@
   "debug.errors": "Lỗi JS",
   "debug.events": "Sự kiện",
   "debug.graph.agentStatus.noData": "Không có mẫu trạng thái tác nhân",
+  "debug.graph.noDataRecorded": "Không có dữ liệu được ghi",
   "debug.graph.badConnection": "Kết nối kém: không có dữ liệu được thu thập cho {duration}",
   "debug.graph.chart.agentStatus": "Trạng thái đại lý",
   "debug.graph.chart.agentStatus.desc": "Đếm cửa sổ tác nhân theo trạng thái: đang chạy, cần chú ý, chuyển tiếp và rảnh từ mẫu YOLOmux.",

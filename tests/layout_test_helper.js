@@ -1260,6 +1260,9 @@ globalThis.__layoutTestApi = {
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
   debugGraphHistoryCoverageGapRunsForTest: debugGraphHistoryCoverageGapRuns,
   debugGraphHistoryCoverageGapRectsHtmlForTest: debugGraphHistoryCoverageGapRectsHtml,
+  debugGraphLivePulseHtmlForTest: debugGraphLivePulseHtml,
+  debugGraphSlidingAxisActiveForTest: () => debugGraphSlidingAxisActive(),
+  debugGraphChartAxisMaxForTest: debugGraphChartAxisMax,
   debugGraphHeldProvenanceTextForTest: debugGraphHeldProvenanceText,
   debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
@@ -1347,7 +1350,9 @@ globalThis.__layoutTestApi = {
     jsDebugLogsState.clearedAt = 0;
   },
   setJsDebugLogLevelsForTest(levels) {
+    loadJsDebugStatsUiPreferences();
     jsDebugLogsState.levels = new Set((levels || []).filter(level => jsDebugLogLevels.includes(level)));
+    saveJsDebugStatsUiPreferences();
   },
   setDebugGraphRangeForTest: setDebugGraphRange,
   setDebugGraphResolutionOverrideForTest: setDebugGraphResolutionOverride,

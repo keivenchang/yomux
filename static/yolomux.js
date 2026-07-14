@@ -41622,13 +41622,17 @@ const jsDebugSystemState = {
   updatedAt: 0,
 };
 const jsDebugLogLevels = Object.freeze(['info', 'warning', 'debug', 'error']);
+// Fresh state hides the chatty info/debug levels; warnings and errors are the
+// signal a first-time viewer needs. Info/Debug remain one toggle away and their
+// selection persists (see save/load of jsDebugStatsUiPreferences).
+const jsDebugLogDefaultLevels = Object.freeze(['warning', 'error']);
 const jsDebugLogsState = {
   payload: [],
   error: '',
   inFlight: false,
   updatedAt: 0,
   clearedAt: 0,
-  levels: new Set(jsDebugLogLevels),
+  levels: new Set(jsDebugLogDefaultLevels),
 };
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugGraphResolutionOverrideSeconds = 0;
@@ -41666,6 +41670,7 @@ let jsDebugGraphSelectionState = null;
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveFrame = 0;
 let jsDebugGraphLiveFrameLastMs = 0;
+let jsDebugGraphLiveFrameTicking = false;
 let jsDebugCostAgeNextRefreshAtMs = 0;
 let jsDebugCostPanelNextRefreshAtMs = 0;
 let jsDebugGraphHiddenCharts = null;
@@ -41730,6 +41735,9 @@ const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
 const jsDebugStatsLivePushRangeSeconds = 30 * 60;
+// Wall-clock slide cadence for live (<=30m, non-zoomed) views. One render per
+// second advances the axis and drifts content left without a data tick.
+const jsDebugGraphSlideRenderMs = 1000;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
 const jsDebugStatsHistoryFlushMs = 30000;
@@ -41979,6 +41987,12 @@ function loadJsDebugStatsUiPreferences() {
   for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
   jsDebugGraphHiddenCharts = hidden;
   jsDebugGraphVisibleCharts = visible;
+  // Respect a previously-persisted level selection (including an intentionally
+  // empty one); only fresh state falls back to the warning+error default.
+  const storedLogLevels = Array.isArray(saved.logLevels)
+    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
+    : null;
+  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
   syncDebugGraphResolutionOverride(Date.now(), {persist: true});
 }
 
@@ -41993,6 +42007,7 @@ function saveJsDebugStatsUiPreferences() {
       modelTokenDimension: jsDebugGraphModelTokenDimension,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
+      logLevels: [...jsDebugLogsState.levels].sort(),
     }));
   } catch (_) {
   }
@@ -44189,6 +44204,11 @@ function debugGraphNiceAxisMax(value, unit) {
   if (unit === 'bytesPerSecond') return debugGraphNiceBytesPerSecondAxisMax(value);
   if (unit === 'tokens') return Math.max(1, debugGraphNiceCeil(value));
   if (unit === 'tokensPerMinute') return Math.max(1, debugGraphNiceCeil(value));
+  // Percent charts without a fixed 0-100 axis (e.g. Servers Load, where a single
+  // multi-core service can exceed 100%) still need round tick steps. A 1/2/5
+  // ceil keeps the max and its half-step both round (100->50, 50->25, 20->10)
+  // instead of the raw data max (the 88.3% / 44.1% ticks in the report).
+  if (unit === 'percent') return Math.max(1, debugGraphNiceCeil(value));
   return value;
 }
 
@@ -45230,6 +45250,14 @@ function jsDebugHistoryCoverageIntervalsForFamily(family) {
   for (const key of aliases) {
     if (Object.prototype.hasOwnProperty.call(stores, key)) return stores[key];
   }
+  // Per-family independence: once the server reports ANY per-store coverage, a
+  // family with no store entry of its own was never recorded (fresh install or
+  // a newly added metric such as system_memory / service_load). Treat it as
+  // fully uncovered so its never-recorded window paints red, instead of
+  // borrowing another family's coverage through the compatibility-global
+  // intervals (cross-family inference). Only a legacy all-empty store map — the
+  // pre-per-store protocol — falls back to the global coverage.
+  if (Object.keys(stores).length > 0) return [];
   return jsDebugHistoryReadiness.coverageIntervals;
 }
 
@@ -45249,11 +45277,28 @@ function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = 
     gaps.push(...debugGraphComplementTimeRanges(coveredRanges, requested));
   }
   const mergedGaps = debugGraphMergeTimeRanges(gaps, domain);
-  if (!alreadyPaintedRanges.length) return mergedGaps;
-  return debugGraphMergeTimeRanges(
-    mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
-    domain,
-  );
+  const trimmedGaps = !alreadyPaintedRanges.length
+    ? mergedGaps
+    : debugGraphMergeTimeRanges(
+      mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
+      domain,
+    );
+  return debugGraphMeaningfulCoverageGaps(trimmedGaps, domain);
+}
+
+// A durable-coverage gap should paint only when it spans at least one rendered
+// bucket at its own age. The 1-2 second sampler micro-breaks at owner/epoch
+// handoffs (server restarts) are sub-bucket at coarse ranges; without this
+// filter each inflated to a 1.5px red hairline and a fully recorded region read
+// as a fake "missing chunk". Genuine holes and never-recorded prefixes stay.
+function debugGraphMeaningfulCoverageGaps(ranges, domain) {
+  const nowMs = Number(domain?.endMs) || Date.now();
+  return (ranges || []).filter(range => {
+    const startMs = Number(range?.startMs);
+    const endMs = Number(range?.endMs);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+    return endMs - startMs >= debugGraphBucketDurationForTime(startMs, nowMs);
+  });
 }
 
 function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = []) {
@@ -45267,7 +45312,7 @@ function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRang
       index,
       x1,
       Math.max(1.5, x2 - x1),
-      t('debug.noCommunicationData'),
+      t('debug.graph.noDataRecorded'),
     )}</g>`;
   }).join('');
 }
@@ -45820,23 +45865,20 @@ function debugGraphHeldProvenanceText(provenance) {
 }
 
 function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now()) {
-  if (domain?.zoomed || Number(domain?.rangeSeconds) > 3600 || !buckets.length) return '';
-  const index = buckets.length - 1;
-  const bucket = buckets[index];
-  const startMs = Number(bucket?.startMs);
-  const durationMs = Math.max(1, Number(bucket?.durationMs) || 0);
-  if (!Number.isFinite(startMs) || nowMs < startMs || nowMs >= startMs + durationMs) return '';
-  const values = (groupSeries || []).flatMap(series => {
-    if (Array.isArray(series?.hasDataValues) && series.hasDataValues[index] !== true) return [];
-    const value = Number(series?.values?.[index]);
-    return Number.isFinite(value) ? [Math.max(0, value)] : [];
-  });
-  if (!values.length) return '';
+  if (domain?.zoomed || Number(domain?.rangeSeconds) > 3600) return '';
+  const domainEnd = Number(domain?.endMs);
+  if (!Number.isFinite(domainEnd) || nowMs > domainEnd + 1000) return '';
+  // The live edge is the cell that contains "now" at this chart's own display
+  // resolution. Mark it on EVERY live chart whether or not a sample has landed
+  // in it yet: sparse charts (agent/model tokens) have no data bucket at the
+  // edge but are still live, so the shared heartbeat must appear there too. The
+  // pulse only ever marks this one ongoing cell, never a gap, and its paint is
+  // driven solely by the shared agent-status opacity clock.
+  const durationMs = Math.max(1, Number(buckets?.at?.(-1)?.durationMs) || debugGraphBucketDurationForTime(nowMs, nowMs));
+  const startMs = Math.floor(nowMs / durationMs) * durationMs;
   const xStart = debugGraphXForTime(startMs, domain);
   const xLimit = debugGraphXForTime(startMs + durationMs, domain);
   const width = Math.max(0.5, xLimit - xStart);
-  // The live bucket owns one fixed geometry for its whole lifetime. Only the shared agent-status
-  // opacity clock changes its paint; no per-frame x/y mutation or independent timing is allowed.
   return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
@@ -48028,8 +48070,28 @@ function refreshDebugCostAgeLabels(nowMs = Date.now()) {
   return true;
 }
 
+function debugGraphSlidingAxisActive() {
+  // Short live ranges advance continuously with the wall clock so the axis
+  // slides and content drifts left even between data ticks. Coarse (>30m),
+  // zoomed, and hidden views stay static per the range-scaled cadence contract.
+  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugStatsLivePushRangeSeconds;
+}
+
 function debugGraphLiveTickerNeeded() {
-  return debugCostAgeLabels().length > 0;
+  return debugCostAgeLabels().length > 0 || debugGraphSlidingAxisActive();
+}
+
+function debugGraphSlideLiveViews(nowMs = Date.now()) {
+  // Re-render each visible live graph at most once per slide interval so the
+  // plot region drifts left with wall clock. The per-graph throttle keeps this
+  // to ~1s and never fires within a sub-second window of a fresh render, so
+  // data-tick throttling and mounted controls are undisturbed.
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    if (graph.offsetParent === null) continue;
+    const renderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
+    if (Number.isFinite(renderedAt) && nowMs - renderedAt < jsDebugGraphSlideRenderMs) continue;
+    refreshDebugGraphElement(graph, {force: true});
+  }
 }
 
 function stopDebugGraphLiveTicker() {
@@ -48040,14 +48102,25 @@ function stopDebugGraphLiveTicker() {
 
 function debugGraphLiveFrameTick(frameMs = performanceNow()) {
   jsDebugGraphLiveFrame = 0;
+  // A slide render re-arms the ticker; guard against synchronous re-entry so a
+  // synchronous requestAnimationFrame (test harness) or a nested refresh cannot
+  // recurse. Real browsers schedule the next tick on the following frame.
+  if (jsDebugGraphLiveFrameTicking) return;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const ageLabels = debugCostAgeLabels();
-  if (!ageLabels.length) return;
-  if (frameMs - jsDebugGraphLiveFrameLastMs >= 50) {
-    jsDebugGraphLiveFrameLastMs = frameMs;
-    refreshDebugCostAgeLabels(Date.now());
+  const slidingActive = debugGraphSlidingAxisActive();
+  if (!ageLabels.length && !slidingActive) return;
+  jsDebugGraphLiveFrameTicking = true;
+  try {
+    if (ageLabels.length && frameMs - jsDebugGraphLiveFrameLastMs >= 50) {
+      jsDebugGraphLiveFrameLastMs = frameMs;
+      refreshDebugCostAgeLabels(Date.now());
+    }
+    if (slidingActive) debugGraphSlideLiveViews();
+    jsDebugGraphLiveFrame = requestAnimationFrame(debugGraphLiveFrameTick);
+  } finally {
+    jsDebugGraphLiveFrameTicking = false;
   }
-  jsDebugGraphLiveFrame = requestAnimationFrame(debugGraphLiveFrameTick);
 }
 
 function syncDebugGraphLiveTicker() {
@@ -48627,6 +48700,7 @@ function bindDebugPanel(panel) {
       if (!jsDebugLogLevels.includes(level)) return;
       if (jsDebugLogsState.levels.has(level)) jsDebugLogsState.levels.delete(level);
       else jsDebugLogsState.levels.add(level);
+      saveJsDebugStatsUiPreferences();
       refreshDebugLogsViews();
       return;
     }
