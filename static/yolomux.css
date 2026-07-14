@@ -5425,7 +5425,9 @@ body :is(
 .js-debug-cost-table[data-js-debug-cost-table="source"] th:last-child,
 .js-debug-cost-table[data-js-debug-cost-table="source"] td:last-child {
   inline-size: auto;
-  white-space: normal;
+  /* Numeric cost is a single token — keep it on one line so a squeezed column
+     can't wrap it and blow the row height up (the row scrolls, never grows). */
+  white-space: nowrap;
   overflow-wrap: normal;
 }
 .js-debug-cost-report-title {
