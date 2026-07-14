@@ -1554,7 +1554,7 @@ function tmuxWindowNavigationRecord(session, options = {}) {
   if (!key) return null;
   let record = tmuxWindowNavigationRecords.get(key) || null;
   if (!record && options.create === true) {
-    record = {activeIndexOverride: undefined, sequence: 0, directTargetGuard: null};
+    record = {activeIndexOverride: undefined, sequence: 0, directTargetGuard: null, switchLoading: null};
     tmuxWindowNavigationRecords.set(key, record);
   }
   return record;
@@ -1562,8 +1562,60 @@ function tmuxWindowNavigationRecord(session, options = {}) {
 
 function pruneTmuxWindowNavigationRecord(session, record = tmuxWindowNavigationRecord(session)) {
   if (!record) return false;
-  if (record.activeIndexOverride !== undefined || Number(record.sequence || 0) > 0 || record.directTargetGuard) return false;
+  if (record.activeIndexOverride !== undefined || Number(record.sequence || 0) > 0 || record.directTargetGuard || record.switchLoading) return false;
   return tmuxWindowNavigationRecords.delete(String(session || ''));
+}
+
+// One masked switch transaction per session, owned by the same navigation record as the
+// optimistic override/sequence/guard. Phases: requested -> confirmed (raw tmux signals name the
+// expected window) -> refresh-acknowledged (server issued the forced refresh) -> painted (xterm
+// consumed a refreshed frame and the browser crossed a paint frame). `failed` marks an explicit
+// rollback. Only a phase walk that survives every sequence check may lift the opaque mask.
+const tmuxWindowSwitchPhases = Object.freeze(['requested', 'confirmed', 'refresh-acknowledged', 'painted', 'failed']);
+
+function tmuxWindowSwitchLoading(session) {
+  return tmuxWindowNavigationRecord(session)?.switchLoading || null;
+}
+
+function beginTmuxWindowSwitchLoading(session, options = {}) {
+  const key = String(session || '');
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (!key || sequence <= 0) return null;
+  const record = tmuxWindowNavigationRecord(key, {create: true});
+  if (record.switchLoading?.revealTimer) clearTimeout(record.switchLoading.revealTimer);
+  record.switchLoading = {
+    phase: 'requested',
+    sequence,
+    targetLabel: String(options.targetLabel || ''),
+    expectedIndex: tmuxWindowIndexKey(options.expectedIndex),
+    startedAtMs: Date.now(),
+    revealTimer: 0,
+  };
+  return record.switchLoading;
+}
+
+function setTmuxWindowSwitchLoadingPhase(session, phase, options = {}) {
+  if (!tmuxWindowSwitchPhases.includes(phase)) return null;
+  const loading = tmuxWindowSwitchLoading(session);
+  if (!loading) return null;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && Number(loading.sequence) !== sequence) return null;
+  if (!tmuxWindowSwitchSequenceMatches(session, loading.sequence)) return null;
+  loading.phase = phase;
+  return loading;
+}
+
+function clearTmuxWindowSwitchLoading(session, options = {}) {
+  const key = String(session || '');
+  const record = tmuxWindowNavigationRecord(key);
+  const loading = record?.switchLoading || null;
+  if (!loading) return false;
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  if (sequence > 0 && Number(loading.sequence) !== sequence) return false;
+  if (loading.revealTimer) clearTimeout(loading.revealTimer);
+  record.switchLoading = null;
+  pruneTmuxWindowNavigationRecord(key, record);
+  return true;
 }
 
 function tmuxWindowActiveIndexOverride(session) {

@@ -1955,6 +1955,8 @@
   "terminal.window.pid": "(PID={pid})",
   "terminal.window.previous": "前の tmux サブウィンドウ",
   "terminal.window.prompt": "tmux サブウィンドウプロンプト",
+  "terminal.window.switchLoading": "{target} を読み込み中...",
+  "terminal.window.switchStalled": "{target} をまだ読み込み中...",
   "terminal.window.title": "tmux ウィンドウ {name}",
   "terminal.window.unnamed": "ウィンドウ {index}",
   "terminal.xtermLoadFailed": "/static/xterm.js から xterm.js を読み込めませんでした。ターミナルを接続できません。",

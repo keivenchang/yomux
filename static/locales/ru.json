@@ -2039,6 +2039,8 @@
   "terminal.window.pid": "(процесс={pid})",
   "terminal.window.previous": "предыдущее подокно tmux",
   "terminal.window.prompt": "запрос подокна tmux",
+  "terminal.window.switchLoading": "Загрузка {target}...",
+  "terminal.window.switchStalled": "Всё ещё загружается {target}...",
   "terminal.window.title": "окно tmux {name}",
   "terminal.window.unnamed": "окно {index}",
   "terminal.xtermLoadFailed": "Не удалось загрузить xterm.js из /static/xterm.js. Терминал не может подключиться.",

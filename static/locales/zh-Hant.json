@@ -1955,6 +1955,8 @@
   "terminal.window.pid": "（程序={pid}）",
   "terminal.window.previous": "上一個 tmux 子視窗",
   "terminal.window.prompt": "tmux 子視窗提示",
+  "terminal.window.switchLoading": "正在載入 {target}...",
+  "terminal.window.switchStalled": "仍在載入 {target}...",
   "terminal.window.title": "tmux 視窗 {name}",
   "terminal.window.unnamed": "視窗 {index}",
   "terminal.xtermLoadFailed": "無法從 /static/xterm.js 載入 xterm.js。終端機無法連線。",

@@ -1980,6 +1980,8 @@
   "terminal.window.pid": "(תהליך={pid})",
   "terminal.window.previous": "חלון המשנה הקודם של tmux",
   "terminal.window.prompt": "בקשת חלון משנה של tmux",
+  "terminal.window.switchLoading": "טוען את {target}...",
+  "terminal.window.switchStalled": "עדיין טוען את {target}...",
   "terminal.window.title": "חלון tmux {name}",
   "terminal.window.unnamed": "חלון {index}",
   "terminal.xtermLoadFailed": "טעינת xterm.js מתוך /static/xterm.js נכשלה. המסוף לא יכול להתחבר.",

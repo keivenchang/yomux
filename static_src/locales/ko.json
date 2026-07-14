@@ -1938,6 +1938,8 @@
   "terminal.window.pid": "(PID={pid})",
   "terminal.window.previous": "이전 tmux 하위 창",
   "terminal.window.prompt": "tmux 하위 창 프롬프트",
+  "terminal.window.switchLoading": "{target} 불러오는 중...",
+  "terminal.window.switchStalled": "{target} 아직 불러오는 중...",
   "terminal.window.title": "tmux 창 {name}",
   "terminal.window.unnamed": "창 {index}",
   "terminal.xtermLoadFailed": "/static/xterm.js에서 xterm.js를 불러오지 못했습니다. 터미널을 연결할 수 없습니다.",

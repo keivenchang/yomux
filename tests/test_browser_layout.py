@@ -12939,6 +12939,405 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
     assert metrics["backendHealth"] == {"shown": True, "cleared": True}, metrics
 
 
+TMUX_WINDOW_SWITCH_FIXTURE_PANES = [
+    {"target": "1:0.0", "window": "0", "pane": "0", "window_active": False, "active": True, "process_label": "codex", "command": "codex", "current_path": "/repo/codex"},
+    {"target": "1:1.0", "window": "1", "pane": "0", "window_active": True, "active": True, "process_label": "claude", "command": "claude", "current_path": "/repo/claude"},
+    {"target": "1:2.0", "window": "2", "pane": "0", "window_active": False, "active": True, "process_label": "bash", "command": "bash", "current_path": "/repo/shell"},
+]
+
+TMUX_WINDOW_SWITCH_TEST_PRELUDE = """
+    const signalWindow = (index, active, label, path) => ({
+      session: '1',
+      window_index: String(index),
+      window_name: label,
+      active,
+      panes: [{target: `1:${index}.0`, pane_id: `1:${index}.0`, pane_index: '0', window_index: String(index), active: true, current_path: path, current_command: label}],
+    });
+    const signalsPayload = activeIndex => ({ok: true, windows: [
+      signalWindow(0, activeIndex === 0, 'codex', '/repo/codex'),
+      signalWindow(1, activeIndex === 1, 'claude', '/repo/claude'),
+      signalWindow(2, activeIndex === 2, 'bash', '/repo/shell'),
+    ]});
+    const socketFor = () => terminals.get('1')?.socket;
+    const sentFrames = socket => (socket?.sent || []).map(frame => { try { return JSON.parse(frame); } catch (_) { return null; } }).filter(Boolean);
+    const refreshFrames = socket => sentFrames(socket).filter(frame => frame.type === 'refresh' && frame.txn !== undefined);
+    const binaryFrame = text => new TextEncoder().encode(text).buffer;
+    const maskNode = () => document.querySelector('#term-1 [data-terminal-connection-state="switching"], #term-1 [data-terminal-connection-state="switch-stalled"]');
+    const maskMetrics = () => {
+      const container = document.getElementById('term-1');
+      const node = maskNode();
+      if (!container || !node) return null;
+      const rect = container.getBoundingClientRect();
+      const backdrop = getComputedStyle(container, '::before');
+      return {
+        state: node.dataset.terminalConnectionState,
+        text: node.textContent,
+        backdropWidth: Number.parseFloat(backdrop.width) || 0,
+        backdropHeight: Number.parseFloat(backdrop.height) || 0,
+        backdropBackground: backdrop.backgroundColor,
+        backdropZ: backdrop.zIndex,
+        containerWidth: rect.width,
+        containerHeight: rect.height,
+        switchingClass: container.classList.contains('terminal-connection-switching'),
+      };
+    };
+    const activeWindowButtons = () => Array.from(document.querySelectorAll('[data-tmux-window-bar="1"] [data-window-index]'))
+      .filter(button => button.classList.contains('active'))
+      .map(button => button.dataset.windowIndex);
+    const installWindowBar = () => {
+      document.querySelectorAll('[data-tmux-window-bar="1"]').forEach(node => node.remove());
+      document.body.insertAdjacentHTML('beforeend', tmuxWindowBarHtml('1', transcriptMetadataState.payload.sessions['1']));
+    };
+"""
+
+
+def assert_opaque_switch_mask(mask, label_fragment=None):
+    assert mask is not None, "expected the tmux window switch mask to be present"
+    assert mask["switchingClass"] is True, mask
+    assert mask["backdropWidth"] >= mask["containerWidth"] - 1, mask
+    assert mask["backdropHeight"] >= mask["containerHeight"] - 1, mask
+    assert mask["backdropBackground"].startswith("rgb("), mask  # fully opaque, no alpha channel
+    if label_fragment is not None:
+        assert label_fragment in mask["text"], mask
+
+
+def test_tmux_window_switch_masks_old_window_output_until_confirmed_target_paint(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": TMUX_WINDOW_SWITCH_FIXTURE_PANES}},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof tmuxWindow === 'function' && document.querySelector('#term-1 .xterm')"
+            " && terminals.get('1')?.socket?.readyState === WebSocket.OPEN"
+            " && transcriptMetadataState.payload.sessions?.['1']?.panes?.length >= 3"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalApiFetchJson = apiFetchJson;
+          try {
+        """
+        + TMUX_WINDOW_SWITCH_TEST_PRELUDE
+        + """
+            installWindowBar();
+            const socket = socketFor();
+            const item = terminals.get('1');
+            let releasePost = null;
+            const signalReleases = [];
+            apiFetchJson = (url, options) => {
+              const text = String(url);
+              if (text.startsWith('/api/tmux-window?')) return new Promise(resolve => { releasePost = resolve; });
+              if (text.startsWith('/api/tmux-signals')) return new Promise(resolve => { signalReleases.push(resolve); });
+              return originalApiFetchJson(url, options);
+            };
+
+            tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterClick = {
+              mask: maskMetrics(),
+              activeButtons: activeWindowButtons(),
+            };
+
+            // Old-window PTY frames (a blank redraw plus recognizable 1:claude output) arrive while
+            // the POST is held. They must keep flowing into xterm but must not lift the mask.
+            socket.onmessage({data: binaryFrame('\\u001b[2J\\u001b[H')});
+            socket.onmessage({data: binaryFrame('CLAUDE-OLD-WINDOW-OUTPUT')});
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterOldOutput = {
+              mask: maskMetrics(),
+              activeButtons: activeWindowButtons(),
+              xtermGotOldBytes: (item.term.writes || []).some(text => text.includes('CLAUDE-OLD-WINDOW-OUTPUT')),
+            };
+
+            // Release the POST; the forced signal readback answers stale (window 1 still active).
+            releasePost({ok: true});
+            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'first signal readback'});
+            signalReleases.shift()(signalsPayload(1));
+            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'stale readback retry'});
+            const afterStaleSignals = {
+              mask: maskMetrics(),
+              activeButtons: activeWindowButtons(),
+            };
+
+            // Now confirm window 0 through raw signals: the mask must still hold for the paint barrier.
+            signalReleases.shift()(signalsPayload(0));
+            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'post-confirm forced refresh request'});
+            const txn = refreshFrames(socket)[0].txn;
+            const afterConfirm = {mask: maskMetrics(), txn};
+
+            // The structured text acknowledgement is consumed, never written to xterm, and alone
+            // does not reveal.
+            const writesBeforeAck = (item.term.writes || []).length;
+            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn})});
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterAck = {
+              mask: maskMetrics(),
+              ackWrittenToXterm: (item.term.writes || []).slice(writesBeforeAck).some(text => text.includes('refresh-ack')),
+            };
+
+            // A refreshed binary frame consumed by xterm plus a paint frame finally reveals.
+            socket.onmessage({data: binaryFrame('CODEX-WINDOW-0-READY')});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'mask reveal after confirmed target paint'});
+            const container = document.getElementById('term-1');
+            return {
+              afterClick, afterOldOutput, afterStaleSignals, afterConfirm, afterAck,
+              afterReveal: {
+                maskGone: !maskNode(),
+                switchingClass: container.classList.contains('terminal-connection-switching'),
+                pendingClass: container.classList.contains('terminal-connection-pending'),
+                xtermGotTargetBytes: (item.term.writes || []).some(text => text.includes('CODEX-WINDOW-0-READY')),
+                xtermOpacity: getComputedStyle(container.querySelector('.xterm')).opacity,
+                activeButtons: activeWindowButtons(),
+              },
+            };
+          } finally {
+            apiFetchJson = originalApiFetchJson;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert_opaque_switch_mask(metrics["afterClick"]["mask"], "0:codex")
+    assert metrics["afterClick"]["mask"]["state"] == "switching", metrics["afterClick"]
+    assert metrics["afterClick"]["activeButtons"] == ["0"], metrics["afterClick"]
+    assert_opaque_switch_mask(metrics["afterOldOutput"]["mask"], "0:codex")
+    assert metrics["afterOldOutput"]["activeButtons"] == ["0"], metrics["afterOldOutput"]
+    assert metrics["afterOldOutput"]["xtermGotOldBytes"] is True, metrics["afterOldOutput"]
+    assert_opaque_switch_mask(metrics["afterStaleSignals"]["mask"], "0:codex")
+    assert metrics["afterStaleSignals"]["activeButtons"] == ["0"], metrics["afterStaleSignals"]
+    assert_opaque_switch_mask(metrics["afterConfirm"]["mask"])
+    assert metrics["afterConfirm"]["txn"], metrics["afterConfirm"]
+    assert_opaque_switch_mask(metrics["afterAck"]["mask"])
+    assert metrics["afterAck"]["ackWrittenToXterm"] is False, metrics["afterAck"]
+    assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterReveal"]["switchingClass"] is False, metrics["afterReveal"]
+    assert metrics["afterReveal"]["pendingClass"] is False, metrics["afterReveal"]
+    assert metrics["afterReveal"]["xtermGotTargetBytes"] is True, metrics["afterReveal"]
+    assert float(metrics["afterReveal"]["xtermOpacity"]) == 1.0, metrics["afterReveal"]
+    assert metrics["afterReveal"]["activeButtons"] == ["0"], metrics["afterReveal"]
+
+
+def test_tmux_window_switch_timeout_shows_retry_cancel_and_reconnect_resends_refresh(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": TMUX_WINDOW_SWITCH_FIXTURE_PANES}},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof tmuxWindow === 'function' && document.querySelector('#term-1 .xterm')"
+            " && terminals.get('1')?.socket?.readyState === WebSocket.OPEN"
+            " && transcriptMetadataState.payload.sessions?.['1']?.panes?.length >= 3"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalApiFetchJson = apiFetchJson;
+          try {
+        """
+        + TMUX_WINDOW_SWITCH_TEST_PRELUDE
+        + """
+            installWindowBar();
+            const item = terminals.get('1');
+            let signalAnswer = () => signalsPayload(1); // stale: readback can never confirm window 0
+            apiFetchJson = (url, options) => {
+              const text = String(url);
+              if (text.startsWith('/api/tmux-window?')) return Promise.resolve({ok: true});
+              if (text.startsWith('/api/tmux-signals')) return Promise.resolve(signalAnswer());
+              return originalApiFetchJson(url, options);
+            };
+
+            tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
+            await window.__yolomuxTestWaitFor(
+              () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
+              {timeoutMs: 6000, intervalMs: 25, description: 'exhausted stale readbacks become an explicit stalled state'}
+            );
+            const stalled = {
+              mask: maskMetrics(),
+              retry: Boolean(maskNode()?.querySelector('[data-terminal-connection-retry]')),
+              cancel: Boolean(maskNode()?.querySelector('[data-terminal-connection-cancel]')),
+              activeButtons: activeWindowButtons(),
+            };
+
+            // Retry re-runs signal confirmation; signals now confirm, and the barrier completes.
+            signalAnswer = () => signalsPayload(0);
+            maskNode().querySelector('[data-terminal-connection-retry]').click();
+            const socket = socketFor();
+            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 1, {timeoutMs: 3000, intervalMs: 10, description: 'retry re-runs confirmation and requests refresh'});
+            const retryTxn = refreshFrames(socket)[0].txn;
+            const afterRetryConfirm = {mask: maskMetrics()};
+            // Reconnect during the pending switch: the mask must survive and the new socket must
+            // re-request the transaction's refresh.
+            item.manualClose = true;
+            item.socket.close();
+            startTerminal('1');
+            await window.__yolomuxTestWaitFor(
+              () => socketFor() !== socket && socketFor()?.readyState === WebSocket.OPEN,
+              {timeoutMs: 3000, intervalMs: 10, description: 'reconnected terminal socket'}
+            );
+            const reconnected = socketFor();
+            await window.__yolomuxTestWaitFor(() => refreshFrames(reconnected).length >= 1, {timeoutMs: 3000, intervalMs: 10, description: 'reconnect re-sends the pending refresh request'});
+            const afterReconnect = {
+              mask: maskMetrics(),
+              resentTxn: refreshFrames(reconnected)[0].txn,
+            };
+            reconnected.onmessage({data: JSON.stringify({type: 'refresh-ack', txn: afterReconnect.resentTxn})});
+            reconnected.onmessage({data: binaryFrame('CODEX-WINDOW-0-READY')});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'reveal after reconnect completes the barrier'});
+            const afterReveal = {maskGone: !maskNode(), activeButtons: activeWindowButtons()};
+
+            // A second switch that stalls again can be cancelled back to the confirmed window.
+            signalAnswer = () => signalsPayload(0); // window 0 stays the authoritative window
+            tmuxWindow('1', {windowIndex: 2}, 'tmux sub-window 2:bash');
+            signalAnswer = () => signalsPayload(0); // stale for the expected window 2
+            await window.__yolomuxTestWaitFor(
+              () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
+              {timeoutMs: 6000, intervalMs: 25, description: 'second stalled switch'}
+            );
+            maskNode().querySelector('[data-terminal-connection-cancel]').click();
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 3000, intervalMs: 10, description: 'cancel clears the mask'});
+            await window.__yolomuxTestWaitFor(() => activeWindowButtons().join(',') === '0', {timeoutMs: 3000, intervalMs: 10, description: 'cancel returns to the authoritative confirmed window'});
+            return {
+              stalled, afterRetryConfirm, retryTxn, afterReconnect, afterReveal,
+              afterCancel: {maskGone: !maskNode(), activeButtons: activeWindowButtons()},
+            };
+          } finally {
+            apiFetchJson = originalApiFetchJson;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert_opaque_switch_mask(metrics["stalled"]["mask"], "0:codex")
+    assert metrics["stalled"]["mask"]["state"] == "switch-stalled", metrics["stalled"]
+    assert metrics["stalled"]["retry"] is True, metrics["stalled"]
+    assert metrics["stalled"]["cancel"] is True, metrics["stalled"]
+    assert metrics["stalled"]["activeButtons"] == ["0"], metrics["stalled"]
+    assert_opaque_switch_mask(metrics["afterRetryConfirm"]["mask"])
+    assert metrics["retryTxn"], metrics
+    assert_opaque_switch_mask(metrics["afterReconnect"]["mask"])
+    assert metrics["afterReconnect"]["resentTxn"] == metrics["retryTxn"], metrics["afterReconnect"]
+    assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterCancel"]["maskGone"] is True, metrics["afterCancel"]
+    assert metrics["afterCancel"]["activeButtons"] == ["0"], metrics["afterCancel"]
+
+
+def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_sequence(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": TMUX_WINDOW_SWITCH_FIXTURE_PANES}},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof tmuxWindow === 'function' && document.querySelector('#term-1 .xterm')"
+            " && terminals.get('1')?.socket?.readyState === WebSocket.OPEN"
+            " && transcriptMetadataState.payload.sessions?.['1']?.panes?.length >= 3"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalApiFetchJson = apiFetchJson;
+          try {
+        """
+        + TMUX_WINDOW_SWITCH_TEST_PRELUDE
+        + """
+            installWindowBar();
+            const socket = socketFor();
+            const item = terminals.get('1');
+            const postReleases = [];
+            const signalReleases = [];
+            apiFetchJson = (url, options) => {
+              const text = String(url);
+              if (text.startsWith('/api/tmux-window?')) return new Promise(resolve => { postReleases.push(resolve); });
+              if (text.startsWith('/api/tmux-signals')) return new Promise(resolve => { signalReleases.push(resolve); });
+              return originalApiFetchJson(url, options);
+            };
+
+            // Rapid 0 -> 2 -> 1: only the newest transaction may reveal.
+            tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
+            tmuxWindow('1', {windowIndex: 2}, 'tmux sub-window 2:bash');
+            tmuxWindow('1', {windowIndex: 1}, 'tmux sub-window 1:claude');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterClicks = {mask: maskMetrics(), activeButtons: activeWindowButtons()};
+            const newestSequence = tmuxWindowNavigationRecord('1').sequence;
+
+            // Old transactions completing must not start readbacks, reveal, or roll back the newest.
+            postReleases[0]({ok: true});
+            postReleases[1]({ok: true});
+            await new Promise(resolve => setTimeout(resolve, 60));
+            const afterStalePosts = {
+              mask: maskMetrics(),
+              activeButtons: activeWindowButtons(),
+              staleReadbacks: signalReleases.length,
+            };
+
+            postReleases[2]({ok: true});
+            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'newest readback'});
+            signalReleases.shift()(signalsPayload(1));
+            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'newest transaction refresh'});
+            const txn = refreshFrames(socket)[0].txn;
+            // A stray acknowledgement from an older transaction must not advance the newest barrier.
+            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn: txn - 2})});
+            socket.onmessage({data: binaryFrame('EARLY-FRAME-BEFORE-ACK')});
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterStaleAck = {mask: maskMetrics()};
+            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn})});
+            socket.onmessage({data: binaryFrame('CLAUDE-WINDOW-1-READY')});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'newest transaction reveals'});
+            const afterReveal = {maskGone: !maskNode(), activeButtons: activeWindowButtons(), newestTxn: txn === newestSequence};
+
+            // Relative next/previous switching uses the same masked transaction.
+            tmuxWindow('1', 'n', 'next tmux sub-window');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const relative = {mask: maskMetrics(), inputFrame: sentFrames(socket).some(frame => frame.type === 'input' && frame.data === '\\u0002n')};
+            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'relative readback'});
+            signalReleases.shift()(signalsPayload(2));
+            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 2, {timeoutMs: 2000, intervalMs: 10, description: 'relative transaction refresh'});
+            const relativeTxn = refreshFrames(socket)[1].txn;
+            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn: relativeTxn})});
+            socket.onmessage({data: binaryFrame('BASH-WINDOW-2-READY')});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'relative switch reveals after confirmed paint'});
+            return {
+              afterClicks, afterStalePosts, afterStaleAck, afterReveal, relative,
+              afterRelativeReveal: {maskGone: !maskNode(), activeButtons: activeWindowButtons()},
+            };
+          } finally {
+            apiFetchJson = originalApiFetchJson;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert_opaque_switch_mask(metrics["afterClicks"]["mask"], "1:claude")
+    assert metrics["afterClicks"]["activeButtons"] == ["1"], metrics["afterClicks"]
+    assert_opaque_switch_mask(metrics["afterStalePosts"]["mask"], "1:claude")
+    assert metrics["afterStalePosts"]["activeButtons"] == ["1"], metrics["afterStalePosts"]
+    assert metrics["afterStalePosts"]["staleReadbacks"] == 0, metrics["afterStalePosts"]
+    assert_opaque_switch_mask(metrics["afterStaleAck"]["mask"])
+    assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterReveal"]["activeButtons"] == ["1"], metrics["afterReveal"]
+    assert metrics["afterReveal"]["newestTxn"] is True, metrics["afterReveal"]
+    assert_opaque_switch_mask(metrics["relative"]["mask"], "next tmux sub-window")
+    assert metrics["relative"]["inputFrame"] is True, metrics["relative"]
+    assert metrics["afterRelativeReveal"]["maskGone"] is True, metrics["afterRelativeReveal"]
+    assert metrics["afterRelativeReveal"]["activeButtons"] == ["2"], metrics["afterRelativeReveal"]
+
+
 def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp_path):
     try:
         load_live_runtime_boot_fixture(

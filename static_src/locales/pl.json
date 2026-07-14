@@ -2022,6 +2022,8 @@
   "terminal.window.pid": "(proces={pid})",
   "terminal.window.previous": "poprzednie podokno tmux",
   "terminal.window.prompt": "monit podokna tmux",
+  "terminal.window.switchLoading": "Ładowanie {target}...",
+  "terminal.window.switchStalled": "Nadal trwa ładowanie {target}...",
   "terminal.window.title": "okno tmux {name}",
   "terminal.window.unnamed": "okno {index}",
   "terminal.xtermLoadFailed": "Nie udało się wczytać xterm.js z /static/xterm.js. Nie można podłączyć terminala.",

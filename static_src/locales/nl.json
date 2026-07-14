@@ -1938,6 +1938,8 @@
   "terminal.window.pid": "(proces-id={pid})",
   "terminal.window.previous": "vorige tmux sub-venster",
   "terminal.window.prompt": "tmux sub-venster prompt",
+  "terminal.window.switchLoading": "{target} laden...",
+  "terminal.window.switchStalled": "{target} wordt nog geladen...",
   "terminal.window.title": "tmux-venster {name}",
   "terminal.window.unnamed": "venster {index}",
   "terminal.xtermLoadFailed": "xterm.js niet kunnen laden vanuit /static/xterm.js. Terminal kan niet worden aangesloten.",

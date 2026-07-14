@@ -1955,6 +1955,8 @@
   "terminal.window.pid": "(işlem={pid})",
   "terminal.window.previous": "önceki tmux alt penceresi",
   "terminal.window.prompt": "tmux alt pencere istemi",
+  "terminal.window.switchLoading": "{target} yükleniyor...",
+  "terminal.window.switchStalled": "{target} hâlâ yükleniyor...",
   "terminal.window.title": "tmux penceresi {name}",
   "terminal.window.unnamed": "pencere {index}",
   "terminal.xtermLoadFailed": "xterm.js /static/xterm.js konumundan yüklenemedi. Terminal bağlanamıyor.",

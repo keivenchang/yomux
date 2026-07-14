@@ -8,6 +8,7 @@ const uiDelayMs = Object.freeze({
   serverWatchDebounce: 300,
   tmuxWindowReadback: 120,
   tmuxWindowReadbackRetry: 80,
+  tmuxWindowSwitchReveal: 4000,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
   commandPaletteMissingPathRetry: 1001,
@@ -29,6 +30,9 @@ const yolomuxTiming = Object.freeze({
   serverWatchDebounceMs: uiDelayMs.serverWatchDebounce,
   tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
+  // Bounded UI wait for the post-confirmation refreshed frame before the explicit
+  // `Still loading <target>` Retry/Cancel state (never a silent reveal).
+  tmuxWindowSwitchRevealTimeoutMs: uiDelayMs.tmuxWindowSwitchReveal,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
@@ -56,6 +60,7 @@ const {
   serverWatchDebounceMs,
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
+  tmuxWindowSwitchRevealTimeoutMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
   commandPaletteMissingPathRetryMs,

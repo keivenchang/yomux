@@ -1938,6 +1938,8 @@
   "terminal.window.pid": "（进程={pid}）",
   "terminal.window.previous": "上一个 tmux 子窗口",
   "terminal.window.prompt": "tmux 子窗口提示",
+  "terminal.window.switchLoading": "正在加载 {target}...",
+  "terminal.window.switchStalled": "仍在加载 {target}...",
   "terminal.window.title": "tmux 窗口 {name}",
   "terminal.window.unnamed": "窗口 {index}",
   "terminal.xtermLoadFailed": "无法从 /static/xterm.js 加载 xterm.js。终端无法连接。",

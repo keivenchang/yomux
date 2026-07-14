@@ -1955,6 +1955,8 @@
   "terminal.window.pid": "(पीआईडी={pid})",
   "terminal.window.previous": "पिछली tmux उप-विंडो",
   "terminal.window.prompt": "tmux उप-विंडो प्रॉम्प्ट",
+  "terminal.window.switchLoading": "{target} लोड हो रहा है...",
+  "terminal.window.switchStalled": "{target} अभी भी लोड हो रहा है...",
   "terminal.window.title": "tmux उप-विंडो {name}",
   "terminal.window.unnamed": "विंडो {index}",
   "terminal.xtermLoadFailed": "/static/xterm.js से xterm.js लोड नहीं हो सका। टर्मिनल अटैच नहीं हो सकता।",

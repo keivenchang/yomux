@@ -13052,6 +13052,80 @@ def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(mon
     assert no_files["user_message"]["key"] == "upload.error.noFiles"
 
 
+def _switch_clients_app(monkeypatch, client_names, tmux_behavior):
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    rows = [{"name": name, "session": "1", "width": 120, "flags": ""} for name in client_names]
+    monkeypatch.setattr(app_module, "tmux_session_client_rows", lambda _session: rows)
+    monkeypatch.setattr(app_module, "tmux", tmux_behavior)
+    return webapp
+
+
+def test_switch_attached_tmux_clients_switches_independent_clients_concurrently(monkeypatch):
+    per_client_delay = 0.2
+    calls = []
+    lock = threading.Lock()
+
+    def slow_tmux(args, timeout=None, **_kwargs):
+        with lock:
+            calls.append(list(args))
+        time.sleep(per_client_delay)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    webapp = _switch_clients_app(monkeypatch, ["c1", "c2", "c3", "c4"], slow_tmux)
+
+    started = time.monotonic()
+    switched = webapp.switch_attached_tmux_clients("1", "1:0")
+    elapsed = time.monotonic() - started
+
+    assert switched == 4
+    assert sorted(call[2] for call in calls) == ["c1", "c2", "c3", "c4"]
+    assert all(call[:2] == ["switch-client", "-c"] and call[4] == "1:0" for call in calls)
+    serial_floor = per_client_delay * len(calls)
+    assert elapsed < serial_floor * 0.75, {
+        "elapsed": elapsed,
+        "serial_floor": serial_floor,
+        "reason": "independent attached clients must not switch serially",
+    }
+
+
+def test_switch_attached_tmux_clients_bounds_stale_client_and_reports_timing(monkeypatch, caplog):
+    stale_delay = 0.5
+    fast_delay = 0.02
+
+    def mixed_tmux(args, timeout=None, **_kwargs):
+        client = args[2]
+        if client == "stale":
+            time.sleep(stale_delay)
+            return SimpleNamespace(returncode=1, stdout="", stderr="client is dead")
+        if client == "failed":
+            return SimpleNamespace(returncode=1, stdout="", stderr="no such client")
+        time.sleep(fast_delay)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    webapp = _switch_clients_app(monkeypatch, ["fast-a", "stale", "fast-b", "failed", "fast-c"], mixed_tmux)
+
+    with caplog.at_level("DEBUG", logger=app_module.logger.name):
+        started = time.monotonic()
+        switched = webapp.switch_attached_tmux_clients("1", "1:2")
+        elapsed = time.monotonic() - started
+
+    assert switched == 3
+    # One stale client consumes only its own timeout budget, not a serial sum in front of others.
+    assert elapsed < stale_delay + fast_delay * 5 + 0.3, {"elapsed": elapsed}
+    log_text = caplog.text
+    assert "1:2" in log_text, "switch logging must name the target for slow-switch diagnosis"
+    assert "stale" in log_text and "failed" in log_text, "failed clients are attributed by name in logs"
+    assert "ms" in log_text, "switch logging must carry elapsed timing"
+
+
+def test_switch_attached_tmux_clients_without_clients_is_a_no_op(monkeypatch):
+    def unexpected_tmux(*_args, **_kwargs):
+        raise AssertionError("no clients means no switch-client calls")
+
+    webapp = _switch_clients_app(monkeypatch, [], unexpected_tmux)
+    assert webapp.switch_attached_tmux_clients("1", "1:0") == 0
+
+
 def test_ensure_xterm_runtime_assets_downloads_static_fallback_without_npm(monkeypatch, tmp_path):
     downloads = []
     real_run = app_module.subprocess.run

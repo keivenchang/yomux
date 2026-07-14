@@ -1955,6 +1955,8 @@
   "terminal.window.pid": "(tiến trình={pid})",
   "terminal.window.previous": "cửa sổ con tmux trước",
   "terminal.window.prompt": "lời nhắc cửa sổ con tmux",
+  "terminal.window.switchLoading": "Đang tải {target}...",
+  "terminal.window.switchStalled": "Vẫn đang tải {target}...",
   "terminal.window.title": "cửa sổ tmux {name}",
   "terminal.window.unnamed": "cửa sổ {index}",
   "terminal.xtermLoadFailed": "Không tải được xterm.js từ /static/xterm.js. Terminal không thể kết nối.",

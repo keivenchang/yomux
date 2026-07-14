@@ -1955,6 +1955,8 @@
   "terminal.window.pid": "⟦(ƥíđ={pid})··⟧",
   "terminal.window.previous": "⟦ƥřéṽíóúš ťɱúẋ šúƀ-ŵíñđóŵ··········⟧",
   "terminal.window.prompt": "⟦ťɱúẋ šúƀ-ŵíñđóŵ ƥřóɱƥť·········⟧",
+  "terminal.window.switchLoading": "⟦Łóáđíñǧ {target}...····⟧",
+  "terminal.window.switchStalled": "⟦Šťíłł łóáđíñǧ {target}...·······⟧",
   "terminal.window.title": "⟦ťɱúẋ šúƀ-ŵíñđóŵ {name}······⟧",
   "terminal.window.unnamed": "⟦ŵíñđóŵ {index}···⟧",
   "terminal.xtermLoadFailed": "⟦ẋťéřɱ.ĵš ƒáíłéđ ťó łóáđ ƒřóɱ /static/xterm.js. Ťéřɱíñáł çáññóť áťťáçĥ.·····················⟧",

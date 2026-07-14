@@ -1997,6 +1997,8 @@
   "terminal.window.pid": "(processus={pid})",
   "terminal.window.previous": "sous-fenêtre tmux précédente",
   "terminal.window.prompt": "invite de sous-fenêtre tmux",
+  "terminal.window.switchLoading": "Chargement de {target}...",
+  "terminal.window.switchStalled": "Chargement de {target} toujours en cours...",
   "terminal.window.title": "fenêtre tmux {name}",
   "terminal.window.unnamed": "fenêtre {index}",
   "terminal.xtermLoadFailed": "Échec du chargement de xterm.js depuis /static/xterm.js. Le terminal ne peut pas se connecter.",

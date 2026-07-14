@@ -2167,7 +2167,13 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           window.__terminalResizeCalls.push({cols, rows});
         }
         refresh() {}
-        write(data) { this.lastWrite = data; }
+        write(data, callback) {
+          this.lastWrite = data;
+          this.writes = this.writes || [];
+          this.writes.push(typeof data === 'string' ? data : new TextDecoder().decode(data));
+          // xterm 6 invokes the optional write-completion callback once the chunk is parsed.
+          if (typeof callback === 'function') callback();
+        }
         onData(callback) { this._onData = callback; return {dispose() {}}; }
         onFocus(callback) { this._onFocus = callback; return {dispose() {}}; }
         onBlur(callback) { this._onBlur = callback; return {dispose() {}}; }

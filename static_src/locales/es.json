@@ -1980,6 +1980,8 @@
   "terminal.window.pid": "(proceso={pid})",
   "terminal.window.previous": "subventana anterior de tmux",
   "terminal.window.prompt": "solicitud de subventana de tmux",
+  "terminal.window.switchLoading": "Cargando {target}...",
+  "terminal.window.switchStalled": "Todavía cargando {target}...",
   "terminal.window.title": "ventana tmux {name}",
   "terminal.window.unnamed": "ventana {index}",
   "terminal.xtermLoadFailed": "No se pudo cargar xterm.js desde /static/xterm.js. No se puede conectar el terminal.",

@@ -832,6 +832,9 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     TextEncoder,
     TextDecoder,
     Uint8Array,
+    // Host ArrayBuffer so binary terminal-socket frames built by tests pass the bundle's
+    // `data instanceof ArrayBuffer` routing (Uint8Array/TextEncoder above are host classes too).
+    ArrayBuffer,
   };
   context.globalThis = context;
   context.__openedWindows = [];
@@ -1736,8 +1739,16 @@ globalThis.__layoutTestApi = {
       activeIndexOverride: record.activeIndexOverride,
       sequence: record.sequence,
       directTargetGuard: record.directTargetGuard ? {...record.directTargetGuard} : null,
+      switchLoading: record.switchLoading ? {...record.switchLoading} : null,
     } : null;
   },
+  processTerminalSocketFrameForTest(session, data) {
+    const item = terminals.get(session);
+    return processTerminalSocketFrame(session, item, data);
+  },
+  stallTmuxWindowSwitchLoadingForTest: stallTmuxWindowSwitchLoading,
+  retryTmuxWindowSwitchLoadingForTest: retryTmuxWindowSwitchLoading,
+  cancelTmuxWindowSwitchLoadingForTest: cancelTmuxWindowSwitchLoading,
   expireTmuxWindowDirectTargetGuardForTest(session) {
     const record = tmuxWindowNavigationRecord(session);
     if (record?.directTargetGuard) record.directTargetGuard.guardUntilMs = 0;

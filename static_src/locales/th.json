@@ -1938,6 +1938,8 @@
   "terminal.window.pid": "(กระบวนการ={pid})",
   "terminal.window.previous": "หน้าต่างย่อย tmux ก่อนหน้า",
   "terminal.window.prompt": "พรอมต์หน้าต่างย่อย tmux",
+  "terminal.window.switchLoading": "กำลังโหลด {target}...",
+  "terminal.window.switchStalled": "ยังคงโหลด {target}...",
   "terminal.window.title": "หน้าต่าง tmux {name}",
   "terminal.window.unnamed": "หน้าต่าง {index}",
   "terminal.xtermLoadFailed": "โหลด xterm.js จาก /static/xterm.js ไม่สำเร็จ เทอร์มินัลไม่สามารถเชื่อมต่อได้",

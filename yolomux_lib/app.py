@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -11110,16 +11111,43 @@ class TmuxWebtermApp:
         return {"session": session, "window": window_text, "ok": True}, HTTPStatus.OK
 
     def switch_attached_tmux_clients(self, session: str, target: str) -> int:
-        switched = 0
-        for row in tmux_session_client_rows(session):
-            client_name = str(row.get("name") or "").strip()
-            if not client_name:
-                continue
+        started = time.monotonic()
+        client_names = [name for name in (str(row.get("name") or "").strip() for row in tmux_session_client_rows(session)) if name]
+        if not client_names:
+            return 0
+
+        def switch_one(client_name: str) -> tuple[str, bool, float, str]:
+            client_started = time.monotonic()
             result = tmux(["switch-client", "-c", client_name, "-t", target], timeout=1.0)
+            elapsed = time.monotonic() - client_started
             if result.returncode == 0:
+                return client_name, True, elapsed, ""
+            return client_name, False, elapsed, cmd_error(result, "tmux switch-client failed")
+
+        # Attached clients are independent: switch them concurrently with a small core-derived
+        # worker bound so one stale client consumes only its own 1s timeout budget instead of
+        # serially spending it in front of every other client. Results stay ordered/deterministic.
+        if len(client_names) == 1:
+            outcomes = [switch_one(client_names[0])]
+        else:
+            max_workers = min(len(client_names), max(2, os.cpu_count() or 2))
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tmux-switch") as pool:
+                outcomes = list(pool.map(switch_one, client_names))
+        switched = 0
+        slowest_name, slowest_elapsed = "", 0.0
+        for client_name, ok, elapsed, error in outcomes:
+            if elapsed > slowest_elapsed:
+                slowest_name, slowest_elapsed = client_name, elapsed
+            if ok:
                 switched += 1
-                continue
-            logger.debug("tmux switch-client failed for %s -> %s: %s", client_name, target, cmd_error(result, "tmux switch-client failed"))
+            else:
+                logger.debug("tmux switch-client failed for %s -> %s after %.0fms: %s", client_name, target, elapsed * 1000, error)
+        total_elapsed = time.monotonic() - started
+        log = logger.warning if total_elapsed > 1.0 else logger.debug
+        log(
+            "tmux switch-clients %s: %d/%d clients in %.0fms (slowest %s %.0fms)",
+            target, switched, len(client_names), total_elapsed * 1000, slowest_name, slowest_elapsed * 1000,
+        )
         return switched
 
     def stop_auto_approve_worker(self, session: str) -> None:

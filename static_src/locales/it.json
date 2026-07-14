@@ -1980,6 +1980,8 @@
   "terminal.window.pid": "(PID={pid})",
   "terminal.window.previous": "sottofinestra tmux precedente",
   "terminal.window.prompt": "prompt della sottofinestra tmux",
+  "terminal.window.switchLoading": "Caricamento di {target}...",
+  "terminal.window.switchStalled": "Caricamento di {target} ancora in corso...",
   "terminal.window.title": "finestra tmux {name}",
   "terminal.window.unnamed": "finestra {index}",
   "terminal.xtermLoadFailed": "Impossibile caricare xterm.js da /static/xterm.js. Il terminale non può connettersi.",

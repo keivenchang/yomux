@@ -2106,6 +2106,8 @@
   "terminal.window.pid": "(معرّف العملية={pid})",
   "terminal.window.previous": "نافذة tmux الفرعية السابقة",
   "terminal.window.prompt": "موجّه نافذة tmux الفرعية",
+  "terminal.window.switchLoading": "جارٍ تحميل {target}...",
+  "terminal.window.switchStalled": "لا يزال يتم تحميل {target}...",
   "terminal.window.title": "نافذة tmux {name}",
   "terminal.window.unnamed": "النافذة {index}",
   "terminal.xtermLoadFailed": "فشل تحميل xterm.js من /static/xterm.js. تعذّر إرفاق الطرفية.",

@@ -1955,6 +1955,8 @@
   "terminal.window.pid": "(pid={pid})",
   "terminal.window.previous": "previous tmux sub-window",
   "terminal.window.prompt": "tmux sub-window prompt",
+  "terminal.window.switchLoading": "Loading {target}...",
+  "terminal.window.switchStalled": "Still loading {target}...",
   "terminal.window.title": "tmux sub-window {name}",
   "terminal.window.unnamed": "window {index}",
   "terminal.xtermLoadFailed": "xterm.js failed to load from /static/xterm.js. Terminal cannot attach.",

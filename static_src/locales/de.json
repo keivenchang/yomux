@@ -1938,6 +1938,8 @@
   "terminal.window.pid": "(PID={pid})",
   "terminal.window.previous": "vorheriges tmux-Unterfenster",
   "terminal.window.prompt": "Eingabe für tmux-Unterfenster",
+  "terminal.window.switchLoading": "Lade {target} ...",
+  "terminal.window.switchStalled": "Lade {target} weiterhin ...",
   "terminal.window.title": "tmux-Fenster {name}",
   "terminal.window.unnamed": "Fenster {index}",
   "terminal.xtermLoadFailed": "xterm.js konnte nicht aus /static/xterm.js geladen werden. Das Terminal kann nicht verbunden werden.",

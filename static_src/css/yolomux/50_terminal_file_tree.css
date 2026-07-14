@@ -604,6 +604,23 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 .terminal-connection-pending > .xterm {
   opacity: 0.52;
 }
+/* A pending tmux sub-window switch must never show the previous window's frame: an opaque
+   full-container backdrop (inheriting the shared terminal container background set by
+   applyTerminalContainerTheme) sits above the xterm layers while xterm stays mounted and keeps
+   ingesting output behind it. The connection-state badge stays on its higher badge layer. */
+.terminal-connection-switching::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  background: inherit;
+}
+/* Sibling low-layer overlays (file-link underlines, attention highlight) belong to the masked
+   previous frame; they must not leak above the opaque switch backdrop. */
+.terminal-connection-switching .terminal-file-link-underlines,
+.terminal-connection-switching .terminal-attention-question-overlay {
+  visibility: hidden;
+}
 .terminal-connection-state {
   position: absolute;
   z-index: var(--z-terminal-badge);

@@ -3640,8 +3640,16 @@ function bindPanelControls(panel, session) {
     event.preventDefault();
     event.stopPropagation();
     const targetSession = button.dataset.terminalConnectionRetry || session;
+    // A stalled window switch re-runs its signal confirmation + refresh barrier; the unavailable
+    // state keeps its session-startup retry.
+    if (retryTmuxWindowSwitchLoading(targetSession)) return;
     showTerminalConnectionState(targetSession, 'connecting', t('tmuxWall.status.connecting'));
     void ensureTerminalRunning(targetSession);
+  });
+  delegate(panel, 'click', '[data-terminal-connection-cancel]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelTmuxWindowSwitchLoading(button.dataset.terminalConnectionCancel || session);
   });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
@@ -4434,9 +4442,16 @@ function scheduleTmuxWindowReadback(session, options = {}) {
     const readback = refreshTmuxWindowActiveFromSignals(session, {...options, acceptUnchanged});
     return Promise.resolve(readback).then(confirmed => {
       if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return;
-      if (confirmed) clearTerminalConnectionState(session, {sequence: options.sequence});
-      if (!confirmed && attempt + 1 < tmuxWindowReadbackMaxAttempts) {
+      if (confirmed) {
+        beginTmuxWindowSwitchPaintBarrier(session, options);
+        return;
+      }
+      if (attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
+      } else {
+        // The last signal-readback attempt is not permission to reveal unconfirmed content: keep
+        // an explicit stalled mask with Retry/Cancel instead of silently clearing it.
+        stallTmuxWindowSwitchLoading(session, tmuxWindowSwitchOptionSequence(options));
       }
     }).catch(error => {
       console.warn('tmux sub-window signal readback failed', error);
@@ -4446,7 +4461,9 @@ function scheduleTmuxWindowReadback(session, options = {}) {
       } else {
         const info = transcriptMetadataState.payload.sessions?.[session];
         reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
-        clearTerminalConnectionState(session, {sequence: options.sequence});
+        if (!stallTmuxWindowSwitchLoading(session, tmuxWindowSwitchOptionSequence(options))) {
+          clearTerminalConnectionState(session, {sequence: options.sequence});
+        }
       }
     });
   };
@@ -4463,8 +4480,8 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
-  const targetLabel = directIndex !== null ? t('terminal.window.title', {name: directIndex}) : shortcut.label;
-  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${targetLabel}`, {sequence});
+  const targetLabel = directIndex !== null ? tmuxWindowTargetDisplayLabel(session, directIndex) : shortcut.label;
+  showTmuxWindowSwitchLoading(session, sequence, targetLabel, directIndex);
   updateTerminalTmuxInputState(session, {repeatUntilMs: shortcut.repeatable ? Date.now() + terminalTmuxWindowRepeatMs : 0});
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
@@ -4781,8 +4798,9 @@ function tmuxWindow(session, key, label) {
   const directIndex = tmuxWindowNumber(key?.windowIndex);
   if (directIndex !== null) {
     const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
+    const targetLabel = tmuxWindowTargetDisplayLabel(session, directIndex);
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
-    showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${t('terminal.window.title', {name: directIndex})}`, {sequence});
+    showTmuxWindowSwitchLoading(session, sequence, targetLabel, directIndex);
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
     focusAfterAcknowledgedSwitch();
@@ -4793,6 +4811,8 @@ function tmuxWindow(session, key, label) {
       })
       .catch(error => {
         if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
+        setTmuxWindowSwitchLoadingPhase(session, 'failed', {sequence});
+        clearTmuxWindowSwitchLoading(session, {sequence});
         clearTerminalConnectionState(session, {sequence});
         if (previousInfo) {
           setTranscriptMetadataPayload({
@@ -4815,7 +4835,7 @@ function tmuxWindow(session, key, label) {
   }
   const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = setTmuxWindowActiveIndexPending(session);
-  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${label}`, {sequence});
+  showTmuxWindowSwitchLoading(session, sequence, label);
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
@@ -4823,6 +4843,12 @@ function tmuxWindow(session, key, label) {
   focusAfterAcknowledgedSwitch();
   scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
 }
+
+// Sequenced window-switch states mask the previous window completely; a generic (sequence-less)
+// socket open or PTY output clear may lift only ordinary connecting/reconnecting states, never a
+// pending switch — that false reveal is exactly the reported blank -> old window -> new window bounce.
+const terminalConnectionMaskStates = Object.freeze(['switching', 'switch-stalled']);
+const terminalConnectionSwitchingClass = 'terminal-connection-switching';
 
 function terminalConnectionStateNode(session) {
   return document.getElementById(terminalDomId(session))?.querySelector?.('[data-terminal-connection-state]') || null;
@@ -4832,8 +4858,11 @@ function terminalConnectionStateHtml(session, state, text, options = {}) {
   const retry = options.retry === true
     ? `<button type="button" data-terminal-connection-retry="${esc(session)}">${esc(t('common.retry'))}</button>`
     : '';
+  const cancel = options.cancel === true
+    ? `<button type="button" data-terminal-connection-cancel="${esc(session)}">${esc(t('common.cancel'))}</button>`
+    : '';
   const sequence = options.sequence === undefined ? '' : ` data-terminal-connection-sequence="${esc(String(options.sequence))}"`;
-  return `<div class="terminal-connection-state terminal-connection-state--${esc(state)}" data-terminal-connection-state="${esc(state)}"${sequence} role="status"><span>${esc(text)}</span>${retry}</div>`;
+  return `<div class="terminal-connection-state terminal-connection-state--${esc(state)}" data-terminal-connection-state="${esc(state)}"${sequence} role="status"><span>${esc(text)}</span>${retry}${cancel}</div>`;
 }
 
 function showTerminalConnectionState(session, state, text, options = {}) {
@@ -4847,16 +4876,149 @@ function showTerminalConnectionState(session, state, text, options = {}) {
   if (node) node.replaceWith(next);
   else container.appendChild(next);
   container.classList.add('terminal-connection-pending');
+  container.classList.toggle(terminalConnectionSwitchingClass, terminalConnectionMaskStates.includes(state));
   return next;
 }
 
 function clearTerminalConnectionState(session, options = {}) {
   const node = terminalConnectionStateNode(session);
   if (!node) return false;
+  const state = String(node.dataset.terminalConnectionState || '');
   if (options.sequence !== undefined && String(node.dataset.terminalConnectionSequence || '') !== String(options.sequence)) return false;
+  if (options.sequence === undefined && terminalConnectionMaskStates.includes(state)) return false;
   const container = node.parentElement;
   node.remove();
   container?.classList.remove('terminal-connection-pending');
+  container?.classList.remove(terminalConnectionSwitchingClass);
+  return true;
+}
+
+function tmuxWindowTargetDisplayLabel(session, windowIndex) {
+  const indexKey = tmuxWindowIndexKey(windowIndex);
+  if (indexKey === null) return '';
+  const record = tmuxWindowRecords(transcriptMetadataState.payload.sessions?.[session]?.panes)
+    .find(item => String(item.index) === indexKey);
+  if (record?.indexedButtonLabel) return record.indexedButtonLabel;
+  if (typeof tmuxSignalWindowsForSession === 'function') {
+    const windowRecord = tmuxSignalWindowsForSession(session)
+      .find(item => tmuxWindowIndexKey(item?.window_index) === indexKey);
+    const name = String(windowRecord?.window_name || '').trim();
+    if (name) return `${indexKey}:${name}`;
+  }
+  return indexKey;
+}
+
+function showTmuxWindowSwitchLoading(session, sequence, targetLabel, expectedIndex = null) {
+  const loading = beginTmuxWindowSwitchLoading(session, {sequence, targetLabel, expectedIndex});
+  if (!loading) return null;
+  armTmuxWindowSwitchRevealTimeout(session, loading);
+  return showTerminalConnectionState(session, 'switching', t('terminal.window.switchLoading', {target: loading.targetLabel}), {sequence});
+}
+
+function armTmuxWindowSwitchRevealTimeout(session, loading = tmuxWindowSwitchLoading(session)) {
+  if (!loading) return false;
+  if (loading.revealTimer) clearTimeout(loading.revealTimer);
+  const sequence = Number(loading.sequence);
+  loading.revealTimer = setTimeout(() => {
+    loading.revealTimer = 0;
+    stallTmuxWindowSwitchLoading(session, sequence);
+  }, tmuxWindowSwitchRevealTimeoutMs);
+  return true;
+}
+
+function stallTmuxWindowSwitchLoading(session, sequence) {
+  const loading = tmuxWindowSwitchLoading(session);
+  if (!loading || Number(loading.sequence) !== Number(sequence)) return false;
+  if (!tmuxWindowSwitchSequenceMatches(session, sequence)) return false;
+  if (loading.phase === 'painted' || loading.phase === 'failed') return false;
+  if (loading.revealTimer) {
+    clearTimeout(loading.revealTimer);
+    loading.revealTimer = 0;
+  }
+  // A timeout is an explicit degraded state, not permission to show unconfirmed content: keep the
+  // opaque mask and offer Retry (re-run confirmation/refresh) and Cancel (return to the confirmed window).
+  showTerminalConnectionState(session, 'switch-stalled', t('terminal.window.switchStalled', {target: loading.targetLabel}), {sequence, retry: true, cancel: true});
+  return true;
+}
+
+function retryTmuxWindowSwitchLoading(session) {
+  const loading = tmuxWindowSwitchLoading(session);
+  if (!loading || !tmuxWindowSwitchSequenceMatches(session, loading.sequence)) return false;
+  loading.phase = 'requested';
+  showTerminalConnectionState(session, 'switching', t('terminal.window.switchLoading', {target: loading.targetLabel}), {sequence: loading.sequence});
+  armTmuxWindowSwitchRevealTimeout(session, loading);
+  scheduleTmuxWindowReadback(session, loading.expectedIndex !== null
+    ? {delayMs: 0, clearActiveIndexOverride: true, expectedIndex: loading.expectedIndex, sequence: loading.sequence}
+    : {delayMs: 0, sequence: loading.sequence});
+  return true;
+}
+
+function cancelTmuxWindowSwitchLoading(session) {
+  const loading = tmuxWindowSwitchLoading(session);
+  if (!loading || !tmuxWindowSwitchSequenceMatches(session, loading.sequence)) return false;
+  const sequence = Number(loading.sequence);
+  loading.phase = 'failed';
+  clearTmuxWindowSwitchLoading(session, {sequence});
+  clearTerminalConnectionState(session, {sequence});
+  clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true});
+  // Return to the last authoritatively confirmed window: a fresh expectation-free readback lands
+  // on tmux's actual active window instead of guessing locally.
+  const cancelSequence = nextTmuxWindowSwitchSequence(session);
+  scheduleTmuxWindowReadback(session, {delayMs: 0, sequence: cancelSequence});
+  return true;
+}
+
+// Post-confirmation paint barrier: raw signals already named the expected window; now request the
+// forced refresh through the terminal socket and reveal only after its structured acknowledgement,
+// a subsequent binary frame consumed by xterm, and a crossed paint frame.
+function beginTmuxWindowSwitchPaintBarrier(session, options = {}) {
+  const sequence = tmuxWindowSwitchOptionSequence(options);
+  const loading = setTmuxWindowSwitchLoadingPhase(session, 'confirmed', {sequence});
+  if (!loading) {
+    // No masked switch transaction (e.g. a cancel readback landing on the confirmed window):
+    // keep the legacy sequence-guarded clear.
+    return clearTerminalConnectionState(session, {sequence: options.sequence});
+  }
+  sendTmuxWindowSwitchRefresh(session, loading);
+  return true;
+}
+
+function sendTmuxWindowSwitchRefresh(session, loading = tmuxWindowSwitchLoading(session)) {
+  if (!loading) return false;
+  const item = terminals.get(session);
+  if (item?.socket?.readyState !== WebSocket.OPEN) return false;
+  item.socket.send(JSON.stringify({type: 'refresh', reason: 'tmux-window-switch', txn: Number(loading.sequence)}));
+  return true;
+}
+
+function consumeTerminalControlMessage(session, data) {
+  if (typeof data !== 'string' || data.charCodeAt(0) !== 123) return false;
+  let message = null;
+  try { message = JSON.parse(data); } catch (_) { return false; }
+  if (!message || message.type !== 'refresh-ack') return false;
+  const loading = tmuxWindowSwitchLoading(session);
+  if (loading && loading.phase === 'confirmed' && Number(loading.sequence) === Number(message.txn)) {
+    setTmuxWindowSwitchLoadingPhase(session, 'refresh-acknowledged', {sequence: Number(message.txn)});
+  }
+  return true;
+}
+
+function tmuxWindowSwitchPaintCallback(session) {
+  const loading = tmuxWindowSwitchLoading(session);
+  if (!loading || loading.phase !== 'refresh-acknowledged') return undefined;
+  const sequence = Number(loading.sequence);
+  return () => {
+    requestAnimationFrame(() => finishTmuxWindowSwitchPaint(session, sequence));
+  };
+}
+
+function finishTmuxWindowSwitchPaint(session, sequence) {
+  const current = tmuxWindowSwitchLoading(session);
+  if (!current || current.phase !== 'refresh-acknowledged') return false;
+  const loading = setTmuxWindowSwitchLoadingPhase(session, 'painted', {sequence});
+  if (!loading) return false;
+  clearTerminalConnectionState(session, {sequence});
+  clearTmuxWindowSwitchLoading(session, {sequence});
   return true;
 }
 
@@ -4914,7 +5076,16 @@ function connectTerminalSocket(session, item) {
     item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
     dismissTerminalConnectionToasts(session);
+    // Generic open clears only ordinary connecting/reconnecting states; a sequenced switching
+    // mask survives reconnect and re-requests its pending post-confirmation refresh instead.
     clearTerminalConnectionState(session);
+    const switchLoading = tmuxWindowSwitchLoading(session);
+    if (switchLoading
+      && ['confirmed', 'refresh-acknowledged'].includes(switchLoading.phase)
+      && tmuxWindowSwitchSequenceMatches(session, switchLoading.sequence)) {
+      switchLoading.phase = 'confirmed';
+      sendTmuxWindowSwitchRefresh(session, switchLoading);
+    }
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
@@ -4928,27 +5099,7 @@ function connectTerminalSocket(session, item) {
   socket.onmessage = event => {
     if (terminals.get(session) !== item || !item.term) return;
     try {
-      const dataBytes = event.data instanceof ArrayBuffer ? event.data.byteLength : utf8ByteLength(event.data);
-      const inputSentAt = Number(item.lastInputSentAt || 0);
-      if (inputSentAt > 0) {
-        recordClientPerfCounter('echoToTermWrite', performanceNow() - inputSentAt, {bytes: dataBytes});
-        item.lastInputSentAt = 0;
-      }
-      const writePerf = clientPerfStart('xtermWrite');
-      if (shareViewMode) {
-        handleShareViewSocketMessage(session, item, event.data);
-      } else if (event.data instanceof ArrayBuffer) {
-        item.term.write(new Uint8Array(event.data));
-      } else {
-        item.term.write(String(event.data));
-      }
-      clientPerfEnd(writePerf, {bytes: dataBytes});
-      const firstOutput = item.terminalOutputSeen !== true;
-      item.terminalOutputSeen = true;
-      clearTerminalConnectionState(session);
-      item.fileUnderlineController?.schedule?.({reason: 'output'});
-      if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
-      scheduleTerminalAttentionHighlight(session);
+      processTerminalSocketFrame(session, item, event.data);
     } catch (_) {
       if (terminals.get(session) === item) closeTerminalItem(session, item);
     }
@@ -4968,6 +5119,39 @@ function connectTerminalSocket(session, item) {
     updateStatus();
     refreshTrackedSessionChrome(session);
   };
+}
+
+// One frame-processing owner for the terminal WebSocket. PTY output stays raw binary; small
+// structured text control frames (the switch refresh acknowledgement) are consumed here and never
+// written to xterm. YO!share keeps its separate message path.
+function processTerminalSocketFrame(session, item, data) {
+  const dataBytes = data instanceof ArrayBuffer ? data.byteLength : utf8ByteLength(data);
+  const inputSentAt = Number(item.lastInputSentAt || 0);
+  if (inputSentAt > 0) {
+    recordClientPerfCounter('echoToTermWrite', performanceNow() - inputSentAt, {bytes: dataBytes});
+    item.lastInputSentAt = 0;
+  }
+  const writePerf = clientPerfStart('xtermWrite');
+  let consumedControl = false;
+  if (shareViewMode) {
+    handleShareViewSocketMessage(session, item, data);
+  } else if (consumeTerminalControlMessage(session, data)) {
+    consumedControl = true;
+  } else if (data instanceof ArrayBuffer) {
+    // The optional completion callback is the pinned xterm 6 write barrier: a pending confirmed
+    // switch reveals only after this refreshed frame is consumed and a paint frame has crossed.
+    item.term.write(new Uint8Array(data), tmuxWindowSwitchPaintCallback(session));
+  } else {
+    item.term.write(String(data));
+  }
+  clientPerfEnd(writePerf, {bytes: dataBytes});
+  if (consumedControl) return;
+  const firstOutput = item.terminalOutputSeen !== true;
+  item.terminalOutputSeen = true;
+  clearTerminalConnectionState(session);
+  item.fileUnderlineController?.schedule?.({reason: 'output'});
+  if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
+  scheduleTerminalAttentionHighlight(session);
 }
 
 function shareSocketMessage(data) {

@@ -3223,6 +3223,92 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.transcriptInfoForTest('meta-preview').selected_pane.current_path, '/tmp/shell', 'relative window navigation updates the selected pane path from tmux signals');
   });
 
+  await testAsync('tmux window switch transaction gates reveal behind confirm, refresh-ack, and painted frame', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    api.setTranscriptInfoForTest('meta-preview', {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    });
+    const frames = [];
+    const writes = [];
+    let writeCallback = null;
+    const term = {
+      focus() {},
+      write(data, callback) {
+        writes.push(typeof data === 'string' ? data : new TextDecoder().decode(data));
+        writeCallback = callback || null;
+      },
+    };
+    const socket = {readyState: WebSocket.OPEN, send(message) { frames.push(JSON.parse(message)); }};
+    api.registerTerminalForTest('meta-preview', term, socket);
+    api.setFetchForTest((url, options = {}) => {
+      if (String(url).startsWith('/api/tmux-window')) return Promise.resolve(jsonResponse({ok: true}));
+      if (String(url).startsWith('/api/tmux-signals')) {
+        return Promise.resolve(jsonResponse({ok: true, windows: [{
+          session: 'meta-preview',
+          window_index: '0',
+          active: false,
+          panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}],
+        }, {
+          session: 'meta-preview',
+          window_index: '1',
+          active: true,
+          panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/claude', current_command: 'claude'}],
+        }]}));
+      }
+      if (String(url).startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        return Promise.resolve(jsonResponse({responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    const binaryFrame = text => new TextEncoder().encode(text).buffer;
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
+    let record = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(record.switchLoading?.phase, 'requested', 'a direct switch begins a requested loading transaction in the shared navigation record');
+    assert.equal(record.switchLoading?.sequence, record.sequence, 'the loading transaction shares the one navigation sequence');
+    assert.ok(String(record.switchLoading?.targetLabel || '').includes('1:claude'), 'the loading transaction names the exact index:name target');
+
+    api.processTerminalSocketFrameForTest('meta-preview', binaryFrame('OLD-WINDOW-BYTES'));
+    record = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(record.switchLoading?.phase, 'requested', 'old-window PTY frames cannot advance or clear a requested switch transaction');
+    assert.ok(writes.some(text => text.includes('OLD-WINDOW-BYTES')), 'hidden PTY bytes keep flowing into xterm behind the mask');
+
+    for (let i = 0; i < 12; i += 1) await flushAsyncWork();
+    record = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(record.switchLoading?.phase, 'confirmed', 'raw-signal confirmation advances the transaction to confirmed without revealing');
+    const refresh = frames.find(frame => frame.type === 'refresh' && frame.txn !== undefined);
+    assert.ok(refresh, 'confirmation sends the terminal-socket refresh request carrying the transaction id');
+    assert.equal(refresh.txn, record.sequence, 'the refresh request reuses the shared navigation sequence as its id');
+
+    assert.equal(api.processTerminalSocketFrameForTest('meta-preview', JSON.stringify({type: 'refresh-ack', txn: refresh.txn - 1})), undefined, 'stale acknowledgements are consumed without effect');
+    assert.equal(api.tmuxWindowNavigationRecordForTest('meta-preview').switchLoading?.phase, 'confirmed', 'a stale transaction id cannot advance the newest barrier');
+    api.processTerminalSocketFrameForTest('meta-preview', JSON.stringify({type: 'refresh-ack', txn: refresh.txn}));
+    assert.equal(api.tmuxWindowNavigationRecordForTest('meta-preview').switchLoading?.phase, 'refresh-acknowledged', 'the matching acknowledgement advances the barrier');
+    assert.equal(writes.some(text => text.includes('refresh-ack')), false, 'structured control acknowledgements are never written to xterm');
+
+    writeCallback = null;
+    api.processTerminalSocketFrameForTest('meta-preview', binaryFrame('NEW-WINDOW-BYTES'));
+    assert.equal(typeof writeCallback, 'function', 'the revealing binary frame uses the xterm write-completion callback');
+    writeCallback();
+    assert.equal(api.tmuxWindowNavigationRecordForTest('meta-preview').switchLoading, null, 'the painted transaction clears the shared loading record');
+    assert.ok(writes.some(text => text.includes('NEW-WINDOW-BYTES')), 'the revealing frame was consumed by xterm');
+
+    assert.ok(/function processTerminalSocketFrame\(session, item, data\)[\s\S]*consumeTerminalControlMessage\(session, data\)[\s\S]*data instanceof ArrayBuffer/.test(source), 'control text frames are consumed before binary PTY routing in one frame-processing owner');
+    assert.ok(/socket\.onmessage = event => \{[\s\S]{0,400}processTerminalSocketFrame\(session, item, event\.data\)/.test(source), 'the terminal socket delegates every frame to the shared processor');
+    assert.ok(/function clearTerminalConnectionState\(session, options = \{\}\)[\s\S]{0,600}terminalConnectionMaskStates/.test(source), 'generic socket open/output clears cannot lift a sequenced switching mask');
+    assert.equal((source.match(/const tmuxWindowNavigationRecords = new Map\(\)/g) || []).length, 1, 'switch loading state lives in the one shared navigation record map');
+    for (const oldMap of ['tmuxWindowSwitchLoadings', 'terminalSwitchStates', 'tmuxWindowLoadingControllers']) {
+      assert.equal(source.includes(oldMap), false, `${oldMap} cannot return as a parallel switch-loading state source`);
+    }
+  });
+
   test('attention notifications use shared routing and policy', () => {
     loadYolomux();
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
