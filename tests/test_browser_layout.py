@@ -1148,7 +1148,10 @@ def test_debug_graph_thirty_minute_resolution_ignores_covered_coarse_boundary(br
     assert metrics == {
         "resolution": 30,
         "bucketDurations": [30_000],
-        "options": [0, 10, 30, 60, 120],
+        # Resolution universe simplified to AUTO + 1/10/60/300; at 30m the 1s
+        # and 300s choices are filtered (too fine for the budget / covered
+        # coarse boundary), leaving AUTO(0)/10/60.
+        "options": [0, 10, 60],
         "selected": "0",
     }, metrics
 
@@ -4338,6 +4341,8 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
             "modelTokenDimension": "output",
             "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil", "serversLoad"],
         "visibleCharts": ["cpu", "memory"],
+        # Logs level filter now persists; default is warning+error.
+        "logLevels": ["error", "warning"],
     }, metrics
 
     browser.refresh()
@@ -5104,6 +5109,10 @@ def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browse
           view.style.width = '240px';
           view.style.height = '260px';
           const list = view.querySelector('[data-js-debug-log-list]');
+          // Info and Debug are hidden by default (warning+error); enable them so
+          // the merge of all four server+client levels is exercised.
+          view.querySelector('[data-js-debug-log-level="info"]')?.click();
+          view.querySelector('[data-js-debug-log-level="debug"]')?.click();
           const initial = [...view.querySelectorAll('[data-js-debug-log-entry]')];
           const themeColors = ['dark', 'light'].map(theme => {
             document.body.classList.toggle('theme-light', theme === 'light');
