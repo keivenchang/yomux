@@ -375,8 +375,11 @@ def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeyp
     }
 
 
-def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
+def test_stats_sample_payload_reuses_short_window_sample(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp([])
+    # Isolate the history cursor from the intentionally independent live
+    # samplers running in other gate lanes.
+    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     wall_times = iter([1000.0, 1000.2, 1002.0])
     monotonic_times = iter([50.0, 50.2, 52.0])
     process_times = iter([10.0, 10.5])
@@ -396,6 +399,7 @@ def test_stats_sample_payload_reuses_short_window_sample(monkeypatch):
         webapp.record_stats_cpu_sample()
         third = webapp.stats_sample_payload()
     finally:
+        webapp.stats_client.request({"action": "shutdown"})
         webapp.control_server.stop()
 
     assert duplicate["time"] == first["time"]
