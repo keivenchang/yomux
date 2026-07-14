@@ -4539,6 +4539,67 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
     assert all(item["sourceCells"][0] > min(item["sourceCells"][1:]) for item in metrics["layouts"] if item["width"] >= 720), metrics
 
 
+def test_yocost_tables_are_plain_ruled_aligned_and_source_is_single_line(browser, tmp_path):
+    """Plain ruled tables: both-axis gridlines, By Agent/Model Usages columns aligned,
+    and source-attribution rows single-line with a middle-truncated path."""
+    browser.set_window_size(1400, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(
+        lambda d: d.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const lp = '/Users/keivenc/.claude/projects/-Users-keivenc-Documents-bin-yolomux-dev8881/d03f4c97-ab37-4e61-a4d2-403d9507e4fc.jsonl';
+          const mk = (i) => ({start: now - ((5 - i) * 60), duration: 60, sequence: i + 1, tokens_per_agent_total: 100 + i, agent_token_samples: 1,
+            agent_token_rates: [{key: 'a|0|codex', label: 'a:0:codex', total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-terra': {total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60}}}],
+            cost_summary: {total_micro_usd: 20000, known_micro_usd: 20000, priced_count: 6, complete: true, unpriced_count: 0,
+              components: [{key: 'input', direction: 'input', quantity: 10, unit: 'tokens', micro_usd: 2000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://a'}],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000}, {provider: 'anthropic', model: 'claude-opus-4-8', effort: '', token_quantity: 40, input_tokens: 20, cache_tokens: 10, output_tokens: 10, input_micro_usd: 4000, cache_micro_usd: 3000, output_micro_usd: 3000, other_micro_usd: 0, micro_usd: 10000}],
+              sources: [{tmux_key: 'x', agent_kind: 'codex', source: lp, transcript: lp, model: 'gpt-5.6-terra', token_quantity: 30000000, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000, lower_micro_usd: 10000, upper_micro_usd: 10000}],
+              catalog_revision: 't', freshness: 'verified'}});
+          debugGraphApplyServerHistory({sequence: 6, records: Array.from({length: 6}, (_u, i) => mk(i))});
+          setDebugGraphChartVisible('modelTokens', true); setDebugGraphChartVisible('costSummary', true); setDebugGraphRange(6 * 60); renderDebugPanels({force: true});
+          document.querySelector('[data-js-debug-graph]')?.querySelector('[data-js-debug-summary-group="costSummary"] [data-js-debug-cost-details]')?.click();
+          await window.__yolomuxTestWaitFor(
+            () => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('.js-debug-cost-report'),
+            {timeoutMs: 3000, intervalMs: 20, description: 'yocost'},
+          );
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const panel = document.getElementById(panelDomId(yocostItemId));
+          const headerX = sel => { const t = panel.querySelector(sel); return t ? [...t.querySelectorAll('thead th')].map(h => Math.round(h.getBoundingClientRect().left)) : null; };
+          const cell = panel.querySelector('[data-js-debug-cost-table="agent"] tbody td');
+          const cs = cell ? getComputedStyle(cell) : null;
+          const src = panel.querySelector('[data-js-debug-cost-table="source"]');
+          const srcRow = src?.querySelector('tbody tr');
+          const srcLink = src?.querySelector('.js-debug-cost-transcript-link');
+          done({
+            agentCols: headerX('[data-js-debug-cost-table="agent"]'),
+            modelCols: headerX('[data-js-debug-cost-table="model"]'),
+            borderBottom: cs?.borderBottomWidth, borderRight: cs?.borderInlineEndWidth,
+            sourceRowHeight: srcRow ? Math.round(srcRow.getBoundingClientRect().height) : null,
+            sourceMiddleParts: srcLink ? srcLink.querySelectorAll('[data-middle-truncate-part]').length : 0,
+            sourceHasTitle: Boolean(srcLink?.title),
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert not metrics.get("error"), metrics
+    # By Agent and Model Usages share one column template -> columns line up.
+    assert metrics["agentCols"] and len(metrics["agentCols"]) == len(metrics["modelCols"]) == 6, metrics
+    assert all(abs(a - m) <= 1 for a, m in zip(metrics["agentCols"], metrics["modelCols"])), metrics
+    # Plain ruled table: gridlines on BOTH axes.
+    assert metrics["borderBottom"] == "1px" and metrics["borderRight"] == "1px", metrics
+    # Source path stays a single-line row and middle-truncates with a full-path title.
+    assert metrics["sourceRowHeight"] is not None and metrics["sourceRowHeight"] <= 48, metrics
+    assert metrics["sourceMiddleParts"] == 2 and metrics["sourceHasTitle"] is True, metrics
+
+
 def test_yocost_by_agent_cards_scroll_horizontally_at_extreme_narrow_instead_of_squishing(browser, tmp_path):
     """Extreme-narrow last resort: below the two-column card floor the By Agent section
     scrolls sideways (contained) rather than squishing/overlapping; normal-narrow reflows."""
