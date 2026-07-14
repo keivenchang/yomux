@@ -1002,6 +1002,98 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         assert result["max"] < 100, result
 
 
+def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_content(browser, tmp_path):
+    """Highlight-first paint-order contract: the new tab's active chrome flips synchronously in the
+    input frame (highlight first), while the heavy terminal follow-up (phase 2) is deferred behind a
+    frame and the previous tab's content never lingers under the new highlight. A deliberately slowed
+    phase 2 (window.__yolomuxTabSwitchPhaseTwoDelayMs) proves content strictly follows."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    # Everything up to the `return` runs in one synchronous script — no animation frame or timeout can
+    # fire between activatePaneTab and the DOM read, so this observes exactly the input frame.
+    frame = browser.execute_script(
+        """
+        const previous = activeItemForSide('left');
+        const target = previous === '1' ? '2' : '1';
+        window.__phaseTwo = [];
+        const original = focusTerminalFromUserAction;
+        focusTerminalFromUserAction = (...args) => {
+          window.__phaseTwo.push(String(args[0] || ''));
+          return original(...args);
+        };
+        window.__restorePhaseTwo = () => { focusTerminalFromUserAction = original; };
+        window.__yolomuxTabSwitchPhaseTwoDelayMs = 300;
+        activatePaneTab('left', target, {userInitiated: true});
+        const activeTab = document.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '';
+        const targetTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${target}"]`);
+        const highlightFlipped = targetTab?.classList.contains('active') === true
+          || targetTab?.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
+        const previousTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${previous}"]`);
+        const previousStillHighlighted = previousTab?.classList.contains('active') === true
+          || previousTab?.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
+        return {
+          previous,
+          target,
+          activeItem: activeItemForSide('left'),
+          activeTab,
+          highlightFlipped,
+          previousStillHighlighted,
+          phaseTwoCallsInInputFrame: window.__phaseTwo.length,
+        };
+        """
+    )
+    assert frame["activeItem"] == frame["target"], frame
+    # Highlight first: the new tab is highlighted synchronously in the input frame.
+    assert frame["highlightFlipped"] is True and frame["activeTab"] == frame["target"], frame
+    # Old content never lingers under the new highlight: the previous tab is no longer highlighted.
+    assert frame["previousStillHighlighted"] is False, frame
+    # Content follows: the heavy terminal engagement did NOT run in the input frame.
+    assert frame["phaseTwoCallsInInputFrame"] == 0, frame
+    # Phase 2 runs after the highlight paints (slowed by the test hook), for the target only.
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__phaseTwo.length >= 1"))
+    after = browser.execute_script(
+        "const rows = window.__phaseTwo.slice(); window.__restorePhaseTwo(); delete window.__yolomuxTabSwitchPhaseTwoDelayMs; return rows;"
+    )
+    assert after == [frame["target"]], after
+
+
+def test_dockview_rapid_tab_cycling_coalesces_terminal_engagement_to_final_target(browser, tmp_path):
+    """Keyboard-cycling parity: rapid switches step the highlight instantly on every press, but the
+    heavy terminal engagement (phase 2) is generation-guarded and settles on the FINAL target only, so
+    intermediate tabs waste no xterm work and flash no stale content."""
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        window.__phaseTwo = [];
+        const original = focusTerminalFromUserAction;
+        focusTerminalFromUserAction = (...args) => { window.__phaseTwo.push(String(args[0] || '')); return original(...args); };
+        const order = ['2', '3', '1', '2', '3'];
+        const highlightSteps = [];
+        for (const item of order) {
+          activatePaneTab('left', item, {userInitiated: true});
+          const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${item}"]`);
+          const flipped = tab?.classList.contains('active') === true
+            || tab?.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
+          highlightSteps.push(flipped && activeItemForSide('left') === item);
+        }
+        const phaseTwoInInputFrame = window.__phaseTwo.length;
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => {
+          focusTerminalFromUserAction = original;
+          done({highlightSteps, phaseTwoInInputFrame, phaseTwo: window.__phaseTwo.slice(), finalActive: activeItemForSide('left')});
+        }, 60)));
+        """
+    )
+    # Highlight tracks every press instantly, in its own frame.
+    assert result["highlightSteps"] == [True, True, True, True, True], result
+    # No terminal engagement runs synchronously in the input frames.
+    assert result["phaseTwoInInputFrame"] == 0, result
+    # Content settles only on the final target; intermediate targets are coalesced away.
+    assert result["finalActive"] == "3", result
+    assert result["phaseTwo"] == ["3"], result
+
+
 def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)

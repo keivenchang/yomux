@@ -28998,6 +28998,42 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
   return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
 }
 
+// Highlight-first tab switching (two-phase paint order). Phase 1 is synchronous DOM-only chrome:
+// update the layout state and flip the active-tab highlight in the same frame as the input so the new
+// tab lights up immediately. Phase 2 is the heavy follow-up (terminal focus/fit) run on the next
+// frame and generation-guarded, so rapid tab cycling coalesces content onto the FINAL target only and
+// never blocks the highlight paint. See docs/specs/GUI.md "Tab switch: highlight first, content
+// follows".
+let tabSwitchHighlightGeneration = 0;
+
+function nextTabSwitchHighlightGeneration() {
+  tabSwitchHighlightGeneration += 1;
+  return tabSwitchHighlightGeneration;
+}
+
+// Test hook: a positive window.__yolomuxTabSwitchPhaseTwoDelayMs deliberately slows phase 2 so a
+// browser test can prove the highlight flips in the input frame while content strictly follows.
+function tabSwitchPhaseTwoDelayMs() {
+  if (typeof window === 'undefined') return 0;
+  const raw = Number(window.__yolomuxTabSwitchPhaseTwoDelayMs);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+function scheduleTabSwitchPhaseTwo(generation, work) {
+  const run = () => {
+    // A newer switch superseded this one (rapid cycling); its highlight already tracked every step,
+    // so the intermediate targets must not do any terminal/content work.
+    if (generation !== tabSwitchHighlightGeneration) return;
+    work();
+  };
+  const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  raf(() => {
+    const delay = tabSwitchPhaseTwoDelayMs();
+    if (delay > 0) setTimeout(run, delay);
+    else run();
+  });
+}
+
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
   if (options.userInitiated === true) {
@@ -29034,6 +29070,11 @@ function activatePaneTab(side, session, options = {}) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
   }
+  const generation = nextTabSwitchHighlightGeneration();
+  // Phase 1 (synchronous, input frame): update the layout state and flip the active-tab chrome. For an
+  // active-only switch applyLayoutSlots takes Dockview's cheap pre-rendered activate path (no fromJSON)
+  // and swaps the shown pane body to the target, so the highlight paints and the previous tab's content
+  // never lingers under the new highlight.
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
@@ -29041,7 +29082,11 @@ function activatePaneTab(side, session, options = {}) {
   applyLayoutSlots(next, {focusSession: session});
   setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
-  if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
+  // Phase 2 (next frame, generation-guarded): terminal focus/fit follows the highlight and coalesces
+  // across rapid cycling so only the final target engages its xterm.
+  if (options.userInitiated && isTmuxSession(session)) {
+    scheduleTabSwitchPhaseTwo(generation, () => focusTerminalFromUserAction(session, 25));
+  }
 }
 
 async function selectSession(session, options = {}) {
