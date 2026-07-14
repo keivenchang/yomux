@@ -5222,23 +5222,30 @@ body :is(
      wrap scrolls horizontally instead of squishing the columns. */
   inline-size: 100%;
   min-inline-size: 44rem;
-  /* Fixed layout with a shared column template so sibling tables (By Agent /
-     Model Usages) put their columns at the SAME x — they no longer each size to
-     their own content and drift out of alignment. */
-  table-layout: fixed;
-}
-.js-debug-cost-table th:first-child,
-.js-debug-cost-table td:first-child {
-  inline-size: 22%;
-}
-.js-debug-cost-table th:not(:first-child),
-.js-debug-cost-table td:not(:first-child) {
-  /* The five value columns share the remaining width equally in both tables. */
-  inline-size: calc(78% / 5);
 }
 .js-debug-cost-table th,
 .js-debug-cost-table td {
   padding-inline: var(--space-5);
+}
+/* By Agent and Model Usages share the same five value columns, so give ONLY
+   those two a fixed shared column template — they put their columns at the SAME
+   x instead of each sizing to its own content and drifting out of alignment.
+   The source/calculation/pricing tables keep content sizing (different shapes). */
+.js-debug-cost-table[data-js-debug-cost-table="agent"],
+.js-debug-cost-table[data-js-debug-cost-table="model"] {
+  table-layout: fixed;
+}
+.js-debug-cost-table[data-js-debug-cost-table="agent"] th:first-child,
+.js-debug-cost-table[data-js-debug-cost-table="agent"] td:first-child,
+.js-debug-cost-table[data-js-debug-cost-table="model"] th:first-child,
+.js-debug-cost-table[data-js-debug-cost-table="model"] td:first-child {
+  inline-size: 22%;
+}
+.js-debug-cost-table[data-js-debug-cost-table="agent"] th:not(:first-child),
+.js-debug-cost-table[data-js-debug-cost-table="agent"] td:not(:first-child),
+.js-debug-cost-table[data-js-debug-cost-table="model"] th:not(:first-child),
+.js-debug-cost-table[data-js-debug-cost-table="model"] td:not(:first-child) {
+  inline-size: calc(78% / 5);
 }
 .js-debug-cost-unpriced-disclosure {
   margin-block-start: var(--space-5);
