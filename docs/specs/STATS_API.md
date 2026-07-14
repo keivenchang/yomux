@@ -48,8 +48,15 @@ through the outage. `epochs` describes those bounded sampler segments and
 The requested/available/covered bounds, `complete`, older-page facts,
 resolution, source/returned counts, and cursor facts remain as a compatibility
 envelope during migration, but they do not replace the interval list or prove
-that a middle span is covered. Missing or malformed `intervals` is a contract
-violation; transport failure is the other bounded Retry state. Ranges are
+that a middle span is covered. A missing or non-array top-level `intervals` list
+is a contract violation; a structurally invalid entry in that required
+top-level list (reversed, non-object) is also rejected. But the client never
+blanks a whole multi-family response for a single bad family: the interval-count
+bound degrades by capping to the most recent entries rather than rejecting, and
+a per-family `store_intervals` list is lenient — an individual malformed
+interval is skipped (its span renders as honest no-data) and a
+structurally-unusable family is dropped with a Logs warning while every other
+family still renders. Transport failure is the other bounded Retry state. Ranges are
 inclusive `start`, exclusive `end`. A legacy schema-2 read-only database derives
 intervals and epochs from retained bucket gaps without mutating the database.
 

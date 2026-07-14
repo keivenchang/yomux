@@ -6759,9 +6759,33 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const envelope = {mode: 'live', requested_start: 100, requested_end: 500, covered_start: 100, covered_end: 500, resolution_seconds: 1};
     assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: envelope}), null, 'a compatibility envelope without the required interval list is malformed');
-    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: [{start: 100, end: 90, resolution_seconds: 1}]}}), null, 'a reversed interval is malformed');
-    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: Array.from({length: 257}, (_item, index) => ({start: index, end: index + 1, resolution_seconds: 1}))}}), null, 'an unbounded interval list is malformed');
+    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: [{start: 100, end: 90, resolution_seconds: 1}]}}), null, 'a reversed interval in the required top-level list is a structural contract violation');
+    // The interval-count bound degrades by capping to the most recent entries
+    // rather than rejecting the whole response (per-family resilience contract).
+    const overLimit = api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: Array.from({length: 300}, (_item, index) => ({start: index, end: index + 1, resolution_seconds: 1}))}});
+    assert.ok(overLimit, 'an over-length interval list degrades to capped coverage instead of rejecting');
+    assert.ok(overLimit.intervals.length <= 256, 'the over-length interval list is capped to the bound, not rejected');
     assert.deepStrictEqual(canonical(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: []}}).intervals), [], 'an explicit empty interval list is valid coverage');
+  });
+
+  test('YO!stats coverage drops only a malformed family and keeps the others', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const envelope = {mode: 'live', requested_start: 100, requested_end: 500, covered_start: 100, covered_end: 500, resolution_seconds: 1};
+    const good = [{start: 100, end: 200, resolution_seconds: 1}];
+    const coverage = api.normalizedJsDebugHistoryCoverageForTest({coverage: {
+      ...envelope,
+      intervals: good,
+      store_intervals: {
+        cpu: good,
+        // A structurally-unusable family (not an array) must drop ONLY itself.
+        agent_tokens: 'corrupt',
+        gpu: good,
+      },
+    }});
+    assert.ok(coverage, 'a single malformed family never nulls the whole multi-family response');
+    assert.ok(coverage.storeIntervals.cpu && coverage.storeIntervals.cpu.length === 1, 'healthy families still render');
+    assert.ok(coverage.storeIntervals.gpu && coverage.storeIntervals.gpu.length === 1, 'other healthy families still render');
+    assert.equal(coverage.storeIntervals.agent_tokens, undefined, 'the malformed family is dropped, not rendered');
   });
 
   await testAsync('YO!stats widening the range queues an older-history fetch behind an in-flight poll', async () => {

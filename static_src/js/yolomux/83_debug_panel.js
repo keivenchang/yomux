@@ -618,18 +618,41 @@ function normalizedJsDebugHistoryCoverage(history = {}) {
   if (!raw || typeof raw !== 'object') return null;
   const fallbackResolution = Number(raw.resolution_seconds);
   const fallbackSourceResolution = Number(raw.source_resolution_seconds);
-  const normalizeIntervals = intervals => {
-    if (!Array.isArray(intervals) || intervals.length > jsDebugHistoryCoverageIntervalLimit) return null;
+  // Degrade granularly rather than rejecting a whole multi-family response so a
+  // single malformed family can never blank every chart. The interval-count
+  // bound always degrades by capping to the most recent entries (never a hard
+  // reject). The top-level required list stays structurally strict (a reversed
+  // or non-object interval is a real contract violation), but a per-family
+  // store list is lenient: an individual bad interval is skipped (its span
+  // renders as honest no-data) and a structurally-unusable family is dropped,
+  // keeping every other family's charts alive.
+  const normalizeIntervals = (intervals, {strict = false} = {}) => {
+    if (!Array.isArray(intervals)) return null;
+    const bounded = intervals.length > jsDebugHistoryCoverageIntervalLimit
+      ? intervals.slice(-jsDebugHistoryCoverageIntervalLimit)
+      : intervals;
     const normalized = [];
-    for (const interval of intervals) {
-      if (!interval || typeof interval !== 'object' || Array.isArray(interval)) return null;
+    for (const interval of bounded) {
+      if (!interval || typeof interval !== 'object' || Array.isArray(interval)) {
+        if (strict) return null;
+        continue;
+      }
       const startSeconds = Number(interval.start ?? interval.start_seconds);
       const endSeconds = Number(interval.end ?? interval.end_seconds);
       const resolutionSeconds = Number(interval.resolution_seconds ?? interval.resolution ?? fallbackResolution);
       const sourceResolutionSeconds = Number(interval.source_resolution_seconds ?? interval.source_resolution ?? fallbackSourceResolution) || 0;
-      if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return null;
-      if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return null;
-      if (!Number.isFinite(sourceResolutionSeconds) || sourceResolutionSeconds < 0) return null;
+      if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) {
+        if (strict) return null;
+        continue;
+      }
+      if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) {
+        if (strict) return null;
+        continue;
+      }
+      if (!Number.isFinite(sourceResolutionSeconds) || sourceResolutionSeconds < 0) {
+        if (strict) return null;
+        continue;
+      }
       normalized.push({
         startSeconds,
         endSeconds,
@@ -640,15 +663,22 @@ function normalizedJsDebugHistoryCoverage(history = {}) {
     }
     return mergeJsDebugHistoryCoverageIntervals(normalized);
   };
-  const intervals = normalizeIntervals(raw.intervals);
+  const intervals = normalizeIntervals(raw.intervals, {strict: true});
   if (!intervals) return null;
   const rawStores = raw.store_intervals ?? raw.family_intervals ?? {};
   if (!rawStores || typeof rawStores !== 'object' || Array.isArray(rawStores)) return null;
   const storeIntervals = {};
+  const droppedFamilies = [];
   for (const [key, value] of Object.entries(rawStores)) {
     const normalized = normalizeIntervals(value);
-    if (!normalized) return null;
+    if (!normalized) {
+      droppedFamilies.push(String(key));
+      continue;
+    }
     storeIntervals[String(key)] = normalized;
+  }
+  if (droppedFamilies.length) {
+    recordJsDebugStatsDiagnostic('warning', `coverage degraded: dropped malformed families ${droppedFamilies.join(', ')}; other families render`);
   }
   const intervalStart = intervals.length ? Math.min(...intervals.map(interval => interval.startSeconds)) : 0;
   const intervalEnd = intervals.length ? Math.max(...intervals.map(interval => interval.endSeconds)) : 0;
