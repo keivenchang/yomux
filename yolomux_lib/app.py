@@ -22,7 +22,6 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -11116,26 +11115,52 @@ class TmuxWebtermApp:
         if not client_names:
             return 0
 
-        def switch_one(client_name: str) -> tuple[str, bool, float, str]:
+        outcomes: list[tuple[str, bool, float, str] | None] = [None] * len(client_names)
+
+        def switch_one(index: int, client_name: str) -> None:
             client_started = time.monotonic()
             result = tmux(["switch-client", "-c", client_name, "-t", target], timeout=1.0)
             elapsed = time.monotonic() - client_started
             if result.returncode == 0:
-                return client_name, True, elapsed, ""
-            return client_name, False, elapsed, cmd_error(result, "tmux switch-client failed")
+                outcomes[index] = (client_name, True, elapsed, "")
+            else:
+                outcomes[index] = (client_name, False, elapsed, cmd_error(result, "tmux switch-client failed"))
 
-        # Attached clients are independent: switch them concurrently with a small core-derived
-        # worker bound so one stale client consumes only its own 1s timeout budget instead of
-        # serially spending it in front of every other client. Results stay ordered/deterministic.
+        # Attached clients are independent: switch them concurrently in bounded core-derived
+        # waves so one stale client consumes only its own 1s timeout budget instead of serially
+        # spending it in front of every other client. Plain named threads through the shared
+        # start_thread_with_rollback owner (project thread discipline: no executor pools in the
+        # main process); a thread that fails to start falls back to switching inline. Results
+        # stay ordered/deterministic through the indexed outcomes list.
         if len(client_names) == 1:
-            outcomes = [switch_one(client_names[0])]
+            switch_one(0, client_names[0])
         else:
-            max_workers = min(len(client_names), max(2, os.cpu_count() or 2))
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tmux-switch") as pool:
-                outcomes = list(pool.map(switch_one, client_names))
+            wave_size = min(len(client_names), max(2, os.cpu_count() or 2))
+            for wave_start in range(0, len(client_names), wave_size):
+                wave = []
+                for index in range(wave_start, min(wave_start + wave_size, len(client_names))):
+                    worker = threading.Thread(
+                        target=switch_one,
+                        args=(index, client_names[index]),
+                        name=f"tmux-switch-{index}",
+                        daemon=True,
+                    )
+                    try:
+                        common.start_thread_with_rollback(worker, lambda index=index: switch_one(index, client_names[index]))
+                    except RuntimeError:
+                        pass  # rollback already switched this client inline
+                    else:
+                        wave.append(worker)
+                for worker in wave:
+                    # The tmux call itself is bounded at 1s; 2s covers scheduling slack.
+                    worker.join(timeout=2.0)
         switched = 0
         slowest_name, slowest_elapsed = "", 0.0
-        for client_name, ok, elapsed, error in outcomes:
+        for index, outcome in enumerate(outcomes):
+            if outcome is None:
+                logger.debug("tmux switch-client for %s -> %s did not finish within the join bound", client_names[index], target)
+                continue
+            client_name, ok, elapsed, error = outcome
             if elapsed > slowest_elapsed:
                 slowest_name, slowest_elapsed = client_name, elapsed
             if ok:
