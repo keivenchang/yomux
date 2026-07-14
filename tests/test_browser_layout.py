@@ -19382,3 +19382,30 @@ def test_servers_load_draws_every_service_across_the_full_range(browser, tmp_pat
     # One drawn line per service (>=3), spanning back across most of the hour.
     assert out["lines"] >= 3, out
     assert out["bucketsWithService"] >= 30 and out["firstAgoMin"] >= 45, out
+
+
+def test_yostats_metric_descriptions_are_native_title_tooltips_not_custom_boxes(browser, tmp_path):
+    """Metric/chart descriptions use native title tooltips (anchored to their
+    element, auto-dismissed) — never a custom large box floating over a plot."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof renderDebugPanels === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          setDebugGraphChartVisible('cpu', true); renderDebugPanels({force: true});
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const graph = document.querySelector('[data-js-debug-graph]');
+          const described = [...graph.querySelectorAll('[data-js-debug-meta-desc], [data-js-debug-chart-desc]')];
+          const withTitle = described.filter(node => (node.getAttribute('title') || '').length > 0);
+          // No custom description popover/box element renders inside the graph.
+          const customBoxes = graph.querySelectorAll('.js-debug-explain-popover, [data-js-debug-explain-popover], .js-debug-desc-box').length;
+          done({describedCount: described.length, withTitleCount: withTitle.length, customBoxes});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    # Every described element exposes a native title tooltip; none renders a custom box.
+    assert out["describedCount"] >= 1, out
+    assert out["withTitleCount"] == out["describedCount"], out
+    assert out["customBoxes"] == 0, out
