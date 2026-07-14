@@ -329,6 +329,24 @@ def test_stats_store_repairs_preexisting_coverage_overlaps_on_open(tmp_path):
     reopened.close()
 
 
+def test_usage_atom_backfill_status_is_complete_when_version_marker_matches(tmp_path):
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    # A stale status JSON left at "pending" must not override the authoritative
+    # version marker — the served backfill state follows the durable marker so
+    # the cost summary never shows a false "Backfill pending".
+    service.store.set_metadata_value(
+        statsd.STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY,
+        json.dumps({"state": "pending", "sources": 407, "missing": 0}),
+    )
+    service.store.set_metadata_value(
+        statsd.STATSD_USAGE_ATOM_MIGRATION_MARKER,
+        str(statsd.STATSD_USAGE_ATOM_MIGRATION_VERSION),
+    )
+    status = service._usage_atom_migration_status()
+    assert status["state"] == "complete"
+    assert status["missing"] == 0
+
+
 def test_stats_store_keeps_rollups_outside_raw_history_rows(tmp_path):
     store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
     raw = _bucket(start=100, duration=1, sequence=1)
