@@ -27,7 +27,18 @@ responses and never cause an automatic refetch loop.
 `coverage.stores` and its compact `store_intervals` projection report the same
 bounded facts independently for raw/server/rollup data and the CPU, memory, GPU,
 Agent Status, Agent tokens, and cost families. A chart may claim data only in
-its own family's intervals. A checked token sample with no delta records covered
+its own family's intervals. Every served interval list per family is strictly
+disjoint, sorted by `start`, and non-inverted (`end > start`) BY CONSTRUCTION:
+per-epoch coalescing keeps distinct sampler owners as separate intervals, but a
+cross-epoch overlap left by a statsd restart/owner handoff (the new owner
+backfilling a first sample a few seconds before the outgoing owner's finalized
+`end`) is clipped at the seam with the later owner authoritative, so the server
+can never emit a payload its own client's per-interval contract would reject.
+This invariant is enforced at three layers: write time (a new owner's interval
+ends any earlier same-family interval that extends past its start), serve time
+(`_bounded_intervals` clips residual overlaps and drops zero-width rows), and an
+idempotent on-open durable repair that heals pre-existing overlaps from older
+databases. A checked token sample with no delta records covered
 zero usage; an absent sample remains an uncovered gap and must not become a
 silent zero. Agent Status carry-forward ends at an epoch boundary, so sleep,
 restart, owner change, or a wall-clock discontinuity cannot paint a stale roster
