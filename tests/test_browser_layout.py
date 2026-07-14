@@ -4437,6 +4437,71 @@ def test_debug_agent_billable_dimensions_reconcile_and_label_atomless_windows(br
     assert "no billable breakdown for this window" in metrics["emptyHtml"].lower(), metrics
 
 
+def test_debug_token_dimension_switch_repaints_both_surfaces_from_cache_within_one_frame(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof createYoCostPanel === 'function' && typeof debugGraphApplyServerHistory === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        let fetches = 0;
+        window.fetch = (...args) => { fetches += 1; return originalFetch(...args); };
+        const cost = createYoCostPanel();
+        document.body.append(cost);
+        const now = Math.floor(Date.now() / 1000) - 60;
+        debugGraphApplyServerHistory({sequence: 91, records: [{
+          start: now, duration: 60, sequence: 91,
+          agent_token_samples: 1, tokens_per_agent_total: 30,
+          agent_token_rates: [{
+            key: 's|0|codex', label: 's:0', total: 30, samples: 1, tokens: 30, seconds: 60,
+            model_rates: {'gpt-5.6-sol': {total: 30, samples: 1, tokens: 30, seconds: 60}},
+            billable_available: true,
+            billable_tokens: {input: 100, cache_read: 20, cache_write: 10, all: 160},
+            billable_samples: {input: 1, cache_read: 1, cache_write: 1, all: 4},
+          }],
+          cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', effort: 'high', direction: 'input', cache_role: 'none', unit: 'tokens', quantity: 100}]},
+        }]});
+        renderDebugPanels({force: true});
+        renderYoCostPanels({force: true});
+        const initialLoading = document.querySelectorAll('[data-js-debug-history-overlay]:not([hidden])').length;
+        const switchAndRead = value => {
+          const started = performance.now();
+          setDebugGraphModelTokenDimension(value);
+          return new Promise(resolve => requestAnimationFrame(() => resolve({
+            elapsed: performance.now() - started,
+            values: [...document.querySelectorAll('[data-js-debug-model-token-dimension-select]')].map(select => select.value),
+            unavailable: document.querySelectorAll('[data-js-debug-agent-billable-unavailable]').length,
+            loading: document.querySelectorAll('[data-js-debug-history-overlay]:not([hidden])').length,
+          })));
+        };
+        (async () => {
+          const first = await switchAndRead('all');
+          await switchAndRead('output');
+          const repeated = await switchAndRead('all');
+          window.fetch = originalFetch;
+          cost.remove();
+          done({first, repeated, fetches, initialLoading});
+        })().catch(error => {
+          window.fetch = originalFetch;
+          cost.remove();
+          done({error: String(error?.stack || error)});
+        });
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["fetches"] == 0, metrics
+    assert metrics["first"]["elapsed"] < 100 and metrics["repeated"]["elapsed"] < 100, metrics
+    assert metrics["first"]["values"] and set(metrics["first"]["values"]) == {"all"}, metrics
+    assert metrics["repeated"]["values"] and set(metrics["repeated"]["values"]) == {"all"}, metrics
+    assert metrics["first"]["unavailable"] == 0 and metrics["repeated"]["unavailable"] == 0, metrics
+    assert metrics["first"]["loading"] == metrics["initialLoading"], metrics
+    assert metrics["repeated"]["loading"] == metrics["initialLoading"], metrics
+
+
 def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(

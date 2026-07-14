@@ -2934,6 +2934,19 @@ function debugGraphModelTokenDimensionDescriptionKey(dimension = jsDebugGraphMod
   return item ? jsDebugGraphDescriptionKeyByLabelKey[item.labelKey] : '';
 }
 
+function setDebugGraphModelTokenDimension(value, {persist = true} = {}) {
+  const selected = String(value || '');
+  jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected)
+    ? selected
+    : 'output';
+  if (persist) saveJsDebugStatsUiPreferences();
+  // Every token dimension is projected from the buckets already in memory.
+  // Repaint both tabs synchronously and bypass the passive focused-control
+  // deferral; no history request or artificial loading state is warranted.
+  refreshDebugGraphSurfaces({force: true, deferFocusedControl: false});
+  return jsDebugGraphModelTokenDimension;
+}
+
 function debugGraphModelTokenComponentMatches(component, dimension = jsDebugGraphModelTokenDimension) {
   if (String(component?.unit || '').toLowerCase() !== 'tokens') return false;
   const direction = String(component?.direction || '').toLowerCase();
@@ -6847,10 +6860,7 @@ function handleDebugGraphControlEvent(event, panel) {
   }
   const modelDimension = event.target.closest('[data-js-debug-model-token-dimension-select]');
   if (modelDimension && panel.contains(modelDimension) && event.type === 'change') {
-    const selected = String(modelDimension.value || '');
-    jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected) ? selected : 'output';
-    saveJsDebugStatsUiPreferences();
-    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+    setDebugGraphModelTokenDimension(modelDimension.value);
     return true;
   }
   const chartLayout = event.target.closest('button[data-js-debug-chart-layout]');
