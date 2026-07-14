@@ -627,9 +627,10 @@
   inset: 0;
   display: block;
   min-height: 100%;
+  z-index: 2;
   padding: var(--space-12);
   color: var(--text);
-  background: color-mix(in srgb, var(--panel) 76%, transparent);
+  background: var(--inactive-pane-overlay);
   pointer-events: none;
 }
 .js-debug-history-overlay[hidden] {
@@ -638,6 +639,7 @@
 .js-debug-history-overlay-message {
   position: sticky;
   top: 50%;
+  z-index: 1;
   display: flex;
   width: max-content;
   max-width: min(100%, 42rem);
@@ -651,6 +653,7 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: var(--panel2);
+  opacity: 1;
   font: 700 var(--ui-font-size-xs)/1.35 var(--ui-font);
   text-align: center;
 }

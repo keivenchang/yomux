@@ -1776,6 +1776,9 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
           generation: 1,
         });
         renderDebugPanels({force: true});
+        const costPanel = createYoCostPanel();
+        document.body.append(costPanel);
+        renderYoCostPanels({force: true});
         const graph = document.querySelector('[data-js-debug-graph]');
         const view = graph.closest('.js-debug-graph-view');
         const shell = graph.querySelector('.js-debug-chart-shell');
@@ -1790,6 +1793,33 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
         const dots = Array.from(overlay.querySelectorAll('.moving-ellipsis > span'));
         const viewRect = view.getBoundingClientRect();
         const messageRect = message.getBoundingClientRect();
+        const overlayStyles = [];
+        for (const theme of ['dark', 'light']) {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          const probe = document.createElement('div');
+          probe.style.background = 'var(--inactive-pane-overlay)';
+          document.body.append(probe);
+          const expectedBackdrop = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          for (const [surface, root] of [
+            ['stats', graph],
+            ['cost', costPanel.querySelector('[data-js-yocost-graphs]')],
+          ]) {
+            const targetOverlay = root?.querySelector('[data-js-debug-history-overlay]');
+            const targetMessage = targetOverlay?.querySelector('.js-debug-history-overlay-message');
+            const overlayStyle = targetOverlay ? getComputedStyle(targetOverlay) : null;
+            const messageStyle = targetMessage ? getComputedStyle(targetMessage) : null;
+            overlayStyles.push({
+              theme, surface, expectedBackdrop,
+              backdrop: overlayStyle?.backgroundColor || '',
+              overlayZ: Number(overlayStyle?.zIndex || 0),
+              messageZ: Number(messageStyle?.zIndex || 0),
+              messageOpacity: messageStyle?.opacity || '',
+              messageBackground: messageStyle?.backgroundColor || '',
+            });
+          }
+        }
+        costPanel.remove();
         return {
           busy: graph.getAttribute('aria-busy'),
           phase: graph.dataset.jsDebugHistoryState,
@@ -1804,6 +1834,7 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
           messageRight: messageRect.right,
           viewLeft: viewRect.left,
           viewRight: viewRect.right,
+          overlayStyles,
         };
         """
     )
@@ -1816,6 +1847,12 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
     assert metrics["labelText"] == "Loading history", metrics
     assert abs(metrics["messageCenterY"] - metrics["viewCenterY"]) <= 12, metrics
     assert metrics["messageLeft"] >= metrics["viewLeft"] - 0.5 and metrics["messageRight"] <= metrics["viewRight"] + 0.5, metrics
+    assert {(item["theme"], item["surface"]) for item in metrics["overlayStyles"]} == {
+        ("dark", "stats"), ("dark", "cost"), ("light", "stats"), ("light", "cost")
+    }, metrics
+    assert all(item["backdrop"] == item["expectedBackdrop"] for item in metrics["overlayStyles"]), metrics
+    assert all(item["overlayZ"] > 0 and item["messageZ"] > 0 for item in metrics["overlayStyles"]), metrics
+    assert all(item["messageOpacity"] == "1" and not item["messageBackground"].endswith(", 0)") for item in metrics["overlayStyles"]), metrics
 
 
 @pytest.mark.boot
