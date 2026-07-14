@@ -305,3 +305,69 @@ def test_morning_after_sleep_gap_protocol_history_is_honest_and_reload_idempoten
     after_reload = _run_morning_after_range(browser, 24 * 3600)
     assert after_reload.get("scriptError") is None, after_reload
     assert after_reload == before_reload
+
+
+def _mixed_resolution_history(tmp_path):
+    """Continuous 1h history: older half at 60s, recent half at 10s (no gap)."""
+    now = int(time.time() // 60 * 60)
+    database = tmp_path / "mixres" / "stats.sqlite3"
+    service = statsd.PersistentStatsService(tmp_path / "mixres" / "statsd.sock", database)
+    sequence = 0
+    try:
+        for segment_start, segment_end, bucket_seconds in ((now - 3600, now - 1800, 60), (now - 1800, now, 10)):
+            for bucket_start in range(segment_start, segment_end, bucket_seconds):
+                sequence += 1
+                duration = min(bucket_seconds, segment_end - bucket_start)
+                bucket = stats_store.empty_bucket(bucket_start, duration)
+                bucket.update({"sequence": sequence, "server_sequence": sequence, "cpu_total_percent": 25.0, "cpu_count": 1.0, "system_cpu_total_percent": 40.0, "system_cpu_count": 1.0})
+                service.store.upsert_bucket(bucket)
+        for family, cadence in (("cpu", 3600),):
+            service.handle({"action": "merge_server_records", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "records": [{"time": now - 3600, "_stats_coverage": {"family": family, "cadence_seconds": cadence, "epoch_id": f"e:{family}", "owner_generation": 1}}], "now": now - 3600, "compact": False, "refresh_rollups": False})
+        history = service.handle({"action": "history", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "start": now - 3600, "end": 0, "resolution_seconds": 1, "max_points": 6000, "client_id": "mixres", "token_resolution_seconds": 60, "token_history_start": now - 3600, "token_history_end": 0})
+        assert history["ok"] is True
+    finally:
+        service.store.close()
+    return {"now": now, "history": history}
+
+
+def test_explicit_fine_resolution_coarsens_until_the_whole_range_is_covered(browser, tmp_path):
+    """A 10s override on a range whose older span is only 60s must render the FULL
+    range at one coarsened resolution (60s), never a finer half-empty chart."""
+    fixture = _mixed_resolution_history(tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    browser.execute_script(
+        """
+        const fx = arguments[0]; stopJsDebugStatsPolling(); Date.now = () => Number(fx.now) * 1000;
+        const of = window.fetch; window.fetch = (i, o = {}) => { const u = new URL(String(i), 'https://localhost');
+          if (u.pathname !== '/api/stats-sample') return of(i, o);
+          return jsonResponse({ok: true, time: Number(fx.now), pid: 1, uptime_seconds: 10, cpu_percent: 25, rss_bytes: 1e8, history: fx.history}); };
+        """,
+        fixture,
+    )
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); resetJsDebugHistoryReadiness();
+          setDebugGraphRange(3600, {render: false});
+          setDebugGraphResolutionOverride(10);
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(3);
+          const domain = debugGraphDomain();
+          const coverageResSec = jsDebugHistoryCoverageResolutionForRange(Math.floor(domain.startMs / 1000), Math.ceil(domain.endMs / 1000));
+          const displayResSec = debugGraphDisplayResolutionMs(domain, 0) / 1000;
+          const buckets = debugGraphDisplayBuckets();
+          const startsAgoMin = buckets.length ? Math.round((domain.endMs - Math.min(...buckets.map(b => b.startMs))) / 60000) : 0;
+          done({coverageResSec, displayResSec, bucketCount: buckets.length, startsAgoMin});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    # Coverage for the whole range is 60s; the 10s override must coarsen to 60s.
+    assert out["coverageResSec"] == 60, out
+    assert out["displayResSec"] >= out["coverageResSec"], out
+    assert out["displayResSec"] == 60, out
+    # Full range rendered (buckets reach back ~60 min), not a half-empty chart.
+    assert out["startsAgoMin"] >= 55, out
+    assert out["bucketCount"] >= 50, out
