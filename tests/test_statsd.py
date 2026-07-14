@@ -251,6 +251,84 @@ def test_stats_store_wal_round_trip_preserves_bucket_and_normalized_rows(tmp_pat
     reopened.close()
 
 
+def _coverage_overlap_pairs(intervals):
+    ordered = sorted(intervals, key=lambda item: (int(item["start"]), int(item["end"])))
+    return [
+        (left, right)
+        for left, right in zip(ordered, ordered[1:])
+        if int(left["end"]) > int(right["start"])
+    ]
+
+
+def test_bounded_intervals_clips_cross_epoch_handoff_overlaps():
+    # Two sampler owners (statsd restart handoff) whose boundaries overlap by a
+    # few seconds — the exact durable shape that broke the 16h view.
+    overlapping = [
+        {"start": 100, "end": 210, "epoch_id": "owner-a", "owner_generation": 1, "source": "sampler"},
+        {"start": 205, "end": 320, "epoch_id": "owner-b", "owner_generation": 2, "source": "sampler"},
+        {"start": 316, "end": 400, "epoch_id": "owner-c", "owner_generation": 3, "source": "sampler"},
+    ]
+    bounded, truncated = stats_store.StatsStore._bounded_intervals(overlapping)
+    assert truncated is False
+    assert _coverage_overlap_pairs(bounded) == []
+    # Later owner is authoritative at the seam; earlier owner is clipped to it,
+    # and every distinct epoch identity survives.
+    by_epoch = {item["epoch_id"]: (int(item["start"]), int(item["end"])) for item in bounded}
+    assert by_epoch == {"owner-a": (100, 205), "owner-b": (205, 316), "owner-c": (316, 400)}
+
+
+def test_stats_store_owner_handoff_writes_never_persist_overlap(tmp_path):
+    store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
+    # Owner A extends its epoch, then Owner B (a restart) backfills a first
+    # sample that lands before A's finalized end.
+    for sample_time in (100, 110, 120, 130):
+        store.record_sample_coverage(family="cpu", sample_time=sample_time, cadence=10, epoch_id="owner-a", owner_generation=1)
+    store.record_sample_coverage(family="cpu", sample_time=135, cadence=10, epoch_id="owner-b", owner_generation=2)
+    rows = store._connection().execute(
+        "SELECT epoch_id,start,end FROM stats_coverage_intervals WHERE family='cpu' ORDER BY start"
+    ).fetchall()
+    intervals = [{"start": row[1], "end": row[2], "epoch_id": row[0]} for row in rows]
+    assert _coverage_overlap_pairs(intervals) == []
+    # Owner A's end was clipped to Owner B's start (135); no row is inverted.
+    assert all(int(row[2]) > int(row[1]) for row in rows)
+    served = store.query_coverage(start=0, end=0)["store_intervals"]["cpu"]
+    assert _coverage_overlap_pairs(served) == []
+    store.close()
+
+
+def test_stats_store_repairs_preexisting_coverage_overlaps_on_open(tmp_path):
+    path = tmp_path / "stats.sqlite3"
+    store = stats_store.StatsStore(path)
+    connection = store._connection()
+    # Inject the corrupt durable shape observed on the live DB: seven-owner
+    # handoff chain with 2-5s boundary overlaps (bypass the write path).
+    chain = [
+        ("owner-1", 1000, 1250),
+        ("owner-2", 1245, 1600),
+        ("owner-3", 1596, 1602),  # short-lived restart blip
+        ("owner-4", 1600, 2000),
+    ]
+    with connection:
+        for epoch_id, start, end in chain:
+            connection.execute(
+                "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
+                " VALUES('agent_status',?,?,?,10,1,'sampler')",
+                (epoch_id, start, end),
+            )
+    store.close()
+
+    reopened = stats_store.StatsStore(path)
+    overlaps = reopened._connection().execute(
+        "SELECT COUNT(*) FROM stats_coverage_intervals a JOIN stats_coverage_intervals b"
+        " ON a.family=b.family AND a.rowid<b.rowid AND a.end > b.start AND b.end > a.start"
+    ).fetchone()[0]
+    assert overlaps == 0
+    served = reopened.query_coverage(start=0, end=0)["store_intervals"]["agent_status"]
+    assert _coverage_overlap_pairs(served) == []
+    assert all(int(item["end"]) > int(item["start"]) for item in served)
+    reopened.close()
+
+
 def test_stats_store_keeps_rollups_outside_raw_history_rows(tmp_path):
     store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
     raw = _bucket(start=100, duration=1, sequence=1)

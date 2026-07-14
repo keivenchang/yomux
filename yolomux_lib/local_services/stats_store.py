@@ -240,8 +240,50 @@ class StatsStore:
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(STATS_STORE_SCHEMA_VERSION),),
         )
+        self._repair_coverage_overlaps(connection)
         connection.commit()
         self.connection = connection
+
+    @staticmethod
+    def _repair_coverage_overlaps(connection: sqlite3.Connection) -> int:
+        """Clip any pre-existing cross-epoch overlaps durably (idempotent).
+
+        Databases written before write-time handoff clipping can hold boundary
+        overlaps from statsd restarts.  Detection is a cheap self-join; when it
+        finds none this is a no-op, so it is safe to run on every open.  Repair
+        mirrors the serve-time rule: the later owner is authoritative, so the
+        earlier interval's ``end`` is clipped to the later interval's ``start``
+        and zero-width rows are removed.
+        """
+
+        overlaps = connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals a "
+            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+            "AND a.end > b.start AND b.end > a.start"
+        ).fetchone()
+        if not overlaps or int(overlaps[0]) == 0:
+            return 0
+        repaired = 0
+        families = [row[0] for row in connection.execute(
+            "SELECT DISTINCT family FROM stats_coverage_intervals"
+        ).fetchall()]
+        for family in families:
+            rows = connection.execute(
+                "SELECT rowid,start,end FROM stats_coverage_intervals WHERE family=? ORDER BY start,end",
+                (family,),
+            ).fetchall()
+            prev_rowid = prev_start = prev_end = None
+            for rowid, start, end in rows:
+                if prev_rowid is not None and prev_end > int(start):
+                    clipped = int(start)
+                    if clipped <= int(prev_start):
+                        connection.execute("DELETE FROM stats_coverage_intervals WHERE rowid=?", (prev_rowid,))
+                    else:
+                        connection.execute("UPDATE stats_coverage_intervals SET end=? WHERE rowid=?", (clipped, prev_rowid))
+                    repaired += 1
+                prev_rowid, prev_start, prev_end = rowid, int(start), int(end)
+        connection.execute("DELETE FROM stats_coverage_intervals WHERE end<=start")
+        return repaired
 
     def close(self) -> None:
         if self.connection is not None:
@@ -350,6 +392,17 @@ class StatsStore:
                 (max(end, int(row[1])), cadence, owner_generation, family, epoch_id, int(row[0])),
             )
         else:
+            # A new interval (owner handoff or an in-epoch gap) authoritatively
+            # ends any earlier same-family interval that still extends past this
+            # start, so a restarting owner can never persist a boundary overlap.
+            connection.execute(
+                "UPDATE stats_coverage_intervals SET end=? WHERE family=? AND start<? AND end>?",
+                (start, family, start, start),
+            )
+            connection.execute(
+                "DELETE FROM stats_coverage_intervals WHERE family=? AND end<=start",
+                (family,),
+            )
             connection.execute(
                 "INSERT OR REPLACE INTO stats_coverage_intervals"
                 "(family,epoch_id,start,end,cadence,owner_generation,source) VALUES(?,?,?,?,?,?,'sampler')",
@@ -592,7 +645,19 @@ class StatsStore:
 
     @staticmethod
     def _bounded_intervals(intervals: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
-        """Sort/coalesce within an epoch and bound without joining epochs."""
+        """Sort/coalesce within an epoch, clip cross-epoch overlaps, and bound.
+
+        Coalescing joins same-epoch adjacency but keeps distinct sampler epochs
+        as separate intervals so per-owner identity survives for diagnostics.
+        A statsd restart/owner handoff can still leave the previous owner's
+        finalized ``end`` a few seconds past the new owner's backfilled
+        ``start`` (the old owner's last flush races the new owner opening its
+        interval).  Those boundary overlaps must never reach the client, which
+        requires a strictly disjoint, sorted interval list: the later owner is
+        authoritative at the seam, so the earlier interval's ``end`` is clipped
+        down to the later interval's ``start`` and any interval that collapses
+        to zero/negative width is dropped.
+        """
 
         merged: list[dict[str, Any]] = []
         for raw in sorted(intervals, key=lambda item: (int(item["start"]), int(item["end"]), str(item["epoch_id"]))):
@@ -601,8 +666,17 @@ class StatsStore:
                 merged[-1]["end"] = max(int(merged[-1]["end"]), int(item["end"]))
                 continue
             merged.append(item)
-        truncated = len(merged) > STATS_COVERAGE_MAX_INTERVALS
-        return (merged[-STATS_COVERAGE_MAX_INTERVALS:] if truncated else merged), truncated
+        disjoint: list[dict[str, Any]] = []
+        for item in merged:
+            if disjoint and int(disjoint[-1]["end"]) > int(item["start"]):
+                disjoint[-1]["end"] = int(item["start"])
+            if disjoint and int(disjoint[-1]["end"]) <= int(disjoint[-1]["start"]):
+                disjoint.pop()
+            if int(item["end"]) <= int(item["start"]):
+                continue
+            disjoint.append(item)
+        truncated = len(disjoint) > STATS_COVERAGE_MAX_INTERVALS
+        return (disjoint[-STATS_COVERAGE_MAX_INTERVALS:] if truncated else disjoint), truncated
 
     def _legacy_coverage_intervals(
         self,
