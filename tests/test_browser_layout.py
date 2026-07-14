@@ -1466,6 +1466,8 @@ def test_debug_graph_24_hour_cost_range_reconciles_three_unknown_classes(browser
         renderDebugPanels({force: true});
         const summary = debugGraphCostSummaryForBuckets(debugGraphAgentTokenDisplayBuckets(now));
         const report = debugGraphCostReportHtml(summary, {startMs: now - (24 * 60 * 60 * 1000), endMs: now});
+        const reportFixture = document.createElement('div');
+        reportFixture.innerHTML = report;
         const card = document.querySelector('[data-js-debug-summary-group="costSummary"]');
         return {
           lower: summary.lowerMicroUsd,
@@ -1473,9 +1475,11 @@ def test_debug_graph_24_hour_cost_range_reconciles_three_unknown_classes(browser
           spread: summary.upperMicroUsd - summary.lowerMicroUsd,
           tokens: summary.unpricedTokenQuantity,
           cardText: card?.textContent || '',
-          hasCache: report.includes('openai · unknown (cache)'),
-          hasInput: report.includes('openai · unknown (input)'),
-          hasOutput: report.includes('openai · unknown (output)'),
+          disclosureLabel: reportFixture.querySelector('.js-debug-cost-unpriced-disclosure summary')?.getAttribute('aria-label') || '',
+          unpricedRows: [...reportFixture.querySelectorAll('[data-js-debug-unpriced-class]')].map(row => ({
+            label: row.cells[0]?.textContent.trim() || '',
+            tokens: row.cells[1]?.textContent.trim() || '',
+          })),
         };
         """
     )
@@ -1484,7 +1488,12 @@ def test_debug_graph_24_hour_cost_range_reconciles_three_unknown_classes(browser
     assert metrics["spread"] == 2_000_000, metrics
     assert metrics["tokens"] == 3_000, metrics
     assert "$0.3000 – $2.30" in metrics["cardText"], metrics
-    assert metrics["hasCache"] and metrics["hasInput"] and metrics["hasOutput"], metrics
+    assert metrics["disclosureLabel"] == "Unpriced model/classes: 3", metrics
+    assert {row["label"]: row["tokens"] for row in metrics["unpricedRows"]} == {
+        "openai · unknown · cache": "1.0k tokens",
+        "openai · unknown · input": "1.2k tokens",
+        "openai · unknown · output": "800 tokens",
+    }, metrics
 
 
 def test_yostats_chart_title_descriptions_cover_theme_and_pane_role(browser, tmp_path):
