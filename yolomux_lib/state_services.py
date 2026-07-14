@@ -56,6 +56,17 @@ class StatsSampleRecord:
 
 
 @dataclass
+class CpuBudgetRecord:
+    """Own sustained server-CPU warning state for the one-second CPU sampler."""
+
+    exceeded_since: float = 0.0
+    last_warning_at: float = 0.0
+    warning_emitted: bool = False
+    current_percent: float = 0.0
+    top_consumers: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class TranscriptsPayloadCacheRecord:
     stored_at: float | None = None
     payload: dict[str, Any] | None = None
@@ -105,10 +116,11 @@ class TabberActivityWarmerRecord:
 
 @dataclass
 class StatsHistoryService:
-    """Own the HTTP-process stats sample cache and token sampling cadence."""
+    """Own the elected HTTP-process metric scheduler and sample caches."""
 
     sample_lock: threading.Lock = field(default_factory=threading.Lock)
     sample_record: StatsSampleRecord = field(default_factory=StatsSampleRecord)
+    cpu_budget_record: CpuBudgetRecord = field(default_factory=CpuBudgetRecord)
     agent_token_lock: threading.Lock = field(default_factory=threading.Lock)
     agent_token_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     agent_activity_state: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -116,6 +128,13 @@ class StatsHistoryService:
     agent_token_consumer_until: float = 0.0
     agent_token_bootstrap_pending: bool = True
     agent_token_worker: threading.Thread | None = None
+    scheduler_lock: threading.RLock = field(default_factory=threading.RLock)
+    scheduler_stop_event: threading.Event = field(default_factory=threading.Event)
+    scheduler_threads: dict[str, threading.Thread] = field(default_factory=dict)
+    scheduler_family_locks: dict[str, threading.Lock] = field(default_factory=dict)
+    scheduler_wake_events: dict[str, threading.Event] = field(default_factory=dict)
+    scheduler_generation: int = 0
+    scheduler_diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -162,6 +181,18 @@ class SessionFilesService:
 
 
 @dataclass
+class IndexedRepoDiscoveryRecord:
+    """Last completed jobd repository discovery plus one in-flight job."""
+
+    indexed_dirs: tuple[str, ...] = ()
+    roots: list[str] = field(default_factory=list)
+    job_id: str = ""
+    worker: threading.Thread | None = None
+    refreshed_at: float = 0.0
+    retry_at: float = 0.0
+
+
+@dataclass
 class ActivityTranscriptService:
     """Own payload caches for activity, transcript, tail, and context-item views."""
 
@@ -181,6 +212,8 @@ class ActivityTranscriptService:
     # large JSONL belongs in jobd, never in the HTTP process cache.
     transcript_job_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
     transcript_job_records: dict[tuple[Any, ...], str] = field(default_factory=dict)
+    indexed_repo_lock: threading.RLock = field(default_factory=threading.RLock)
+    indexed_repo_record: IndexedRepoDiscoveryRecord = field(default_factory=IndexedRepoDiscoveryRecord)
 
 
 @dataclass

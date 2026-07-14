@@ -1089,6 +1089,7 @@ let jsDebugEvents = [];
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
 let jsDebugRenderForce = false;
+let jsDebugRenderDragDeferred = false;
 const clientPerfCounterLimit = 80;
 const clientPerfLongTaskSampleLimit = 40;
 const clientPerfCounters = new Map();
@@ -2197,6 +2198,39 @@ function rerenderDateTimeFormatSurfaces() {
   if (typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs();
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
 }
+const backendHealthState = {consecutiveFailures: 0};
+const backendHealthFailureThreshold = 3;
+
+function syncBackendHealthIndicator() {
+  if (!topbar) return;
+  let indicator = topbar.querySelector('[data-backend-health]');
+  const host = topbar.querySelector('.topbar-right-tools') || topbar;
+  const degraded = backendHealthState.consecutiveFailures >= backendHealthFailureThreshold;
+  if (!degraded) {
+    indicator?.remove();
+    return;
+  }
+  if (!indicator) {
+    indicator = document.createElement('span');
+    indicator.className = 'backend-health-indicator';
+    indicator.dataset.backendHealth = 'unresponsive';
+    indicator.setAttribute('role', 'status');
+    host.prepend(indicator);
+  }
+  indicator.textContent = `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`;
+}
+
+function noteBackendHealthFailure() {
+  backendHealthState.consecutiveFailures += 1;
+  syncBackendHealthIndicator();
+}
+
+function noteBackendHealthSuccess() {
+  if (!backendHealthState.consecutiveFailures) return;
+  backendHealthState.consecutiveFailures = 0;
+  syncBackendHealthIndicator();
+}
+
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
@@ -2217,9 +2251,11 @@ async function apiFetch(url, options = {}) {
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
+    noteBackendHealthFailure();
     if (apiDebugEnabled) recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
+  noteBackendHealthSuccess();
   if (apiDebugEnabled) {
     const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
     recordApiDebugResponseBytes(event, response);
@@ -2264,6 +2300,10 @@ async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
   let response;
   try {
     response = await fetch(url, requestOptions);
+    noteBackendHealthSuccess();
+  } catch (error) {
+    noteBackendHealthFailure();
+    throw error;
   } finally {
     if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.fetchMs = performanceNow() - fetchStartedAt;
   }
@@ -2738,19 +2778,35 @@ function clearJsDebugEvents() {
     jsDebugRenderTimer = null;
   }
   jsDebugRenderForce = false;
+  jsDebugRenderDragDeferred = false;
   if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
 }
 
 function scheduleJsDebugPanelRefresh(options = {}) {
   if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
   if (options.force === true) jsDebugRenderForce = true;
+  if (dragState.item != null) {
+    jsDebugRenderDragDeferred = true;
+    return;
+  }
   if (jsDebugRenderTimer) return;
   jsDebugRenderTimer = setTimeout(() => {
     jsDebugRenderTimer = null;
+    if (dragState.item != null) {
+      jsDebugRenderDragDeferred = true;
+      return;
+    }
     const force = jsDebugRenderForce;
     jsDebugRenderForce = false;
     refreshDebugPanelsFromEvents({force});
   }, jsDebugRenderDebounceMs);
+}
+
+function flushDeferredJsDebugPanelRefresh() {
+  if (!jsDebugRenderDragDeferred) return false;
+  jsDebugRenderDragDeferred = false;
+  scheduleJsDebugPanelRefresh({force: jsDebugRenderForce});
+  return true;
 }
 
 function installJsDebugEventCapture() {
@@ -2774,7 +2830,6 @@ function installJsDebugEventCapture() {
 function enableDebugMode() {
   debugModeEnabled = true;
   installJsDebugEventCapture();
-  if (typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
   scheduleJsDebugPanelRefresh();
 }
 
@@ -11694,6 +11749,7 @@ const notificationEventDefinitions = Object.freeze({
   watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
   update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
   indexCoverage: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true, dismissOnly: true}),
+  statsResolution: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true}),
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
   notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
   // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
@@ -12761,7 +12817,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
   updatePanelInactiveOverlays();
-  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: true});
+  const statsActivated = typeof jsDebugStatsLayoutItemsVisible === 'function'
+    && !jsDebugStatsLayoutItemsVisible(previousActive)
+    && jsDebugStatsLayoutItemsVisible(activeSessions);
+  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
@@ -15190,7 +15249,10 @@ async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   return requestFileExplorerFsResource('list', root, options, async () => {
       hydrateFileExplorerRepoInfoCache();
-      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: options.fresh !== true});
+      // `fresh` bypasses the completed-value TTL; it must not multiply an
+      // identical in-flight list request when several UI refresh owners fire
+      // in the same batch window.
+      const payload = await fetchFilesystemBatchItem('list', root);
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),
@@ -20271,7 +20333,7 @@ function agentWindowActivityRecord(key, create = false) {
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
-const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse';
+const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse';
 const agentWindowActivityPulseAnimationNames = new Set([
   'attention-ring-fade',
   'agent-status-acknowledgement-fade',
@@ -20349,9 +20411,10 @@ function clearAgentWindowTransitionPulseRefresh(key) {
 function mutationTouchesAgentWindowActivity(mutation) {
   for (const node of mutation?.addedNodes || []) {
     if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.classList?.contains?.('js-debug-live-pulse')) return true;
     if (node?.classList?.contains?.('status-indicator') && (node.classList.contains('heartbeat-pulse') || node.classList.contains('attention-pulse'))) return true;
     if (node?.querySelector?.('.agent-window-activity')) return true;
-    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse')) return true;
+    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse')) return true;
   }
   return false;
 }
@@ -20402,7 +20465,7 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
     : attentionAnimationDelay(nowMs);
   for (const node of nodes) {
     if (!node?.style) continue;
-    if (!node.classList?.contains?.('status-indicator') && !node.querySelector?.('.agent-window-status-dot')) continue;
+    if (!node.classList?.contains?.('status-indicator') && !node.classList?.contains?.('js-debug-live-pulse') && !node.querySelector?.('.agent-window-status-dot')) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
     if (localDelay) node.style.removeProperty('--attention-animation-delay');
     syncAgentWindowPulseAnimationCurrentTime(node, nowMs);
@@ -28288,6 +28351,7 @@ function endSessionDrag(event) {
   // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
+  flushDeferredJsDebugPanelRefresh();
   // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
   dragTimingReport();
@@ -28757,10 +28821,6 @@ function slotForTabActivation(item) {
 
 async function activateTabInExistingPane(item, options = {}) {
   if (!isLayoutItem(item)) return;
-  if (isTmuxSession(item)) {
-    const ensured = await ensureSession(item);
-    if (!ensured) return;
-  }
   const targetSlot = options.preferFocused === true
     ? (fileEditorActivationSlot() || slotForTabActivation(item))
     : slotForTabActivation(item);
@@ -28919,10 +28979,6 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
     await splitSessionAtSlot(session, targetSlot, zone, null, pct);
     return;
   }
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return;
-  }
   const next = layoutWithoutItem(session);
   if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(targetSlot);
   if (!next[targetSlot]) next[targetSlot] = emptyPlaceholderPaneState();
@@ -28939,26 +28995,15 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
   applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
-// C12 F1: is this session's terminal already attached (socket open/connecting)? A live pane does not need
-// the blocking /api/ensure-session round-trip (two tmux subprocesses) on a move — it is already running.
-function sessionTerminalIsLive(session) {
-  const readyState = terminals.get(session)?.socket?.readyState;
-  return readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING;
-}
-
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0, options = {}) {
   if (!isLayoutItem(session) || !targetSlot) return false;
   const actualSourceSlot = sourceSlot || slotForItem(session);
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, targetSlot, layoutSlots, {
     allowRequiredInGeneric: sidePaneConstrainedMode(),
   })) return false;
-  // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
-  // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
-  // still reconciles/recovers if the session turns out to be gone (its socket would no longer be live).
-  if (isTmuxSession(session) && !sessionTerminalIsLive(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return;
-  }
+  // Placement is always visual-first. applyLayoutSlots -> ensureTerminalRunning owns the
+  // asynchronous readiness check and renders the shared connecting/unavailable state while it
+  // reconciles. Never put /api/ensure-session back in this user-action critical path.
   const next = layoutWithoutItem(session, {
     // Directional Move deliberately leaves the source as an explicit drop target when its
     // final tab leaves. Ordinary tab drag/move continues to compact that now-empty slot.
@@ -29072,19 +29117,11 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
   const targetRole = paneRoleForSlot(targetSlot);
   if ((targetRole.kind === paneRoleSide && !['top', 'bottom'].includes(zone))
     || !paneRoleAllowsItemTransfer(item, actualSourceSlot, targetSlot, layoutSlots)) return false;
-  // Read this before ensureSession(). A tmux readiness round trip can let Dockview reconcile an
-  // empty source while it is pending; the directional action still owes the user the explicit peer
-  // they chose when the gesture began.
   const preserveRemovedSlot = options.preserveSourcePlaceholder === true
     && sourceSlot === targetSlot
     && paneTabs(sourceSlot).length === 1;
-  if (isTmuxSession(item)) {
-    const ensured = await ensureSession(item);
-    if (!ensured) return;
-  }
-  // ensureSession() may let Dockview adopt the same visible group under a new slot id while the
-  // readiness request is in flight. Keep a self-split attached to that live source leaf instead of
-  // replacing the stale pre-await slot name (which leaves the new pane outside the layout tree).
+  // Layout placement is synchronous, so the source cannot drift during a readiness round trip;
+  // applyLayoutSlots delegates any cold terminal reconciliation to ensureTerminalRunning.
   const liveSourceSlot = slotForItem(item) || actualSourceSlot;
   const liveTargetSlot = targetSlot === actualSourceSlot ? liveSourceSlot : targetSlot;
   // Dockview can retain an unrendered empty group from an earlier arrangement. Directional Move
@@ -29382,10 +29419,6 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
     }
   }
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {targetRole})) return false;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return false;
-  }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   if (!root) {
@@ -29410,10 +29443,6 @@ async function splitSessionAtGutter(session, splitPath, zone, sourceSlot = null,
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {
     targetRole: paneRoleDefinition(paneRoleGeneric),
   })) return false;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return false;
-  }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   const target = layoutNodeAtPath(splitPath, root);
@@ -29469,6 +29498,42 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
   return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
 }
 
+// Highlight-first tab switching (two-phase paint order). Phase 1 is synchronous DOM-only chrome:
+// update the layout state and flip the active-tab highlight in the same frame as the input so the new
+// tab lights up immediately. Phase 2 is the heavy follow-up (terminal focus/fit) run on the next
+// frame and generation-guarded, so rapid tab cycling coalesces content onto the FINAL target only and
+// never blocks the highlight paint. See docs/specs/GUI.md "Tab switch: highlight first, content
+// follows".
+let tabSwitchHighlightGeneration = 0;
+
+function nextTabSwitchHighlightGeneration() {
+  tabSwitchHighlightGeneration += 1;
+  return tabSwitchHighlightGeneration;
+}
+
+// Test hook: a positive window.__yolomuxTabSwitchPhaseTwoDelayMs deliberately slows phase 2 so a
+// browser test can prove the highlight flips in the input frame while content strictly follows.
+function tabSwitchPhaseTwoDelayMs() {
+  if (typeof window === 'undefined') return 0;
+  const raw = Number(window.__yolomuxTabSwitchPhaseTwoDelayMs);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+function scheduleTabSwitchPhaseTwo(generation, work) {
+  const run = () => {
+    // A newer switch superseded this one (rapid cycling); its highlight already tracked every step,
+    // so the intermediate targets must not do any terminal/content work.
+    if (generation !== tabSwitchHighlightGeneration) return;
+    work();
+  };
+  const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  raf(() => {
+    const delay = tabSwitchPhaseTwoDelayMs();
+    if (delay > 0) setTimeout(run, delay);
+    else run();
+  });
+}
+
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
   if (options.userInitiated === true) {
@@ -29505,6 +29570,11 @@ function activatePaneTab(side, session, options = {}) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
   }
+  const generation = nextTabSwitchHighlightGeneration();
+  // Phase 1 (synchronous, input frame): update the layout state and flip the active-tab chrome. For an
+  // active-only switch applyLayoutSlots takes Dockview's cheap pre-rendered activate path (no fromJSON)
+  // and swaps the shown pane body to the target, so the highlight paints and the previous tab's content
+  // never lingers under the new highlight.
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
@@ -29512,7 +29582,11 @@ function activatePaneTab(side, session, options = {}) {
   applyLayoutSlots(next, {focusSession: session});
   setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
-  if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
+  // Phase 2 (next frame, generation-guarded): terminal focus/fit follows the highlight and coalesces
+  // across rapid cycling so only the final target engages its xterm.
+  if (options.userInitiated && isTmuxSession(session)) {
+    scheduleTabSwitchPhaseTwo(generation, () => focusTerminalFromUserAction(session, 25));
+  }
 }
 
 async function selectSession(session, options = {}) {
@@ -31483,6 +31557,7 @@ function scheduleTerminalReconnect(session, item) {
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
   statusErr(localizedHtml('terminal.connection.reconnectingStatus', {session: sessionLabel(session), seconds}));
   showTerminalConnectionToast(session, t('terminal.connection.reconnectingToast', {seconds}), delay);
+  showTerminalConnectionState(session, 'reconnecting', t('terminal.connection.reconnectingToast', {seconds}));
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
     item.reconnectTimer = null;
@@ -32260,6 +32335,8 @@ function dockviewRootBoundaryDropIntent(event) {
 
 function dockviewPaneContentDropInfo(event) {
   if (event?.kind !== 'content' || !event.group) return null;
+  const targetSlot = dockviewSlotForGroupId(event.group.id || '');
+  const targetRect = targetSlot ? layoutSlotScreenRect(targetSlot) : null;
   const fileSurfaceContent = event.nativeEvent?.target?.closest?.(
     '.file-explorer-tree-panel, .file-explorer-changes-panel, .file-tree-row',
   );
@@ -32268,18 +32345,17 @@ function dockviewPaneContentDropInfo(event) {
   // split. Vertical Side splits remain available from the tab menu and actual pane-edge chrome.
   const zone = narrowSingleColumnMode() || fileSurfaceContent
     ? 'middle'
-    : (event.position === 'center' ? 'middle' : event.position);
+    : (event.nativeEvent && targetRect ? dropZoneForRect(event.nativeEvent, targetRect) : event.position);
   if (zone !== 'middle' && !layoutSplitZone(zone)) return null;
   const data = event.getData?.();
   const item = resolveLayoutItem(data?.panelId || '');
-  const targetSlot = dockviewSlotForGroupId(event.group.id || '');
   if (!item || !targetSlot) return null;
   const sourceSlot = slotForItem(item) || dockviewSlotForGroupId(data?.groupId || '');
   const intent = {
     item,
     sourceSlot,
     targetSlot,
-    targetRect: layoutSlotScreenRect(targetSlot),
+    targetRect,
     zone,
     createsPane: layoutSplitZone(zone),
   };
@@ -32848,6 +32924,9 @@ function dockviewFinishTabPointerDrag(event) {
     && dropIntentAllowsSession(state.item, contentIntent)
   ) {
     window.setTimeout(() => {
+      // Dockview's onWillDrop may have committed an edge split after the document-level pointer
+      // fallback queued this center move. Do not collapse that newer app-owned transaction.
+      if (Date.now() - (Number(dockviewLayoutState.tabDropHandledAt) || 0) < 800) return;
       if (slotForItem(state.item) === contentTargetSlot) return;
       void moveSessionToSlot(state.item, contentTargetSlot, state.slot, paneTabs(contentTargetSlot).length);
     }, 0);
@@ -33441,6 +33520,7 @@ function dockviewInit() {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
+        dockviewLayoutState.tabDropHandledAt = Date.now();
         queueMicrotask(() => {
           void splitSessionAtSlot(paneIntent.item, paneIntent.targetSlot, paneIntent.zone, paneIntent.sourceSlot);
         });
@@ -40831,7 +40911,7 @@ function preferenceSections() {
     {id: PREFERENCE_SECTION_IDS.uploads, title: t('pref.section.uploads'), items: [
       preferenceSettingItem('uploads.max_bytes', {type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576}),
       preferenceSettingItem('uploads.filename_template', {type: 'text', wide: true}),
-      preferenceSettingItem('uploads.subdir', {type: 'text'}),
+      preferenceSettingItem('uploads.retention_days', {type: 'number', min: 1, max: 365, step: 1}),
       preferenceSettingItem('uploads.show_suggestions', {type: 'boolean'}),
       preferenceSettingItem('uploads.suggestion_autorun', {type: 'boolean'}),
       preferenceSettingItem('uploads.image_action_order', {type: 'list', wide: true, rows: 7, maxItems: 9, autosize: true}),
@@ -41509,6 +41589,7 @@ const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older',
 const jsDebugHistoryOlderOverlayDelayMs = 120;
 const jsDebugHistoryRetryInitialDelayMs = 10_000;
 const jsDebugHistoryRetryMaxDelayMs = 5 * 60_000;
+const jsDebugHistoryCoverageIntervalLimit = 256;
 const jsDebugHistoryReadiness = {
   phase: 'idle',
   requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
@@ -41521,6 +41602,8 @@ const jsDebugHistoryReadiness = {
   loadedEndSeconds: 0,
   resolutionSeconds: 0,
   coverageIntervals: [],
+  requestCoverageIntervals: [],
+  storeCoverageIntervals: {},
   attemptCount: 0,
   error: '',
   generation: 0,
@@ -41549,6 +41632,11 @@ const jsDebugLogsState = {
 };
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugGraphResolutionOverrideSeconds = 0;
+// When a Resolution change needs a history fetch, this holds the value to restore and the
+// history generation to match so a stale response cannot revert a newer request. Cleared
+// on the matching ready (success) or error (revert + toast). Null when the last change was
+// served from cache (instant, no overlay).
+let jsDebugGraphPendingResolutionChange = null;
 let jsDebugGraphChartLayout = 0;
 const jsDebugStatsPollState = {
   inFlight: false,
@@ -41576,6 +41664,10 @@ let jsDebugStatsDisconnectStartedAtMs = null;
 let jsDebugGraphZoomDomain = null;
 let jsDebugGraphSelectionState = null;
 let jsDebugGraphRangeSliderDragging = false;
+let jsDebugGraphLiveFrame = 0;
+let jsDebugGraphLiveFrameLastMs = 0;
+let jsDebugCostAgeNextRefreshAtMs = 0;
+let jsDebugCostPanelNextRefreshAtMs = 0;
 let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
@@ -41593,7 +41685,6 @@ const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', time
 const jsDebugCostComponentSortState = {key: 'cost', direction: 'desc'};
 const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
-  {seconds: 60, label: '1m'},
   {seconds: 5 * 60, label: '5m'},
   {seconds: 15 * 60, label: '15m'},
   {seconds: 30 * 60, label: '30m'},
@@ -41607,6 +41698,20 @@ const jsDebugGraphRangeOptions = Object.freeze([
 const jsDebugGraphRetentionMs = 24 * 60 * 60 * 1000;
 const jsDebugGraphMaxDisplayPoints = 120;
 const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
+// User-directed Resolution picker universe. Deliberately DECOUPLED from the AUTO
+// effective-resolution set (jsDebugGraphDisplayBucketMs): each of these four values
+// maps 1:1 onto a stored tier (raw 1s + persisted 10/60/300s rollups) so an explicit
+// pick is served straight from a precomputed tier with no server-side re-aggregation.
+// AUTO/effective clamping may still RENDER coarser values (e.g. 600s for the oldest
+// retention windows) — that honest retained resolution is shown in the label, not the
+// picker. Persisted/deeplinked out-of-set overrides normalize into this set.
+const jsDebugGraphResolutionChoices = Object.freeze([1, 10, 60, 300]);
+// Rendered-point cap for EXPLICIT overrides. AUTO is already bounded by
+// jsDebugGraphMaxDisplayPoints; an explicit override that would render more than this
+// many buckets for the current domain is clamped up to the finest universe choice that
+// stays within budget (the label then shows the effective, coarser value). This is what
+// keeps a fine override from ballooning render time + RAM on a wide domain.
+const jsDebugGraphOverridePointCap = 600;
 const jsDebugGraphTiers = Object.freeze([
   Object.freeze({maxAgeMs: 30 * 60 * 1000, bucketMs: 1000}),
   Object.freeze({maxAgeMs: 2 * 60 * 60 * 1000, bucketMs: 10 * 1000}),
@@ -41623,6 +41728,8 @@ const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
 const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
+const jsDebugStatsCoarsePollMs = 60001;
+const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
 const jsDebugStatsHistoryFlushMs = 30000;
@@ -41637,9 +41744,13 @@ const jsDebugStatsHistoryPostMaxBytes = 96 * 1024;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['serversLoad', 'memory', 'gpuUtil', 'gpuMemory', 'costSummary']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
+const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
+  tenSecondGauge: 10 * 1000,
+  minuteGauge: 60 * 1000,
+});
 const jsDebugGraphThisClientId = 'this-client';
 const jsDebugGraphOtherClientsAverageId = 'other-clients-average';
 const jsDebugGraphThisClientAggregate = 'thisClient';
@@ -41780,10 +41891,17 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
-  {key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid', value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0, hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0},
+  {
+    key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid',
+    value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0,
+    hasData: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    sampleCount: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0),
+    displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
+  },
 ]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Servers load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: 10},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
@@ -41828,12 +41946,14 @@ function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
   const seconds = Number(value);
   const options = debugGraphAvailableRangeOptions(nowMs);
   if (options.some(option => option.seconds === seconds)) return seconds;
+  if (seconds === 60) return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
   if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
   return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
 }
 
 function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
+  syncDebugGraphResolutionOverride(nowMs, {persist: true});
   return jsDebugGraphRangeSeconds;
 }
 
@@ -41847,9 +41967,7 @@ function loadJsDebugStatsUiPreferences() {
   }
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
   jsDebugSubTab = normalizedJsDebugSubTab(saved.subTab);
-  jsDebugGraphRangeSeconds = jsDebugGraphRangeOptions.some(option => option.seconds === Number(saved.rangeSeconds))
-    ? Number(saved.rangeSeconds)
-    : jsDebugGraphDefaultRangeSeconds;
+  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
   jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
   jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === String(saved.modelTokenDimension || ''))
@@ -41861,6 +41979,7 @@ function loadJsDebugStatsUiPreferences() {
   for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
   jsDebugGraphHiddenCharts = hidden;
   jsDebugGraphVisibleCharts = visible;
+  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
 }
 
 function saveJsDebugStatsUiPreferences() {
@@ -41904,7 +42023,10 @@ function setDebugGraphChartVisible(key, visible) {
     jsDebugGraphVisibleCharts.delete(chartKey);
   }
   saveJsDebugStatsUiPreferences();
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
+  // while a graph control is focused, but deferring the user's own activation
+  // leaves aria-pressed and the chart body visibly stale until focus moves.
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
 }
 
 function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
@@ -41937,6 +42059,8 @@ function jsDebugHistoryReadinessSnapshot() {
     loadedEndSeconds: state.loadedEndSeconds,
     resolutionSeconds: state.resolutionSeconds,
     coverageIntervals: state.coverageIntervals.map(interval => ({...interval})),
+    requestCoverageIntervals: state.requestCoverageIntervals.map(interval => ({...interval})),
+    storeCoverageIntervals: Object.fromEntries(Object.entries(state.storeCoverageIntervals || {}).map(([key, intervals]) => [key, intervals.map(interval => ({...interval}))])),
     attemptCount: state.attemptCount,
     error: state.error,
     generation: state.generation,
@@ -41953,7 +42077,7 @@ function jsDebugHistoryRetryDelayMs(attemptCount = jsDebugHistoryReadiness.attem
 }
 
 function jsDebugHistoryAutoRetryDue(state = jsDebugHistoryReadiness, nowMs = performanceNow()) {
-  return state.phase !== 'error' || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
+  return !['error', 'retrying'].includes(state.phase) || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
 }
 
 function clearJsDebugHistoryOverlayTimer() {
@@ -41989,7 +42113,7 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
   const wasBusy = jsDebugHistoryReadinessBusy(state);
   const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
   clearJsDebugHistoryOverlayTimer();
-  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs', 'nextAutoRetryAtMs']) {
+  for (const field of ['requestedRangeSeconds', 'targetStartSeconds', 'targetEndSeconds', 'requestedStartSeconds', 'requestedEndSeconds', 'requestedResolutionSeconds', 'loadedStartSeconds', 'loadedEndSeconds', 'resolutionSeconds', 'coverageIntervals', 'requestCoverageIntervals', 'storeCoverageIntervals', 'attemptCount', 'error', 'generation', 'loadingStartedAtMs', 'nextAutoRetryAtMs']) {
     if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
   }
   state.phase = nextPhase;
@@ -42009,6 +42133,7 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
     state.loadingStartedAtMs = 0;
   }
   syncJsDebugHistoryReadinessSurfaces();
+  resolveDebugGraphResolutionChange(state);
   return jsDebugHistoryReadinessSnapshot();
 }
 
@@ -42016,7 +42141,7 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
   const phase = retry ? 'retrying' : (Number(state.loadedStartSeconds) > 0 ? 'loading-older' : 'loading-initial');
-  return setJsDebugHistoryReadiness(phase, {
+  const snapshot = setJsDebugHistoryReadiness(phase, {
     requestedRangeSeconds: jsDebugGraphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
@@ -42029,6 +42154,8 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
     loadingStartedAtMs: performanceNow(),
     nextAutoRetryAtMs: 0,
   });
+  if (retry) recordJsDebugStatsDiagnostic('warning', `retry entered (attempt ${snapshot.attemptCount}) for unavailable history coverage`);
+  return snapshot;
 }
 
 function jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds) {
@@ -42041,22 +42168,102 @@ function jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, reque
 function normalizedJsDebugHistoryCoverage(history = {}) {
   const raw = history?.coverage;
   if (!raw || typeof raw !== 'object') return null;
+  const fallbackResolution = Number(raw.resolution_seconds);
+  const fallbackSourceResolution = Number(raw.source_resolution_seconds);
+  const normalizeIntervals = intervals => {
+    if (!Array.isArray(intervals) || intervals.length > jsDebugHistoryCoverageIntervalLimit) return null;
+    const normalized = [];
+    for (const interval of intervals) {
+      if (!interval || typeof interval !== 'object' || Array.isArray(interval)) return null;
+      const startSeconds = Number(interval.start ?? interval.start_seconds);
+      const endSeconds = Number(interval.end ?? interval.end_seconds);
+      const resolutionSeconds = Number(interval.resolution_seconds ?? interval.resolution ?? fallbackResolution);
+      const sourceResolutionSeconds = Number(interval.source_resolution_seconds ?? interval.source_resolution ?? fallbackSourceResolution) || 0;
+      if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return null;
+      if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return null;
+      if (!Number.isFinite(sourceResolutionSeconds) || sourceResolutionSeconds < 0) return null;
+      normalized.push({
+        startSeconds,
+        endSeconds,
+        resolutionSeconds,
+        sourceResolutionSeconds,
+        ...(interval.epoch_id != null ? {epochId: String(interval.epoch_id)} : {}),
+      });
+    }
+    return mergeJsDebugHistoryCoverageIntervals(normalized);
+  };
+  const intervals = normalizeIntervals(raw.intervals);
+  if (!intervals) return null;
+  const rawStores = raw.store_intervals ?? raw.family_intervals ?? {};
+  if (!rawStores || typeof rawStores !== 'object' || Array.isArray(rawStores)) return null;
+  const storeIntervals = {};
+  for (const [key, value] of Object.entries(rawStores)) {
+    const normalized = normalizeIntervals(value);
+    if (!normalized) return null;
+    storeIntervals[String(key)] = normalized;
+  }
+  const intervalStart = intervals.length ? Math.min(...intervals.map(interval => interval.startSeconds)) : 0;
+  const intervalEnd = intervals.length ? Math.max(...intervals.map(interval => interval.endSeconds)) : 0;
   const coverage = {
     mode: raw.mode === 'older' ? 'older' : 'live',
     requestedStart: Number(raw.requested_start),
     requestedEnd: Number(raw.requested_end),
-    coveredStart: Number(raw.covered_start),
-    coveredEnd: Number(raw.covered_end),
-    resolutionSeconds: Number(raw.resolution_seconds),
-    sourceResolutionSeconds: Number(raw.source_resolution_seconds),
+    coveredStart: intervalStart,
+    coveredEnd: intervalEnd,
+    resolutionSeconds: Number.isFinite(fallbackResolution) && fallbackResolution > 0 ? fallbackResolution : (intervals[0]?.resolutionSeconds || 1),
+    sourceResolutionSeconds: Number.isFinite(fallbackSourceResolution) && fallbackSourceResolution > 0 ? fallbackSourceResolution : 0,
     complete: raw.complete === true,
     hasMoreOlder: raw.has_more_older === true,
     nextOlderEnd: Number(raw.next_older_end),
+    intervals,
+    storeIntervals,
+    epochs: Array.isArray(raw.epochs) ? raw.epochs.slice(0, jsDebugHistoryCoverageIntervalLimit) : [],
   };
-  if (!Number.isFinite(coverage.coveredStart) || !Number.isFinite(coverage.coveredEnd) || coverage.coveredEnd < coverage.coveredStart) return null;
   if (!Number.isFinite(coverage.resolutionSeconds) || coverage.resolutionSeconds <= 0) coverage.resolutionSeconds = 1;
   if (!Number.isFinite(coverage.sourceResolutionSeconds) || coverage.sourceResolutionSeconds <= 0) coverage.sourceResolutionSeconds = 0;
   return coverage;
+}
+
+function normalizedJsDebugHistoryPending(history = {}) {
+  const coverage = history?.coverage;
+  if (!coverage || typeof coverage !== 'object' || coverage.pending !== true) return null;
+  const retrySeconds = Number(coverage.retry_after_seconds ?? coverage.retry_after_s ?? 1);
+  return {
+    retryAfterMs: Math.max(1000, Math.min(60_000, Number.isFinite(retrySeconds) ? retrySeconds * 1000 : 1000)),
+    reason: String(coverage.reason || 'Backfill in progress'),
+  };
+}
+
+function jsDebugHistoryIntervalSummary(intervals) {
+  const values = Array.isArray(intervals) ? intervals : [];
+  if (!values.length) return '0 intervals';
+  const start = Math.min(...values.map(interval => Number(interval.startSeconds)));
+  const end = Math.max(...values.map(interval => Number(interval.endSeconds)));
+  return `${values.length} interval${values.length === 1 ? '' : 's'} [${Math.floor(start)}..${Math.ceil(end)}]`;
+}
+
+function recordJsDebugHistoryCoverageDiagnostic(coverage, request) {
+  const requestStart = Number(request?.targetStartSeconds ?? coverage?.requestedStart);
+  const requestEnd = Number(request?.targetEndSeconds ?? coverage?.requestedEnd);
+  const stores = Object.entries(coverage?.storeIntervals || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, intervals]) => `${key}=${jsDebugHistoryIntervalSummary(intervals)}`)
+    .join(', ') || 'compatibility-global';
+  const explicitEpochs = Array.isArray(coverage?.epochs) ? coverage.epochs : [];
+  const intervalEpochs = [...(coverage?.intervals || []), ...Object.values(coverage?.storeIntervals || {}).flat()]
+    .filter(interval => interval?.epochId != null)
+    .map(interval => ({id: interval.epochId, start: interval.startSeconds, end: interval.endSeconds}));
+  const epochRows = explicitEpochs.length ? explicitEpochs : intervalEpochs;
+  const epochIds = new Set(epochRows.map(epoch => String(epoch?.id ?? epoch?.epoch_id ?? 'boundary')));
+  const epochStarts = epochRows.map(epoch => Number(epoch?.start ?? epoch?.start_seconds)).filter(Number.isFinite);
+  const epochEnds = epochRows.map(epoch => Number(epoch?.end ?? epoch?.end_seconds)).filter(Number.isFinite);
+  const epochSummary = epochRows.length
+    ? `${epochIds.size}${epochStarts.length && epochEnds.length ? ` [${Math.floor(Math.min(...epochStarts))}..${Math.ceil(Math.max(...epochEnds))}]` : ''}`
+    : '0';
+  recordJsDebugStatsDiagnostic(
+    'info',
+    `coverage accepted: requested [${Math.floor(requestStart)}..${Math.ceil(requestEnd)}], global=${jsDebugHistoryIntervalSummary(coverage?.intervals)}, stores: ${stores}, epochs=${epochSummary}`,
+  );
 }
 
 function mergeJsDebugHistoryCoverageIntervals(intervals) {
@@ -42067,28 +42274,48 @@ function mergeJsDebugHistoryCoverageIntervals(intervals) {
     const start = Number(interval?.startSeconds);
     const end = Number(interval?.endSeconds);
     if (!Number.isFinite(resolution) || resolution <= 0 || !Number.isFinite(start) || end <= start) continue;
-    const key = `${resolution}:${sourceResolution}`;
+    const epochId = interval?.epochId == null ? '' : String(interval.epochId);
+    const key = `${resolution}:${sourceResolution}:${epochId}`;
     if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution, sourceResolutionSeconds: sourceResolution});
+    grouped.get(key).push({startSeconds: start, endSeconds: end, resolutionSeconds: resolution, sourceResolutionSeconds: sourceResolution, ...(epochId ? {epochId} : {})});
   }
   const output = [];
-  for (const [resolution, items] of grouped.entries()) {
+  for (const items of grouped.values()) {
     items.sort((left, right) => left.startSeconds - right.startSeconds || right.endSeconds - left.endSeconds);
     for (const item of items) {
       const previous = output.at(-1);
-      if (previous?.resolutionSeconds === resolution && previous.sourceResolutionSeconds === sourceResolution && item.startSeconds <= previous.endSeconds) {
+      if (previous?.resolutionSeconds === item.resolutionSeconds && previous.sourceResolutionSeconds === item.sourceResolutionSeconds && previous.epochId === item.epochId && item.startSeconds <= previous.endSeconds) {
         previous.endSeconds = Math.max(previous.endSeconds, item.endSeconds);
       } else {
         output.push({...item});
       }
     }
   }
-  return output;
+  return output.sort((left, right) => left.startSeconds - right.startSeconds || left.endSeconds - right.endSeconds);
 }
 
-function applyJsDebugHistoryCoverage(coverage) {
+function jsDebugHistoryReplaceIntervals(existing, replacement, startSeconds, endSeconds) {
+  const kept = (existing || []).flatMap(interval => {
+    if (interval.endSeconds <= startSeconds || interval.startSeconds >= endSeconds) return [interval];
+    const pieces = [];
+    if (interval.startSeconds < startSeconds) pieces.push({...interval, endSeconds: startSeconds});
+    if (interval.endSeconds > endSeconds) pieces.push({...interval, startSeconds: endSeconds});
+    return pieces;
+  });
+  return mergeJsDebugHistoryCoverageIntervals([...kept, ...(replacement || [])]);
+}
+
+function applyJsDebugHistoryCoverage(coverage, request = null) {
   if (!coverage) return jsDebugHistoryReadinessSnapshot();
   const state = jsDebugHistoryReadiness;
+  const actualIntervals = Array.isArray(coverage.intervals)
+    ? coverage.intervals
+    : (coverage.coveredEnd > coverage.coveredStart ? [{
+        startSeconds: coverage.coveredStart,
+        endSeconds: coverage.coveredEnd,
+        resolutionSeconds: coverage.resolutionSeconds,
+        sourceResolutionSeconds: coverage.sourceResolutionSeconds,
+      }] : []);
   if (coverage.coveredStart > 0) {
     state.loadedStartSeconds = Number(state.loadedStartSeconds) > 0
       ? Math.min(Number(state.loadedStartSeconds), coverage.coveredStart)
@@ -42096,19 +42323,30 @@ function applyJsDebugHistoryCoverage(coverage) {
   }
   if (coverage.coveredEnd > 0) state.loadedEndSeconds = Math.max(Number(state.loadedEndSeconds) || 0, coverage.coveredEnd);
   state.resolutionSeconds = coverage.resolutionSeconds;
-  // A live cursor response is only a delta, not proof that the older prefix is
-  // present.  Keep the server's exact durable interval: marking it through
-  // Infinity was what let a later partial response erase visible CPU points.
-  const satisfiedStart = coverage.coveredStart;
-  // Only an explicitly complete live response can satisfy the moving tail.
-  // A partial live delta retains its exact durable interval above.
-  const satisfiedEnd = coverage.complete && coverage.mode === 'live'
-    ? Infinity
-    : coverage.coveredEnd;
-  if (coverage.complete && satisfiedEnd > satisfiedStart) {
-    state.coverageIntervals = mergeJsDebugHistoryCoverageIntervals([
-      ...state.coverageIntervals,
-      {startSeconds: satisfiedStart, endSeconds: satisfiedEnd, resolutionSeconds: coverage.resolutionSeconds, sourceResolutionSeconds: coverage.sourceResolutionSeconds},
+  const targetStart = Number(request?.targetStartSeconds ?? coverage.requestedStart);
+  const targetEnd = Number(request?.targetEndSeconds ?? coverage.requestedEnd);
+  const intervalStart = actualIntervals.length ? Math.min(...actualIntervals.map(interval => interval.startSeconds)) : targetStart;
+  const requestStart = coverage.mode === 'older'
+    ? Number(coverage.requestedStart)
+    : (coverage.hasMoreOlder ? intervalStart : targetStart);
+  const olderEnd = Number(coverage.requestedEnd);
+  const requestEnd = coverage.mode === 'older' && olderEnd > requestStart
+    ? olderEnd
+    : (targetEnd > requestStart ? targetEnd : Math.max(coverage.coveredEnd, requestStart));
+  if (requestEnd > requestStart) {
+    state.coverageIntervals = jsDebugHistoryReplaceIntervals(state.coverageIntervals, actualIntervals, requestStart, requestEnd);
+    const storeKeys = new Set([...Object.keys(state.storeCoverageIntervals || {}), ...Object.keys(coverage.storeIntervals || {})]);
+    const nextStores = {...state.storeCoverageIntervals};
+    for (const key of storeKeys) {
+      const replacement = Object.prototype.hasOwnProperty.call(coverage.storeIntervals || {}, key)
+        ? coverage.storeIntervals[key]
+        : actualIntervals;
+      nextStores[key] = jsDebugHistoryReplaceIntervals(nextStores[key] || [], replacement, requestStart, requestEnd);
+    }
+    state.storeCoverageIntervals = nextStores;
+    state.requestCoverageIntervals = mergeJsDebugHistoryCoverageIntervals([
+      ...state.requestCoverageIntervals,
+      {startSeconds: requestStart, endSeconds: requestEnd, resolutionSeconds: coverage.resolutionSeconds, sourceResolutionSeconds: coverage.sourceResolutionSeconds},
     ]);
   }
   if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd)) {
@@ -42118,7 +42356,7 @@ function applyJsDebugHistoryCoverage(coverage) {
 }
 
 function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
-  const intervals = jsDebugHistoryReadiness.coverageIntervals
+  const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
     .filter(interval => Number(interval.resolutionSeconds) <= Math.max(maxResolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
     .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
   let cursor = startSeconds;
@@ -42136,7 +42374,7 @@ function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResoluti
 }
 
 function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
-  const resolutions = [...new Set(jsDebugHistoryReadiness.coverageIntervals.map(interval => Number(interval.resolutionSeconds)))]
+  const resolutions = [...new Set(jsDebugHistoryReadiness.requestCoverageIntervals.map(interval => Number(interval.resolutionSeconds)))]
     .filter(resolution => Number.isFinite(resolution) && resolution > 0)
     .sort((left, right) => left - right);
   return resolutions.find(resolution => jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolution)) ?? Infinity;
@@ -42144,7 +42382,22 @@ function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
 
 function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return true;
-  return !jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds);
+  if (jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds)) return false;
+  const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
+    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(resolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
+    .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
+  let cursor = startSeconds;
+  for (const interval of intervals) {
+    const intervalStart = Number(interval.startSeconds);
+    const intervalEnd = Number(interval.endSeconds);
+    if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
+    if (intervalStart > cursor) return true;
+    cursor = Math.max(cursor, intervalEnd);
+  }
+  // A continuously covered prefix is enough for an ordinary incremental poll:
+  // its sequence cursor supplies the newly elapsed live tail. Older-prefix,
+  // interior-gap, and finer-resolution requests still require a full snapshot.
+  return cursor <= startSeconds;
 }
 
 function jsDebugRequestedHistoryResolutionSeconds() {
@@ -42185,6 +42438,8 @@ function resetJsDebugHistoryReadiness() {
     loadedEndSeconds: 0,
     resolutionSeconds: 0,
     coverageIntervals: [],
+    requestCoverageIntervals: [],
+    storeCoverageIntervals: {},
     attemptCount: 0,
     error: '',
     generation: Number(jsDebugHistoryReadiness.generation || 0) + 1,
@@ -42202,11 +42457,11 @@ function debugGraphZoomDomainValid(domain = jsDebugGraphZoomDomain) {
 function clearDebugGraphZoom({render = true} = {}) {
   jsDebugGraphZoomDomain = null;
   jsDebugGraphSelectionState = null;
+  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
   if (!render) return;
-  if (requestJsDebugHistoryForCurrentDomain()) return;
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    refreshDebugGraphElement(graph, {force: true});
-  }
+  syncJsDebugStatsDeliveryMode();
+  requestJsDebugHistoryForCurrentDomain();
+  refreshDebugGraphSurfaces();
 }
 
 function debugEventCounts() {
@@ -42281,10 +42536,15 @@ function debugEventDetailText(event) {
 }
 
 function debugClientLogLevel(event) {
+  if (event?.type === 'stats_history' && jsDebugLogLevels.includes(String(event?.level || ''))) return String(event.level);
   if (event?.type === 'error' || event?.type === 'unhandledrejection' || event?.error || Number(event?.status || 0) >= 500) return 'error';
   if (Number(event?.status || 0) >= 400 || event?.ok === false) return 'warning';
   if (event?.type === 'sse') return 'debug';
   return 'info';
+}
+
+function recordJsDebugStatsDiagnostic(level, message) {
+  recordJsDebugEvent('stats_history', {level, message: `YO!stats: ${message}`});
 }
 
 function debugClientLogRecord(event, index = 0) {
@@ -42539,6 +42799,7 @@ function debugGraphNewHostMetrics() {
     gpuUtilProcesses: new Map(),
     gpuMemoryProcesses: new Map(),
     gpuDevices: new Map(),
+    serviceLoad: new Map(),
   };
 }
 
@@ -42774,85 +43035,110 @@ function debugGraphQueueServerDelta(bucket, data = {}) {
   scheduleJsDebugStatsHistoryFlush();
 }
 
-function debugGraphMergeAgentTokenRates(target, source) {
+function debugGraphMergeAgentTokenRates(target, source, multiplier = 1) {
   if (!(source?.agentTokenRates instanceof Map)) return;
+  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
+  if (!scale) return;
   if (!(target.agentTokenRates instanceof Map)) target.agentTokenRates = new Map();
   for (const [key, item] of source.agentTokenRates.entries()) {
     const existing = target.agentTokenRates.get(String(key)) || {label: item?.label || String(key), total: 0, samples: 0, tokens: 0, seconds: 0};
     existing.label = item?.label || existing.label;
-    existing.total += Number(item?.total || 0);
-    existing.samples += Number(item?.samples || 0);
-    existing.tokens += Number(item?.tokens || 0);
-    existing.seconds += Number(item?.seconds || 0);
+    existing.total += Number(item?.total || 0) * scale;
+    existing.samples += Number(item?.samples || 0) * scale;
+    existing.tokens += Number(item?.tokens || 0) * scale;
+    existing.seconds += Number(item?.seconds || 0) * scale;
+    existing.billableAvailable = existing.billableAvailable === true || item?.billableAvailable === true;
+    if (!existing.billableTokens || typeof existing.billableTokens !== 'object') {
+      existing.billableTokens = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    if (!existing.billableSamples || typeof existing.billableSamples !== 'object') {
+      existing.billableSamples = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    for (const dimension of ['input', 'cacheRead', 'cacheWrite', 'all']) {
+      existing.billableTokens[dimension] += Number(item?.billableTokens?.[dimension] || 0) * scale;
+      existing.billableSamples[dimension] += Number(item?.billableSamples?.[dimension] || 0) * scale;
+    }
     if (!(existing.modelRates instanceof Map)) existing.modelRates = new Map();
     const sourceModelRates = item?.modelRates instanceof Map
       ? item.modelRates
       : new Map(Array.isArray(item?.modelRates) ? item.modelRates : []);
     for (const [model, sourceRate] of sourceModelRates.entries()) {
       const targetRate = existing.modelRates.get(String(model)) || {total: 0, samples: 0, tokens: 0, seconds: 0};
-      targetRate.total += Number(sourceRate?.total || 0);
-      targetRate.samples += Number(sourceRate?.samples || 0);
-      targetRate.tokens += Number(sourceRate?.tokens || 0);
-      targetRate.seconds += Number(sourceRate?.seconds || 0);
+      targetRate.total += Number(sourceRate?.total || 0) * scale;
+      targetRate.samples += Number(sourceRate?.samples || 0) * scale;
+      targetRate.tokens += Number(sourceRate?.tokens || 0) * scale;
+      targetRate.seconds += Number(sourceRate?.seconds || 0) * scale;
       existing.modelRates.set(String(model), targetRate);
     }
     target.agentTokenRates.set(String(key), existing);
   }
 }
 
-function debugGraphMergeCostSummary(target, source) {
+function debugGraphMergeCostSummary(target, source, multiplier = 1) {
   if (!source?.costSummary) return;
+  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
+  if (!scale) return;
   const current = target.costSummary || {
     totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
     components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
   };
-  current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd);
-  current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd);
-  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd);
-  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd);
-  current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount);
+  current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd) * scale;
+  current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd) * scale;
+  current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
+  current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
+  current.pricedCount += debugGraphCostInteger(source.costSummary.pricedCount) * scale;
   current.complete = current.complete && source.costSummary.complete === true;
-  current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount);
-  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0);
-  current.components.push(...debugGraphCostRows(source.costSummary.components));
-  current.models.push(...debugGraphCostRows(source.costSummary.models));
-  current.sources.push(...debugGraphCostRows(source.costSummary.sources));
-  current.tmuxWindows.push(...debugGraphCostRows(source.costSummary.tmuxWindows));
+  current.unpricedCount += debugGraphCostInteger(source.costSummary.unpricedCount) * scale;
+  current.unpricedTokenQuantity += Math.max(0, Number(source.costSummary.unpricedTokenQuantity) || 0) * scale;
+  const scaledRows = value => debugGraphCostRows(value).map(row => {
+    if (scale === 1) return row;
+    const scaled = {...row};
+    for (const key of ['quantity', 'token_quantity', 'micro_usd', 'total_micro_usd', 'cost_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
+      if (Number.isFinite(Number(scaled[key]))) scaled[key] = Number(scaled[key]) * scale;
+    }
+    return scaled;
+  });
+  current.components.push(...scaledRows(source.costSummary.components));
+  current.models.push(...scaledRows(source.costSummary.models));
+  current.sources.push(...scaledRows(source.costSummary.sources));
+  current.tmuxWindows.push(...scaledRows(source.costSummary.tmuxWindows));
   current.catalogRevision = source.costSummary.catalogRevision || current.catalogRevision;
   current.activeCatalogRevision = source.costSummary.activeCatalogRevision || current.activeCatalogRevision;
   current.freshness = source.costSummary.freshness || current.freshness;
   target.costSummary = current;
 }
 
-function debugGraphMergeBucket(target, source) {
-  target.apiCount += source.apiCount || 0;
-  target.sseCount += source.sseCount || 0;
-  target.latencyTotalMs += source.latencyTotalMs || 0;
-  target.latencyCount += source.latencyCount || 0;
-  target.bandwidthBytes += source.bandwidthBytes || 0;
-  target.disconnectedMs += source.disconnectedMs || 0;
-  target.cpuTotalPercent += source.cpuTotalPercent || 0;
-  target.cpuCount += source.cpuCount || 0;
-  target.systemCpuTotalPercent += source.systemCpuTotalPercent || 0;
-  target.systemCpuCount += source.systemCpuCount || 0;
-  target.askAgentTotal += source.askAgentTotal || 0;
-  target.runAgentTotal += source.runAgentTotal || 0;
-  target.transitionAgentTotal += source.transitionAgentTotal || 0;
-  target.idleAgentTotal += source.idleAgentTotal || 0;
-  target.activeAgentTotal += source.activeAgentTotal || 0;
-  target.inactiveAgentTotal += source.inactiveAgentTotal || 0;
-  target.agentActivitySamples += source.agentActivitySamples || 0;
+function debugGraphMergeBucket(target, source, multiplier = 1) {
+  const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
+  if (!scale) return;
+  target.apiCount += (source.apiCount || 0) * scale;
+  target.sseCount += (source.sseCount || 0) * scale;
+  target.latencyTotalMs += (source.latencyTotalMs || 0) * scale;
+  target.latencyCount += (source.latencyCount || 0) * scale;
+  target.bandwidthBytes += (source.bandwidthBytes || 0) * scale;
+  target.disconnectedMs += (source.disconnectedMs || 0) * scale;
+  target.cpuTotalPercent += (source.cpuTotalPercent || 0) * scale;
+  target.cpuCount += (source.cpuCount || 0) * scale;
+  target.systemCpuTotalPercent += (source.systemCpuTotalPercent || 0) * scale;
+  target.systemCpuCount += (source.systemCpuCount || 0) * scale;
+  target.askAgentTotal += (source.askAgentTotal || 0) * scale;
+  target.runAgentTotal += (source.runAgentTotal || 0) * scale;
+  target.transitionAgentTotal += (source.transitionAgentTotal || 0) * scale;
+  target.idleAgentTotal += (source.idleAgentTotal || 0) * scale;
+  target.activeAgentTotal += (source.activeAgentTotal || 0) * scale;
+  target.inactiveAgentTotal += (source.inactiveAgentTotal || 0) * scale;
+  target.agentActivitySamples += (source.agentActivitySamples || 0) * scale;
   target.agentStatusSequence = Math.max(Number(target.agentStatusSequence ?? -1), Number(source.agentStatusSequence ?? -1));
-  target.tokensPerAgentTotal += source.tokensPerAgentTotal || 0;
-  target.agentTokenSamples += source.agentTokenSamples || 0;
-  debugGraphMergeAgentTokenRates(target, source);
-  debugGraphMergeCostSummary(target, source);
+  target.tokensPerAgentTotal += (source.tokensPerAgentTotal || 0) * scale;
+  target.agentTokenSamples += (source.agentTokenSamples || 0) * scale;
+  debugGraphMergeAgentTokenRates(target, source, scale);
+  debugGraphMergeCostSummary(target, source, scale);
   const sourceHost = source.hostMetrics;
   if (sourceHost) {
     const targetHost = target.hostMetrics || (target.hostMetrics = debugGraphNewHostMetrics());
-    targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0);
-    targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0);
-    targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0);
+    targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0) * scale;
+    targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0) * scale;
+    targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0) * scale;
     if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
     if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
@@ -42865,8 +43151,8 @@ function debugGraphMergeBucket(target, source) {
       for (const [key, sourceItem] of sourceMap.entries()) {
         const item = targetMap.get(key) || {label: sourceItem.label || key, [valueKey]: 0, samples: 0};
         item.label = sourceItem.label || item.label;
-        item[valueKey] += Number(sourceItem[valueKey] || 0);
-        item.samples += Number(sourceItem.samples || 0);
+        item[valueKey] += Number(sourceItem[valueKey] || 0) * scale;
+        item.samples += Number(sourceItem.samples || 0) * scale;
         targetMap.set(key, item);
       }
     }
@@ -42874,11 +43160,31 @@ function debugGraphMergeBucket(target, source) {
       for (const [key, sourceItem] of sourceHost.gpuDevices.entries()) {
         const item = targetHost.gpuDevices.get(key) || {label: sourceItem.label || key, utilTotalPercent: 0, memoryUsedTotalBytes: 0, memoryCapacityTotalBytes: 0, samples: 0};
         item.label = sourceItem.label || item.label;
-        item.utilTotalPercent += Number(sourceItem.utilTotalPercent || 0);
-        item.memoryUsedTotalBytes += Number(sourceItem.memoryUsedTotalBytes || 0);
-        item.memoryCapacityTotalBytes += Number(sourceItem.memoryCapacityTotalBytes || 0);
-        item.samples += Number(sourceItem.samples || 0);
+        item.utilTotalPercent += Number(sourceItem.utilTotalPercent || 0) * scale;
+        item.memoryUsedTotalBytes += Number(sourceItem.memoryUsedTotalBytes || 0) * scale;
+        item.memoryCapacityTotalBytes += Number(sourceItem.memoryCapacityTotalBytes || 0) * scale;
+        item.samples += Number(sourceItem.samples || 0) * scale;
         targetHost.gpuDevices.set(key, item);
+      }
+    }
+    if (sourceHost.serviceLoad instanceof Map) {
+      for (const [key, sourceItem] of sourceHost.serviceLoad.entries()) {
+        const item = targetHost.serviceLoad.get(key) || {label: sourceItem.label || key, cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+        item.label = sourceItem.label || item.label;
+        for (const prefix of ['cpu', 'rss']) {
+          const totalKey = `${prefix}Total${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
+          const samplesKey = `${prefix}Samples`;
+          const minKey = `${prefix}Min${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
+          const maxKey = `${prefix}Max${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
+          const sourceSamples = Number(sourceItem[samplesKey] || 0) * scale;
+          if (sourceSamples <= 0) continue;
+          const previousSamples = Number(item[samplesKey] || 0);
+          item[totalKey] += Number(sourceItem[totalKey] || 0) * scale;
+          item[samplesKey] += sourceSamples;
+          item[minKey] = previousSamples > 0 ? Math.min(item[minKey], Number(sourceItem[minKey] || 0)) : Number(sourceItem[minKey] || 0);
+          item[maxKey] = Math.max(item[maxKey], Number(sourceItem[maxKey] || 0));
+        }
+        targetHost.serviceLoad.set(key, item);
       }
     }
   }
@@ -42886,12 +43192,12 @@ function debugGraphMergeBucket(target, source) {
     if (!(target.clients instanceof Map)) target.clients = new Map();
     for (const [clientId, sourceClient] of source.clients.entries()) {
       const targetClient = target.clients.get(clientId) || debugGraphNewClientBucket();
-      targetClient.apiCount += Number(sourceClient.apiCount || 0);
-      targetClient.sseCount += Number(sourceClient.sseCount || 0);
-      targetClient.latencyTotalMs += Number(sourceClient.latencyTotalMs || 0);
-      targetClient.latencyCount += Number(sourceClient.latencyCount || 0);
-      targetClient.bandwidthBytes += Number(sourceClient.bandwidthBytes || 0);
-      targetClient.disconnectedMs += Number(sourceClient.disconnectedMs || 0);
+      targetClient.apiCount += Number(sourceClient.apiCount || 0) * scale;
+      targetClient.sseCount += Number(sourceClient.sseCount || 0) * scale;
+      targetClient.latencyTotalMs += Number(sourceClient.latencyTotalMs || 0) * scale;
+      targetClient.latencyCount += Number(sourceClient.latencyCount || 0) * scale;
+      targetClient.bandwidthBytes += Number(sourceClient.bandwidthBytes || 0) * scale;
+      targetClient.disconnectedMs += Number(sourceClient.disconnectedMs || 0) * scale;
       target.clients.set(clientId, targetClient);
     }
   }
@@ -42900,8 +43206,8 @@ function debugGraphMergeBucket(target, source) {
     for (const [processId, sourceProcess] of source.servers.entries()) {
       const targetProcess = target.servers.get(processId) || {label: processId, cpuTotalPercent: 0, cpuCount: 0};
       targetProcess.label = sourceProcess.label || targetProcess.label;
-      targetProcess.cpuTotalPercent += Number(sourceProcess.cpuTotalPercent || 0);
-      targetProcess.cpuCount += Number(sourceProcess.cpuCount || 0);
+      targetProcess.cpuTotalPercent += Number(sourceProcess.cpuTotalPercent || 0) * scale;
+      targetProcess.cpuCount += Number(sourceProcess.cpuCount || 0) * scale;
       target.servers.set(processId, targetProcess);
     }
   }
@@ -43032,7 +43338,10 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
     (Number.isFinite(nextPid) && Number.isFinite(jsDebugStatsServerPid) && nextPid !== jsDebugStatsServerPid)
     || (Number.isFinite(nextStartedAt) && Number.isFinite(jsDebugStatsServerStartedAt) && nextStartedAt !== jsDebugStatsServerStartedAt)
   );
-  if (serverChanged) clearJsDebugGraphData();
+  if (serverChanged) {
+    recordJsDebugStatsDiagnostic('warning', `owner changed from PID ${jsDebugStatsServerPid || 'unknown'} to PID ${nextPid || 'unknown'}; refreshing durable history`);
+    clearJsDebugGraphData();
+  }
   if (Number.isFinite(Number(payload.uptime_seconds))) jsDebugStatsServerUptimeSeconds = Math.max(0, Number(payload.uptime_seconds));
   if (Number.isFinite(nextPid)) jsDebugStatsServerPid = nextPid;
   if (Number.isFinite(nextStartedAt)) jsDebugStatsServerStartedAt = nextStartedAt;
@@ -43094,7 +43403,7 @@ function applyJsDebugStatsSamplePush(payload = {}) {
   recordJsDebugStatsSample({
     ...sample,
     history: {sequence: cursor, latest_sequence: cursor, records: [record]},
-  }, {forceGraphRefresh: true, advanceHistoryCursor: true});
+  }, {advanceHistoryCursor: true});
   return true;
 }
 
@@ -43202,6 +43511,25 @@ function debugGraphApplyHostMetrics(bucket, source) {
   debugGraphApplyHostMetricProcesses(target.memoryProcesses, source.memory_processes, 'totalBytes');
   debugGraphApplyHostMetricProcesses(target.gpuUtilProcesses, source.gpu_util_processes);
   debugGraphApplyHostMetricProcesses(target.gpuMemoryProcesses, source.gpu_memory_processes, 'totalBytes');
+  if (source.service_load && typeof source.service_load === 'object' && !Array.isArray(source.service_load)) {
+    for (const [key, record] of Object.entries(source.service_load)) {
+      if (!record || typeof record !== 'object') continue;
+      const item = target.serviceLoad.get(key) || {label: String(record.label || key), cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+      item.label = String(record.label || item.label || key);
+      for (const prefix of ['cpu', 'rss']) {
+        const unit = prefix === 'cpu' ? 'Percent' : 'Bytes';
+        const sourceUnit = prefix === 'cpu' ? 'percent' : 'bytes';
+        const samplesKey = `${prefix}Samples`;
+        const sourceSamples = Math.max(0, Number(record[`${prefix}_samples`] || 0));
+        if (sourceSamples < Number(item[samplesKey] || 0)) continue;
+        item[`${prefix}Total${unit}`] = Math.max(0, Number(record[`${prefix}_total_${sourceUnit}`] || 0));
+        item[samplesKey] = sourceSamples;
+        item[`${prefix}Min${unit}`] = Math.max(0, Number(record[`${prefix}_min_${sourceUnit}`] || 0));
+        item[`${prefix}Max${unit}`] = Math.max(0, Number(record[`${prefix}_max_${sourceUnit}`] || 0));
+      }
+      target.serviceLoad.set(key, item);
+    }
+  }
   if (!source.gpu_devices || typeof source.gpu_devices !== 'object' || Array.isArray(source.gpu_devices)) return;
   for (const [key, record] of Object.entries(source.gpu_devices)) {
     if (!record || typeof record !== 'object') continue;
@@ -43308,6 +43636,23 @@ function debugGraphApplyServerAgentTokenRates(bucket, rates) {
     if (Number.isFinite(samples)) existing.samples = Math.max(Number(existing.samples || 0), Math.max(0, samples));
     if (Number.isFinite(tokens)) existing.tokens = Math.max(Number(existing.tokens || 0), Math.max(0, tokens));
     if (Number.isFinite(seconds)) existing.seconds = Math.max(Number(existing.seconds || 0), Math.max(0, seconds));
+    const billable = item.billable_tokens && typeof item.billable_tokens === 'object' ? item.billable_tokens : {};
+    const billableSamples = item.billable_samples && typeof item.billable_samples === 'object' ? item.billable_samples : {};
+    existing.billableAvailable = existing.billableAvailable === true || item.billable_available === true;
+    if (!existing.billableTokens || typeof existing.billableTokens !== 'object') {
+      existing.billableTokens = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    if (!existing.billableSamples || typeof existing.billableSamples !== 'object') {
+      existing.billableSamples = {input: 0, cacheRead: 0, cacheWrite: 0, all: 0};
+    }
+    existing.billableTokens.input = Math.max(Number(existing.billableTokens.input || 0), Math.max(0, Number(billable.input) || 0));
+    existing.billableTokens.cacheRead = Math.max(Number(existing.billableTokens.cacheRead || 0), Math.max(0, Number(billable.cache_read) || 0));
+    existing.billableTokens.cacheWrite = Math.max(Number(existing.billableTokens.cacheWrite || 0), Math.max(0, Number(billable.cache_write) || 0));
+    existing.billableTokens.all = Math.max(Number(existing.billableTokens.all || 0), Math.max(0, Number(billable.all) || 0));
+    existing.billableSamples.input = Math.max(Number(existing.billableSamples.input || 0), Math.max(0, Number(billableSamples.input) || 0));
+    existing.billableSamples.cacheRead = Math.max(Number(existing.billableSamples.cacheRead || 0), Math.max(0, Number(billableSamples.cache_read) || 0));
+    existing.billableSamples.cacheWrite = Math.max(Number(existing.billableSamples.cacheWrite || 0), Math.max(0, Number(billableSamples.cache_write) || 0));
+    existing.billableSamples.all = Math.max(Number(existing.billableSamples.all || 0), Math.max(0, Number(billableSamples.all) || 0));
     if (!(existing.modelRates instanceof Map)) existing.modelRates = new Map();
     const modelRates = item.model_rates && typeof item.model_rates === 'object' && !Array.isArray(item.model_rates)
       ? Object.entries(item.model_rates)
@@ -43352,11 +43697,14 @@ function debugGraphRemoveCoarserServerBuckets(startSeconds, endSeconds, resoluti
 function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, replaceCoverage = null} = {}) {
   if (!history || typeof history !== 'object') return;
   if (replaceCoverage) {
-    debugGraphRemoveCoarserServerBuckets(
-      replaceCoverage.covered_start,
-      replaceCoverage.covered_end,
-      replaceCoverage.resolution_seconds,
-    );
+    const replacements = Array.isArray(replaceCoverage) ? replaceCoverage : [replaceCoverage];
+    for (const interval of replacements) {
+      debugGraphRemoveCoarserServerBuckets(
+        interval.start ?? interval.start_seconds ?? interval.covered_start,
+        interval.end ?? interval.end_seconds ?? interval.covered_end,
+        interval.resolution_seconds ?? interval.resolution,
+      );
+    }
   }
   // Compact local fine buckets before applying an authoritative server coarse bucket. Applying
   // first would merge the same measurements a second time at the 1h/2h tier boundaries.
@@ -43436,11 +43784,11 @@ function clearDebugGraphAgentTokenData() {
   resetDebugGraphAgentTokenHistory();
 }
 
-function debugGraphAggregateBucket(map, source, scaleMs) {
-  const durationMs = Math.max(scaleMs, Number(source.durationMs) || scaleMs);
+function debugGraphAggregateBucket(map, source, scaleMs, multiplier = 1) {
+  const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(scaleMs) || jsDebugGraphRawBucketMs);
   const startMs = Math.floor(source.startMs / durationMs) * durationMs;
   const bucket = debugGraphBucket(map, startMs, durationMs);
-  debugGraphMergeBucket(bucket, source);
+  debugGraphMergeBucket(bucket, source, multiplier);
 }
 
 function debugGraphBucketInRange(bucket, cutoffMs, nowMs) {
@@ -43455,6 +43803,49 @@ function debugGraphAvailableRangeOptions(nowMs = Date.now()) {
   return jsDebugGraphRangeOptions;
 }
 
+function debugGraphMinimumDisplayResolutionMs(domain, nowMs = Date.now()) {
+  const domainStartMs = Number(domain?.startMs);
+  return Math.max(
+    Number.isFinite(domainStartMs) ? debugGraphBucketDurationForTime(domainStartMs, nowMs) : jsDebugGraphRawBucketMs,
+    ...debugGraphContributingSourceSlices(domain).map(slice => slice.sourceDurationMs),
+  );
+}
+
+function debugGraphAvailableResolutionChoices(domain = debugGraphDomain(), nowMs = Date.now()) {
+  const rangeSeconds = Math.max(1, Number(domain?.rangeSeconds) || 0);
+  const domainStartMs = Number(domain?.startMs);
+  const retainedSeconds = Number.isFinite(domainStartMs)
+    ? debugGraphBucketDurationForTime(domainStartMs, nowMs) / 1000
+    : jsDebugGraphRawBucketMs / 1000;
+  // A 30-minute-or-longer chart should not offer sub-10-second overrides:
+  // they create hundreds or thousands of mostly empty cells and resurrected
+  // the misleading coarse-boundary menu. Short live ranges retain 1/2/5s.
+  const friendlyMinimumSeconds = rangeSeconds >= 30 * 60 ? 10 : 1;
+  return jsDebugGraphResolutionChoices.filter(value => value >= Math.max(retainedSeconds, friendlyMinimumSeconds) && value * 10 <= rangeSeconds);
+}
+
+function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGraphDomain(), nowMs = Date.now()) {
+  const requested = Math.max(0, Number(value) || 0);
+  if (requested === 0) return 0;
+  const choices = debugGraphAvailableResolutionChoices(domain, nowMs);
+  if (!choices.length) return 0;
+  if (choices.includes(requested)) return requested;
+  // Normalize an out-of-set persisted/deeplinked value (e.g. a legacy 30/120/600s
+  // override) or a now-invalid prior-range value by rounding UP to the nearest coarser
+  // valid choice — never render finer than the request implied. If nothing coarser is
+  // available for this range (the request was coarser than the whole menu), fall back to
+  // the coarsest offered choice.
+  return choices.find(candidate => candidate >= requested) ?? choices[choices.length - 1];
+}
+
+function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs);
+  if (normalized === jsDebugGraphResolutionOverrideSeconds) return false;
+  jsDebugGraphResolutionOverrideSeconds = normalized;
+  if (persist) saveJsDebugStatsUiPreferences();
+  return true;
+}
+
 function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
   const domainStartMs = Number(domain?.startMs);
   const domainEndMs = Number(domain?.endMs);
@@ -43464,12 +43855,27 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   const targetMs = domainSpanMs / jsDebugGraphMaxDisplayPoints;
   const displayMs = jsDebugGraphDisplayBucketMs.find(bucketMs => bucketMs >= targetMs)
     || jsDebugGraphDisplayBucketMs.at(-1);
-  const retainedMs = Number.isFinite(domainStartMs)
-    ? debugGraphBucketDurationForTime(domainStartMs, nowMs)
-    : jsDebugGraphRawBucketMs;
+  // A display set has one bar width. Its scale must therefore accommodate the
+  // coarsest retained source in the whole domain, not merely the tier at its
+  // left edge. This also covers server history overlapping the live raw tail.
+  const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  const overrideMs = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0) * 1000;
-  if (overrideMs > 0) return Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
+  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
+  if (overrideMs > 0) {
+    let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
+    // Point-cap: an explicit override that would render more than the budget of buckets
+    // for this domain is clamped UP to the finest universe choice that stays within the
+    // cap. The label reads back this effective (coarser) value so the render never blows
+    // past the point budget even when the picker offers a finer value.
+    const budgetMs = domainSpanMs / jsDebugGraphOverridePointCap;
+    if (effectiveMs < budgetMs) {
+      const cappedMs = jsDebugGraphResolutionChoices
+        .map(seconds => seconds * 1000)
+        .find(candidateMs => candidateMs >= budgetMs) ?? jsDebugGraphResolutionChoices[jsDebugGraphResolutionChoices.length - 1] * 1000;
+      effectiveMs = Math.max(effectiveMs, cappedMs);
+    }
+    return effectiveMs;
+  }
   return Math.max(jsDebugGraphRawBucketMs, displayMs, retainedMs, minimumMs);
 }
 
@@ -43479,16 +43885,79 @@ function debugGraphSourceBuckets(domain) {
     .sort((left, right) => left.startMs - right.startMs);
 }
 
+function debugGraphAddCoveredInterval(intervals, startMs, endMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+  let index = 0;
+  while (index < intervals.length && intervals[index].endMs < startMs) index += 1;
+  let mergedStart = startMs;
+  let mergedEnd = endMs;
+  while (index < intervals.length && intervals[index].startMs <= mergedEnd) {
+    mergedStart = Math.min(mergedStart, intervals[index].startMs);
+    mergedEnd = Math.max(mergedEnd, intervals[index].endMs);
+    intervals.splice(index, 1);
+  }
+  intervals.splice(index, 0, {startMs: mergedStart, endMs: mergedEnd});
+}
+
+function debugGraphUncoveredIntervals(intervals, startMs, endMs) {
+  const uncovered = [];
+  let cursor = startMs;
+  for (const interval of intervals) {
+    if (interval.endMs <= cursor) continue;
+    if (interval.startMs >= endMs) break;
+    if (interval.startMs > cursor) uncovered.push({startMs: cursor, endMs: Math.min(endMs, interval.startMs)});
+    cursor = Math.max(cursor, interval.endMs);
+    if (cursor >= endMs) break;
+  }
+  if (cursor < endMs) uncovered.push({startMs: cursor, endMs});
+  return uncovered;
+}
+
+function debugGraphContributingSourceSlices(domain) {
+  const domainStartMs = Number(domain?.startMs);
+  const domainEndMs = Number(domain?.endMs);
+  if (!Number.isFinite(domainStartMs) || !Number.isFinite(domainEndMs) || domainEndMs <= domainStartMs) return [];
+  const coveredIntervals = [];
+  const slices = [];
+  const sources = debugGraphSourceBuckets(domain).sort((left, right) => (
+    (Number(left.durationMs) - Number(right.durationMs))
+    || (Number(left.startMs) - Number(right.startMs))
+  ));
+  for (const bucket of sources) {
+    const sourceStartMs = Number(bucket.startMs);
+    const sourceDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+    const visibleStartMs = Math.max(domainStartMs, sourceStartMs);
+    // Keep the current/right-edge bucket whole: its sample is attached to the
+    // bucket start even while the interval is still in progress. Only the old
+    // left edge has an out-of-view prefix that can contaminate a narrower range.
+    const visibleEndMs = sourceStartMs + sourceDurationMs;
+    if (visibleEndMs <= visibleStartMs) continue;
+    for (const interval of debugGraphUncoveredIntervals(coveredIntervals, visibleStartMs, visibleEndMs)) {
+      slices.push({
+        bucket,
+        startMs: interval.startMs,
+        endMs: interval.endMs,
+        sourceDurationMs,
+        multiplier: (interval.endMs - interval.startMs) / sourceDurationMs,
+      });
+    }
+    // Coverage is clipped to the selected domain. A coarse bucket retained for a wider
+    // range must not claim an out-of-view prefix and poison a fully fine-covered view.
+    debugGraphAddCoveredInterval(coveredIntervals, visibleStartMs, visibleEndMs);
+  }
+  return slices;
+}
+
 function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
   const buckets = new Map();
-  for (const bucket of jsDebugGraphRollupBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
-  }
-  for (const bucket of jsDebugGraphRawBuckets.values()) {
-    if (debugGraphBucketInRange(bucket, domain.startMs, domain.endMs)) debugGraphAggregateBucket(buckets, bucket, scaleMs);
+  for (const slice of debugGraphContributingSourceSlices(domain)) {
+    // Once a finer source has claimed an instant, a coarser history response may
+    // only fill the remaining visible interval. Place that proportional slice in
+    // its visible cell while retaining the complete source bucket for wider views.
+    debugGraphAggregateBucket(buckets, {...slice.bucket, startMs: slice.startMs}, scaleMs, slice.multiplier);
   }
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
@@ -43536,11 +44005,21 @@ function debugGraphAgentTokenBucketValue(bucket, item) {
   return Number(item?.samples || 0) > 0 ? Number(item.total || 0) / Number(item.samples || 1) : 0;
 }
 
+function debugGraphAgentTokenBucketDimensionValue(bucket, item, dimension = jsDebugGraphModelTokenDimension) {
+  if (dimension === 'output') return debugGraphAgentTokenBucketValue(bucket, item);
+  const quantity = Math.max(0, Number(item?.billableTokens?.[dimension]) || 0);
+  return quantity / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
+}
+
 function debugGraphAgentTokenDisplayedSum(buckets) {
   let total = 0;
   for (const bucket of buckets || []) {
     if (!(bucket?.agentTokenRates instanceof Map)) continue;
     for (const item of bucket.agentTokenRates.values()) {
+      if (jsDebugGraphModelTokenDimension !== 'output') {
+        if (item?.billableAvailable === true) total += Math.max(0, Number(item?.billableTokens?.[jsDebugGraphModelTokenDimension]) || 0);
+        continue;
+      }
       const tokens = Number(item?.tokens);
       if (Number.isFinite(tokens) && tokens >= 0) {
         total += tokens;
@@ -43715,7 +44194,10 @@ function debugGraphNiceAxisMax(value, unit) {
 
 function debugGraphTokenNumberText(value) {
   const number = Math.max(0, Number(value) || 0);
-  if (number >= 1000 * 1000) return `${(number / 1000 / 1000).toFixed(number >= 100 * 1000 * 1000 ? 0 : 1)}M`;
+  if (number >= 1000 * 1000) {
+    const millions = number / 1000 / 1000;
+    return `${millions.toFixed(Number.isInteger(millions) || number >= 100 * 1000 * 1000 ? 0 : 1)}M`;
+  }
   if (number >= 1000) return `${(number / 1000).toFixed(number >= 100 * 1000 ? 0 : 1)}k`;
   if (Number.isInteger(number)) return String(number);
   return number >= 100 ? number.toFixed(0) : number.toFixed(number >= 10 ? 1 : 2);
@@ -43910,7 +44392,7 @@ function debugGraphHistoryOverlayText(state = jsDebugHistoryReadiness) {
   const range = jsDebugGraphRangeLabel(state.requestedRangeSeconds);
   if (state.phase === 'loading-initial') return t('debug.graph.history.loadingInitial');
   if (state.phase === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
-  if (state.phase === 'retrying') return t('debug.graph.history.retrying', {range});
+  if (state.phase === 'retrying') return state.error || t('debug.graph.history.retrying', {range});
   if (state.phase === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
   return '';
 }
@@ -43933,6 +44415,7 @@ function debugGraphHistoryOverlayHtml(state = jsDebugHistoryReadiness) {
 }
 
 function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
+  const selectedAgentDimension = dimension === 'agent' ? jsDebugGraphModelTokenDimension : 'output';
   const tokenItems = new Map();
   for (const bucket of buckets) {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
@@ -43940,7 +44423,9 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       if (dimension === 'agent') {
         const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
         existing.label = item?.label || existing.label;
-        existing.samples += Number(item?.samples || 0);
+        existing.samples += selectedAgentDimension === 'output'
+          ? Number(item?.samples || 0)
+          : (item?.billableAvailable === true ? 1 : 0);
         tokenItems.set(String(key), existing);
         continue;
       }
@@ -43954,24 +44439,29 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
     }
   }
   const prefix = dimension === 'agent' ? jsDebugGraphAgentTokenSeriesPrefix : jsDebugGraphModelTokenSeriesPrefix;
-  return [...tokenItems.entries()]
+  const displayedItems = [...tokenItems.entries()]
     .filter(([, item]) => item.samples > 0)
-    .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
-    .map(([key, item], index) => ({
+    .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]));
+  const visuals = debugGraphDisplayedTokenVisuals(displayedItems, ([key]) => key);
+  return displayedItems.map(([key, item], index) => ({
       key: `${prefix}${key}`,
       label: item.label,
       descKey: dimension === 'agent' ? 'debug.graph.series.agentToken.desc' : 'debug.graph.series.modelToken.desc',
       descParams: dimension === 'agent' ? {agent: item.label} : {model: item.label},
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
+      tokenPatternSeries: true,
       agentTokenSeries: dimension === 'agent',
       agentTokenKey: key,
       tokenDimension: dimension,
-      agentTokenPatternIndex: index % jsDebugGraphAgentTokenPatternCount,
-      color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
+      agentTokenPatternIndex: visuals[index].patternIndex,
+      color: visuals[index].color,
       value: bucket => {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-        if (dimension === 'agent') return tokenItem ? debugGraphAgentTokenBucketValue(bucket, tokenItem) : 0;
+        if (dimension === 'agent') {
+          if (!tokenItem) return 0;
+          return debugGraphAgentTokenBucketDimensionValue(bucket, tokenItem, selectedAgentDimension);
+        }
         let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
           for (const agentRate of bucket.agentTokenRates.values()) {
@@ -43985,12 +44475,25 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       hasData: bucket => {
         if (dimension === 'agent') {
           const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+          if (selectedAgentDimension !== 'output') return tokenItem?.billableAvailable === true;
           return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
         }
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
           const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
           return Number(modelRate?.samples || 0) > 0 || Number(modelRate?.tokens || 0) > 0;
         });
+      },
+      sampleCount: bucket => {
+        if (dimension === 'agent') {
+          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+          if (selectedAgentDimension !== 'output') return Math.max(0, Number(tokenItem?.billableSamples?.[selectedAgentDimension]) || 0);
+          return Math.max(0, Number(tokenItem?.samples) || 0);
+        }
+        let samples = 0;
+        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
+          samples += Math.max(0, Number(agentRate?.modelRates?.get(key)?.samples) || 0);
+        }
+        return samples;
       },
     }));
 }
@@ -44009,6 +44512,28 @@ function debugGraphStablePaletteIndex(identity, count) {
   return hash % size;
 }
 
+function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+  const colorCount = Math.max(1, jsDebugGraphAgentTokenColors.length);
+  const patternCount = Math.max(1, jsDebugGraphAgentTokenPatternCount);
+  const combinations = [];
+  const pairedCount = Math.min(colorCount, patternCount);
+  for (let index = 0; index < pairedCount; index += 1) combinations.push([index, index]);
+  for (let colorIndex = 0; colorIndex < colorCount; colorIndex += 1) {
+    for (let patternIndex = 0; patternIndex < patternCount; patternIndex += 1) {
+      if (colorIndex === patternIndex && colorIndex < pairedCount) continue;
+      combinations.push([colorIndex, patternIndex]);
+    }
+  }
+  return (items || []).map((item, index) => {
+    const identity = identityForItem(item);
+    const combinationIndex = index < combinations.length
+      ? index
+      : debugGraphStablePaletteIndex(identity, combinations.length);
+    const [colorIndex, patternIndex] = combinations[combinationIndex];
+    return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
+  });
+}
+
 function debugGraphModelTokenDimensionLabel(dimension = jsDebugGraphModelTokenDimension) {
   const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
   return item ? debugGraphCostText(item.labelKey, item.fallback) : debugGraphCostText('debug.cost.output', 'Output');
@@ -44017,6 +44542,19 @@ function debugGraphModelTokenDimensionLabel(dimension = jsDebugGraphModelTokenDi
 function debugGraphModelTokenDimensionDescriptionKey(dimension = jsDebugGraphModelTokenDimension) {
   const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
   return item ? jsDebugGraphDescriptionKeyByLabelKey[item.labelKey] : '';
+}
+
+function setDebugGraphModelTokenDimension(value, {persist = true} = {}) {
+  const selected = String(value || '');
+  jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected)
+    ? selected
+    : 'output';
+  if (persist) saveJsDebugStatsUiPreferences();
+  // Every token dimension is projected from the buckets already in memory.
+  // Repaint both tabs synchronously and bypass the passive focused-control
+  // deferral; no history request or artificial loading state is warranted.
+  refreshDebugGraphSurfaces({force: true, deferFocusedControl: false});
+  return jsDebugGraphModelTokenDimension;
 }
 
 function debugGraphModelTokenComponentMatches(component, dimension = jsDebugGraphModelTokenDimension) {
@@ -44086,23 +44624,22 @@ function debugGraphModelTokenSeriesDefs(buckets) {
       }
     }
   }
-  return [...tokenItems.values()]
+  const displayedItems = [...tokenItems.values()]
     .filter(item => item.samples > 0)
-    .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key))
-    .map((item, index) => ({
+    .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key));
+  const visuals = debugGraphDisplayedTokenVisuals(displayedItems, item => item.key);
+  return displayedItems.map((item, index) => ({
       key: `${jsDebugGraphModelTokenSeriesPrefix}${item.key}`,
       label: item.label,
       descKey: 'debug.graph.series.modelToken.desc',
       descParams: {model: item.label},
       unit: 'tokensPerMinute',
       cssKey: 'agentToken',
+      tokenPatternSeries: true,
       agentTokenKey: item.key,
       tokenDimension: 'model',
-      // Model color is keyed by the exact model alone so adding/changing an
-      // effort variant cannot repaint that model. Pattern keys retain the
-      // model+effort distinction for accessible stacked-series separation.
-      agentTokenPatternIndex: debugGraphStablePaletteIndex(item.key, jsDebugGraphAgentTokenPatternCount),
-      color: jsDebugGraphAgentTokenColors[debugGraphStablePaletteIndex(item.model, jsDebugGraphAgentTokenColors.length)],
+      agentTokenPatternIndex: visuals[index].patternIndex,
+      color: visuals[index].color,
       value: bucket => {
         const components = debugGraphModelTokenComponentRecords(bucket);
         if (components.length) {
@@ -44124,6 +44661,19 @@ function debugGraphModelTokenSeriesDefs(buckets) {
         if (components.length) return components.some(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
         if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return false;
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => Number(agentRate?.modelRates?.get(item.model)?.tokens || 0) > 0);
+      },
+      sampleCount: bucket => {
+        const components = debugGraphModelTokenComponentRecords(bucket)
+          .filter(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
+        if (components.length) {
+          return components.reduce((total, component) => total + Math.max(1, Number(component?.samples ?? component?.sample_count) || 0), 0);
+        }
+        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return 0;
+        let samples = 0;
+        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
+          samples += Math.max(0, Number(agentRate?.modelRates?.get(item.model)?.samples) || 0);
+        }
+        return samples;
       },
     }));
 }
@@ -44230,6 +44780,10 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       color: jsDebugGraphGpuDeviceColors[index % jsDebugGraphGpuDeviceColors.length],
       value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
+      sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, gpuDeviceId: deviceId})?.samples || 0),
+      familyHasData: bucket => [...(bucket?.hostMetrics?.gpuDevices?.values?.() || [])]
+        .some(item => Number(item?.samples || 0) > 0),
+      displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
     }));
 }
 
@@ -44240,33 +44794,124 @@ function debugGraphHostMetricSeriesDefs(buckets) {
   ];
 }
 
+function debugGraphServiceLoadSeriesDefs(buckets) {
+  const services = new Map();
+  for (const bucket of buckets) {
+    for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
+      if (Number(item?.cpuSamples || 0) > 0) services.set(key, String(item.label || key));
+    }
+  }
+  const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
+  const visuals = debugGraphDisplayedTokenVisuals(items, ([key]) => key);
+  const linePatterns = ['solid', 'dash', 'dot'];
+  return items.map(([key, label], index) => ({
+    key: `serviceLoad:${key}`, label, unit: 'percent', serviceLoad: true,
+    color: visuals[index].color, linePattern: linePatterns[visuals[index].patternIndex % linePatterns.length],
+    value: bucket => {
+      const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
+      return Number(item?.cpuSamples || 0) > 0 ? Number(item.cpuTotalPercent || 0) / Number(item.cpuSamples) : 0;
+    },
+    hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
+    sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
+    familyHasData: bucket => [...(bucket?.hostMetrics?.serviceLoad?.values?.() || [])].some(item => Number(item?.cpuSamples || 0) > 0),
+    displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
+  }));
+}
+
+function debugGraphDisplayHoldOutage(bucket) {
+  return Number(bucket?.disconnectedMs || 0) > 0;
+}
+
+function debugGraphProjectSeriesSamples(def, buckets) {
+  const holdMs = Math.max(0, Number(def?.displayHoldMs) || 0);
+  const values = [];
+  const hasDataValues = [];
+  const observedDataValues = [];
+  const provenanceValues = [];
+  let heldSample = null;
+  for (const [index, bucket] of (buckets || []).entries()) {
+    const value = def.value(bucket);
+    const observed = def.hasData(bucket) === true;
+    if (observed) {
+      const bucketStartMs = Number(bucket?.startMs) || 0;
+      const requestedSampleTimeMs = typeof def.sampleTimeMs === 'function' ? Number(def.sampleTimeMs(bucket)) : NaN;
+      const sampleTimeMs = Number.isFinite(requestedSampleTimeMs) ? requestedSampleTimeMs : bucketStartMs;
+      const requestedSampleCount = typeof def.sampleCount === 'function' ? Number(def.sampleCount(bucket)) : 1;
+      const sampleCount = Number.isFinite(requestedSampleCount) ? Math.max(0, requestedSampleCount) : 0;
+      const provenance = {
+        sampleTimeMs,
+        sampleCount,
+        sourceBucketStartMs: bucketStartMs,
+        sourceBucketDurationMs: Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs),
+        sourceIndex: index,
+        expiresAtMs: holdMs > 0 ? sampleTimeMs + holdMs : sampleTimeMs,
+        held: false,
+      };
+      values.push(value);
+      hasDataValues.push(true);
+      observedDataValues.push(true);
+      provenanceValues.push(provenance);
+      heldSample = holdMs > 0 ? {value, provenance} : null;
+      continue;
+    }
+    const familyObserved = typeof def.familyHasData === 'function' && def.familyHasData(bucket) === true;
+    if (familyObserved || debugGraphDisplayHoldOutage(bucket)) heldSample = null;
+    const bucketStartMs = Number(bucket?.startMs) || 0;
+    const bucketDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+    const bucketEndMs = bucketStartMs + bucketDurationMs;
+    const held = heldSample && bucketStartMs >= heldSample.provenance.sampleTimeMs
+      && bucketEndMs <= heldSample.provenance.expiresAtMs;
+    values.push(held ? heldSample.value : value);
+    hasDataValues.push(Boolean(held));
+    observedDataValues.push(false);
+    provenanceValues.push(held ? {...heldSample.provenance, held: true} : null);
+  }
+  return {values, hasDataValues, observedDataValues, provenanceValues};
+}
+
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphServiceLoadSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
-    const values = buckets.map(bucket => def.value(bucket));
-    const hasDataValues = buckets.map(bucket => def.hasData(bucket));
-    const sampleValues = values.filter((_value, index) => hasDataValues[index]);
-    const sampleTimes = times.filter((_time, index) => hasDataValues[index]);
+    const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
+    const sampleValues = values.filter((_value, index) => observedDataValues[index]);
+    const sampleTimes = provenanceValues
+      .filter((_provenance, index) => observedDataValues[index])
+      .map(provenance => provenance.sampleTimeMs);
     const samples = sampleValues.length;
-    const max = Math.max(0, ...sampleValues);
-    const current = sampleValues.length ? sampleValues[sampleValues.length - 1] : 0;
+    const displayValues = values.filter((_value, index) => hasDataValues[index]);
+    const displaySamples = displayValues.length;
+    const max = Math.max(0, ...displayValues);
+    const current = displayValues.length ? displayValues[displayValues.length - 1] : 0;
     const movingAverageSamples = Number(def.movingAverageSamples || 0);
     const movingAverageValues = movingAverageSamples > 0 ? debugGraphMovingAverageValues(sampleValues, movingAverageSamples) : [];
-    return {...localizedDef, values, times, durations, hasDataValues, movingAverageValues, movingAverageTimes: sampleTimes, movingAverageSamples, max, current, samples};
+    return {
+      ...localizedDef,
+      values,
+      times,
+      durations,
+      hasDataValues,
+      observedDataValues,
+      provenanceValues,
+      movingAverageValues,
+      movingAverageTimes: sampleTimes,
+      movingAverageSamples,
+      max,
+      current,
+      samples,
+      displaySamples,
+    };
   });
 }
 
 function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs);
-  const defaultSeconds = debugGraphBucketDurationForTime(domain.startMs, nowMs) / 1000;
+  syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
-  const choices = [1, 2, 5, 10, 30, 60, 120, 300, 600];
-  const retainedSeconds = debugGraphBucketDurationForTime(domain.startMs, nowMs) / 1000;
-  const availableChoices = choices.filter(value => value >= retainedSeconds && value * 10 <= domain.rangeSeconds);
-  const overrideSeconds = availableChoices.includes(Number(jsDebugGraphResolutionOverrideSeconds)) ? Number(jsDebugGraphResolutionOverrideSeconds) : 0;
+  const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
+  const overrideSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
 
@@ -44564,6 +45209,69 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
   }).join('');
 }
 
+function jsDebugHistoryCoverageFamilyForGroup(group) {
+  if (group?.key === 'activity') return 'agent_status';
+  if (group?.key === 'agentTokens') return 'agent_tokens';
+  if (group?.key === 'modelTokens') return jsDebugGraphModelTokenDimension === 'output' ? 'agent_tokens' : 'cost';
+  if (group?.key === 'cpu') return 'cpu';
+  if (group?.key === 'memory') return 'system_memory';
+  if (group?.key === 'gpuUtil' || group?.key === 'gpuMemory') return 'gpu';
+  return '';
+}
+
+function jsDebugHistoryCoverageIntervalsForFamily(family) {
+  const stores = jsDebugHistoryReadiness.storeCoverageIntervals || {};
+  const aliases = family === 'cpu' ? ['cpu', 'server', 'raw', 'buckets']
+    : family === 'system_memory' ? ['system_memory', 'memory']
+      : family === 'gpu' ? ['gpu', 'gpu_metrics']
+    : family === 'agent_status' ? ['agent_status', 'status']
+      : family === 'agent_tokens' ? ['agent_tokens', 'tokens']
+        : family === 'cost' ? ['cost', 'cost_atoms', 'usage_atoms'] : [];
+  for (const key of aliases) {
+    if (Object.prototype.hasOwnProperty.call(stores, key)) return stores[key];
+  }
+  return jsDebugHistoryReadiness.coverageIntervals;
+}
+
+function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = []) {
+  const family = jsDebugHistoryCoverageFamilyForGroup(group);
+  if (!family) return [];
+  const requestedRanges = (jsDebugHistoryReadiness.requestCoverageIntervals || []).map(interval => ({
+    startMs: Number(interval.startSeconds) * 1000,
+    endMs: Number(interval.endSeconds) * 1000,
+  }));
+  const coveredRanges = jsDebugHistoryCoverageIntervalsForFamily(family).map(interval => ({
+    startMs: Number(interval.startSeconds) * 1000,
+    endMs: Number(interval.endSeconds) * 1000,
+  }));
+  const gaps = [];
+  for (const requested of debugGraphMergeTimeRanges(requestedRanges, domain)) {
+    gaps.push(...debugGraphComplementTimeRanges(coveredRanges, requested));
+  }
+  const mergedGaps = debugGraphMergeTimeRanges(gaps, domain);
+  if (!alreadyPaintedRanges.length) return mergedGaps;
+  return debugGraphMergeTimeRanges(
+    mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
+    domain,
+  );
+}
+
+function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = []) {
+  const family = jsDebugHistoryCoverageFamilyForGroup(group);
+  return debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges).map((range, index) => {
+    const x1 = debugGraphXForTime(range.startMs, domain);
+    const x2 = debugGraphXForTime(range.endMs, domain);
+    return `<g data-js-debug-history-coverage-family="${esc(family)}">${debugGraphPlotOverlayRectHtml(
+      'js-debug-no-data-range js-debug-history-no-data-range',
+      'data-js-debug-history-no-data-range',
+      index,
+      x1,
+      Math.max(1.5, x2 - x1),
+      t('debug.noCommunicationData'),
+    )}</g>`;
+  }).join('');
+}
+
 function debugGraphAgentStatusNoDataRuns(buckets, domain) {
   const ranges = debugGraphBucketRanges(buckets);
   const statusRanges = ranges
@@ -44616,7 +45324,7 @@ function debugGraphSeriesClassKey(series) {
 }
 
 function debugGraphAgentTokenPatternIndex(series) {
-  if (series?.agentTokenSeries !== true) return -1;
+  if (series?.tokenPatternSeries !== true) return -1;
   const index = Math.floor(Number(series.agentTokenPatternIndex));
   return Number.isFinite(index) && index >= 0 ? index % jsDebugGraphAgentTokenPatternCount : 0;
 }
@@ -44693,7 +45401,7 @@ function debugGraphSeriesLineClassName(series, extraClass = '') {
 }
 
 function debugGraphSeriesTokenAgentAttrs(series) {
-  if (series?.agentTokenSeries !== true) return '';
+  if (series?.tokenPatternSeries !== true) return '';
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
@@ -44701,9 +45409,10 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
   // CPU is sampled best-effort.  Its absent intervals are facts, not zeroes or
   // a signal to draw a smooth line between the two surrounding samples.
   const cpuSeries = series?.processCpu === true || series?.key === 'cpu' || series?.key === 'systemCpu';
+  const heldGaugeSeries = Number(series?.displayHoldMs || 0) > 0;
   const gapThresholdMs = series?.clientMetric === true
     ? debugGraphCommunicationGapThresholdMs([series])
-    : (cpuSeries ? 1 : 0);
+    : ((cpuSeries || heldGaugeSeries) ? 1 : 0);
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
@@ -44802,7 +45511,7 @@ function debugGraphLegendHtml(seriesItems) {
 }
 
 function debugGraphLegendSwatchHtml(series) {
-  if (series?.agentTokenSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
+  if (series?.tokenPatternSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
@@ -44912,6 +45621,7 @@ function debugGraphXAxisHtml(domain) {
 }
 
 function debugGraphGroupSeriesItems(group, seriesItems) {
+  if (group.serviceLoad === true) return seriesItems.filter(series => series.serviceLoad === true);
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
   if (group.hostMetric) {
@@ -45030,6 +45740,22 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   if (!data) return debugGraphValueText(0, chart?.dataset?.jsDebugChartUnit);
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return debugGraphValueText(0, data.group.unit);
+  if (data.group.key === 'serversLoad') {
+    const bucket = data.buckets[index];
+    const details = data.groupSeries.flatMap(series => {
+      const key = String(series.key || '').replace(/^serviceLoad:/, '');
+      const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
+      const samples = Number(item?.cpuSamples || 0);
+      if (samples <= 0) return [];
+      const avg = Number(item.cpuTotalPercent || 0) / samples;
+      return [`${series.label}: ${debugGraphValueText(avg, 'percent')} (${t('debug.graph.serviceLoad.range', {
+        minimum: debugGraphValueText(Number(item.cpuMinPercent || 0), 'percent'),
+        average: debugGraphValueText(avg, 'percent'),
+        maximum: debugGraphValueText(Number(item.cpuMaxPercent || 0), 'percent'),
+      })})`];
+    });
+    return details.join(' · ') || debugGraphValueText(0, data.group.unit);
+  }
   const series = data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
@@ -45040,6 +45766,78 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
     ? values.reduce((total, item) => total + item, 0)
     : Math.max(0, ...values);
   return debugGraphValueText(value, data.group.unit);
+}
+
+function debugGraphTokenHoverDetailAtTime(chart, timestamp) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  if (!data || !['agentTokens', 'modelTokens'].includes(data.group?.key)) return null;
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  const bucket = index >= 0 ? data.buckets[index] : null;
+  const startMs = Number(bucket?.startMs);
+  const endMs = startMs + Math.max(1, Number(bucket?.durationMs) || 0);
+  const hoveredTime = debugGraphTimeLabel(timestamp, {includeSeconds: false});
+  const span = Number.isFinite(startMs)
+    ? `${debugGraphTimeLabel(startMs, {includeSeconds: false})}–${debugGraphTimeLabel(endMs, {includeSeconds: false})}`
+    : hoveredTime;
+  if (index < 0) return {span, detail: debugGraphCostText('debug.graph.tokens.noData', 'No token samples'), noData: true};
+  const activeSeries = data.groupSeries
+    .filter(series => !data.group.dynamicTokenDimension || series.tokenDimension === data.group.dynamicTokenDimension)
+    .filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
+  const sampleCount = activeSeries.reduce((total, series) => {
+    const provenance = Array.isArray(series.provenanceValues) ? series.provenanceValues[index] : null;
+    return total + Math.max(0, Number(provenance?.sampleCount) || 0);
+  }, 0);
+  if (!activeSeries.length || sampleCount <= 0) {
+    return {span, detail: debugGraphCostText('debug.graph.tokens.noData', 'No token samples'), noData: true};
+  }
+  const value = debugGraphHoverValueAtTime(chart, timestamp);
+  const sampleLabel = sampleCount === 1 ? 'sample' : 'samples';
+  return {span, detail: `${value} · ${debugSystemNumber(sampleCount)} ${sampleLabel}`, noData: false};
+}
+
+function debugGraphHoverProvenanceAtTime(chart, timestamp) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  if (!data) return [];
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  if (index < 0) return [];
+  return data.groupSeries.flatMap(series => {
+    if (Array.isArray(series.hasDataValues) && series.hasDataValues[index] !== true) return [];
+    const provenance = Array.isArray(series.provenanceValues) ? series.provenanceValues[index] : null;
+    return provenance ? [{series: series.key, ...provenance}] : [];
+  });
+}
+
+function debugGraphHeldProvenanceText(provenance) {
+  const held = (provenance || []).filter(item => item?.held === true && Number.isFinite(Number(item.sampleTimeMs)));
+  if (!held.length) return '';
+  const sampleTimeMs = Math.max(...held.map(item => Number(item.sampleTimeMs)));
+  const sampleCount = held
+    .filter(item => Number(item.sampleTimeMs) === sampleTimeMs)
+    .reduce((total, item) => total + Math.max(0, Number(item.sampleCount) || 0), 0);
+  return `↳ ${debugGraphExactTimeLabel(sampleTimeMs)} · n=${debugSystemNumber(sampleCount)}`;
+}
+
+function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now()) {
+  if (domain?.zoomed || Number(domain?.rangeSeconds) > 3600 || !buckets.length) return '';
+  const index = buckets.length - 1;
+  const bucket = buckets[index];
+  const startMs = Number(bucket?.startMs);
+  const durationMs = Math.max(1, Number(bucket?.durationMs) || 0);
+  if (!Number.isFinite(startMs) || nowMs < startMs || nowMs >= startMs + durationMs) return '';
+  const values = (groupSeries || []).flatMap(series => {
+    if (Array.isArray(series?.hasDataValues) && series.hasDataValues[index] !== true) return [];
+    const value = Number(series?.values?.[index]);
+    return Number.isFinite(value) ? [Math.max(0, value)] : [];
+  });
+  if (!values.length) return '';
+  const xStart = debugGraphXForTime(startMs, domain);
+  const xLimit = debugGraphXForTime(startMs + durationMs, domain);
+  const width = Math.max(0.5, xLimit - xStart);
+  // The live bucket owns one fixed geometry for its whole lifetime. Only the shared agent-status
+  // opacity clock changes its paint; no per-frame x/y mutation or independent timing is allowed.
+  return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
@@ -45070,6 +45868,13 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     ? ''
     : `<span class="js-debug-chart-summary"${debugGraphExplainAttrs(displayedSummary.text, displayedSummary.descKey, {attribute: 'data-js-debug-summary-desc'})} data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
+  const agentBillableUnavailable = group.key === 'agentTokens'
+    && jsDebugGraphModelTokenDimension !== 'output'
+    && !buckets.some(bucket => [...(bucket?.agentTokenRates?.values?.() || [])].some(rate => rate?.billableAvailable === true));
+  const chartUnavailable = gpuUnavailable || agentBillableUnavailable;
+  const chartUnavailableText = agentBillableUnavailable
+    ? debugGraphCostText('debug.graph.agentTokens.billableUnavailable', 'No billable breakdown for this window')
+    : t('finder.dateMode.none');
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
   const modelDimensionControl = group.key === 'modelTokens'
@@ -45086,9 +45891,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
         ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
-      ${gpuUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
-    ${gpuUnavailable ? `<div class="js-debug-chart-unavailable" data-js-debug-gpu-unavailable="${esc(group.key)}">${esc(t('finder.dateMode.none'))}</div>` : `<div class="js-debug-chart-body">
+    ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
       ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
@@ -45099,16 +45904,18 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
+          ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [])}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
+          ${debugGraphLivePulseHtml(groupSeries, buckets, domain)}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
       ${debugGraphXAxisHtml(domain)}
     </div>`}
-    ${gpuUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time></div>'}
+    ${chartUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time><span data-js-debug-hover-source-separator aria-hidden="true" hidden> · </span><span data-js-debug-hover-source hidden></span></div>'}
   </section>`;
 }
 
@@ -45124,7 +45931,10 @@ function debugGraphUsesLogScale(group, seriesItems) {
 function debugGraphTokenAxisDescriptor(buckets) {
   const values = (buckets || []).map(bucket => {
     let total = 0;
-    for (const rate of bucket?.agentTokenRates?.values?.() || []) total += debugGraphAgentTokenBucketValue(bucket, rate);
+    for (const rate of bucket?.agentTokenRates?.values?.() || []) {
+      if (jsDebugGraphModelTokenDimension !== 'output' && rate?.billableAvailable !== true) continue;
+      total += debugGraphAgentTokenBucketDimensionValue(bucket, rate);
+    }
     // Model input/cache can legitimately exceed generated output. The shared
     // descriptor must include the selected Model chart while remaining one
     // exact axis for both token charts.
@@ -45343,6 +46153,24 @@ function debugGraphCostModelLabel(row) {
   return effort ? `${label} · ${effort}` : label;
 }
 
+function debugGraphCostModelAgentKind(row) {
+  const identity = [row?.provider, row?.model, row?.label].map(value => String(value || '').toLowerCase()).join(' ');
+  if (identity.includes('anthropic') || identity.includes('claude')) return 'claude';
+  if (identity.includes('openai') || identity.includes('gpt') || identity.includes('codex')) return 'codex';
+  return '';
+}
+
+function debugGraphCostModelIdentityHtml(row, {showProvider = false, secondaryHtml = ''} = {}) {
+  const model = String(row?.model || row?.label || row?.source || row?.agent || row?.key || 'unknown');
+  const effort = String(row?.effort || '').trim();
+  const provider = String(row?.provider || '').trim();
+  const meta = [showProvider ? provider : '', effort].filter(Boolean).join(' · ');
+  const kind = debugGraphCostModelAgentKind(row);
+  const icon = kind ? `<span class="js-debug-cost-model-icon" aria-hidden="true">${agentIcon(kind)}</span>` : '';
+  const secondary = meta || secondaryHtml ? `<span class="js-debug-cost-model-meta">${meta ? `<small>${esc(meta)}</small>` : ''}${secondaryHtml}</span>` : '';
+  return `<span class="js-debug-cost-model-identity">${icon}<span class="js-debug-cost-model-copy"><strong>${esc(model)}</strong>${secondary}</span></span>`;
+}
+
 function debugGraphCostUsageTokensText(tokens) {
   const value = Math.max(0, Number(tokens) || 0);
   return value > 0 ? debugGraphTokensText(value) : '0';
@@ -45385,10 +46213,10 @@ function debugGraphCostPricingSourceEntries(components, modelRow = null) {
   return [...links].map(([url, label]) => ({url, label}));
 }
 
-function debugGraphCostPricingLinksHtml(components, modelRow = null) {
+function debugGraphCostPricingLinksHtml(components, modelRow = null, {compact = false} = {}) {
   const links = debugGraphCostPricingSourceEntries(components, modelRow);
   if (!links.length) return '';
-  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`).join(' · ')}</span>`;
+  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"${compact ? ` aria-label="${esc(`${label} pricing`)}"` : ''}>${esc(compact ? debugGraphCostText('debug.cost.pricing', 'pricing') : label)}</a>`).join(' · ')}</span>`;
 }
 
 function debugGraphCostAllPricingSourcesHtml(components) {
@@ -45403,7 +46231,8 @@ function debugGraphCostAllPricingSourcesHtml(components) {
 function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null} = {}) {
   const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
   const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
-  return `<span class="js-debug-cost-table-metric"><strong>${esc(debugGraphCostUsageTokensText(tokens))}</strong><small>${esc(cost)}</small></span>`;
+  const exactTokens = `${Math.max(0, Number(tokens) || 0).toLocaleString()} tokens`;
+  return `<span class="js-debug-cost-table-metric" title="${esc(exactTokens)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong><small>${esc(cost)}</small></span>`;
 }
 
 function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = []} = {}) {
@@ -45419,13 +46248,14 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   const rowHtml = row => {
     const breakdown = debugGraphCostBreakdownItems(row);
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
-    const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row) : '';
+    const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row, {compact: true}) : '';
     const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostUsageUsdText(debugGraphCostMicroUsd(row), totalTokens)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostUsageUsdText(item.microUsd, item.tokens)}`).join('; ')}`;
-    return `<tr aria-label="${esc(accessible)}"><th scope="row"><strong>${esc(labelFor(row))}</strong>${pricingLinks}</th>${breakdown.map(item => `<td>${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td>${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong>${esc(labelFor(row))}</strong>`;
+    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
   };
   const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td>${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td>${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
@@ -45503,17 +46333,18 @@ function debugGraphCostComponentSortHeaderHtml(key, label) {
 function debugGraphCostComponentDetailsHtml(rows) {
   if (!rows.length) return '';
   const headers = [
-    ['provider', 'Provider'], ['model', 'Model'], ['effort', 'Effort'], ['direction', 'Direction'],
-    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')], ['modality', 'Modality'], ['unit', 'Unit'],
-    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['rate', debugGraphCostText('debug.cost.rate', 'Rate')],
-    ['cost', debugGraphCostText('debug.cost.estimated', 'Cost')], ['effective', debugGraphCostText('debug.cost.effective', 'Effective')],
-    ['source', debugGraphCostText('debug.cost.source', 'Pricing source')],
+    ['provider', 'Provider'], ['model', 'Model'], ['direction', debugGraphCostText('debug.cost.usageClass', 'Usage class')],
+    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['cost', debugGraphCostText('debug.cost.rateAndCost', 'Rate / cost')],
+    ['effective', debugGraphCostText('debug.cost.pricing', 'Pricing')],
   ];
   return `<section class="js-debug-cost-details-section">
     <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
     <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
       const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      return `<tr><td>${esc(String(row?.provider || '—'))}</td><td>${esc(String(row?.model || '—'))}</td><td>${esc(String(row?.effort || '—'))}</td><td>${esc(String(row?.direction || '—'))}</td><td>${esc(String(row?.cache_role || '—'))}</td><td>${esc(String(row?.modality || '—'))}</td><td>${esc(String(row?.unit || '—'))}</td><td>${esc(debugGraphTokensText(row?.quantity))}</td><td>${esc(debugGraphCostComponentRateText(row))}</td><td>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</td><td>${esc(String(row?.effective_from || '—'))}</td><td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</td></tr>`;
+      const usageClass = [row?.direction, row?.cache_role].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
+      const usageMeta = [row?.modality, row?.unit].map(value => String(value || '').trim()).filter(Boolean).join(' · ');
+      const exactQuantity = `${Math.max(0, Number(row?.quantity) || 0).toLocaleString()} ${String(row?.unit || 'units')}`;
+      return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell"><strong>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</strong><small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;
     }).join('')}</tbody></table></div>
   </section>`;
 }
@@ -45604,11 +46435,20 @@ function debugGraphCostTranscriptPath(row) {
   return path;
 }
 
+function debugGraphMiddleTruncatedTextHtml(value, tailLength = 20) {
+  const text = String(value || '');
+  const characters = Array.from(text);
+  const tailSize = Math.max(1, Math.min(characters.length - 1, Math.floor(Number(tailLength) || 20)));
+  if (characters.length <= tailSize + 1) return `<span class="js-debug-responsive-text">${esc(text)}</span>`;
+  const split = characters.length - tailSize;
+  return `<span class="js-debug-responsive-text js-debug-responsive-text--middle"><span class="js-debug-responsive-text-prefix" data-middle-truncate-part="prefix">${esc(characters.slice(0, split).join(''))}</span><span class="js-debug-responsive-text-suffix" data-middle-truncate-part="suffix">${esc(characters.slice(split).join(''))}</span></span>`;
+}
+
 function debugGraphCostSourceLabelHtml(row) {
   const label = debugGraphCostSourceLabel(row);
   const transcript = debugGraphCostTranscriptPath(row);
   if (!transcript) return esc(label);
-  return `<a href="#" class="js-debug-cost-transcript-link" data-js-debug-cost-transcript-path="${esc(transcript)}" title="${esc(transcript)}">${esc(label)}</a>`;
+  return `<a href="#" class="js-debug-cost-transcript-link" data-js-debug-cost-transcript-path="${esc(transcript)}" title="${esc(transcript)}" aria-label="${esc(label)}">${debugGraphMiddleTruncatedTextHtml(label)}</a>`;
 }
 
 function debugGraphCostSourceTreeHtml(rows) {
@@ -45643,16 +46483,22 @@ function debugGraphCostBackfillText(summary) {
 
 function debugGraphCostUnpricedUsage(summary) {
   const rows = debugGraphCostRows(summary?.components).filter(row => row?.priced === false || Math.max(0, Number(row?.unpriced_count) || 0) > 0);
-  const labels = [...new Set(rows.map(row => {
-    const model = [row?.provider, row?.model].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || debugGraphCostText('debug.cost.unknown', 'Unknown');
+  const classesByKey = new Map();
+  for (const row of rows) {
+    const provider = String(row?.provider || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
+    const model = String(row?.model || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
     const itemClass = debugGraphCostClass(row);
-    return `${model} (${itemClass})`;
-  }))];
+    const key = `${provider}\u0000${model}\u0000${itemClass}`;
+    const current = classesByKey.get(key) || {provider, model, itemClass, tokenQuantity: 0};
+    current.tokenQuantity += Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0));
+    classesByKey.set(key, current);
+  }
+  const classes = [...classesByKey.values()];
   const rowsTokenQuantity = rows.reduce((total, row) => total + Math.max(0, Number(row?.unpriced_token_quantity) || (row?.priced === false ? Number(row?.token_quantity ?? row?.quantity) || 0 : 0)), 0);
   const tokenQuantity = Math.max(0, Number(summary?.unpricedTokenQuantity) || rowsTokenQuantity);
   const knownMicroUsd = debugGraphCostInteger(summary?.knownMicroUsd);
   const upperMicroUsd = Math.max(knownMicroUsd, debugGraphCostInteger(summary?.upperMicroUsd));
-  return {tokenQuantity, worstCaseMicroUsd: upperMicroUsd - knownMicroUsd, labels};
+  return {tokenQuantity, worstCaseMicroUsd: upperMicroUsd - knownMicroUsd, classes};
 }
 
 function debugGraphCostUnknownUsageHtml(summary) {
@@ -45661,10 +46507,15 @@ function debugGraphCostUnknownUsageHtml(summary) {
   const rows = [
     [debugGraphCostText('debug.cost.knownTotal', 'Known priced total'), debugGraphCostUsdText(summary?.knownMicroUsd)],
     [debugGraphCostText('debug.cost.unpricedTokens', 'Unpriced tokens'), debugGraphTokensText(usage.tokenQuantity)],
-    [debugGraphCostText('debug.cost.worstCase', 'Worst-case additional estimate'), debugGraphCostUsdText(usage.worstCaseMicroUsd)],
-    [debugGraphCostText('debug.cost.unpricedModels', 'Unpriced model/classes'), usage.labels.join(', ') || debugGraphCostText('debug.cost.unknown', 'Unknown')],
+    [debugGraphCostText('debug.cost.worstCase', 'Worst-case estimate'), debugGraphCostUsdText(usage.worstCaseMicroUsd)],
   ];
-  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div></section>`;
+  const classesLabel = debugGraphCostText('debug.cost.unpricedModels', 'Unpriced model/classes');
+  const classRows = usage.classes.map(item => {
+    const label = `${item.provider} · ${item.model} · ${item.itemClass}`;
+    return `<tr data-js-debug-unpriced-class><th scope="row">${esc(label)}</th><td>${esc(debugGraphTokensText(item.tokenQuantity))}</td></tr>`;
+  }).join('');
+  const disclosure = usage.classes.length ? `<details class="js-debug-cost-unpriced-disclosure"><summary aria-label="${esc(`${classesLabel}: ${usage.classes.length}`)}"><span>${esc(classesLabel)}</span><strong>${usage.classes.length}</strong></summary><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced-classes"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.modelClass', 'Provider · model · class'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th></tr></thead><tbody>${classRows}</tbody></table></div></details>` : '';
+  return `<section class="js-debug-cost-details-section js-debug-cost-unknown-usage"><h2>${esc(debugGraphCostText('debug.cost.unpricedUsage', 'Unpriced usage'))}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="unpriced"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div>${disclosure}</section>`;
 }
 
 function debugGraphCostReportHtml(summary, domain) {
@@ -45813,10 +46664,9 @@ function debugGraphClassName(nowMs = Date.now()) {
   return `js-debug-graph${debugGraphDisplayBuckets(nowMs).length ? '' : ' js-debug-graph--empty'}${debugGraphZoomDomainValid() ? ' js-debug-graph--zoomed' : ''}`;
 }
 
-function debugGraphInnerHtml(nowMs = Date.now()) {
+function debugGraphBodyHtml(nowMs = Date.now()) {
   loadJsDebugStatsUiPreferences();
   activeJsDebugGraphRangeSeconds(nowMs);
-  const controls = debugGraphControlsHtml(nowMs);
   const meta = debugGraphMetaHtml();
   const clientPerf = debugClientPerfHtml();
   const buckets = debugGraphDisplayBuckets(nowMs);
@@ -45825,11 +46675,15 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
     const loadingShell = jsDebugHistoryReadiness.overlayVisible === true || jsDebugHistoryReadinessBusy()
       ? debugGraphChartShellHtml('', debugGraphDomain(nowMs))
       : '';
-    return `${controls}${clientPerf}${empty}${loadingShell}${meta}`;
+    return `${clientPerf}${empty}${loadingShell}${meta}`;
   }
   const seriesItems = debugGraphSeriesData(buckets);
   const chartGroups = debugGraphVisibleChartGroups(seriesItems);
-  return `${controls}${clientPerf}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}${meta}`;
+  return `${clientPerf}${debugGraphSvgHtml(buckets, seriesItems, chartGroups, nowMs)}${meta}`;
+}
+
+function debugGraphInnerHtml(nowMs = Date.now()) {
+  return `${debugGraphControlsHtml(nowMs)}<div data-js-debug-graph-body>${debugGraphBodyHtml(nowMs)}</div>`;
 }
 
 function debugGraphHtml() {
@@ -45882,6 +46736,10 @@ function jsDebugStatsPanelVisible() {
     && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
 }
 
+function jsDebugStatsLayoutItemsVisible(items) {
+  return Array.isArray(items) && (items.includes(debugPaneItemId) || items.includes(yocostItemId));
+}
+
 function jsDebugStatsTokenConsumerEnabled() {
   return jsDebugStatsPanelVisible();
 }
@@ -45890,8 +46748,24 @@ function stopJsDebugStatsPolling() {
   clearRuntimeInterval('debug-stats');
 }
 
+function jsDebugStatsLivePushEnabled() {
+  // A drag zoom is a fixed historical domain. The shared range slider is the
+  // live-tail owner for both YO!stats and YO!cost; only its 5m/15m views need
+  // every durable one-second push.
+  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
+}
+
 function jsDebugStatsPollIntervalMs() {
-  return jsDebugStatsPollState.firstSampleReceived ? jsDebugStatsPollMs : jsDebugStatsPollFastMs;
+  if (!jsDebugStatsPollState.firstSampleReceived) return jsDebugStatsPollFastMs;
+  return jsDebugStatsLivePushEnabled() ? jsDebugStatsPollMs : jsDebugStatsCoarsePollMs;
+}
+
+function syncJsDebugStatsDeliveryMode() {
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
+  // Re-entering a short live range can follow almost a minute without stats
+  // SSE. Fetch once now so the existing history merger fills that delivery
+  // gap before subsequent one-second pushes arrive.
+  armJsDebugStatsPolling({pollNow: jsDebugStatsLivePushEnabled(), forceGraphRefresh: true});
 }
 
 function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {}) {
@@ -45901,7 +46775,15 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
   }
   stopJsDebugStatsPolling();
   if (pollNow) void pollJsDebugStatsSample({forceGraphRefresh});
-  resetRuntimeInterval('debug-stats', pollJsDebugStatsSample, jsDebugStatsPollIntervalMs());
+  resetRuntimeInterval('debug-stats', pollJsDebugStatsOnInterval, jsDebugStatsPollIntervalMs());
+}
+
+function pollJsDebugStatsOnInterval() {
+  // Passive cadence ticks never need to queue behind an explicit range,
+  // activation, or initial request. The next full interval is soon enough and
+  // avoids a slow request degenerating into an immediate back-to-back fetch.
+  if (jsDebugStatsPollState.inFlight) return;
+  return pollJsDebugStatsSample();
 }
 
 function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
@@ -45951,12 +46833,14 @@ async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, re
   await nextAnimationFrame();
   recordClientPerfCounter('statsHistoryPaint', performanceNow() - paintStartedAt);
   if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
+  const recoveredRetry = jsDebugHistoryReadiness.phase === 'retrying';
   setJsDebugHistoryReadiness('ready', {
     requestedRangeSeconds,
     requestedStartSeconds,
     error: '',
     nextAutoRetryAtMs: 0,
   });
+  if (recoveredRetry) recordJsDebugStatsDiagnostic('info', 'retry exited after durable history coverage recovered');
   return true;
 }
 
@@ -45989,7 +46873,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
     if (needsHistoryCoverage) {
       const state = jsDebugHistoryReadiness;
-      if (state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) {
+      if (['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) {
         historyRequestSuppressed = true;
       } else {
         const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
@@ -45997,14 +46881,14 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
           && Number(state.targetStartSeconds) === Number(targetStart)
           && Number(state.targetEndSeconds) === Number(targetEnd)
           && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
-        if (!currentRequestMatches) {
+        if (!currentRequestMatches || state.phase === 'retrying') {
           const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
           beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
             targetStartSeconds: targetStart,
             targetEndSeconds: targetEnd,
             requestedEndSeconds: requestWindow.endSeconds,
             requestedResolutionSeconds: coverageResolution,
-            retry: state.phase === 'error',
+            retry: ['error', 'retrying'].includes(state.phase),
           });
         }
         readinessRequest = jsDebugHistoryReadinessSnapshot();
@@ -46026,12 +46910,27 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
     });
     if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
+    const pendingCoverage = normalizedJsDebugHistoryPending(payload?.history);
+    if (readinessRequest && pendingCoverage) {
+      recordJsDebugStatsDiagnostic('info', `history backfill pending: ${pendingCoverage.reason}`);
+      setJsDebugHistoryReadiness('retrying', {
+        error: pendingCoverage.reason,
+        nextAutoRetryAtMs: performanceNow() + pendingCoverage.retryAfterMs,
+      });
+      return;
+    }
     const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
-    if (readinessRequest && !coverage) throw new Error('stats history response omitted coverage');
-    if (readinessRequest && !coverage.complete) throw new Error('stats history response provided incomplete coverage');
-    const replaceCoverage = coverage && jsDebugHistoryCoverageResolutionForRange(coverage.coveredStart, coverage.coveredEnd) > coverage.resolutionSeconds
-      ? payload.history.coverage
-      : null;
+    if (readinessRequest && !coverage) {
+      recordJsDebugStatsDiagnostic('error', 'coverage rejected: response omitted or malformed the required interval list');
+      throw new Error('stats history response has malformed coverage intervals');
+    }
+    if (readinessRequest) recordJsDebugHistoryCoverageDiagnostic(coverage, readinessRequest);
+    if (coverage?.mode === 'older' && Number(coverage.sourceResolutionSeconds || 0) >= 60) {
+      recordJsDebugStatsDiagnostic('info', `history range served from ${coverage.sourceResolutionSeconds}s retained rollup`);
+    }
+    const replaceCoverage = coverage?.intervals.filter(interval => (
+      jsDebugHistoryCoverageResolutionForRange(interval.startSeconds, interval.endSeconds) > interval.resolutionSeconds
+    )) || null;
     const applyStartedAt = performanceNow();
     recordJsDebugStatsSample(payload, {
       forceGraphRefresh: forceGraphRefresh || needsHistoryCoverage,
@@ -46039,10 +46938,10 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       advanceHistoryCursor: coverage?.mode !== 'older',
       replaceCoverage,
     });
-    if (coverage) applyJsDebugHistoryCoverage(coverage);
+    if (coverage) applyJsDebugHistoryCoverage(coverage, readinessRequest);
     recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
     if (readinessRequest) {
-      if (coverage.hasMoreOlder && coverage.coveredStart > readinessRequest.targetStartSeconds && Number.isFinite(coverage.nextOlderEnd)) {
+      if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd) && coverage.nextOlderEnd > readinessRequest.targetStartSeconds) {
         jsDebugStatsPollState.pending = true;
         jsDebugStatsPollState.pendingForceGraphRefresh = true;
         return;
@@ -46051,6 +46950,12 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     }
   } catch (error) {
     if (readinessRequest && jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) {
+      const elapsedMs = Math.max(0, performanceNow() - Number(readinessRequest.loadingStartedAtMs || performanceNow()));
+      const level = error?.name === 'TimeoutError' ? 'error' : 'warning';
+      const reason = error?.name === 'TimeoutError'
+        ? `history request timed out after ${Math.round(elapsedMs)}ms`
+        : `history request failed: ${jsDebugErrorText(error)}`;
+      recordJsDebugStatsDiagnostic(level, reason);
       setJsDebugHistoryReadiness('error', {
         error: jsDebugErrorText(error),
         nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryDelayMs(readinessRequest.attemptCount),
@@ -46197,9 +47102,9 @@ async function clearJsDebugServerHistory() {
   }
 }
 
-function startJsDebugStatsPolling() {
+function startJsDebugStatsPolling({pollNow = true} = {}) {
   startJsDebugClientHealthPolling();
-  syncJsDebugStatsPolling({pollNow: true});
+  syncJsDebugStatsPolling({pollNow});
 }
 
 const jsDebugClientHealthPollState = {inFlight: false};
@@ -46248,12 +47153,21 @@ async function primeJsDebugStatsBeforeLongLivedStreams() {
   return jsDebugStatsPollState.firstSampleReceived;
 }
 
+async function initializeJsDebugStatsBeforeStreams() {
+  startJsDebugClientHealthPolling();
+  await primeJsDebugStatsBeforeLongLivedStreams();
+  syncJsDebugStatsPolling({pollNow: false});
+  return jsDebugStatsPollState.firstSampleReceived;
+}
+
 if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
     const visible = document.visibilityState === 'visible';
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
     syncDebugSystemPolling({pollNow: visible});
     syncDebugLogsPolling({pollNow: visible});
+    if (visible) syncDebugGraphLiveTicker();
+    else stopDebugGraphLiveTicker();
   });
 }
 
@@ -46427,7 +47341,7 @@ function debugSystemLocalServicesCardHtml() {
 
 function debugSystemLocalServicesTableHtml(serviceNames = []) {
   const minWidthRem = 10 + (Math.max(1, serviceNames.length) * 9);
-  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
+  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-fixed-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
     <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
     <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}">—</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>`;
@@ -46518,6 +47432,118 @@ function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
   </table></div>`;
 }
 
+function debugSystemSamplerFamilyEntries(value) {
+  if (Array.isArray(value)) {
+    return value.map((family, index) => [String(family?.family || family?.name || index), family || {}]);
+  }
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).filter(([, family]) => family && typeof family === 'object');
+}
+
+function debugSystemSamplerFamilyNumber(family, ...keys) {
+  for (const key of keys) {
+    if (family?.[key] == null) continue;
+    const value = Number(family[key]);
+    if (Number.isFinite(value)) return Math.max(0, value);
+  }
+  return 0;
+}
+
+function debugSystemSamplerFamilySuccessAge(family, nowSeconds) {
+  const reportedAge = debugSystemSamplerFamilyNumber(family, 'last_success_age_seconds');
+  if (reportedAge > 0) return relativeTimeFormat(reportedAge);
+  let succeededAt = debugSystemSamplerFamilyNumber(family, 'last_success_at', 'last_success');
+  if (succeededAt > 1e12) succeededAt /= 1000;
+  return succeededAt > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - succeededAt)) : '—';
+}
+
+function debugSystemSamplerFamilySeconds(family, secondsKeys, millisecondsKeys) {
+  const seconds = debugSystemSamplerFamilyNumber(family, ...secondsKeys);
+  if (seconds > 0) return seconds;
+  return debugSystemSamplerFamilyNumber(family, ...millisecondsKeys) / 1000;
+}
+
+function debugSystemSamplerHeaderHtml(shortKey, fullKey) {
+  const full = t(fullKey);
+  return `<th scope="col" title="${esc(full)}" aria-label="${esc(full)}"><span aria-hidden="true">${esc(t(shortKey))}</span></th>`;
+}
+
+function debugSystemSamplerFamiliesHtml(value, nowSeconds = Date.now() / 1000) {
+  const families = debugSystemSamplerFamilyEntries(value);
+  if (!families.length) return '';
+  return `<div class="js-debug-system-table-wrap" data-js-debug-sampler-families><table class="js-debug-system-table js-debug-system-fixed-table js-debug-system-sampler-table">
+    <thead><tr>${[
+      ['debug.system.sampler.header.family.short', 'debug.system.sampler.header.family.short'],
+      ['debug.system.sampler.header.cadence.short', 'debug.system.sampler.header.cadence.full'],
+      ['debug.system.sampler.header.aliveRun.short', 'debug.system.sampler.header.aliveRun.full'],
+      ['debug.system.sampler.header.attSuccFails.short', 'debug.system.sampler.header.attSuccFails.full'],
+      ['debug.system.sampler.header.lateMiss.short', 'debug.system.sampler.header.lateMiss.full'],
+      ['debug.system.sampler.header.runtime.short', 'debug.system.sampler.header.runtime.full'],
+      ['debug.system.sampler.header.lastOk.short', 'debug.system.sampler.header.lastOk.full'],
+      ['debug.system.sampler.header.lastFail.short', 'debug.system.localServices.field.lastFailure'],
+    ].map(([shortKey, fullKey]) => debugSystemSamplerHeaderHtml(shortKey, fullKey)).join('')}</tr></thead>
+    <tbody>${families.map(([name, family]) => {
+      const cadence = debugSystemSamplerFamilySeconds(family, ['cadence_seconds', 'interval_seconds'], ['cadence_ms', 'interval_ms']);
+      const runtime = debugSystemSamplerFamilySeconds(family, ['last_runtime_seconds', 'runtime_seconds', 'last_runtime'], ['last_runtime_ms', 'runtime_ms']);
+      const running = family.running === true || family.in_flight === true;
+      const alive = family.alive === true || family.sampler_alive === true || running;
+      const attempts = debugSystemSamplerFamilyNumber(family, 'attempts', 'attempt_count');
+      const successes = debugSystemSamplerFamilyNumber(family, 'successes', 'success_count');
+      const failures = debugSystemSamplerFamilyNumber(family, 'failures', 'failure_count');
+      const late = debugSystemSamplerFamilyNumber(family, 'late', 'late_cycles');
+      const missed = debugSystemSamplerFamilyNumber(family, 'missed', 'missed_cycles');
+      return `<tr data-js-debug-sampler-family="${esc(name)}">
+        <th scope="row">${esc(name)}</th><td>${esc(cadence > 0 ? debugGraphTerseTimeText(cadence * 1000) : '—')}</td>
+        <td>${alive ? 'Yes' : 'No'} / ${running ? 'Yes' : 'No'}</td>
+        <td>${esc(`${debugSystemNumber(attempts)} / ${debugSystemNumber(successes)} / ${debugSystemNumber(failures)}`)}</td>
+        <td>${esc(`${debugSystemNumber(late)} / ${debugSystemNumber(missed)}`)}</td>
+        <td>${esc(runtime > 0 ? debugGraphTerseTimeText(runtime * 1000) : '—')}</td>
+        <td>${esc(debugSystemSamplerFamilySuccessAge(family, nowSeconds))}</td>
+        <td>${esc(family.last_failure || '—')}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() / 1000) {
+  const statsd = (services || []).find(service => String(service?.service || '') === 'statsd') || {};
+  const profile = statsd.history_profile && typeof statsd.history_profile === 'object' ? statsd.history_profile : {};
+  const requests = Math.max(0, Number(statsd.history_requests) || 0);
+  const hits = Math.min(requests, Math.max(0, Number(statsd.history_cache_hits) || 0));
+  const hitRate = requests > 0 ? `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})` : '—';
+  const historyQuery = profile.returned_records == null || profile.source_records == null
+    ? '—'
+    : `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`;
+  const aggregate = debugSystemRowsHtml([
+    ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
+    ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
+    ['Late / missed deadlines', `${debugSystemNumber(statsd.sampler_late_cycles)} / ${debugSystemNumber(statsd.sampler_missed_cycles)}`],
+    ['History cache hit rate', hitRate],
+    ['Last history latency', debugGraphTerseTimeText(Number(profile.assemble_ms || 0))],
+    ['Last history query', historyQuery],
+  ]);
+  return debugSystemCardHtml(
+    'YO!stats sampler',
+    `${aggregate}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`,
+    {wide: true},
+  );
+}
+
+function debugSystemCpuBudgetCardHtml(budget = {}) {
+  const status = ['ok', 'watching', 'warning'].includes(budget.status) ? budget.status : 'ok';
+  const consumers = Array.isArray(budget.top_consumers) ? budget.top_consumers : [];
+  const consumerText = consumers.map(row => {
+    const owner = [row?.role, row?.surface].filter(Boolean).join(':');
+    return `${owner || t('common.notAvailable')} ${debugSystemNumber(row?.compute_ms_total, 1)}ms`;
+  }).join(' · ') || 'None';
+  return debugSystemCardHtml('CPU budget', `<div data-js-debug-cpu-budget="${esc(status)}">${debugSystemRowsHtml([
+    ['Status', status],
+    ['Current / budget', `${debugSystemNumber(budget.current_percent, 1)}% / ${debugSystemNumber(budget.budget_percent, 1)}%`],
+    ['Sustained', `${debugSystemNumber(budget.sustained_seconds, 0)}s / ${debugSystemNumber(budget.sustained_budget_seconds, 0)}s`],
+    ['Top compute owners', consumerText],
+  ])}</div>`);
+}
+
 function debugSystemInnerHtml() {
   const payload = jsDebugSystemState.payload;
   if (!payload) {
@@ -46535,6 +47561,8 @@ function debugSystemInnerHtml() {
   const clientEvents = payload.client_events || {};
   const chat = payload.chat || {};
   const totals = payload.local_services?.totals || {};
+  const cpuBudget = payload.cpu_budget || {};
+  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
   const generatedAgo = payload.generated_at ? relativeTimeFormat(Math.max(0, Date.now() / 1000 - Number(payload.generated_at))) : t('common.notAvailable');
   const cards = [
     debugSystemCardHtml('Server', debugSystemRowsHtml([
@@ -46543,6 +47571,7 @@ function debugSystemInnerHtml() {
       ['Process CPU', `${debugSystemNumber(server.cpu_percent, 1)}%`], ['System CPU', `${debugSystemNumber(server.system_cpu_percent, 1)}%`],
       ['Memory', debugGraphTerseBytesText(server.rss_bytes)], ['State directory', payload.state_dir],
     ])),
+    debugSystemCpuBudgetCardHtml(cpuBudget),
     debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
       ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
       ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
@@ -46566,6 +47595,7 @@ function debugSystemInnerHtml() {
       ['Delivered events', clientEvents.delivered_events],
       ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
     ])),
+    debugSystemStatsSamplerCardHtml(services),
     debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
     debugSystemLocalServicesCardHtml(),
     debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),
@@ -46704,7 +47734,7 @@ function yoCostPanelHtml() {
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refresh = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
   const ageLabel = debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
-  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-data-age" data-js-yocost-data-age>${esc(ageLabel)}${refresh}</div>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
 }
 
 function openYoCostTranscriptPreview(event) {
@@ -46726,14 +47756,29 @@ function handleYoCostTableSort(event, panel) {
   const nextDirection = jsDebugCostComponentSortState.key === key && jsDebugCostComponentSortState.direction === 'asc' ? 'desc' : 'asc';
   jsDebugCostComponentSortState.key = key;
   jsDebugCostComponentSortState.direction = nextDirection;
-  renderYoCostPanels();
+  // Age-label cadence throttles passive panel repainting; a user sort is an
+  // explicit content mutation and must repaint immediately.
+  renderYoCostPanels({force: true});
   return true;
 }
 
 function bindYoCostPanel(panel) {
   if (!panel || panel.dataset.jsYoCostBound === 'true') return;
   panel.dataset.jsYoCostBound = 'true';
-  panel.addEventListener('pointerdown', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('pointerdown', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    handleDebugGraphPointerDown(event, panel);
+  });
+  panel.addEventListener('pointermove', event => { handleDebugGraphPointerMove(event, panel); });
+  panel.addEventListener('pointerleave', () => { debugGraphClearInteractionLines(panel); });
+  panel.addEventListener('pointerup', event => {
+    if (handleDebugGraphControlEvent(event, panel)) return;
+    handleDebugGraphPointerUp(event, panel);
+  });
+  panel.addEventListener('pointercancel', event => {
+    handleDebugGraphControlEvent(event, panel);
+    cancelDebugGraphSelection(panel);
+  });
   panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
   panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
   panel.addEventListener('click', event => {
@@ -46741,7 +47786,6 @@ function bindYoCostPanel(panel) {
     if (handleYoCostTableSort(event, panel)) return;
     openYoCostTranscriptPreview(event);
   });
-  syncJsDebugStatsPolling({pollNow: !jsDebugStatsPollState.firstSampleReceived});
 }
 
 function createYoCostPanel() {
@@ -46762,7 +47806,21 @@ function createYoCostPanel() {
   return panel;
 }
 
-function renderYoCostPanels() {
+function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
+  return 3000 + Math.floor(Math.max(0, Math.min(1, Number(randomValue) || 0)) * 7000);
+}
+
+function renderYoCostPanels({force = false} = {}) {
+  if (dragState.item != null) {
+    jsDebugRenderForce ||= force;
+    jsDebugRenderDragDeferred = true;
+    return false;
+  }
+  const nowMs = Date.now();
+  const visible = typeof document !== 'undefined'
+    && document.visibilityState !== 'hidden'
+    && itemIsActivePaneTab(yocostItemId);
+  if (!force && (!visible || nowMs < jsDebugCostPanelNextRefreshAtMs)) return false;
   for (const panel of document.querySelectorAll('.js-yocost-panel')) {
     const body = panel.querySelector('.js-yocost-body');
     const scroll = body?.querySelector('.js-yocost-scroll');
@@ -46774,11 +47832,18 @@ function renderYoCostPanels() {
     }
     bindYoCostPanel(panel);
   }
+  const delayMs = debugCostAgeRefreshDelayMs();
+  jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
+  jsDebugCostAgeNextRefreshAtMs = nowMs + delayMs;
+  syncDebugGraphLiveTicker();
+  return true;
 }
 
-function refreshDebugGraphSurfaces({force = true} = {}) {
-  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force});
-  renderYoCostPanels();
+function refreshDebugGraphSurfaces({force = true, deferFocusedControl = true} = {}) {
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    refreshDebugGraphElement(graph, {force, deferFocusedControl});
+  }
+  renderYoCostPanels({force});
 }
 
 function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(yocostItemId))) {
@@ -46820,15 +47885,20 @@ function renderDebugPanels(options = {}) {
     }
     bindDebugPanel(panel);
   }
-  renderYoCostPanels();
+  renderYoCostPanels(options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelsFromEvents(options = {}) {
+  if (dragState.item != null) {
+    jsDebugRenderForce ||= options.force === true;
+    jsDebugRenderDragDeferred = true;
+    return;
+  }
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  renderYoCostPanels();
+  renderYoCostPanels(options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -46860,8 +47930,146 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   log.scrollTop = nearBottom || options.force === true ? log.scrollHeight : oldTop;
 }
 
-function refreshDebugGraphElement(graph, {force = false} = {}) {
+function debugGraphFocusedControl(graph) {
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  if (!graph || !active || !graph.contains(active)) return null;
+  if (active.matches?.('[data-js-debug-range-slider]')) return null;
+  return active.closest?.('.js-debug-graph-controls, [data-js-debug-model-token-dimension]') || null;
+}
+
+function syncDebugGraphControls(graph, nowMs = Date.now()) {
+  if (!graph) return;
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const domain = debugGraphDomain(nowMs);
+  const zoomed = debugGraphZoomDomainValid();
+  const slider = graph.querySelector('[data-js-debug-range-slider]');
+  if (slider) {
+    slider.max = String(Math.max(0, options.length - 1));
+    slider.value = String(jsDebugGraphRangeOptionIndex(activeJsDebugGraphRangeSeconds(nowMs), nowMs));
+    slider.disabled = zoomed;
+    slider.setAttribute('aria-disabled', zoomed ? 'true' : 'false');
+  }
+  const rangeLabel = graph.querySelector('[data-js-debug-range-label]');
+  if (rangeLabel) rangeLabel.textContent = zoomed ? debugGraphCostRangeText(domain) : jsDebugGraphRangeLabel(jsDebugGraphRangeSeconds, nowMs);
+  const rangeControl = graph.querySelector('[data-js-debug-range-control]');
+  let reset = rangeControl?.querySelector('[data-js-debug-zoom-reset]');
+  if (zoomed && rangeControl && !reset) {
+    reset = makeButton({
+      className: 'js-debug-zoom-reset',
+      dataset: {jsDebugZoomReset: ''},
+      label: `${t('common.reset')} ${t('debug.graph.control.zoom')}`,
+    });
+    rangeControl.append(reset);
+  } else if (!zoomed) {
+    reset?.remove();
+  }
+  graph.querySelectorAll('[data-js-debug-chart-layout]').forEach(button => {
+    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === jsDebugGraphChartLayout ? 'true' : 'false');
+  });
+  graph.querySelectorAll('[data-js-debug-chart-toggle]').forEach(button => {
+    button.setAttribute('aria-pressed', debugGraphChartVisible(button.dataset.jsDebugChartToggle) ? 'true' : 'false');
+  });
+  const resolution = graph.querySelector('[data-js-debug-resolution]');
+  const expectedHost = document.createElement('div');
+  expectedHost.innerHTML = debugGraphResolutionLabelHtml(nowMs);
+  const expectedResolution = expectedHost.firstElementChild;
+  if (resolution && expectedResolution) {
+    resolution.dataset.jsDebugResolutionSeconds = expectedResolution.dataset.jsDebugResolutionSeconds;
+    const select = resolution.querySelector('[data-js-debug-resolution-override]');
+    const expectedSelect = expectedResolution.querySelector('[data-js-debug-resolution-override]');
+    if (select && expectedSelect && document.activeElement !== select && select.innerHTML !== expectedSelect.innerHTML) select.innerHTML = expectedSelect.innerHTML;
+    if (select && expectedSelect && document.activeElement !== select) select.value = expectedSelect.value;
+    const firstText = [...resolution.childNodes].find(node => node.nodeType === 3);
+    const expectedText = [...expectedResolution.childNodes].find(node => node.nodeType === 3);
+    if (firstText && expectedText) firstText.textContent = expectedText.textContent;
+  }
+  const dimension = graph.querySelector('[data-js-debug-model-token-dimension-select]');
+  if (dimension && document.activeElement !== dimension) dimension.value = jsDebugGraphModelTokenDimension;
+}
+
+function preserveDebugGraphBodyControls(graph, nextBody) {
+  const selectors = ['[data-js-debug-model-token-dimension-select]', '[data-js-debug-chart-close]'];
+  for (const selector of selectors) {
+    const currentByKey = new Map([...graph.querySelectorAll(selector)].map(control => [
+      control.dataset.jsDebugChartClose || control.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens',
+      control,
+    ]));
+    for (const replacement of nextBody.querySelectorAll(selector)) {
+      const key = replacement.dataset.jsDebugChartClose || replacement.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens';
+      const current = currentByKey.get(key);
+      if (!current) continue;
+      for (const attribute of [...replacement.attributes]) current.setAttribute(attribute.name, attribute.value);
+      for (const attribute of [...current.attributes]) {
+        if (!replacement.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+      }
+      replacement.replaceWith(current);
+    }
+  }
+}
+
+function debugCostAgeLabels() {
+  if (typeof document === 'undefined' || !itemIsActivePaneTab(yocostItemId)) return [];
+  return [...document.querySelectorAll('[data-js-yocost-data-age-label]')].filter(label => !label.closest('[hidden]') && label.getClientRects().length > 0);
+}
+
+function debugCostAgeLabelText(nowMs = Date.now()) {
+  const refreshedAtMs = Math.max(Number(jsDebugStatsPollState.lastSampleAtMs) || 0, Number(jsDebugPricingRefreshState.lastRequestedAtMs) || 0);
+  const ageSeconds = refreshedAtMs > 0 ? Math.max(0, Math.floor((nowMs - refreshedAtMs) / 1000)) : null;
+  const age = ageSeconds === null ? t('common.notAvailable') : ageSeconds < 60 ? `${ageSeconds}s ago` : relativeTimeFormat(ageSeconds);
+  return debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
+}
+
+function refreshDebugCostAgeLabels(nowMs = Date.now()) {
+  const labels = debugCostAgeLabels();
+  if (!labels.length || nowMs < jsDebugCostAgeNextRefreshAtMs) return false;
+  const text = debugCostAgeLabelText(nowMs);
+  labels.forEach(label => { label.textContent = text; });
+  jsDebugCostAgeNextRefreshAtMs = nowMs + debugCostAgeRefreshDelayMs();
+  return true;
+}
+
+function debugGraphLiveTickerNeeded() {
+  return debugCostAgeLabels().length > 0;
+}
+
+function stopDebugGraphLiveTicker() {
+  if (jsDebugGraphLiveFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(jsDebugGraphLiveFrame);
+  jsDebugGraphLiveFrame = 0;
+  jsDebugGraphLiveFrameLastMs = 0;
+}
+
+function debugGraphLiveFrameTick(frameMs = performanceNow()) {
+  jsDebugGraphLiveFrame = 0;
+  if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+  const ageLabels = debugCostAgeLabels();
+  if (!ageLabels.length) return;
+  if (frameMs - jsDebugGraphLiveFrameLastMs >= 50) {
+    jsDebugGraphLiveFrameLastMs = frameMs;
+    refreshDebugCostAgeLabels(Date.now());
+  }
+  jsDebugGraphLiveFrame = requestAnimationFrame(debugGraphLiveFrameTick);
+}
+
+function syncDebugGraphLiveTicker() {
+  if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined' || document.visibilityState === 'hidden' || !debugGraphLiveTickerNeeded()) {
+    stopDebugGraphLiveTicker();
+    return;
+  }
+  if (!jsDebugGraphLiveFrame) jsDebugGraphLiveFrame = requestAnimationFrame(debugGraphLiveFrameTick);
+}
+
+function flushDeferredDebugGraphRefresh(graph) {
+  if (!graph || graph.dataset.jsDebugGraphRefreshPending !== 'true' || debugGraphFocusedControl(graph)) return false;
+  delete graph.dataset.jsDebugGraphRefreshPending;
+  return refreshDebugGraphElement(graph, {force: true});
+}
+
+function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = true} = {}) {
   if (!graph || jsDebugGraphRangeSliderDragging) return false;
+  if (deferFocusedControl && debugGraphFocusedControl(graph)) {
+    graph.dataset.jsDebugGraphRefreshPending = 'true';
+    return false;
+  }
   const nowMs = Date.now();
   const lastRenderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
   if (!force && Number.isFinite(lastRenderedAt) && nowMs - lastRenderedAt < jsDebugGraphRefreshMs) return false;
@@ -46871,12 +48079,25 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
   const scrollLeft = scrollOwner?.scrollLeft || 0;
   try {
     graph.className = debugGraphClassName(nowMs);
-    graph.innerHTML = debugGraphInnerHtml(nowMs);
+    let body = graph.querySelector('[data-js-debug-graph-body]');
+    if (!body) {
+      graph.innerHTML = debugGraphInnerHtml(nowMs);
+      body = graph.querySelector('[data-js-debug-graph-body]');
+    } else {
+      const nextBody = document.createElement('div');
+      nextBody.innerHTML = debugGraphBodyHtml(nowMs);
+      preserveDebugGraphBodyControls(graph, nextBody);
+      body.replaceChildren(...nextBody.childNodes);
+    }
+    syncDebugGraphControls(graph, nowMs);
     restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
     bindDebugCostSummaryTabButtons(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
+    delete graph.dataset.jsDebugGraphRefreshPending;
+    if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
+    syncDebugGraphLiveTicker();
   } finally {
     clientPerfEnd(perf);
   }
@@ -46927,7 +48148,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionSeconds(requestedStartSeconds, requestedResolutionSeconds);
   if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds)) return false;
   const state = jsDebugHistoryReadiness;
-  if (!retry && state.phase === 'error' && !jsDebugHistoryAutoRetryDue(state)) return false;
+  if (!retry && ['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
     && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
@@ -46951,13 +48172,17 @@ function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
-  saveJsDebugStatsUiPreferences();
   activeJsDebugGraphRangeSeconds();
+  saveJsDebugStatsUiPreferences();
   syncDebugGraphAgentTokenResolution();
   if (!render) return;
+  syncJsDebugStatsDeliveryMode();
   const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
-  if (requestJsDebugHistoryForCurrentDomain()) return;
-  if (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error') {
+  // An explicit range action is also an explicit retry. Do not let an old
+  // automatic-retry backoff make a newly requested domain appear ready while
+  // no request is queued.
+  const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
+  if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
     setJsDebugHistoryReadiness('ready', {
       requestedRangeSeconds: jsDebugGraphRangeSeconds,
       requestedStartSeconds,
@@ -46971,10 +48196,64 @@ function setDebugGraphRange(value, {render = true} = {}) {
 
 function setDebugGraphResolutionOverride(value) {
   loadJsDebugStatsUiPreferences();
+  const previousSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
   const seconds = Math.max(0, Number(value) || 0);
-  jsDebugGraphResolutionOverrideSeconds = [0, 1, 2, 5, 10, 30, 60, 120, 300, 600].includes(seconds) ? seconds : 0;
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
+  jsDebugGraphResolutionOverrideSeconds = normalized;
+  saveJsDebugStatsUiPreferences();
+  // Immediate ≤1-frame acknowledgement: the control + Resolution label reflect the target
+  // value now, before any fetch resolves.
+  refreshDebugGraphSurfaces();
+  if (normalized === previousSeconds) {
+    jsDebugGraphPendingResolutionChange = null;
+    return;
+  }
+  // Cached/instant path: when the domain's buckets are already client-side (the common
+  // case, since a resolution change is an in-memory re-aggregation) no fetch is needed and
+  // the swap is instant with no overlay. Only when the change genuinely needs finer/coarser
+  // history do we show the shared dimmed loading overlay over the still-visible old data and
+  // arm a generation-guarded revert-on-failure.
+  const fetching = requestJsDebugHistoryForCurrentDomain();
+  if (!fetching) {
+    jsDebugGraphPendingResolutionChange = null;
+    return;
+  }
+  jsDebugGraphPendingResolutionChange = {previousSeconds, generation: Number(jsDebugHistoryReadiness.generation || 0)};
+  // An explicit user action must acknowledge within a frame, so surface the shared overlay
+  // immediately rather than after the older-load debounce that avoids flashing on passive
+  // tail repairs.
+  jsDebugHistoryReadiness.overlayVisible = true;
+  clearJsDebugHistoryOverlayTimer();
+  syncJsDebugHistoryReadinessSurfaces();
+}
+
+// Resolve a pending Resolution-change fetch. Generation-guarded so a stale history response
+// can neither clear nor revert a newer request. On success the overlay clears through the
+// normal ready path; on failure the control reverts to its previous value with a danger
+// toast (never a silent snap-back) and the chart returns to that cached resolution.
+function resolveDebugGraphResolutionChange(state) {
+  const pending = jsDebugGraphPendingResolutionChange;
+  if (!pending || Number(state.generation) !== Number(pending.generation)) return;
+  if (state.phase === 'ready') {
+    jsDebugGraphPendingResolutionChange = null;
+    return;
+  }
+  if (state.phase !== 'error') return;
+  jsDebugGraphPendingResolutionChange = null;
+  const revertedSeconds = normalizedDebugGraphResolutionOverrideSeconds(pending.previousSeconds, debugGraphDomain(), Date.now());
+  jsDebugGraphResolutionOverrideSeconds = revertedSeconds;
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
+  const label = revertedSeconds > 0 ? `${revertedSeconds}s` : 'AUTO';
+  // A toast is user feedback, never a state-machine dependency: its rendering must not be
+  // able to throw back into the readiness transition that invoked this resolver.
+  try {
+    emitNotification('statsResolution', {
+      title: t('debug.graph.resolution.loadFailed', {resolution: label}),
+      className: 'danger-alert toast',
+      coalesceKey: 'statsResolution',
+    });
+  } catch (_) {}
 }
 
 function setDebugGraphChartLayout(value) {
@@ -47031,7 +48310,7 @@ function debugGraphPointerRatioForEvent(event) {
 }
 
 function debugGraphSetInteractionLines(panel, ratio) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
   if (!graph || ratio == null) return;
   const x = (Math.max(0, Math.min(1, Number(ratio))) * jsDebugGraphGeometry.width).toFixed(1);
   graph.classList.add('js-debug-graph--hovering');
@@ -47066,8 +48345,21 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   const spanMs = Number(domain.endMs) - Number(domain.startMs);
   if (!Number.isFinite(spanMs) || spanMs <= 0) return;
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
-  tooltip.querySelector('[data-js-debug-hover-max]').textContent = debugGraphHoverValueAtTime(chart, timestamp);
-  tooltip.querySelector('[data-js-debug-hover-time]').textContent = debugGraphExactTimeLabel(timestamp);
+  const tokenDetail = debugGraphTokenHoverDetailAtTime(chart, timestamp);
+  tooltip.querySelector('[data-js-debug-hover-max]').textContent = tokenDetail?.span || debugGraphHoverValueAtTime(chart, timestamp);
+  tooltip.querySelector('[data-js-debug-hover-time]').textContent = tokenDetail?.detail || debugGraphExactTimeLabel(timestamp);
+  tooltip.toggleAttribute('data-js-debug-hover-no-data', tokenDetail?.noData === true);
+  const provenance = debugGraphHoverProvenanceAtTime(chart, timestamp);
+  if (provenance.length) tooltip.setAttribute('data-js-debug-hover-provenance', JSON.stringify(provenance));
+  else tooltip.removeAttribute('data-js-debug-hover-provenance');
+  const sourceText = debugGraphHeldProvenanceText(provenance);
+  const source = tooltip.querySelector('[data-js-debug-hover-source]');
+  const sourceSeparator = tooltip.querySelector('[data-js-debug-hover-source-separator]');
+  if (source) {
+    source.textContent = sourceText;
+    source.hidden = !sourceText;
+  }
+  if (sourceSeparator) sourceSeparator.hidden = !sourceText;
   debugGraphSetHoverLegendItems(chart, timestamp);
   for (const item of panel.querySelectorAll('[data-js-debug-hover-tooltip]')) item.hidden = item !== tooltip;
   tooltip.hidden = false;
@@ -47083,14 +48375,14 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
 
 function debugGraphClearInteractionLines(panel) {
   if (jsDebugGraphSelectionState) return;
-  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
   if (graph) graph.classList.remove('js-debug-graph--hovering');
   panel?.querySelectorAll?.('[data-js-debug-hover-tooltip]').forEach(tooltip => { tooltip.hidden = true; });
   panel?.querySelectorAll?.('[data-js-debug-legend-item--hovered]').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
 }
 
 function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
   if (!graph) return;
   const start = Math.max(0, Math.min(1, Number(startRatio)));
   const end = Math.max(0, Math.min(1, Number(endRatio)));
@@ -47104,7 +48396,7 @@ function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
 }
 
 function debugGraphClearSelectionRects(panel) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
   if (!graph) return;
   graph.classList.remove('js-debug-graph--selecting');
   graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
@@ -47130,6 +48422,7 @@ function handleDebugGraphPointerDown(event, panel) {
   const ratio = debugGraphPointerRatioForEvent(event);
   if (ratio == null || event.button > 0) return false;
   event.preventDefault();
+  if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control], [data-js-debug-model-token-dimension]')) document.activeElement.blur?.();
   const svg = event.target.closest('.js-debug-line-chart');
   jsDebugGraphSelectionState = {
     panel,
@@ -47178,10 +48471,11 @@ function handleDebugGraphPointerUp(event, panel) {
       startMs: Number(domain.startMs) + (minRatio * spanMs),
       endMs: Number(domain.startMs) + (maxRatio * spanMs),
     };
-    if (requestJsDebugHistoryForCurrentDomain()) return;
-    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-      refreshDebugGraphElement(graph, {force: true});
-    }
+    syncDebugGraphResolutionOverride(Date.now(), {persist: true});
+    syncJsDebugStatsDeliveryMode();
+    refreshDebugGraphSurfaces();
+    requestJsDebugHistoryForCurrentDomain();
+    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) syncDebugGraphControls(graph);
   } else {
     debugGraphSetInteractionLines(panel, end);
   }
@@ -47212,8 +48506,8 @@ function handleDebugGraphControlEvent(event, panel) {
   const chartToggle = event.target.closest('[data-js-debug-chart-toggle]');
   if (event.type === 'click' && chartToggle && panel.contains(chartToggle)) {
     event.preventDefault();
-    const visible = chartToggle.getAttribute('aria-pressed') !== 'true';
-    setDebugGraphChartVisible(chartToggle.dataset.jsDebugChartToggle, visible);
+    const chartKey = chartToggle.dataset.jsDebugChartToggle;
+    setDebugGraphChartVisible(chartKey, !debugGraphChartVisible(chartKey));
     return true;
   }
   const retry = event.target.closest('[data-js-debug-history-retry]');
@@ -47235,10 +48529,7 @@ function handleDebugGraphControlEvent(event, panel) {
   }
   const modelDimension = event.target.closest('[data-js-debug-model-token-dimension-select]');
   if (modelDimension && panel.contains(modelDimension) && event.type === 'change') {
-    const selected = String(modelDimension.value || '');
-    jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected) ? selected : 'output';
-    saveJsDebugStatsUiPreferences();
-    for (const graph of document.querySelectorAll('[data-js-debug-graph]')) refreshDebugGraphElement(graph, {force: true});
+    setDebugGraphModelTokenDimension(modelDimension.value);
     return true;
   }
   const chartLayout = event.target.closest('button[data-js-debug-chart-layout]');
@@ -47286,6 +48577,11 @@ function bindDebugPanel(panel) {
   bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
   syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
   syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
+  panel.addEventListener('focusout', event => {
+    const graph = event.target?.closest?.('[data-js-debug-graph]');
+    if (!graph) return;
+    setTimeout(() => { flushDeferredDebugGraphRefresh(graph); }, 0);
+  });
   panel.addEventListener('pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
@@ -62359,7 +63655,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
-  {action: 'copy', labelKey: 'common.copy', ariaLabelKey: 'common.copy'},
+  {action: 'copy', label: '⌘C', ariaLabelKey: 'common.copy', ariaLabelSuffix: 'Cmd-C'},
   {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
   {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
   {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
@@ -62384,12 +63680,16 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
+// Overflow refers to shared definitions instead of creating parallel key definitions that could
+// drift from their terminal-byte behavior.
+const terminalMobileAccessoryMoreActions = Object.freeze(['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r']);
 const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
-// Backspace uses its existing terminal-byte definition; the utility column ends in Alt/Cmd.
+// Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
 const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift', 'interrupt', 'alt', 'cmd']);
+const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift']);
+const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
@@ -62410,6 +63710,7 @@ function terminalMobileAccessoryState(session, options = {}) {
       cmdLocked: false,
       more: false,
       open: false,
+      palettePlacement: null,
       x: null,
       y: null,
       palettePress: null,
@@ -62447,7 +63748,7 @@ function terminalMobileAccessoryButtonHtml(session, definition, state, extraClas
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const label = definition.labelKey ? t(definition.labelKey) : definition.label;
-  const ariaLabel = definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel;
+  const ariaLabel = `${definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel}${definition.ariaLabelSuffix ? ` (${definition.ariaLabelSuffix})` : ''}`;
   return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
@@ -62604,45 +63905,65 @@ function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, 
   const below = paneHeight - bottom;
   const leftRoom = left;
   const rightRoom = paneWidth - right;
+  const previous = state?.palettePlacement || null;
   const moved = terminalMobileAccessoryMoved(state);
-  let side = 'above';
-  if (!moved && above >= height + gap) {
-    side = 'above';
-  } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
-    side = 'below';
-  } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
-    side = 'left';
-  } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
-    side = 'right';
-  } else if (below <= gap * 2 && above >= height + gap) {
-    side = 'above';
-  } else {
-    const candidates = [
-      {side: 'above', room: above, fits: above >= height + gap},
-      {side: 'below', room: below, fits: below >= height + gap},
-      {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
-      {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
-    ];
-    const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
-    side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+  let side = previous?.side || 'above';
+  if (!previous) {
+    if (!moved && above >= height + gap) {
+      side = 'above';
+    } else if (top <= height + gap && below >= Math.min(height, paneHeight) - gap) {
+      side = 'below';
+    } else if (moved && rightRoom <= gap * 2 && leftRoom >= width + gap) {
+      side = 'left';
+    } else if (moved && leftRoom <= gap * 2 && rightRoom >= width + gap) {
+      side = 'right';
+    } else if (below <= gap * 2 && above >= height + gap) {
+      side = 'above';
+    } else {
+      const candidates = [
+        {side: 'above', room: above, fits: above >= height + gap},
+        {side: 'below', room: below, fits: below >= height + gap},
+        {side: 'left', room: leftRoom, fits: leftRoom >= width + gap},
+        {side: 'right', room: rightRoom, fits: rightRoom >= width + gap},
+      ];
+      const fit = candidates.filter(item => item.fits).sort((a, b) => b.room - a.room)[0];
+      side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
+    }
+  }
+  let anchor = Number(previous?.anchor);
+  if (!Number.isFinite(anchor)) {
+    anchor = side === 'above' ? top - gap
+      : side === 'below' ? bottom + gap
+        : side === 'left' ? left - gap
+          : right + gap;
   }
   let x = right - width;
-  let y = top - height - gap;
+  let y = anchor - height;
   if (side === 'below') {
     x = left;
-    y = bottom + gap;
+    y = anchor;
   } else if (side === 'left') {
-    x = left - width - gap;
+    x = anchor - width;
     y = top;
   } else if (side === 'right') {
-    x = right + gap;
+    x = anchor;
     y = top;
   }
-  return {
+  const placement = {
     side,
     x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
     y: Math.round(terminalMobileAccessoryClamp(y, 0, paneHeight - height)),
   };
+  if (state) {
+    state.palettePlacement = {
+      side,
+      anchor: side === 'above' ? placement.y + height
+        : side === 'below' ? placement.y
+          : side === 'left' ? placement.x + width
+            : placement.x,
+    };
+  }
+  return placement;
 }
 
 function terminalMobileAccessoryLauncherDragPosition(press, event) {
@@ -62660,17 +63981,20 @@ function terminalMobileAccessoryHtml(session) {
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
   const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
   const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
+  const bottomKeys = terminalMobileAccessoryBottomActions.map(key).join('');
   // The overflow button remains the rightmost control in both palette states. Keeping the return
   // target in one physical corner avoids a touch user hunting for it after the content switches.
-  const moreKeys = [...terminalMobileAccessoryMoreKeyDefs.map(definition => terminalMobileAccessoryButtonHtml(session, definition, state)), key('more')].join('');
+  const moreKeys = [...terminalMobileAccessoryMoreActions.map(key), key('more')].join('');
   const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
   return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
+      <div class="mobile-terminal-key-grabber" aria-hidden="true"></div>
       <div class="mobile-terminal-key-side">
         ${sideKeys}
       </div>
       <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
       <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
+      <div class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom">${bottomKeys}</div>
       <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
     </div>`;
 }
@@ -62696,6 +64020,9 @@ function syncTerminalMobileAccessoryState(session) {
   const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
   bar.hidden = state.open !== true;
   bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+  // Set both visibility levers before measuring. Measuring after only the class change observes a
+  // hybrid primary/overflow layout and creates a second corrective placement on the next sync.
+  if (more) more.hidden = state.more !== true;
   if (launcher) {
     const open = state.open === true;
     launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -62731,7 +64058,6 @@ function syncTerminalMobileAccessoryState(session) {
     bar.style.transform = positionedBlock ? 'none' : '';
     delete bar.dataset.terminalMobilePlacement;
   }
-  if (more) more.hidden = state.more !== true;
   for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
   return true;
@@ -62741,7 +64067,10 @@ function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
   if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
   if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
-  if (key === 'open' && state.open !== true) dismissTerminalMobileAccessories(session);
+  if (key === 'open' && state.open !== true) {
+    dismissTerminalMobileAccessories(session);
+    state.palettePlacement = null;
+  }
   state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
   return state[key];
@@ -62878,6 +64207,7 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
     press.longPressed = true;
     state.open = true;
     state.more = true;
+    state.palettePlacement = null;
     syncTerminalMobileAccessoryState(session);
   }, terminalMobileAccessoryLongPressMs);
   return true;
@@ -62897,6 +64227,7 @@ function moveTerminalMobileAccessoryLauncherPress(session, event) {
   const position = terminalMobileAccessoryLauncherDragPosition(press, event);
   state.x = position.x;
   state.y = position.y;
+  state.palettePlacement = null;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
   event.stopPropagation();
@@ -62965,6 +64296,7 @@ function moveTerminalMobileAccessoryPalettePress(session, event) {
   const position = terminalMobileAccessoryLauncherDragPosition(press, event);
   state.x = position.x;
   state.y = position.y;
+  state.palettePlacement = null;
   syncTerminalMobileAccessoryState(session);
   event.preventDefault();
   event.stopPropagation();
@@ -65761,6 +67093,13 @@ function bindPanelControls(panel, session) {
     }
     handleWindowStepButtonClick(event);
   });
+  delegate(panel, 'click', '[data-terminal-connection-retry]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSession = button.dataset.terminalConnectionRetry || session;
+    showTerminalConnectionState(targetSession, 'connecting', t('tmuxWall.status.connecting'));
+    void ensureTerminalRunning(targetSession);
+  });
   delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
@@ -66226,7 +67565,7 @@ function insertEditorPasteUploadReferences(editorTarget, files) {
 
 function markdownImageUploadReferences(files) {
   return (files || []).map(file => {
-    const path = file.relative_path || pathBasename(file.path || '') || file.saved_name || '';
+    const path = file.path || file.relative_path || file.saved_name || '';
     if (!path) return '';
     return `![image](${markdownLinkTarget(path)})`;
   }).filter(Boolean);
@@ -66552,6 +67891,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
     const readback = refreshTmuxWindowActiveFromSignals(session, {...options, acceptUnchanged});
     return Promise.resolve(readback).then(confirmed => {
       if (!tmuxWindowSwitchSequenceMatches(session, options.sequence)) return;
+      if (confirmed) clearTerminalConnectionState(session, {sequence: options.sequence});
       if (!confirmed && attempt + 1 < tmuxWindowReadbackMaxAttempts) {
         scheduleTmuxWindowReadback(session, {...options, delayMs: tmuxWindowReadbackRetryDelayMs, attempt: attempt + 1});
       }
@@ -66563,6 +67903,7 @@ function scheduleTmuxWindowReadback(session, options = {}) {
       } else {
         const info = transcriptMetadataState.payload.sessions?.[session];
         reconcileTmuxWindowActiveIndexOverride(session, info, {expectedIndex: options.expectedIndex, sequence: options.sequence});
+        clearTerminalConnectionState(session, {sequence: options.sequence});
       }
     });
   };
@@ -66579,6 +67920,8 @@ function noteTerminalTmuxWindowSwitch(session, shortcut) {
   const sequence = directIndex !== null
     ? setTmuxWindowActiveIndexOverride(session, directIndex)
     : setTmuxWindowActiveIndexPending(session);
+  const targetLabel = directIndex !== null ? t('terminal.window.title', {name: directIndex}) : shortcut.label;
+  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${targetLabel}`, {sequence});
   updateTerminalTmuxInputState(session, {repeatUntilMs: shortcut.repeatable ? Date.now() + terminalTmuxWindowRepeatMs : 0});
   statusOk(`${esc(shortcut.label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
@@ -66896,6 +68239,7 @@ function tmuxWindow(session, key, label) {
   if (directIndex !== null) {
     const previousInfo = transcriptMetadataState.payload.sessions?.[session] || null;
     const sequence = setTmuxWindowActiveIndexOverride(session, directIndex);
+    showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${t('terminal.window.title', {name: directIndex})}`, {sequence});
     statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
     scheduleFit(session);
     focusAfterAcknowledgedSwitch();
@@ -66906,6 +68250,7 @@ function tmuxWindow(session, key, label) {
       })
       .catch(error => {
         if (!clearTmuxWindowActiveIndexOverride(session, {sequence, clearDirectTarget: true})) return;
+        clearTerminalConnectionState(session, {sequence});
         if (previousInfo) {
           setTranscriptMetadataPayload({
             ...transcriptMetadataState.payload,
@@ -66927,12 +68272,49 @@ function tmuxWindow(session, key, label) {
   }
   const previousIndex = tmuxWindowInfoActiveIndex(transcriptMetadataState.payload.sessions?.[session]);
   const sequence = setTmuxWindowActiveIndexPending(session);
+  showTerminalConnectionState(session, 'switching', `${t('common.loading')} ${label}`, {sequence});
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusAfterAcknowledgedSwitch();
   scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
+}
+
+function terminalConnectionStateNode(session) {
+  return document.getElementById(terminalDomId(session))?.querySelector?.('[data-terminal-connection-state]') || null;
+}
+
+function terminalConnectionStateHtml(session, state, text, options = {}) {
+  const retry = options.retry === true
+    ? `<button type="button" data-terminal-connection-retry="${esc(session)}">${esc(t('common.retry'))}</button>`
+    : '';
+  const sequence = options.sequence === undefined ? '' : ` data-terminal-connection-sequence="${esc(String(options.sequence))}"`;
+  return `<div class="terminal-connection-state terminal-connection-state--${esc(state)}" data-terminal-connection-state="${esc(state)}"${sequence} role="status"><span>${esc(text)}</span>${retry}</div>`;
+}
+
+function showTerminalConnectionState(session, state, text, options = {}) {
+  const container = document.getElementById(terminalDomId(session));
+  if (!container) return null;
+  let node = terminalConnectionStateNode(session);
+  const replacement = document.createElement('div');
+  replacement.innerHTML = terminalConnectionStateHtml(session, state, text, options);
+  const next = replacement.firstElementChild;
+  if (!next) return null;
+  if (node) node.replaceWith(next);
+  else container.appendChild(next);
+  container.classList.add('terminal-connection-pending');
+  return next;
+}
+
+function clearTerminalConnectionState(session, options = {}) {
+  const node = terminalConnectionStateNode(session);
+  if (!node) return false;
+  if (options.sequence !== undefined && String(node.dataset.terminalConnectionSequence || '') !== String(options.sequence)) return false;
+  const container = node.parentElement;
+  node.remove();
+  container?.classList.remove('terminal-connection-pending');
+  return true;
 }
 
 async function ensureTerminalRunning(session) {
@@ -66950,12 +68332,23 @@ async function ensureTerminalRunning(session) {
       return;
     }
     const knownFromTranscriptPayload = Boolean(transcriptMetadataState.loaded && transcriptMetadataState.payload.sessions?.[session]);
+    if (!knownFromTranscriptPayload) showTerminalConnectionState(session, 'connecting', t('tmuxWall.status.connecting'));
     const ensured = knownFromTranscriptPayload || await ensureSession(session);
     if (!ensured) {
-      const container = document.getElementById(terminalDomId(session));
-      if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
+      const message = t('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)});
+      showTerminalConnectionState(session, 'unavailable', message, {retry: true});
+      if (document?.defaultView && attentionAlerts) {
+        emitNotification('terminalConnection', {
+          session,
+          title: sessionLabel(session),
+          body: message,
+          className: 'danger-alert toast',
+          coalesceKey: `terminal-unavailable:${session}`,
+        });
+      }
       return;
     }
+    clearTerminalConnectionState(session);
     startTerminal(session);
   })();
   terminalStartupPromises.set(key, promise);
@@ -66978,6 +68371,7 @@ function connectTerminalSocket(session, item) {
     item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
     dismissTerminalConnectionToasts(session);
+    clearTerminalConnectionState(session);
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
@@ -67008,6 +68402,7 @@ function connectTerminalSocket(session, item) {
       clientPerfEnd(writePerf, {bytes: dataBytes});
       const firstOutput = item.terminalOutputSeen !== true;
       item.terminalOutputSeen = true;
+      clearTerminalConnectionState(session);
       item.fileUnderlineController?.schedule?.({reason: 'output'});
       if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
       scheduleTerminalAttentionHighlight(session);
@@ -68540,9 +69935,8 @@ async function boot() {
   }
   if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  if (!shareViewMode && typeof startJsDebugStatsPolling === 'function') startJsDebugStatsPolling();
-  if (!shareViewMode && typeof primeJsDebugStatsBeforeLongLivedStreams === 'function') {
-    await primeJsDebugStatsBeforeLongLivedStreams();
+  if (!shareViewMode && typeof initializeJsDebugStatsBeforeStreams === 'function') {
+    await initializeJsDebugStatsBeforeStreams();
   }
   if (!shareViewMode) installClientEventStream();
   if (!shareViewMode) {
@@ -68966,7 +70360,8 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
-    if (activeItems.includes(debugPaneItemId)) channels.add('stats');
+    if ((activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId))
+        && (typeof jsDebugStatsLivePushEnabled !== 'function' || jsDebugStatsLivePushEnabled())) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
       channels.add('transcripts');

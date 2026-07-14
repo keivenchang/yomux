@@ -38,13 +38,23 @@ def test_boot_print_command_uses_any_configured_primary_port():
     assert "--dang --self-signed" in command
     assert "--dev" not in command
     assert "MALLOC_ARENA_MAX=2" in command
-    assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=48123" in command
+    if platform.system() == "Darwin":
+        assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT" in command
+        assert "48123 --host 127.0.0.1" in command
+    else:
+        assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=48123" in command
     clears_tmux_inline = "TMUX= TMUX_PANE=" in command
     clears_tmux_in_detacher = (
         'env.pop("TMUX", None)' in command
         and 'env.pop("TMUX_PANE", None)' in command
     )
-    assert clears_tmux_inline or clears_tmux_in_detacher
+    clears_tmux_in_macos_launcher = "unset TMUX TMUX_PANE" in command
+    assert clears_tmux_inline or clears_tmux_in_detacher or clears_tmux_in_macos_launcher
+    if platform.system() == "Darwin":
+        assert "/bin/bash -c" in command
+        assert "cd" in command
+        assert str(ROOT) in command
+        assert "yolomux-48123.log" in command
 
 
 def test_boot_print_command_launches_dev_ports_in_dev_mode():
@@ -95,6 +105,8 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
     assert 'yolomux_bootout_macos_server "$port"\n  fi\n  stop_port_listener "$port"' in source
     assert "yolomux_submit_macos_server" in source
+    assert "yolomux_macos_server_launcher" in source
+    assert 'cd "$repo"' in startup_common
 
 
 def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_path):

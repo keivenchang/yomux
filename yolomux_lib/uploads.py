@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import stat
+import threading
+import time
 from datetime import datetime
 from email.message import Message
 from pathlib import Path
+from typing import Callable
 
 from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from .common import PASTE_UPLOAD_NAME_RE
@@ -11,6 +17,121 @@ from .common import UPLOAD_MAX_BYTES
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_SAFE_NAME_RE
 from .common import UploadedFile
+
+
+UPLOAD_TMP_BASE = Path("/tmp")
+UPLOAD_RETENTION_SWEEP_SECONDS = 24 * 60 * 60
+UPLOAD_RETENTION_MAX_ENTRIES = 10_000
+
+
+class UploadTargetError(OSError):
+    """The central upload tree failed its ownership/symlink safety checks."""
+
+
+def upload_path_component(value: str, fallback: str, max_length: int = 80) -> str:
+    original = str(value or "").strip()
+    if not original:
+        return fallback
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", original).strip("._-") or fallback
+    normalized = normalized[:max_length]
+    if normalized != original:
+        digest = hashlib.sha256(original.encode("utf-8")).hexdigest()[:10]
+        normalized = f"{normalized[: max(1, max_length - 11)]}-{digest}"
+    return normalized
+
+
+def ensure_private_upload_dir(path: Path) -> Path:
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise UploadTargetError(f"failed to create private upload directory {path}: {exc}") from exc
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise UploadTargetError(f"failed to inspect private upload directory {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise UploadTargetError(f"refusing symlink upload directory: {path}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise UploadTargetError(f"refusing non-directory upload path: {path}")
+    if info.st_uid != os.geteuid():
+        raise UploadTargetError(f"refusing upload directory owned by uid {info.st_uid}: {path}")
+    try:
+        path.chmod(0o700)
+    except OSError as exc:
+        raise UploadTargetError(f"failed to secure upload directory {path}: {exc}") from exc
+    return path
+
+
+def central_upload_target(auth_username: str, session: str, *, tmp_base: Path | None = None) -> tuple[Path, Path]:
+    base = Path(tmp_base) if tmp_base is not None else UPLOAD_TMP_BASE
+    username = upload_path_component(auth_username, "default")
+    session_name = upload_path_component(session, "session")
+    user_root = ensure_private_upload_dir(base / f"yolomux.{username}")
+    uploads_root = ensure_private_upload_dir(user_root / "uploads")
+    return ensure_private_upload_dir(uploads_root / session_name), user_root
+
+
+def prune_expired_uploads(
+    user_root: Path,
+    retention_days: int,
+    *,
+    now: float | None = None,
+    max_entries: int = UPLOAD_RETENTION_MAX_ENTRIES,
+) -> dict[str, int]:
+    uploads_root = user_root / "uploads"
+    root_info = uploads_root.lstat()
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid():
+        raise UploadTargetError(f"refusing unsafe upload retention root: {uploads_root}")
+    cutoff = (time.time() if now is None else float(now)) - (max(1, int(retention_days)) * 24 * 60 * 60)
+    scanned = 0
+    removed = 0
+    pending = [uploads_root]
+    while pending and scanned < max_entries:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if scanned >= max_entries:
+                        break
+                    scanned += 1
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISLNK(info.st_mode):
+                            continue
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append(Path(entry.path))
+                        elif stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                            os.unlink(entry.path)
+                            removed += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return {"scanned": scanned, "removed": removed}
+
+
+class UploadRetentionSweeper:
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._schedule: dict[Path, tuple[float, int]] = {}
+
+    def maybe_prune(self, user_root: Path, retention_days: int, *, force: bool = False) -> dict[str, int]:
+        now = self._clock()
+        days = max(1, int(retention_days))
+        with self._lock:
+            next_sweep, previous_days = self._schedule.get(user_root, (0.0, days))
+            if not force and previous_days == days and now < next_sweep:
+                return {"scanned": 0, "removed": 0}
+            self._schedule[user_root] = (now + UPLOAD_RETENTION_SWEEP_SECONDS, days)
+        try:
+            return prune_expired_uploads(user_root, days)
+        except OSError:
+            with self._lock:
+                self._schedule.pop(user_root, None)
+            raise
 
 
 def sanitize_upload_filename(filename: str) -> str:

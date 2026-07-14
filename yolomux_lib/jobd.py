@@ -35,6 +35,7 @@ from .local_services.runtime import redact_local_service_text
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
 from .local_services.client import LocalServiceClient
+from .metadata import _discover_indexed_repo_roots
 from .transcripts import compact_transcript_items
 from .transcripts import compact_transcript_items_since
 from .transcripts import compact_transcript_lines
@@ -43,7 +44,9 @@ from .transcripts import newest_transcript_timestamp
 from .transcripts import transcript_activity_state_from_text
 
 
-JOBD_PROTOCOL_VERSION = LOCAL_RPC_VERSION
+# The envelope transport remains LOCAL_RPC_VERSION. Bump this service generation whenever the
+# registered task/result contract changes so a newly restarted web process retires an older daemon.
+JOBD_PROTOCOL_VERSION = 2
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_MAX_WORKERS = 2
 JOBD_MAX_QUEUE = 64
@@ -75,6 +78,24 @@ def _text_facts(payload: bytes) -> bytes:
     lines = text.splitlines()
     result = {"bytes": len(text.encode("utf-8")), "lines": len(lines), "nonempty_lines": sum(1 for line in lines if line.strip())}
     return json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _indexed_repo_roots(payload: bytes) -> bytes:
+    """Discover configured repositories in a worker process, never in HTTP."""
+    value = json.loads(payload.decode("utf-8"))
+    raw_dirs = value.get("indexed_dirs") if isinstance(value, dict) else None
+    if not isinstance(raw_dirs, list) or len(raw_dirs) > 64:
+        raise ValueError("indexed_dirs must be a bounded list")
+    indexed_dirs: list[str] = []
+    for item in raw_dirs:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        path = Path(item).expanduser()
+        if not path.is_absolute() or ".." in path.parts:
+            raise ValueError("indexed directory must be absolute and normalized")
+        indexed_dirs.append(str(path))
+    result = {"roots": _discover_indexed_repo_roots(indexed_dirs)}
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def _normalized_transcript_path(path_text: str) -> Path:
@@ -145,6 +166,7 @@ def _transcript_view(payload: bytes) -> bytes:
 
 
 REGISTERED_TASKS = {
+    "indexed_repo_roots": _indexed_repo_roots,
     "json_compact": _json_compact,
     "text_facts": _text_facts,
     "transcript_view": _transcript_view,

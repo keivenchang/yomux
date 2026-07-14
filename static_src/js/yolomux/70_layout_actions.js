@@ -463,10 +463,6 @@ function slotForTabActivation(item) {
 
 async function activateTabInExistingPane(item, options = {}) {
   if (!isLayoutItem(item)) return;
-  if (isTmuxSession(item)) {
-    const ensured = await ensureSession(item);
-    if (!ensured) return;
-  }
   const targetSlot = options.preferFocused === true
     ? (fileEditorActivationSlot() || slotForTabActivation(item))
     : slotForTabActivation(item);
@@ -625,10 +621,6 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
     await splitSessionAtSlot(session, targetSlot, zone, null, pct);
     return;
   }
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return;
-  }
   const next = layoutWithoutItem(session);
   if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(targetSlot);
   if (!next[targetSlot]) next[targetSlot] = emptyPlaceholderPaneState();
@@ -645,26 +637,15 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
   applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
-// C12 F1: is this session's terminal already attached (socket open/connecting)? A live pane does not need
-// the blocking /api/ensure-session round-trip (two tmux subprocesses) on a move — it is already running.
-function sessionTerminalIsLive(session) {
-  const readyState = terminals.get(session)?.socket?.readyState;
-  return readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING;
-}
-
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0, options = {}) {
   if (!isLayoutItem(session) || !targetSlot) return false;
   const actualSourceSlot = sourceSlot || slotForItem(session);
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, targetSlot, layoutSlots, {
     allowRequiredInGeneric: sidePaneConstrainedMode(),
   })) return false;
-  // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
-  // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
-  // still reconciles/recovers if the session turns out to be gone (its socket would no longer be live).
-  if (isTmuxSession(session) && !sessionTerminalIsLive(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return;
-  }
+  // Placement is always visual-first. applyLayoutSlots -> ensureTerminalRunning owns the
+  // asynchronous readiness check and renders the shared connecting/unavailable state while it
+  // reconciles. Never put /api/ensure-session back in this user-action critical path.
   const next = layoutWithoutItem(session, {
     // Directional Move deliberately leaves the source as an explicit drop target when its
     // final tab leaves. Ordinary tab drag/move continues to compact that now-empty slot.
@@ -778,19 +759,11 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
   const targetRole = paneRoleForSlot(targetSlot);
   if ((targetRole.kind === paneRoleSide && !['top', 'bottom'].includes(zone))
     || !paneRoleAllowsItemTransfer(item, actualSourceSlot, targetSlot, layoutSlots)) return false;
-  // Read this before ensureSession(). A tmux readiness round trip can let Dockview reconcile an
-  // empty source while it is pending; the directional action still owes the user the explicit peer
-  // they chose when the gesture began.
   const preserveRemovedSlot = options.preserveSourcePlaceholder === true
     && sourceSlot === targetSlot
     && paneTabs(sourceSlot).length === 1;
-  if (isTmuxSession(item)) {
-    const ensured = await ensureSession(item);
-    if (!ensured) return;
-  }
-  // ensureSession() may let Dockview adopt the same visible group under a new slot id while the
-  // readiness request is in flight. Keep a self-split attached to that live source leaf instead of
-  // replacing the stale pre-await slot name (which leaves the new pane outside the layout tree).
+  // Layout placement is synchronous, so the source cannot drift during a readiness round trip;
+  // applyLayoutSlots delegates any cold terminal reconciliation to ensureTerminalRunning.
   const liveSourceSlot = slotForItem(item) || actualSourceSlot;
   const liveTargetSlot = targetSlot === actualSourceSlot ? liveSourceSlot : targetSlot;
   // Dockview can retain an unrendered empty group from an earlier arrangement. Directional Move
@@ -1088,10 +1061,6 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
     }
   }
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {targetRole})) return false;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return false;
-  }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   if (!root) {
@@ -1116,10 +1085,6 @@ async function splitSessionAtGutter(session, splitPath, zone, sourceSlot = null,
   if (!paneRoleAllowsItemTransfer(session, actualSourceSlot, null, layoutSlots, {
     targetRole: paneRoleDefinition(paneRoleGeneric),
   })) return false;
-  if (isTmuxSession(session)) {
-    const ensured = await ensureSession(session);
-    if (!ensured) return false;
-  }
   const next = layoutWithoutItem(session);
   const root = next[layoutTreeKey] || legacyLayoutTree(next);
   const target = layoutNodeAtPath(splitPath, root);
@@ -1175,6 +1140,42 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
   return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
 }
 
+// Highlight-first tab switching (two-phase paint order). Phase 1 is synchronous DOM-only chrome:
+// update the layout state and flip the active-tab highlight in the same frame as the input so the new
+// tab lights up immediately. Phase 2 is the heavy follow-up (terminal focus/fit) run on the next
+// frame and generation-guarded, so rapid tab cycling coalesces content onto the FINAL target only and
+// never blocks the highlight paint. See docs/specs/GUI.md "Tab switch: highlight first, content
+// follows".
+let tabSwitchHighlightGeneration = 0;
+
+function nextTabSwitchHighlightGeneration() {
+  tabSwitchHighlightGeneration += 1;
+  return tabSwitchHighlightGeneration;
+}
+
+// Test hook: a positive window.__yolomuxTabSwitchPhaseTwoDelayMs deliberately slows phase 2 so a
+// browser test can prove the highlight flips in the input frame while content strictly follows.
+function tabSwitchPhaseTwoDelayMs() {
+  if (typeof window === 'undefined') return 0;
+  const raw = Number(window.__yolomuxTabSwitchPhaseTwoDelayMs);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+function scheduleTabSwitchPhaseTwo(generation, work) {
+  const run = () => {
+    // A newer switch superseded this one (rapid cycling); its highlight already tracked every step,
+    // so the intermediate targets must not do any terminal/content work.
+    if (generation !== tabSwitchHighlightGeneration) return;
+    work();
+  };
+  const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  raf(() => {
+    const delay = tabSwitchPhaseTwoDelayMs();
+    if (delay > 0) setTimeout(run, delay);
+    else run();
+  });
+}
+
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
   if (options.userInitiated === true) {
@@ -1211,6 +1212,11 @@ function activatePaneTab(side, session, options = {}) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
   }
+  const generation = nextTabSwitchHighlightGeneration();
+  // Phase 1 (synchronous, input frame): update the layout state and flip the active-tab chrome. For an
+  // active-only switch applyLayoutSlots takes Dockview's cheap pre-rendered activate path (no fromJSON)
+  // and swaps the shown pane body to the target, so the highlight paints and the previous tab's content
+  // never lingers under the new highlight.
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
@@ -1218,7 +1224,11 @@ function activatePaneTab(side, session, options = {}) {
   applyLayoutSlots(next, {focusSession: session});
   setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
-  if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
+  // Phase 2 (next frame, generation-guarded): terminal focus/fit follows the highlight and coalesces
+  // across rapid cycling so only the final target engages its xterm.
+  if (options.userInitiated && isTmuxSession(session)) {
+    scheduleTabSwitchPhaseTwo(generation, () => focusTerminalFromUserAction(session, 25));
+  }
 }
 
 async function selectSession(session, options = {}) {
@@ -3189,6 +3199,7 @@ function scheduleTerminalReconnect(session, item) {
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
   statusErr(localizedHtml('terminal.connection.reconnectingStatus', {session: sessionLabel(session), seconds}));
   showTerminalConnectionToast(session, t('terminal.connection.reconnectingToast', {seconds}), delay);
+  showTerminalConnectionState(session, 'reconnecting', t('terminal.connection.reconnectingToast', {seconds}));
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
     item.reconnectTimer = null;

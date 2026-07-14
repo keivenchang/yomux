@@ -42,6 +42,45 @@ def server_ws_json(frame: bytes) -> dict:
     return json.loads(frame[offset:offset + payload_length].decode("utf-8"))
 
 
+def test_expected_client_disconnect_is_counted_without_traceback(monkeypatch):
+    recorded = []
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    server.app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: recorded.append((args, kwargs)))
+    stderr = io.StringIO()
+    monkeypatch.setattr(server_module.sys, "stderr", stderr)
+
+    try:
+        raise BrokenPipeError(errno.EPIPE, "fixture disconnected")
+    except BrokenPipeError:
+        server.handle_error(None, ("127.0.0.1", 4321))
+
+    assert stderr.getvalue() == "127.0.0.1 - - client disconnected: BrokenPipeError\n"
+    assert "Traceback" not in stderr.getvalue()
+    assert recorded == [(('http-endpoint', 'expected-disconnect'), {
+        'trigger': 'BrokenPipeError',
+        'count': 1,
+        'details': {'client': '127.0.0.1'},
+    })]
+
+
+def test_unexpected_server_error_keeps_the_standard_traceback_path(monkeypatch):
+    delegated = []
+    server = object.__new__(server_module.TmuxWebtermHTTPServer)
+    monkeypatch.setattr(
+        server_module.ThreadingHTTPServer,
+        "handle_error",
+        lambda self, request, address: delegated.append((request, address)),
+    )
+
+    request = object()
+    try:
+        raise RuntimeError("real handler bug")
+    except RuntimeError:
+        server.handle_error(request, ("127.0.0.1", 4321))
+
+    assert delegated == [(request, ("127.0.0.1", 4321))]
+
+
 def init_share_replay_state(server):
     server.share_replay_lock = server_module.threading.Lock()
     server.share_replay_records = {}
@@ -319,6 +358,67 @@ def test_get_stats_sample_promotes_backend_phase_profile_without_exposing_privat
         "stats_history_encode_ms": 7.5,
         "stats_history_compact_ms": 1.25,
     }
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("statsd socket unavailable"), TimeoutError("statsd RPC timed out")])
+def test_get_stats_sample_returns_one_bounded_503_without_legacy_history_replay(failure):
+    calls = []
+    writes = []
+
+    def unavailable(**kwargs):
+        calls.append(kwargs)
+        raise failure
+
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=SimpleNamespace(stats_sample_encoded_payload=unavailable)),
+        write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)),
+        write_json_bytes=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unavailable statsd must not emit a stale history payload")),
+    )
+
+    http_routes.get_stats_sample(request, SimpleNamespace(query="since=7&client_id=browser-a&history_start=100&history_end=200"), None)
+
+    assert len(calls) == 1, "the failed statsd request must not fall back to an in-process or replay path"
+    assert writes == [(
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        {
+            "error": "statsd unavailable",
+            "user_message": {
+                "key": "stats.error.unavailable",
+                "params": {"error": "statsd unavailable"},
+                "fallback": "statsd unavailable",
+            },
+            "diagnostic": str(failure),
+            "status": 503,
+        },
+    )]
+
+
+def test_do_post_stats_history_rejects_oversized_body_before_app_dispatch():
+    app_calls = []
+    handler, calls, writes = route_handler(
+        "/api/stats-history",
+        SimpleNamespace(record_stats_history_payload=lambda payload: app_calls.append(payload) or ("unexpected", HTTPStatus.OK)),
+    )
+    handler.headers = {"Content-Length": str((128 * 1024) + 1)}
+    handler.rfile = io.BytesIO(b"")
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert app_calls == []
+    assert writes == [(
+        "json",
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        {
+            "error": "content too large",
+            "user_message": {
+                "key": "request.error.contentTooLarge",
+                "params": {"max": 128 * 1024},
+                "fallback": "content too large",
+            },
+            "status": 413,
+        },
+    )]
 
 
 class FakeShareConnection:
@@ -763,6 +863,38 @@ def test_handle_upload_enforces_live_app_size_limit():
         "status": 413,
     }
     assert handler.close_connection is True
+
+
+def test_handle_upload_threads_authenticated_yolomux_user_to_all_upload_entry_points():
+    boundary = "upload-test"
+    body = (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"one.png\"\r\n\r\n".encode()
+        + b"png\r\n"
+        + f"--{boundary}--\r\n".encode()
+    )
+    calls = []
+    app = SimpleNamespace(
+        file_transfer_max_bytes=lambda: 1024,
+        upload_files=lambda session, files, **kwargs: calls.append(("terminal", session, files, kwargs)) or ({"ok": True}, HTTPStatus.OK),
+        upload_editor_files=lambda files, **kwargs: calls.append(("editor", "", files, kwargs)) or ({"ok": True}, HTTPStatus.OK),
+    )
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(body)), "Content-Type": f"multipart/form-data; boundary={boundary}"},
+        rfile=io.BytesIO(body),
+        server=SimpleNamespace(app=app),
+        close_connection=False,
+        file_transfer_max_bytes=lambda: app.file_transfer_max_bytes(),
+        auth_identity=lambda: SimpleNamespace(username="alice"),
+    )
+
+    Handler.handle_upload(handler, "6")
+    handler.rfile = io.BytesIO(body)
+    Handler.handle_upload(handler, "", editor_path="/repo/note.md")
+
+    assert calls[0][0:2] == ("terminal", "6")
+    assert calls[0][3] == {"auth_username": "alice"}
+    assert calls[1][0] == "editor"
+    assert calls[1][3] == {"editor_path": "/repo/note.md", "base_dir": "", "auth_username": "alice", "session": "editor"}
 
 
 def test_request_body_reader_owns_content_length_validation():

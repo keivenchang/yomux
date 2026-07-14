@@ -291,30 +291,12 @@ def test_operator_denies_readonly_setting_write(tmp_path):
     assert calls == []
 
 
-def test_operator_requires_confirmation_for_path_sensitive_setting(tmp_path):
-    path = tmp_path / "settings.yaml"
-    payload = settings_payload_for_path(path)
-    calls = []
-
-    response = yoagent_operator_response(
-        "set upload subdir to .uploads",
-        payload,
-        {},
-        "admin",
-        lambda patch: calls.append(patch) or payload,
-    )
-
-    assert response is not None
-    assert "higher-risk Preference" in response["answer"]
-    assert calls == []
-
-
-def test_operator_confirmed_upload_subdir_write_uses_save_path(tmp_path):
+def test_operator_upload_retention_write_uses_save_path(tmp_path):
     path = tmp_path / "settings.yaml"
     payload = settings_payload_for_path(path)
 
     response = yoagent_operator_response(
-        "confirm set upload subdir to .uploads",
+        "set upload retention to 14 days",
         payload,
         {},
         "admin",
@@ -322,7 +304,7 @@ def test_operator_confirmed_upload_subdir_write_uses_save_path(tmp_path):
     )
 
     assert response is not None
-    assert settings_payload(path)["settings"]["uploads"]["subdir"] == ".uploads"
+    assert settings_payload(path)["settings"]["uploads"]["retention_days"] == 14
     assert "Updated this Preference" in response["answer"]
 
 

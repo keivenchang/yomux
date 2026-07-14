@@ -443,6 +443,18 @@ button.topbar-status-surface {
 .topbar-status-surface[hidden] {
   display: none;
 }
+.backend-health-indicator {
+  min-width: 0;
+  max-width: min(32vw, 20rem);
+  overflow: hidden;
+  padding: var(--space-4) var(--space-7);
+  color: var(--danger-text-soft);
+  background: color-mix(in srgb, var(--bad) 18%, var(--panel2));
+  border: 1px solid var(--danger-border-soft);
+  border-radius: var(--radius-md);
+  text-overflow: ellipsis;
+  font-size: var(--ui-font-size-2xs);
+}
 button.topbar-status-surface:hover,
 button.topbar-status-surface:focus-visible {
   outline: 0;

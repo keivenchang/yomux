@@ -456,7 +456,8 @@ html.status-pulse-disabled .ci-indicator.pr-status-failing {
 }
 /* Green play is continuous work, not the optional broad status animation. It must keep its shared
    opacity pulse even when attention/cooldown animation is disabled in Preferences. */
-html.status-pulse-disabled .status-indicator--dot.status-indicator--working.heartbeat-pulse {
+html.status-pulse-disabled .status-indicator--dot.status-indicator--working.heartbeat-pulse,
+html.status-pulse-disabled .js-debug-live-pulse.heartbeat-pulse {
   animation-name: agent-status-opacity-pulse !important;
   animation-duration: var(--pulse-duration) !important;
   animation-delay: var(--attention-animation-delay, 0s) !important;

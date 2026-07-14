@@ -1599,9 +1599,26 @@ async function runLayoutRestoreSuite() {
     const startDragBody = source.slice(source.indexOf('function startSessionDrag'), source.indexOf('function endSessionDrag'));
     assert.equal(/\.getBoundingClientRect\(/.test(startDragBody), false, 'C12 F2: dragstart computes the grab offset without a getBoundingClientRect reflow');
     assert.ok(startDragBody.includes('event.offsetX') && startDragBody.includes('event.offsetY'), 'C12 F2: dragstart uses event.offsetX/offsetY for the drag-image offset');
-    // C12 F1: a move of an already-running pane skips the blocking ensure-session round-trip.
-    assert.ok(source.includes('function sessionTerminalIsLive('), 'C12 F1: a terminal-liveness helper exists');
-    assert.ok(/if \(isTmuxSession\(session\) && !sessionTerminalIsLive\(session\)\) \{\s*const ensured = await ensureSession/.test(source), 'C12 F1: moveSessionToSlot only awaits ensureSession when the pane is not already live');
+    // User navigation is visual-first even for a cold tmux session; the rendered terminal owner
+    // performs readiness reconciliation after applyLayoutSlots acknowledges the action.
+    const activateExistingBody = source.slice(source.indexOf('async function activateTabInExistingPane'), source.indexOf('function filesOnlySlotForSession'));
+    const moveSessionBody = source.slice(source.indexOf('async function moveSessionToSlot'), source.indexOf('async function dropSessionWithIntent'));
+    assert.equal(activateExistingBody.includes('await ensureSession'), false, 'tab activation never awaits the backend before its first layout acknowledgement');
+    assert.equal(moveSessionBody.includes('await ensureSession'), false, 'tab movement never awaits the backend before applying the target layout');
+    assert.equal(source.includes('function sessionTerminalIsLive('), false, 'the retired pre-visual liveness fork is gone');
+    const layoutActionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    assert.equal(layoutActionsSource.includes('await ensureSession'), false, 'no pane-tab move/split/drop action waits for tmux readiness before applying its visual layout');
+    for (const [name, nextName] of [
+      ['closePaneFrameItem', 'function closePaneFromLayout'],
+      ['minimizePaneFromLayout', 'function layoutWithExpandedPane'],
+      ['expandPaneFromLayout', 'function closePaneFromLayout'],
+      ['focusPanel', 'function focusTerminalFromUserAction'],
+    ]) {
+      const start = source.indexOf(`function ${name}`);
+      const end = source.indexOf(nextName, start + 1);
+      const body = source.slice(start, end > start ? end : start + 2500);
+      assert.equal(/await\s|apiFetch/.test(body), false, `${name} remains synchronous-local before its visual acknowledgement`);
+    }
     assert.equal(source.includes('function startCustomDragPreview'), false, '#47: the tab clone-follow preview is removed');
     assert.ok(/function paneTabDropPlacement[\s\S]*?dragMeasureStrip\(strip\)/.test(source), '#47: drop placement measures the strip via the per-drag cache');
     assert.ok(/function dragMeasureStrip\([\s\S]*?dragState\.item != null[\s\S]*?dragState\.tabRectCache/.test(source), '#47: the record-owned rect cache is only active during a live drag');

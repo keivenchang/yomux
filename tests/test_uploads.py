@@ -1,12 +1,21 @@
 import inspect
 import os
+import stat
+import time
+
+import pytest
 
 
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.common import UPLOAD_MAX_BYTES
 from yolomux_lib.common import UPLOAD_MAX_FILES
 from yolomux_lib.server import Handler
+from yolomux_lib.uploads import UploadTargetError
+from yolomux_lib.uploads import UploadRetentionSweeper
+from yolomux_lib.uploads import central_upload_target
 from yolomux_lib.uploads import parse_multipart_upload
+from yolomux_lib.uploads import prune_expired_uploads
+from yolomux_lib.uploads import upload_path_component
 from yolomux_lib.uploads import unique_upload_path
 
 
@@ -30,6 +39,73 @@ def test_unique_upload_path_increments_template_sequence(tmp_path):
     path = unique_upload_path(tmp_path, "20260531-001.png", DEFAULT_UPLOAD_FILENAME_TEMPLATE)
 
     assert path.name == "20260531-002.png"
+
+
+def test_central_upload_target_is_private_sanitized_and_disjoint_per_auth_user(tmp_path):
+    alice, alice_root = central_upload_target("alice", "project/one", tmp_base=tmp_path)
+    bob, bob_root = central_upload_target("bob", "project/one", tmp_base=tmp_path)
+
+    assert alice == alice_root / "uploads" / upload_path_component("project/one", "session")
+    assert bob == bob_root / "uploads" / upload_path_component("project/one", "session")
+    assert alice_root != bob_root
+    assert alice_root.name == "yolomux.alice"
+    assert bob_root.name == "yolomux.bob"
+    for directory in (alice_root, alice_root / "uploads", alice, bob_root, bob_root / "uploads", bob):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+def test_central_upload_target_defaults_empty_auth_and_refuses_squatters(monkeypatch, tmp_path):
+    default_target, default_root = central_upload_target("", "s", tmp_base=tmp_path)
+    assert default_target == tmp_path / "yolomux.default" / "uploads" / "s"
+    assert default_root.name == "yolomux.default"
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    squatted = tmp_path / "yolomux.mallory"
+    squatted.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(UploadTargetError, match="symlink"):
+        central_upload_target("mallory", "s", tmp_base=tmp_path)
+
+    owned = tmp_path / "yolomux.owner"
+    owned.mkdir()
+    monkeypatch.setattr(os, "geteuid", lambda: owned.stat().st_uid + 1)
+    with pytest.raises(UploadTargetError, match="owned by uid"):
+        central_upload_target("owner", "s", tmp_base=tmp_path)
+
+
+def test_upload_retention_prunes_only_expired_regular_files_in_verified_tree(tmp_path):
+    target, user_root = central_upload_target("alice", "s", tmp_base=tmp_path)
+    expired = target / "expired.png"
+    fresh = target / "fresh.png"
+    legacy = tmp_path / "repo" / ".uploads" / "legacy.png"
+    legacy.parent.mkdir(parents=True)
+    expired.write_bytes(b"old")
+    fresh.write_bytes(b"new")
+    legacy.write_bytes(b"legacy")
+    now = time.time()
+    os.utime(expired, (now - (10 * 86400), now - (10 * 86400)))
+    os.utime(legacy, (now - (10 * 86400), now - (10 * 86400)))
+
+    result = prune_expired_uploads(user_root, 7, now=now)
+
+    assert result["removed"] == 1
+    assert not expired.exists()
+    assert fresh.read_bytes() == b"new"
+    assert legacy.read_bytes() == b"legacy"
+
+
+def test_upload_retention_rechecks_immediately_when_setting_changes(tmp_path):
+    target, user_root = central_upload_target("alice", "s", tmp_base=tmp_path)
+    candidate = target / "five-days-old.png"
+    candidate.write_bytes(b"old")
+    now = time.time()
+    os.utime(candidate, (now - (5 * 86400), now - (5 * 86400)))
+    sweeper = UploadRetentionSweeper(clock=lambda: 10.0)
+
+    assert sweeper.maybe_prune(user_root, 7)["removed"] == 0
+    assert sweeper.maybe_prune(user_root, 7) == {"scanned": 0, "removed": 0}
+    assert sweeper.maybe_prune(user_root, 1)["removed"] == 1
+    assert not candidate.exists()
 
 
 def test_upload_default_size_cap_matches_file_transfer_preference_default():

@@ -38,10 +38,10 @@
   width: 40px;
   height: 40px;
   padding: 0;
-  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border: 1px solid var(--pane-inactive-tab-border);
   border-radius: var(--radius-control);
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  color: var(--pane-tab-text);
+  background: var(--panel2);
   box-shadow: var(--shadow-elevated);
   font: 700 var(--ui-font-size)/1 var(--ui-font);
   touch-action: none;
@@ -66,7 +66,7 @@
   gap: var(--space-4);
   width: min(18rem, calc(100vw - var(--space-12)));
   max-height: calc(100% - var(--space-4));
-  padding: var(--space-2);
+  padding: calc(var(--space-2) + var(--space-4)) var(--space-2) var(--space-2);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
@@ -79,12 +79,23 @@
 .mobile-terminal-keybar[hidden] {
   display: none;
 }
+.mobile-terminal-key-grabber {
+  position: absolute;
+  inset-inline: 50% auto;
+  inset-block-start: var(--space-2);
+  width: 24px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--pane-tab-text) 55%, transparent);
+  cursor: grab;
+}
 .mobile-terminal-key-side {
   grid-column: 1;
-  grid-row: 1 / span 2;
+  grid-row: 2;
   display: grid;
-  grid-template-rows: repeat(6, 36px);
-  align-self: start;
+  grid-template-rows: repeat(3, 36px);
+  align-self: end;
   align-content: start;
   gap: var(--space-1);
 }
@@ -106,6 +117,18 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: visible;
+}
+.mobile-terminal-keyrow-bottom {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  display: grid;
+  grid-template-columns: repeat(3, 36px);
+  justify-content: start;
+  overflow: visible;
+}
+.mobile-terminal-keyrow-bottom .mobile-terminal-key {
+  min-width: 36px;
+  padding-inline: 0;
 }
 .mobile-terminal-keyrow-shell {
   grid-column: 2;
@@ -134,12 +157,15 @@
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
 .mobile-terminal-keybar--more .mobile-terminal-key-side,
-.mobile-terminal-keybar--more .mobile-terminal-key-dpad {
-  display: none;
+.mobile-terminal-keybar--more .mobile-terminal-key-dpad,
+.mobile-terminal-keybar--more .mobile-terminal-keyrow-bottom {
+  visibility: hidden;
+  pointer-events: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow--more {
-  grid-column: 2;
-  grid-row: 1;
+  grid-column: 1 / -1;
+  grid-row: 1 / 4;
+  align-self: start;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-3);
@@ -154,6 +180,10 @@
 .mobile-terminal-keybar--more .mobile-terminal-keyrow--more .mobile-terminal-key--more {
   grid-column: 4;
   grid-row: 1;
+  width: 36px;
+  min-width: 36px;
+  padding-inline: 0;
+  justify-self: end;
 }
 .mobile-terminal-key-dpad {
   grid-column: 2;
@@ -571,6 +601,39 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   white-space: pre-wrap;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
+.terminal-connection-pending > .xterm {
+  opacity: 0.52;
+}
+.terminal-connection-state {
+  position: absolute;
+  z-index: var(--z-terminal-badge);
+  inset: 50% auto auto 50%;
+  max-width: min(88%, 32rem);
+  display: flex;
+  gap: var(--space-8);
+  align-items: center;
+  padding: var(--space-7) var(--space-10);
+  color: var(--text);
+  background: color-mix(in srgb, var(--overlay-surface-strong) 92%, transparent);
+  border: 1px solid var(--neutral-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 24px var(--paint-shadow-38);
+  translate: -50% -50%;
+  font: 600 var(--ui-font-size-sm)/1.3 var(--ui-font);
+}
+.terminal-connection-state--unavailable {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--line));
+}
+.terminal-connection-state button {
+  flex: none;
+  padding: var(--space-4) var(--space-7);
+  color: inherit;
+  background: var(--panel2);
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
 /* Upload and attention/status messages must stay visually identical. Keep shared box styling on .toast. */
 .toast {
   position: relative;
@@ -580,7 +643,7 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
   background: rgba(255, 244, 194, 0.58);
   border: 1px solid var(--50-terminal-file-tree-server-update-banner-border-88);
   border-radius: var(--radius-lg);
-  box-shadow: 0 16px 42px rgb(var(--shadow-rgb) / 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  box-shadow: 0 16px 42px var(--paint-shadow-38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
   backdrop-filter: blur(2px);
 }
 /* The update-available cue uses a solid (opaque) background instead of the translucent default, so it

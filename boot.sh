@@ -167,9 +167,11 @@ print_launch_command() {
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
   if [[ "$(uname -s)" == "Darwin" ]]; then
+    local launcher
+    launcher="$(yolomux_macos_server_launcher)"
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
-    printf 'launchctl submit -l %q -- /usr/bin/env YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=%q MALLOC_ARENA_MAX=2 TMUX= TMUX_PANE= PATH=%q %q -u %q' \
-      "local.yolomux.$port" "$background_owner_primary_port" "$PATH" "$python_bin" "$repo_root/yolomux.py"
+    printf 'launchctl submit -l %q -o %q -e %q -- /bin/bash -c %q bash %q %q %q %q %q %q' \
+      "local.yolomux.$port" "$log_path" "$log_path" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$background_owner_primary_port"
     for item in "${server_args[@]}"; do
       printf ' %q' "$item"
     done

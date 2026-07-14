@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -161,6 +162,50 @@ def test_indexed_repo_root_discovery_is_shared_across_metadata_requests(tmp_path
         metadata._INDEXED_REPO_ROOTS_CACHE.clear()
 
     assert calls == [indexed.resolve()]
+
+
+def test_unchanged_git_metadata_coalesces_real_subprocess_demand_and_refreshes_dirty_state(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    root = str(repo.resolve())
+    real_git = metadata.git
+    calls: list[tuple[str, ...]] = []
+    calls_lock = threading.Lock()
+
+    def counted_git(args, cwd, timeout=3.0):
+        with calls_lock:
+            calls.append(tuple(args))
+        return real_git(args, cwd, timeout=timeout)
+
+    monkeypatch.setattr(metadata, "git", counted_git)
+    with metadata._GIT_METADATA_CACHE_LOCK:
+        metadata._GIT_METADATA_CACHE.clear()
+        metadata._GIT_METADATA_INFLIGHT.clear()
+
+    cold = metadata.git_metadata_base(root)
+    cold_count = len(calls)
+    calls.clear()
+    warm_results: list[dict | None] = []
+    workers = [threading.Thread(target=lambda: warm_results.append(metadata.git_metadata_base(root))) for _ in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+    warm_count = len(calls)
+
+    assert len(warm_results) == 8
+    assert warm_results == [cold] * 8
+    assert cold_count >= 8
+    assert warm_count <= 2, f"unchanged concurrent readers launched {warm_count} Git subprocesses"
+
+    (repo / "f.txt").write_text("changed\n", encoding="utf-8")
+    with metadata._GIT_METADATA_CACHE_LOCK:
+        signature, value, _verified_at = metadata._GIT_METADATA_CACHE[(root, metadata.OTHER_BRANCH_LIMIT)]
+        metadata._GIT_METADATA_CACHE[(root, metadata.OTHER_BRANCH_LIMIT)] = (signature, value, 0.0)
+    calls.clear()
+    changed = metadata.git_metadata_base(root)
+    assert changed and changed["status_lines"] == [" M f.txt"]
+    assert len(calls) >= 2, "a changed source signature must rebuild the Git snapshot"
 
 
 def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):

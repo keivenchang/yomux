@@ -4877,6 +4877,7 @@ const notificationEventDefinitions = Object.freeze({
   watchedPullRequest: Object.freeze({scope: 'global', system: true, priority: 'pullRequest', coalesce: true}),
   update: Object.freeze({scope: 'global', system: false, priority: 'update', coalesce: true}),
   indexCoverage: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true, dismissOnly: true}),
+  statsResolution: Object.freeze({scope: 'global', system: false, priority: 'warning', coalesce: true}),
   startupTip: Object.freeze({scope: 'global', system: false, priority: 'tip', coalesce: true}),
   notificationTest: Object.freeze({scope: 'global', system: true, priority: 'test', coalesce: true}),
   // Uploads retain their stacked file-result renderer, but that renderer is still dispatched
@@ -5944,7 +5945,10 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
   updatePanelInactiveOverlays();
-  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: true});
+  const statsActivated = typeof jsDebugStatsLayoutItemsVisible === 'function'
+    && !jsDebugStatsLayoutItemsVisible(previousActive)
+    && jsDebugStatsLayoutItemsVisible(activeSessions);
+  if (typeof syncJsDebugStatsPolling === 'function') syncJsDebugStatsPolling({pollNow: statsActivated});
   if (autoFocusCanFollowCursor() && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {

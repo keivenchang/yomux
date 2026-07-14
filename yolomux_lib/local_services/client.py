@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,18 @@ class LocalServiceClient:
             response, binary = local_service_request(self.socket_path, envelope, timeout_seconds=timeout, fallback_legacy=True)
         except (OSError, LocalRpcError) as exc:
             self.registry.note_rpc_failure()
-            return {"ok": False, "error": redact_local_service_text(exc)}, b""
+            transport_error = "rpc"
+            if isinstance(exc, TimeoutError):
+                transport_error = "timeout"
+            elif isinstance(exc, OSError) and exc.errno == errno.ENOENT:
+                transport_error = "absent"
+            elif isinstance(exc, OSError) and exc.errno == errno.ECONNREFUSED:
+                transport_error = "refused"
+            return {
+                "ok": False,
+                "error": redact_local_service_text(exc),
+                "_transport_error": transport_error,
+            }, b""
         self.registry.note_rpc_success()
         return (response, binary) if isinstance(response, dict) else ({"ok": False, "error": "invalid local service response"}, b"")
 

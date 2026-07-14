@@ -1104,6 +1104,398 @@ def test_debug_graph_raw_rollup_overlap_uses_finest_values_at_one_uniform_resolu
     }, metrics
 
 
+def test_debug_graph_thirty_minute_resolution_ignores_covered_coarse_boundary(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphApplyServerHistory === 'function'
+              && typeof debugGraphDisplayBuckets === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.floor(Date.now() / 10_000) * 10_000;
+        const domainStart = now - (30 * 60 * 1000);
+        const coarseStart = Math.floor(domainStart / 600_000) * 600_000;
+        setDebugGraphRange(30 * 60, {render: false});
+        debugGraphApplyServerHistory({sequence: 1, records: [{
+          start: coarseStart / 1000, duration: 600, sequence: 1, api_count: 600,
+        }]});
+        debugGraphApplyServerHistory({
+          sequence: 182,
+          records: Array.from({length: 181}, (_item, index) => ({
+            start: (domainStart / 1000) + (index * 10),
+            duration: 10,
+            sequence: index + 2,
+            api_count: 10,
+          })),
+        });
+        renderDebugPanels({force: true});
+        const select = document.querySelector('[data-js-debug-resolution-override]');
+        return {
+          resolution: Number(document.querySelector('[data-js-debug-resolution-seconds]')?.dataset.jsDebugResolutionSeconds),
+          bucketDurations: [...new Set(debugGraphDisplayBuckets(now).map(bucket => bucket.durationMs))],
+          options: [...(select?.options || [])].map(option => Number(option.value)),
+          selected: select?.value,
+        };
+        """
+    )
+    assert metrics == {
+        "resolution": 30,
+        "bucketDurations": [30_000],
+        "options": [0, 10, 30, 60, 120],
+        "selected": "0",
+    }, metrics
+
+
+def test_debug_graph_live_tail_refresh_stays_ready_without_older_overlay(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof applyJsDebugHistoryCoverage === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalFetch = window.fetch;
+          try {
+            stopJsDebugStatsPolling();
+            clearJsDebugGraphData();
+            resetJsDebugHistoryReadiness();
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            const targetStart = nowSeconds - (30 * 60);
+            setDebugGraphRange(30 * 60, {render: false});
+            applyJsDebugHistoryCoverage({
+              mode: 'older', requestedStart: targetStart, requestedEnd: nowSeconds - 5,
+              coveredStart: targetStart, coveredEnd: nowSeconds - 5,
+              resolutionSeconds: 1, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+            });
+            setJsDebugHistoryReadiness('ready');
+            debugGraphApplyServerHistory({sequence: 55, records: [{start: nowSeconds - 5, duration: 1, sequence: 55, api_count: 1}]});
+            renderDebugPanels({force: true});
+            const requests = [];
+            let release;
+            window.fetch = input => {
+              requests.push(String(input));
+              return new Promise(resolve => {
+                release = () => resolve(new Response(JSON.stringify({history: {sequence: 56, records: []}}), {
+                  status: 200,
+                  headers: {'Content-Type': 'application/json'},
+                }));
+              });
+            };
+            const polling = pollJsDebugStatsSample();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const during = {
+              phase: graph?.dataset.jsDebugHistoryState,
+              busy: graph?.getAttribute('aria-busy'),
+              overlayHidden: graph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
+              text: graph?.textContent || '',
+            };
+            release();
+            await polling;
+            return {
+              requestCount: requests.length,
+              since: new URL(requests[0], location.href).searchParams.get('since'),
+              during,
+              finalPhase: jsDebugHistoryReadinessSnapshot().phase,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["requestCount"] == 1, metrics
+    assert metrics["since"] == "55", metrics
+    assert metrics["during"]["phase"] == "ready", metrics
+    assert metrics["during"]["busy"] == "false", metrics
+    assert metrics["during"]["overlayHidden"] is True, metrics
+    assert "Loading older data" not in metrics["during"]["text"], metrics
+    assert metrics["finalPhase"] == "ready", metrics
+
+
+def test_debug_graph_pending_backfill_is_retryable_and_recovers_in_browser(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]')"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalFetch = window.fetch;
+          try {
+            stopJsDebugStatsPolling();
+            clearJsDebugGraphData();
+            resetJsDebugHistoryReadiness();
+            let requests = 0;
+            const response = payload => Promise.resolve(new Response(JSON.stringify(payload), {
+              status: 200, headers: {'Content-Type': 'application/json'},
+            }));
+            window.fetch = input => {
+              requests += 1;
+              const url = new URL(String(input), location.href);
+              if (requests === 1) return response({history: {
+                coverage: {pending: true, reason: 'Backfill in progress', retry_after_seconds: 5},
+              }});
+              const start = Number(url.searchParams.get('history_start'));
+              const end = Math.ceil(Date.now() / 1000) + 1;
+              return response({history: {sequence: 2, records: [], coverage: {
+                mode: 'live', requested_start: start, requested_end: 0,
+                covered_start: start, covered_end: end, resolution_seconds: 1,
+                complete: true, has_more_older: false, next_older_end: 0,
+                intervals: [{start, end, resolution_seconds: 1}], store_intervals: {}, epochs: [],
+              }}});
+            };
+            await pollJsDebugStatsSample();
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const pending = {
+              phase: jsDebugHistoryReadinessSnapshot().phase,
+              text: graph?.querySelector('[data-js-debug-history-overlay]')?.textContent || '',
+              retryButton: Boolean(graph?.querySelector('[data-js-debug-history-retry]')),
+            };
+            setJsDebugHistoryReadiness('retrying', {nextAutoRetryAtMs: 0});
+            await pollJsDebugStatsSample();
+            return {requests, pending, finalPhase: jsDebugHistoryReadinessSnapshot().phase};
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["pending"]["phase"] == "retrying", metrics
+    assert "Backfill in progress" in metrics["pending"]["text"], metrics
+    assert metrics["pending"]["retryButton"] is False, metrics
+    assert metrics["requests"] == 2, metrics
+    assert metrics["finalPhase"] == "ready", metrics
+
+
+def test_yocost_drag_defers_all_dom_repaint_work_and_flushes_once(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1", sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof renderYoCostPanels === 'function' && typeof flushDeferredJsDebugPanelRefresh === 'function'"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('cost');
+          next.cost = paneStateWithTabs([yocostItemId], yocostItemId);
+          applyLayoutSlots(next, {focusSession: yocostItemId, forceFull: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const panel = document.querySelector('.js-yocost-panel');
+          const body = panel?.querySelector('.js-yocost-body');
+          if (!body) throw new Error('YO!cost body did not mount');
+          const childBefore = body.firstElementChild;
+          dragState.item = yocostItemId;
+          const started = performance.now();
+          const directResult = renderYoCostPanels({force: true});
+          refreshDebugPanelsFromEvents({force: true});
+          scheduleJsDebugPanelRefresh({force: true});
+          const during = {
+            elapsedMs: performance.now() - started,
+            sameChild: body.firstElementChild === childBefore,
+            directResult,
+            deferred: jsDebugRenderDragDeferred,
+          };
+          dragState.item = null;
+          const flushed = flushDeferredJsDebugPanelRefresh();
+          await new Promise(resolve => setTimeout(resolve, 40));
+          return {
+            during,
+            flushed,
+            deferredAfter: jsDebugRenderDragDeferred,
+            bodyConnected: body.isConnected,
+          };
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["during"]["elapsedMs"] <= 50, metrics
+    assert metrics["during"]["sameChild"] is True, metrics
+    assert metrics["during"]["directResult"] is False, metrics
+    assert metrics["during"]["deferred"] is True, metrics
+    assert metrics["flushed"] is True, metrics
+    assert metrics["deferredAfter"] is False, metrics
+    assert metrics["bodyConnected"] is True, metrics
+
+
+def test_debug_graph_layout_reconciliation_polls_only_on_stats_activation(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof applyLayoutSlots === 'function'
+              && typeof emptyLayoutSlots === 'function'
+              && typeof paneStateWithTabs === 'function'
+              && typeof syncJsDebugStatsPolling === 'function';
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalFetch = window.fetch;
+          try {
+            stopJsDebugStatsPolling();
+            resetJsDebugHistoryReadiness();
+            const regular = emptyLayoutSlots();
+            regular[layoutTreeKey] = leafNode('main');
+            regular.main = paneStateWithTabs(['1'], '1');
+            applyLayoutSlots(regular, {focusSession: '1', forceFull: true});
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const sampleRequests = [];
+            window.fetch = input => {
+              const requestUrl = String(input);
+              if (!requestUrl.includes('/api/stats-sample?')) {
+                return Promise.resolve(new Response(JSON.stringify({ok: true}), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              }
+              sampleRequests.push(requestUrl);
+              const parsed = new URL(requestUrl, location.href);
+              const start = Number(parsed.searchParams.get('history_start'));
+              const end = Math.max(start + 1, Math.floor(Date.now() / 1000));
+              return Promise.resolve(new Response(JSON.stringify({
+                pid: 123,
+                uptime_seconds: 10,
+                history: {
+                  sequence: 1,
+                  records: [],
+                  coverage: {
+                    mode: 'live', requested_start: start, requested_end: 0,
+                    covered_start: start, covered_end: end, resolution_seconds: 1,
+                    complete: true, has_more_older: false, next_older_end: 0,
+                    intervals: [{start, end, resolution_seconds: 1}], store_intervals: {}, epochs: [],
+                  },
+                },
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            };
+
+            applyLayoutSlots(regular, {focusSession: '1', forceFull: true});
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const afterRegularReconcile = sampleRequests.length;
+            const stats = emptyLayoutSlots();
+            stats[layoutTreeKey] = leafNode('stats');
+            stats.stats = paneStateWithTabs([debugPaneItemId], debugPaneItemId);
+            applyLayoutSlots(stats, {focusSession: debugPaneItemId, forceFull: true});
+            for (let index = 0; index < 4; index += 1) await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterActivation = sampleRequests.length;
+            applyLayoutSlots(stats, {focusSession: debugPaneItemId, forceFull: true});
+            for (let index = 0; index < 4; index += 1) await new Promise(resolve => requestAnimationFrame(resolve));
+            return {
+              afterRegularReconcile,
+              afterActivation,
+              afterStatsReconcile: sampleRequests.length,
+              pending: jsDebugStatsPollState.pending,
+            };
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["afterRegularReconcile"] == 0, metrics
+    assert metrics["afterActivation"] == 1, metrics
+    assert metrics["afterStatsReconcile"] == 1, metrics
+    assert metrics["pending"] is False, metrics
+
+
+def test_debug_graph_24_hour_cost_range_reconciles_three_unknown_classes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof debugGraphCostSummaryForBuckets === 'function'
+              && typeof debugGraphCostReportHtml === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        const now = Math.floor(Date.now() / 600_000) * 600_000;
+        setDebugGraphRange(24 * 60 * 60, {render: false});
+        debugGraphApplyServerHistory({
+          sequence: 2,
+          usage_atom_backfill: {state: 'complete', sources: 2, missing: 0},
+          records: [
+            {start: (now - (20 * 60 * 60 * 1000)) / 1000, duration: 600, sequence: 1, cost_summary: {
+              total_micro_usd: 100000, known_micro_usd: 100000, lower_micro_usd: 100000, upper_micro_usd: 600000,
+              priced_count: 1, unpriced_count: 1, unpriced_token_quantity: 1000, complete: false,
+              components: [{provider: 'openai', model: 'unknown', direction: 'input', cache_role: 'read', unit: 'tokens', priced: false, token_quantity: 1000, unpriced_count: 1, unpriced_token_quantity: 1000, upper_micro_usd: 500000}],
+            }},
+            {start: (now - (60 * 60 * 1000)) / 1000, duration: 600, sequence: 2, cost_summary: {
+              total_micro_usd: 200000, known_micro_usd: 200000, lower_micro_usd: 200000, upper_micro_usd: 1700000,
+              priced_count: 1, unpriced_count: 2, unpriced_token_quantity: 2000, complete: false,
+              components: [
+                {provider: 'openai', model: 'unknown', direction: 'input', cache_role: 'none', unit: 'tokens', priced: false, token_quantity: 1200, unpriced_count: 1, unpriced_token_quantity: 1200, upper_micro_usd: 600000},
+                {provider: 'openai', model: 'unknown', direction: 'output', cache_role: 'none', unit: 'tokens', priced: false, token_quantity: 800, unpriced_count: 1, unpriced_token_quantity: 800, upper_micro_usd: 900000},
+              ],
+            }},
+          ],
+        });
+        setDebugGraphChartVisible('modelTokens', true);
+        setDebugGraphChartVisible('costSummary', true);
+        renderDebugPanels({force: true});
+        const summary = debugGraphCostSummaryForBuckets(debugGraphAgentTokenDisplayBuckets(now));
+        const report = debugGraphCostReportHtml(summary, {startMs: now - (24 * 60 * 60 * 1000), endMs: now});
+        const reportFixture = document.createElement('div');
+        reportFixture.innerHTML = report;
+        const card = document.querySelector('[data-js-debug-summary-group="costSummary"]');
+        return {
+          lower: summary.lowerMicroUsd,
+          upper: summary.upperMicroUsd,
+          spread: summary.upperMicroUsd - summary.lowerMicroUsd,
+          tokens: summary.unpricedTokenQuantity,
+          cardText: card?.textContent || '',
+          disclosureLabel: reportFixture.querySelector('.js-debug-cost-unpriced-disclosure summary')?.getAttribute('aria-label') || '',
+          unpricedRows: [...reportFixture.querySelectorAll('[data-js-debug-unpriced-class]')].map(row => ({
+            label: row.cells[0]?.textContent.trim() || '',
+            tokens: row.cells[1]?.textContent.trim() || '',
+          })),
+        };
+        """
+    )
+    assert metrics["lower"] == 300_000, metrics
+    assert metrics["upper"] == 2_300_000, metrics
+    assert metrics["spread"] == 2_000_000, metrics
+    assert metrics["tokens"] == 3_000, metrics
+    assert "$0.3000 – $2.30" in metrics["cardText"], metrics
+    assert metrics["disclosureLabel"] == "Unpriced model/classes: 3", metrics
+    assert {row["label"]: row["tokens"] for row in metrics["unpricedRows"]} == {
+        "openai · unknown · cache": "1.0k tokens",
+        "openai · unknown · input": "1.2k tokens",
+        "openai · unknown · output": "800 tokens",
+    }, metrics
+
+
 def test_yostats_chart_title_descriptions_cover_theme_and_pane_role(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=1,debug", sessions=["1"])
     WebDriverWait(browser, 5).until(
@@ -1393,6 +1785,9 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
           generation: 1,
         });
         renderDebugPanels({force: true});
+        const costPanel = createYoCostPanel();
+        document.body.append(costPanel);
+        renderYoCostPanels({force: true});
         const graph = document.querySelector('[data-js-debug-graph]');
         const view = graph.closest('.js-debug-graph-view');
         const shell = graph.querySelector('.js-debug-chart-shell');
@@ -1407,6 +1802,33 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
         const dots = Array.from(overlay.querySelectorAll('.moving-ellipsis > span'));
         const viewRect = view.getBoundingClientRect();
         const messageRect = message.getBoundingClientRect();
+        const overlayStyles = [];
+        for (const theme of ['dark', 'light']) {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          const probe = document.createElement('div');
+          probe.style.background = 'var(--inactive-pane-overlay)';
+          document.body.append(probe);
+          const expectedBackdrop = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          for (const [surface, root] of [
+            ['stats', graph],
+            ['cost', costPanel.querySelector('[data-js-yocost-graphs]')],
+          ]) {
+            const targetOverlay = root?.querySelector('[data-js-debug-history-overlay]');
+            const targetMessage = targetOverlay?.querySelector('.js-debug-history-overlay-message');
+            const overlayStyle = targetOverlay ? getComputedStyle(targetOverlay) : null;
+            const messageStyle = targetMessage ? getComputedStyle(targetMessage) : null;
+            overlayStyles.push({
+              theme, surface, expectedBackdrop,
+              backdrop: overlayStyle?.backgroundColor || '',
+              overlayZ: Number(overlayStyle?.zIndex || 0),
+              messageZ: Number(messageStyle?.zIndex || 0),
+              messageOpacity: messageStyle?.opacity || '',
+              messageBackground: messageStyle?.backgroundColor || '',
+            });
+          }
+        }
+        costPanel.remove();
         return {
           busy: graph.getAttribute('aria-busy'),
           phase: graph.dataset.jsDebugHistoryState,
@@ -1421,6 +1843,7 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
           messageRight: messageRect.right,
           viewLeft: viewRect.left,
           viewRight: viewRect.right,
+          overlayStyles,
         };
         """
     )
@@ -1433,6 +1856,12 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
     assert metrics["labelText"] == "Loading history", metrics
     assert abs(metrics["messageCenterY"] - metrics["viewCenterY"]) <= 12, metrics
     assert metrics["messageLeft"] >= metrics["viewLeft"] - 0.5 and metrics["messageRight"] <= metrics["viewRight"] + 0.5, metrics
+    assert {(item["theme"], item["surface"]) for item in metrics["overlayStyles"]} == {
+        ("dark", "stats"), ("dark", "cost"), ("light", "stats"), ("light", "cost")
+    }, metrics
+    assert all(item["backdrop"] == item["expectedBackdrop"] for item in metrics["overlayStyles"]), metrics
+    assert all(item["overlayZ"] > 0 and item["messageZ"] > 0 for item in metrics["overlayStyles"]), metrics
+    assert all(item["messageOpacity"] == "1" and not item["messageBackground"].endswith(", 0)") for item in metrics["overlayStyles"]), metrics
 
 
 @pytest.mark.boot
@@ -1968,6 +2397,7 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
                 covered_start: Number(url.searchParams.get('history_start')),
                 covered_end: Math.floor(now / 1000),
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: Number(url.searchParams.get('history_start')), end: Math.floor(now / 1000), resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true,
                 has_more_older: false,
                 next_older_end: 0,
@@ -2011,6 +2441,719 @@ def test_debug_graph_first_stats_sample_bypasses_steady_render_throttle(browser,
     assert result["pollRequests"] == 1, result
     assert result["renderedAtAfter"] > result["renderedAt"], result
     assert result["finishedAt"] - result["startedAt"] < 3000, result
+
+
+def test_debug_graph_delivery_cadence_scales_with_shared_range(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof jsDebugStatsLivePushEnabled === 'function'
+              && typeof clientEventDemandDescriptor === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        setDebugGraphRange(60 * 60, {render: false});
+        const coarse = {
+          live: jsDebugStatsLivePushEnabled(),
+          pollMs: jsDebugStatsPollIntervalMs(),
+          channels: [...clientEventDemandDescriptor().channels],
+        };
+        setDebugGraphRange(15 * 60, {render: false});
+        const shortRange = {
+          live: jsDebugStatsLivePushEnabled(),
+          pollMs: jsDebugStatsPollIntervalMs(),
+          channels: [...clientEventDemandDescriptor().channels],
+        };
+        jsDebugGraphZoomDomain = {startMs: Date.now() - 60000, endMs: Date.now()};
+        const historicalZoom = {
+          live: jsDebugStatsLivePushEnabled(),
+          channels: [...clientEventDemandDescriptor().channels],
+        };
+        clearDebugGraphZoom({render: false});
+        return {coarse, shortRange, historicalZoom};
+        """
+    )
+    assert metrics["coarse"]["live"] is False, metrics
+    assert metrics["coarse"]["pollMs"] == 60001, metrics
+    assert "stats" not in metrics["coarse"]["channels"], metrics
+    assert metrics["shortRange"]["live"] is True, metrics
+    assert metrics["shortRange"]["pollMs"] == 30001, metrics
+    assert "stats" in metrics["shortRange"]["channels"], metrics
+    assert metrics["historicalZoom"]["live"] is False, metrics
+    assert "stats" not in metrics["historicalZoom"]["channels"], metrics
+
+
+def test_debug_graph_controls_are_stable_and_live_edge_uses_shared_static_pulse(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof refreshDebugGraphElement === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Date.now();
+          const start = Math.floor(now / 10000) * 10;
+          const record = sequence => ({
+            start,
+            duration: 10,
+            sequence,
+            api_count: sequence,
+            sse_count: 1,
+            cpu_total_percent: 20 + sequence,
+            cpu_count: 1,
+            system_cpu_total_percent: 40,
+            system_cpu_count: 1,
+            tokens_per_agent_total: 120,
+            agent_token_samples: 1,
+            agent_token_rates: [{
+              key: '1|0|codex', label: '1:0:codex', total: 120, samples: 1, tokens: 120, seconds: 60, source: 'transcript',
+              model_rates: {'gpt-5.6-sol': {total: 120, samples: 1, tokens: 120, seconds: 60}},
+            }],
+            cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 120}]},
+          });
+          debugGraphApplyServerHistory({sequence: 1, records: [record(1)]});
+              setJsDebugHistoryReadiness('ready', {
+                loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+                coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+                requestCoverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+              });
+          setDebugGraphChartVisible('modelTokens', true);
+          setDebugGraphRange(300);
+          renderDebugPanels({force: true});
+
+          const graph = document.querySelector('[data-js-debug-graph]');
+          const body = graph.querySelector('[data-js-debug-graph-body]');
+          const controlSelectors = [
+            '[data-js-debug-range-slider]',
+            '[data-js-debug-resolution-override]',
+            '[data-js-debug-chart-layout]',
+            '[data-js-debug-chart-toggle]',
+            '[data-js-debug-model-token-dimension-select]',
+          ];
+          const controls = controlSelectors.map(selector => graph.querySelector(selector));
+          const closeControls = [...graph.querySelectorAll('[data-js-debug-chart-close]')];
+          if (controls.some(control => !control)) return done({error: 'missing stable control fixture'});
+          let bodyMutationCallbacks = 0;
+          const observer = new MutationObserver(() => { bodyMutationCallbacks += 1; });
+          observer.observe(body, {childList: true});
+          controls[1].focus();
+          const focusedRefreshResults = [0, 1, 2].map(() => refreshDebugGraphElement(graph, {force: true}));
+          const focusedBodySame = graph.querySelector('[data-js-debug-graph-body]') === body;
+          const focusedControlsSame = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
+          controls[1].blur();
+          await new Promise(resolve => setTimeout(resolve, 80));
+          observer.disconnect();
+          const controlsAfterBlurSame = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
+          const closeControlsAfterBlurSame = [...graph.querySelectorAll('[data-js-debug-chart-close]')].every((control, index) => control === closeControls[index]);
+          const deferredPending = graph.dataset.jsDebugGraphRefreshPending || '';
+
+          controls[4].focus();
+          const modelFocusedTicks = [7, 8, 9].map(sequence => {
+            applyJsDebugStatsSamplePush({sequence, record: record(sequence), sample: {time: Date.now() / 1000}});
+            return refreshDebugGraphElement(graph, {force: true});
+          });
+          const modelFocusedSame = graph.querySelector('[data-js-debug-model-token-dimension-select]') === controls[4]
+            && document.activeElement === controls[4];
+          controls[4].blur();
+          await new Promise(resolve => setTimeout(resolve, 80));
+          const closeControlsAfterModelBlurSame = [...graph.querySelectorAll('[data-js-debug-chart-close]')].every((control, index) => control === closeControls[index]);
+
+          const renderedBeforeTicks = Number(graph.dataset.jsDebugGraphRenderedAt);
+          for (let sequence = 2; sequence <= 6; sequence += 1) {
+            applyJsDebugStatsSamplePush({sequence, record: record(sequence), sample: {time: Date.now() / 1000}});
+          }
+          const throttleDeadline = performance.now() + 120;
+          await window.__yolomuxTestWaitFor(() => performance.now() >= throttleDeadline, {
+            timeoutMs: 500, intervalMs: 10, description: 'ordinary graph tick throttle observation',
+          });
+          const renderedAfterTicks = Number(graph.dataset.jsDebugGraphRenderedAt);
+          const controlIdentityAfterTicks = controlSelectors.every((selector, index) => graph.querySelector(selector) === controls[index]);
+          setDebugGraphRange(900);
+          const renderedAfterRange = Number(graph.dataset.jsDebugGraphRenderedAt);
+
+          setDebugGraphRange(300);
+          refreshDebugGraphElement(graph, {force: true});
+          const referenceHost = document.createElement('span');
+          referenceHost.innerHTML = agentWindowStatusDotHtmlForTone('working', {pulse: true, label: 'pulse reference'});
+          document.body.append(referenceHost);
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          scheduleAgentWindowActivityAnimationSync(document);
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const live = graph.querySelector('[data-js-debug-live-pulse]');
+          const reference = referenceHost.querySelector('.agent-window-status-dot');
+          const first = value => String(value || '').split(',')[0].trim();
+          const animationMetrics = node => {
+            const style = getComputedStyle(node);
+            const name = first(style.animationName);
+            const animation = node.getAnimations().find(item => item.animationName === name);
+            return {
+              name,
+              duration: first(style.animationDuration),
+              delay: first(style.animationDelay),
+              timingFunction: first(style.animationTimingFunction),
+              iterations: first(style.animationIterationCount),
+              direction: first(style.animationDirection),
+              playState: animation?.playState || '',
+              currentTime: Number(animation?.currentTime),
+            };
+          };
+          const rgba = value => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1;
+            canvas.height = 1;
+            const context = canvas.getContext('2d');
+            context.clearRect(0, 0, 1, 1);
+            context.fillStyle = value;
+            context.fillRect(0, 0, 1, 1);
+            return [...context.getImageData(0, 0, 1, 1).data];
+          };
+          const paint = theme => {
+            document.body.classList.toggle('theme-light', theme === 'light');
+            document.body.classList.toggle('theme-dark', theme === 'dark');
+            const fill = getComputedStyle(live).fill;
+            const accentProbe = document.createElement('span');
+            accentProbe.style.color = 'rgb(var(--active-accent-rgb))';
+            document.body.append(accentProbe);
+            const accent = getComputedStyle(accentProbe).color;
+            accentProbe.remove();
+            return {fill, rgba: rgba(fill), accentRgba: rgba(accent)};
+          };
+          const settledBefore = [...graph.querySelectorAll('[data-js-debug-series], [data-js-debug-moving-average]')].map(node => node.getAttribute('points'));
+          const liveBefore = live ? {x: live.getAttribute('x'), y: live.getAttribute('y'), width: live.getAttribute('width'), height: live.getAttribute('height')} : null;
+          const liveAnimation = live ? animationMetrics(live) : null;
+          const referenceAnimation = reference ? animationMetrics(reference) : null;
+          const darkPaint = live ? paint('dark') : null;
+          const lightPaint = live ? paint('light') : null;
+          await new Promise(resolve => setTimeout(resolve, 180));
+          const liveAfter = live ? {x: live.getAttribute('x'), y: live.getAttribute('y'), width: live.getAttribute('width'), height: live.getAttribute('height')} : null;
+          const settledAfter = [...graph.querySelectorAll('[data-js-debug-series], [data-js-debug-moving-average]')].map(node => node.getAttribute('points'));
+          const retiredMovingCount = graph.querySelectorAll('[data-js-debug-live-tail], .js-debug-live-tail').length;
+          referenceHost.remove();
+
+          setDebugGraphRange(4 * 60 * 60);
+          const longRangeLiveCount = graph.querySelectorAll('[data-js-debug-live-pulse]').length;
+          const longRangeBody = graph.querySelector('[data-js-debug-graph-body]').innerHTML;
+          const staticDeadline = performance.now() + 120;
+          await window.__yolomuxTestWaitFor(() => performance.now() >= staticDeadline, {
+            timeoutMs: 500, intervalMs: 10, description: 'long-range static graph observation',
+          });
+          const longRangeStatic = graph.querySelector('[data-js-debug-graph-body]').innerHTML === longRangeBody;
+
+          done({
+            focusedRefreshResults,
+            focusedBodySame,
+            focusedControlsSame,
+            controlsAfterBlurSame,
+            closeControlsAfterBlurSame,
+            closeControlsAfterModelBlurSame,
+            modelFocusedTicks,
+            modelFocusedSame,
+            bodyMutationCallbacks,
+            deferredPending,
+            renderedBeforeTicks,
+            renderedAfterTicks,
+            renderedAfterRange,
+            controlIdentityAfterTicks,
+            firstRangeStop: Number(graph.querySelector('datalist option')?.dataset.jsDebugRange),
+            oneMinuteLabelCount: [...graph.querySelectorAll('[data-js-debug-range-control] *')].filter(node => node.textContent?.trim() === '1m').length,
+            liveBefore,
+            liveAfter,
+            liveAnimation,
+            referenceAnimation,
+            darkPaint,
+            lightPaint,
+            retiredMovingCount,
+            settledSame: JSON.stringify(settledBefore) === JSON.stringify(settledAfter),
+            longRangeLiveCount,
+            longRangeStatic,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["focusedRefreshResults"] == [False, False, False], metrics
+    assert metrics["focusedBodySame"] is True and metrics["focusedControlsSame"] is True, metrics
+    assert metrics["controlsAfterBlurSame"] is True, metrics
+    assert metrics["closeControlsAfterBlurSame"] is True and metrics["closeControlsAfterModelBlurSame"] is True, metrics
+    assert metrics["modelFocusedTicks"] == [False, False, False] and metrics["modelFocusedSame"] is True, metrics
+    assert metrics["bodyMutationCallbacks"] == 1 and metrics["deferredPending"] == "", metrics
+    assert metrics["renderedAfterTicks"] == metrics["renderedBeforeTicks"], metrics
+    assert metrics["renderedAfterRange"] > metrics["renderedAfterTicks"], metrics
+    assert metrics["controlIdentityAfterTicks"] is True, metrics
+    assert metrics["firstRangeStop"] == 300 and metrics["oneMinuteLabelCount"] == 0, metrics
+    assert metrics["liveBefore"] and metrics["liveAfter"], metrics
+    assert metrics["liveBefore"] == metrics["liveAfter"], metrics
+    assert float(metrics["liveBefore"]["width"]) > 0 and float(metrics["liveBefore"]["height"]) > 0, metrics
+    assert metrics["retiredMovingCount"] == 0, metrics
+    pulse = metrics["liveAnimation"]
+    reference = metrics["referenceAnimation"]
+    assert pulse["name"] == reference["name"] == "agent-status-opacity-pulse", (pulse, reference)
+    assert pulse["duration"] == reference["duration"], metrics
+    assert pulse["delay"] == reference["delay"], metrics
+    assert pulse["timingFunction"] == reference["timingFunction"], metrics
+    assert pulse["iterations"] == reference["iterations"] == "infinite", metrics
+    assert pulse["direction"] == reference["direction"] == "normal", metrics
+    assert pulse["playState"] in {"pending", "running"} and reference["playState"] in {"pending", "running"}, metrics
+    assert pulse["currentTime"] > 0, pulse
+    for theme in ("darkPaint", "lightPaint"):
+        paint = metrics[theme]
+        # Canvas un-premultiplication rounds low-alpha RGB channels; keep the tolerance below one
+        # 8-bit quantization step at the 0.10 theme alpha.
+        assert max(abs(actual - expected) for actual, expected in zip(paint["rgba"][:3], paint["accentRgba"][:3])) <= 12, metrics
+        assert 0 < paint["rgba"][3] <= 46, metrics
+    assert metrics["darkPaint"]["rgba"][3] > metrics["lightPaint"]["rgba"][3], metrics
+    assert metrics["settledSame"] is True, metrics
+    assert metrics["longRangeLiveCount"] == 0 and metrics["longRangeStatic"] is True, metrics
+
+
+def test_yocost_shares_stats_zoom_and_stats_sse_demand(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug,1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof clientEventDemandDescriptor === 'function' && typeof selectSession === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling();
+          clearJsDebugGraphData();
+          jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Date.now();
+          const records = Array.from({length: 12}, (_unused, index) => ({
+            start: Math.floor((now - ((11 - index) * 5000)) / 1000),
+            duration: 5,
+            sequence: index + 1,
+            cpu_total_percent: 10 + index,
+            cpu_count: 1,
+            tokens_per_agent_total: 100 + index,
+            agent_token_samples: 1,
+            agent_token_rates: [{
+              key: '1|0|codex', label: '1:0:codex', total: 100 + index, samples: 1, tokens: 100 + index, seconds: 60, source: 'transcript',
+              model_rates: {'gpt-5.6-sol': {total: 100 + index, samples: 1, tokens: 100 + index, seconds: 60}},
+            }],
+            cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 100 + index}]},
+          }));
+          debugGraphApplyServerHistory({sequence: records.length, records});
+          setJsDebugHistoryReadiness('ready', {
+            loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+            coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+          });
+          setDebugGraphChartVisible('modelTokens', true);
+          setDebugGraphRange(300);
+          selectSession(yocostItemId, {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const demandCostOnly = clientEventDemandDescriptor();
+          const costPanel = document.getElementById(panelDomId(yocostItemId));
+          const svg = costPanel?.querySelector('[data-js-debug-chart="modelTokens"] .js-debug-line-chart');
+          const rect = svg?.getBoundingClientRect();
+          if (!svg || !rect?.width) return done({error: 'missing YO!cost zoom fixture'});
+          const eventInit = clientX => ({bubbles: true, cancelable: true, pointerId: 45, pointerType: 'mouse', button: 0, buttons: 1, clientX, clientY: rect.top + rect.height / 2});
+          const startX = rect.left + rect.width * 0.2;
+          const endX = rect.left + rect.width * 0.7;
+          svg.dispatchEvent(new PointerEvent('pointerdown', eventInit(startX)));
+          svg.dispatchEvent(new PointerEvent('pointermove', eventInit(endX)));
+          svg.dispatchEvent(new PointerEvent('pointerup', eventInit(endX)));
+          const costDomainState = debugGraphDomain();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const costReset = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-zoom-reset]');
+          const costDomain = [Math.floor(costDomainState.startMs), Math.floor(costDomainState.endMs)];
+          selectSession(debugPaneItemId, {userInitiated: true});
+          setDebugSubTab('graph');
+          renderDebugPanels({force: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const statsPanel = document.getElementById(panelDomId(debugPaneItemId));
+          const statsReflectsCostZoom = statsPanel?.querySelector('[data-js-debug-chart-grid]')?.dataset.jsDebugZoomed === 'true'
+            && Boolean(statsPanel?.querySelector('[data-js-debug-zoom-reset]'));
+          statsPanel?.querySelector('[data-js-debug-zoom-reset]')?.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const resetCostZoomed = document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-chart-grid]')?.dataset.jsDebugZoomed === 'true';
+
+          const statsSvg = statsPanel?.querySelector('[data-js-debug-chart="modelTokens"] .js-debug-line-chart');
+          const statsRect = statsSvg?.getBoundingClientRect();
+          if (!statsSvg || !statsRect?.width) return done({error: 'missing YO!stats reverse zoom fixture'});
+          const statsStartX = statsRect.left + statsRect.width * 0.25;
+          const statsEndX = statsRect.left + statsRect.width * 0.75;
+          handleDebugGraphPointerDown({target: statsSvg, clientX: statsStartX, button: 0, preventDefault() {}}, statsPanel);
+          handleDebugGraphPointerMove({target: statsSvg, clientX: statsEndX}, statsPanel);
+          handleDebugGraphPointerUp({target: statsSvg, clientX: statsEndX}, statsPanel);
+          const statsZoomAfterDrag = debugGraphDomain().zoomed === true;
+          selectSession(yocostItemId, {userInitiated: true});
+          renderYoCostPanels({force: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const costAfterStats = document.getElementById(panelDomId(yocostItemId));
+          const costReflectsStatsZoom = debugGraphDomain().zoomed === true
+            && Boolean(costAfterStats?.querySelector('[data-js-debug-zoom-reset]'));
+          selectSession('1', {userInitiated: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const originalActivePaneItems = activePaneItems;
+          activePaneItems = () => ['1'];
+          const demandNeither = clientEventDemandDescriptor();
+          activePaneItems = originalActivePaneItems;
+          done({
+            costDemandChannels: demandCostOnly.channels,
+            costDemandActive: demandCostOnly.active_panes,
+            costZoomed: costDomainState.zoomed === true,
+            costReset: costReset?.textContent || '',
+            costDomain,
+            statsReflectsCostZoom,
+            resetCostZoomed,
+            costReflectsStatsZoom,
+            statsZoomAfterDrag,
+            neitherChannels: demandNeither.channels,
+            neitherActive: demandNeither.active_panes,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert "stats" in metrics["costDemandChannels"] and "__yocost__" in metrics["costDemandActive"], metrics
+    assert metrics["costZoomed"] is True and metrics["costDomain"][1] > metrics["costDomain"][0], metrics
+    assert metrics["costReset"] == "Reset Zoom", metrics
+    assert metrics["statsZoomAfterDrag"] is True, metrics
+    assert metrics["statsReflectsCostZoom"] is True and metrics["costReflectsStatsZoom"] is True, metrics
+    assert metrics["resetCostZoomed"] is False, metrics
+    assert "stats" not in metrics["neitherChannels"], metrics
+
+
+def test_debug_stats_and_yocost_resolution_choices_follow_every_range(browser, tmp_path):
+    """Permanent range sweep: neither shared surface may retain a coarse prior-range menu."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug,1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setDebugGraphRange === 'function' && typeof renderYoCostPanels === 'function' && document.querySelector('[data-js-debug-graph]');"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        setJsDebugHistoryReadiness('ready', {
+          loadedStartSeconds: 0, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+          coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
+        });
+        const ranges = debugGraphAvailableRangeOptions().map(option => option.seconds);
+        const readControl = root => {
+          const control = root?.querySelector('[data-js-debug-resolution]');
+          const select = control?.querySelector('[data-js-debug-resolution-override]');
+          return {
+            choices: [...(select?.options || [])].map(option => Number(option.value)),
+            selected: Number(select?.value),
+            displayed: Number(control?.dataset.jsDebugResolutionSeconds),
+          };
+        };
+        const results = [];
+        setDebugGraphResolutionOverride(0);
+        for (const rangeSeconds of ranges) {
+          setDebugGraphRange(rangeSeconds, {render: false});
+          selectSession(debugPaneItemId, {userInitiated: true});
+          setDebugSubTab('graph');
+          renderDebugPanels({force: true});
+          const stats = readControl(document.getElementById(panelDomId(debugPaneItemId)));
+          selectSession(yocostItemId, {userInitiated: true});
+          renderYoCostPanels({force: true});
+          const cost = readControl(document.getElementById(panelDomId(yocostItemId)));
+          results.push({rangeSeconds, stats, cost});
+        }
+
+        setDebugGraphRange(2 * 60 * 60, {render: false});
+        setDebugGraphResolutionOverride(300);
+        const now = Date.now();
+        debugGraphApplyServerHistory({sequence: 77, records: [{
+          start: Math.floor((now - 600000) / 1000), duration: 600, sequence: 77, api_count: 1,
+        }]});
+        setDebugGraphRange(30 * 60, {render: false});
+        selectSession(debugPaneItemId, {userInitiated: true});
+        renderDebugPanels({force: true});
+        const staleStats = readControl(document.getElementById(panelDomId(debugPaneItemId)));
+        selectSession(yocostItemId, {userInitiated: true});
+        renderYoCostPanels({force: true});
+        const staleCost = readControl(document.getElementById(panelDomId(yocostItemId)));
+        return {results, stale: {stats: staleStats, cost: staleCost}};
+        """
+    )
+    # Universe is AUTO + 1/10/60/300 only, validity-filtered per range (>= retained tier,
+    # >= 10s once a range spans 30m+, and >= 10 rendered points). No 2/5/30/120/600s picks.
+    expected = {
+        5 * 60: [0, 1, 10],
+        15 * 60: [0, 1, 10, 60],
+        30 * 60: [0, 10, 60],
+        60 * 60: [0, 10, 60, 300],
+        2 * 60 * 60: [0, 10, 60, 300],
+        4 * 60 * 60: [0, 60, 300],
+        8 * 60 * 60: [0, 300],
+        16 * 60 * 60: [0],
+        24 * 60 * 60: [0],
+    }
+    assert [item["rangeSeconds"] for item in metrics["results"]] == list(expected), metrics
+    for item in metrics["results"]:
+        choices = expected[item["rangeSeconds"]]
+        for surface in ("stats", "cost"):
+            control = item[surface]
+            assert control["choices"] == choices, (item, surface)
+            assert control["selected"] in choices, (item, surface)
+            # The AUTO effective resolution (label) is the honest retained value: always a
+            # positive number, and never finer than the finest explicit choice on offer.
+            assert control["displayed"] > 0, (item, surface)
+            if len(choices) > 1:
+                assert control["displayed"] >= choices[1], (item, surface)
+    # An out-of-range override (300s picked at 2h) must normalize into the narrower 30m
+    # menu instead of lingering as a phantom coarse option — it rounds down to 60s (the
+    # coarsest 30m choice), never retaining 300s or snapping silently to AUTO.
+    for surface in ("stats", "cost"):
+        control = metrics["stale"][surface]
+        assert control["choices"] == expected[30 * 60], metrics
+        assert control["selected"] == 60, metrics
+
+
+def test_yocost_last_refreshed_uses_visibility_aware_randomized_cadence(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof renderYoCostPanels === 'function' && typeof debugCostAgeRefreshDelayMs === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        selectSession(yocostItemId, {userInitiated: true});
+        const panel = document.getElementById(panelDomId(yocostItemId));
+        const body = panel?.querySelector('.js-yocost-body');
+        const originalRandom = Math.random;
+        const originalNow = Date.now;
+        let now = 100000;
+        Date.now = () => now;
+        try {
+          Math.random = () => 0;
+          jsDebugCostAgeNextRefreshAtMs = 0;
+          jsDebugCostPanelNextRefreshAtMs = 0;
+          const first = renderYoCostPanels({force: true});
+          const firstHtml = body?.innerHTML || '';
+          const firstDeadline = jsDebugCostAgeNextRefreshAtMs;
+          now = firstDeadline - 1;
+          const early = refreshDebugCostAgeLabels(now);
+          const earlySame = (body?.innerHTML || '') === firstHtml;
+          now = firstDeadline;
+          Math.random = () => 1;
+          const atThreeSeconds = refreshDebugCostAgeLabels(now);
+          const secondDeadline = jsDebugCostAgeNextRefreshAtMs;
+          const tickerArmedBeforeHidden = Boolean(jsDebugGraphLiveFrame);
+          Object.defineProperty(document, 'visibilityState', {value: 'hidden', configurable: true});
+          now = secondDeadline + 1;
+          const hidden = debugGraphLiveFrameTick(1000);
+          const hiddenDeadline = jsDebugCostAgeNextRefreshAtMs;
+          Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true});
+          const visibleAgain = refreshDebugCostAgeLabels(now);
+          return {
+            first, early, earlySame, atThreeSeconds, hidden, visibleAgain,
+            firstDelay: firstDeadline - 100000,
+            secondDelay: secondDeadline - firstDeadline,
+            hiddenDeadlineSame: hiddenDeadline === secondDeadline,
+            tickerArmed: tickerArmedBeforeHidden,
+            bodySame: body === panel?.querySelector('.js-yocost-body'),
+            ageText: body?.querySelector('[data-js-yocost-data-age]')?.textContent || '',
+          };
+        } finally {
+          Math.random = originalRandom;
+          Date.now = originalNow;
+        }
+        """
+    )
+    assert metrics["first"] is True and metrics["firstDelay"] == 3000, metrics
+    assert metrics["early"] is False and metrics["earlySame"] is True, metrics
+    assert metrics["atThreeSeconds"] is True and metrics["secondDelay"] == 10000, metrics
+    assert metrics["hidden"] is None and metrics["hiddenDeadlineSame"] is True and metrics["visibleAgain"] is True, metrics
+    assert metrics["tickerArmed"] is True and metrics["bodySame"] is True, metrics
+    assert "Last refreshed" in metrics["ageText"], metrics
+
+
+def test_debug_graph_terminal_partial_history_renders_agent_and_model_tokens(browser, tmp_path):
+    """A known-unavailable prefix must not discard the valid token payload."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof pollJsDebugStatsSample === 'function'
+              && typeof resetJsDebugHistoryReadiness === 'function'
+              && document.querySelector('[data-js-debug-graph]') !== null;
+            """
+        )
+    )
+    browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        resetJsDebugHistoryReadiness();
+        setDebugGraphChartVisible('modelTokens', true);
+        window.__partialStatsOriginalFetch = window.fetch;
+        window.__partialStatsRequests = 0;
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname !== '/api/stats-sample') return window.__partialStatsOriginalFetch(input, options);
+          window.__partialStatsRequests += 1;
+          const requestedStart = Number(url.searchParams.get('history_start'));
+          const coveredStart = requestedStart + 60;
+          const coveredEnd = Math.floor(Date.now() / 1000);
+          return jsonResponse({
+            pid: 4242,
+            uptime_seconds: 120,
+            history: {
+              sequence: 8,
+              latest_sequence: 8,
+              agent_token_schema_version: 4,
+              records: [{
+                start: coveredEnd - 60,
+                duration: 60,
+                sequence: 8,
+                tokens_per_agent_total: 120,
+                agent_token_samples: 1,
+                agent_token_rates: [{
+                  key: '8881|0|codex', label: '8881:0:codex', total: 120,
+                  tokens: 120, seconds: 60, samples: 1,
+                  model_rates: {'gpt-5.6-terra': {total: 120, tokens: 120, seconds: 60, samples: 1}},
+                }],
+              }],
+              coverage: {
+                mode: 'live', requested_start: requestedStart, requested_end: 0,
+                available_start: coveredStart, available_end: coveredEnd,
+                covered_start: coveredStart, covered_end: coveredEnd,
+                complete: false, has_more_older: false, next_older_end: 0,
+                resolution_seconds: 1, source_resolution_seconds: 1,
+                intervals: [{start: coveredStart, end: coveredEnd, resolution_seconds: 1, source_resolution_seconds: 1}],
+                source_records: 1, returned_records: 1,
+              },
+            },
+          });
+        };
+        void pollJsDebugStatsSample({forceGraphRefresh: true});
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return jsDebugHistoryReadinessSnapshot().phase === 'ready'"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        renderDebugPanels({force: true});
+        const chart = key => document.querySelector(`[data-js-debug-chart="${key}"]`);
+        const agent = chart('agentTokens');
+        const model = chart('modelTokens');
+        const result = {
+          requests: window.__partialStatsRequests,
+          phase: jsDebugHistoryReadinessSnapshot().phase,
+          overlay: document.querySelector('[data-js-debug-history-overlay]')?.textContent || '',
+          agentText: agent?.textContent || '',
+          modelText: model?.textContent || '',
+          agentVisuals: agent?.querySelectorAll('rect,path').length || 0,
+          modelVisuals: model?.querySelectorAll('rect,path').length || 0,
+        };
+        window.fetch = window.__partialStatsOriginalFetch;
+        return result;
+        """
+    )
+    assert metrics["requests"] == 1, metrics
+    assert metrics["phase"] == "ready" and metrics["overlay"] == "", metrics
+    assert "Agent tokens/min" in metrics["agentText"] and "120" in metrics["agentText"], metrics
+    assert "Model tokens/min" in metrics["modelText"] and "120" in metrics["modelText"], metrics
+    assert "8881:0:codex" in metrics["agentText"] and "gpt-5.6-terra" in metrics["modelText"], metrics
+    assert metrics["agentVisuals"] > 0 and metrics["modelVisuals"] > 0, metrics
+
+
+def test_debug_graph_one_four_twenty_four_hour_ranges_paint_full_width_without_retry(browser, tmp_path):
+    """The screenshot-014 range matrix must render both history edges."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]');"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          stopJsDebugStatsPolling();
+          const originalFetch = window.fetch;
+          const requests = [];
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+            requests.push(url.toString());
+            const start = Number(url.searchParams.get('history_start'));
+            const end = Math.ceil(Date.now() / 1000);
+            const span = Math.max(1, end - start);
+            const duration = span >= 16 * 60 * 60 ? 600 : (span >= 2 * 60 * 60 ? 60 : 10);
+            const record = (recordStart, sequence) => ({
+              start: recordStart, duration, sequence,
+              system_cpu_total_percent: 20, system_cpu_count: 1,
+              run_agent_total: 1, idle_agent_total: 1, agent_activity_samples: 1,
+            });
+            return jsonResponse({pid: 4242, started_at: 1, uptime_seconds: span, history: {
+              sequence: requests.length * 10,
+              latest_sequence: requests.length * 10,
+              records: [record(start + duration, requests.length * 10 - 1), record(end - duration, requests.length * 10)],
+              coverage: {
+                mode: 'live', requested_start: start, requested_end: 0,
+                available_start: start, available_end: end,
+                covered_start: start, covered_end: end,
+                complete: true, has_more_older: false, next_older_end: 0,
+                resolution_seconds: duration, source_resolution_seconds: duration,
+                intervals: [{start, end, resolution_seconds: duration, source_resolution_seconds: duration}],
+                source_records: 2, returned_records: 2,
+              },
+            }});
+          };
+          const results = [];
+          try {
+            for (const rangeSeconds of [60 * 60, 4 * 60 * 60, 24 * 60 * 60]) {
+              clearJsDebugGraphData();
+              resetJsDebugHistoryReadiness();
+              setDebugGraphRange(rangeSeconds, {render: false});
+              await pollJsDebugStatsSample({forceGraphRefresh: true});
+              stopJsDebugStatsPolling();
+              renderDebugPanels({force: true});
+              const graph = document.querySelector('[data-js-debug-graph]');
+              const bars = [...graph.querySelectorAll('[data-js-debug-bar-series="workingAgents"]')]
+                .map(bar => ({x: Number(bar.getAttribute('x')), width: Number(bar.getAttribute('width'))}));
+              const plotWidth = Number(jsDebugGraphGeometry.width);
+              results.push({
+                rangeSeconds,
+                phase: jsDebugHistoryReadinessSnapshot().phase,
+                overlay: graph.querySelector('[data-js-debug-history-overlay]')?.textContent || '',
+                bars,
+                plotWidth,
+              });
+            }
+            return {requests, results};
+          } finally {
+            window.fetch = originalFetch;
+            stopJsDebugStatsPolling();
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert len(metrics["requests"]) == 3, metrics
+    for result in metrics["results"]:
+        assert result["phase"] == "ready" and result["overlay"] == "", result
+        assert len(result["bars"]) == 2, result
+        left = min(bar["x"] for bar in result["bars"])
+        right = max(bar["x"] + bar["width"] for bar in result["bars"])
+        assert left <= result["plotWidth"] * 0.05, result
+        assert right >= result["plotWidth"] * 0.95, result
 
 
 def test_debug_graph_stats_sse_push_advances_live_tail_without_poll(browser, tmp_path):
@@ -2125,6 +3268,7 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
                 covered_start: Number(url.searchParams.get('history_start')),
                 covered_end: nowSeconds,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: Number(url.searchParams.get('history_start')), end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true,
                 has_more_older: false,
                 next_older_end: 0,
@@ -2336,12 +3480,14 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
           }),
           modelLegends: [...modelChart.querySelectorAll('[data-js-debug-legend^="modelToken:"]')].map(item => {
             const key = item.dataset.jsDebugLegend;
-            const swatch = item.querySelector('.js-debug-legend-swatch');
+            const swatch = item.querySelector('.js-debug-legend-token-swatch');
+            const pattern = swatch?.querySelector('[data-js-debug-token-legend-pattern-def]');
             const bar = modelBars.get(key);
             return {
               key,
-              background: getComputedStyle(swatch).backgroundColor,
-              barFill: getComputedStyle(bar).fill,
+              pattern: item.dataset.jsDebugTokenPattern,
+              barPattern: bar?.dataset.jsDebugTokenPattern,
+              swatchFill: getComputedStyle(pattern?.querySelector('rect')).fill,
               swatchSeriesColor: getComputedStyle(swatch).getPropertyValue('--js-debug-series-color').trim(),
               barSeriesColor: getComputedStyle(bar).getPropertyValue('--js-debug-series-color').trim(),
             };
@@ -2381,14 +3527,92 @@ def test_debug_graph_agent_tokens_use_color_and_infill_patterns(browser, tmp_pat
     assert [item["definition"] for item in metrics["legends"]] == [item["definition"] for item in metrics["patternDefs"]], metrics
     assert [item["key"].endswith(model) for item, model in zip(metrics["modelLegends"], ["gpt-5.6-sol", "gpt-5.6-terra"])] == [True, True], metrics
     assert all(item["key"].startswith("modelToken:legacy�") for item in metrics["modelLegends"]), metrics
-    assert len({item["background"] for item in metrics["modelLegends"]}) == 2, metrics
-    assert all(item["background"] == item["barFill"] for item in metrics["modelLegends"]), metrics
+    assert len({item["swatchFill"] for item in metrics["modelLegends"]}) == 2, metrics
+    assert all(item["pattern"] == item["barPattern"] for item in metrics["modelLegends"]), metrics
     assert all(item["swatchSeriesColor"] == item["barSeriesColor"] for item in metrics["modelLegends"]), metrics
     assert [item["owner"] for item in metrics["tokenAxes"]] == ["shared", "shared"], metrics
     assert len({(item["max"], item["scale"], item["midpoint"]) for item in metrics["tokenAxes"]}) == 1, metrics
     assert all(item["hovered"] for item in metrics["hover"]["dark"]), metrics
     assert all(item["color"] == "rgb(228, 232, 238)" for item in metrics["hover"]["dark"]), metrics
     assert all(color == "rgb(23, 32, 44)" for color in metrics["hover"]["light"]), metrics
+
+
+def test_debug_token_series_visuals_are_distinct_and_match_across_stats_cost_and_themes(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof recordJsDebugStatsSample === 'function' && typeof renderYoCostPanels === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        jsDebugStatsPollState.firstSampleReceived = true;
+        const models = ['claude-fable-5', 'claude-opus-4-8', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-image-2'];
+        const nowSeconds = Math.floor(Date.now() / 60000) * 60;
+        recordJsDebugStatsSample({history: {sequence: 5, records: [{
+          start: nowSeconds - 60, duration: 60, sequence: 5,
+          tokens_per_agent_total: 150, agent_token_samples: 5,
+          agent_token_rates: models.map((model, index) => ({
+            key: `series-${index}|0|codex`, label: `agent-${index + 1}`, total: (index + 1) * 10,
+            samples: 1, tokens: (index + 1) * 10, seconds: 60, source: 'transcript',
+            model_rates: {[model]: {total: (index + 1) * 10, samples: 1, tokens: (index + 1) * 10, seconds: 60}},
+          })),
+        }]}}, {forceGraphRefresh: true});
+        setDebugGraphChartVisible('modelTokens', true);
+        renderDebugPanels({force: true});
+
+        const visualFor = (chart, seriesKey) => {
+          const bar = chart.querySelector(`[data-js-debug-bar-series="${CSS.escape(seriesKey)}"]`);
+          const legend = chart.querySelector(`[data-js-debug-legend="${CSS.escape(seriesKey)}"]`);
+          const barPattern = bar?.dataset.jsDebugTokenPattern || '';
+          const legendPattern = legend?.dataset.jsDebugTokenPattern || '';
+          const barDefinition = [...chart.querySelectorAll('[data-js-debug-token-pattern-def]')]
+            .find(node => node.id && (bar?.style.fill || '').includes(`#${node.id}`));
+          const legendDefinition = legend?.querySelector('[data-js-debug-token-legend-pattern-def]');
+          return {
+            label: legend?.textContent.trim() || '',
+            pattern: barPattern,
+            legendPattern,
+            color: getComputedStyle(barDefinition?.querySelector('rect')).fill,
+            legendColor: getComputedStyle(legendDefinition?.querySelector('rect')).fill,
+          };
+        };
+        const collect = root => Object.fromEntries(['agentTokens', 'modelTokens'].map(chartKey => {
+          const chart = root.querySelector(`[data-js-debug-chart="${chartKey}"]`);
+          const keys = [...chart.querySelectorAll('[data-js-debug-legend][data-js-debug-token-pattern]')]
+            .map(item => item.dataset.jsDebugLegend);
+          return [chartKey, Object.fromEntries(keys.map(key => [key, visualFor(chart, key)]))];
+        }));
+        const snapshots = {};
+        for (const theme of ['dark', 'light']) {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          selectSession(debugPaneItemId, {userInitiated: true});
+          renderDebugPanels({force: true});
+          const stats = collect(document.querySelector('[data-js-debug-graph]'));
+          selectSession(yocostItemId, {userInitiated: true});
+          renderYoCostPanels({force: true});
+          const cost = collect(document.getElementById(panelDomId(yocostItemId)).querySelector('[data-js-yocost-graphs]'));
+          snapshots[theme] = {stats, cost};
+        }
+        document.body.classList.remove('theme-light');
+        return {models, snapshots};
+        """
+    )
+    for theme in ("dark", "light"):
+        for chart_key in ("agentTokens", "modelTokens"):
+            stats = metrics["snapshots"][theme]["stats"][chart_key]
+            cost = metrics["snapshots"][theme]["cost"][chart_key]
+            assert len(stats) == 5, metrics
+            assert stats == cost, metrics
+            assert len({item["color"] for item in stats.values()}) == 5, metrics
+            assert len({item["pattern"] for item in stats.values()}) == 5, metrics
+            assert len({(item["color"], item["pattern"]) for item in stats.values()}) == 5, metrics
+            assert all(item["pattern"] == item["legendPattern"] for item in stats.values()), metrics
+            assert all(item["color"] == item["legendColor"] for item in stats.values()), metrics
+        model_labels = {item["label"] for item in metrics["snapshots"][theme]["stats"]["modelTokens"].values()}
+        assert {"claude-fable-5", "claude-opus-4-8"} <= model_labels, metrics
 
 
 def test_debug_graph_token_charts_share_broken_linear_peak_axis(browser, tmp_path):
@@ -2556,6 +3780,17 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             statsVisible: jsDebugStatsPanelVisible(),
             dataAge: yocostPanel?.querySelector('[data-js-yocost-data-age]')?.textContent || '',
             refreshButton: yocostPanel?.querySelector('[data-js-debug-cost-refresh]')?.textContent || '',
+            controls: (() => {
+              const toolbar = yocostPanel?.querySelector('.js-yocost-controls');
+              const toolbarRect = toolbar?.getBoundingClientRect();
+              const children = [...(toolbar?.children || [])].map(node => node.getBoundingClientRect());
+              const rangeRect = toolbar?.querySelector('[data-js-debug-range-control]')?.getBoundingClientRect();
+              return {
+                rows: new Set(children.map(rect => Math.round(rect.top + (rect.height / 2)))).size,
+                rangeRatio: toolbarRect?.width ? rangeRect.width / toolbarRect.width : 1,
+                contained: Boolean(toolbarRect && children.every(rect => rect.left >= toolbarRect.left - 1 && rect.right <= toolbarRect.right + 1)),
+              };
+            })(),
             headings: [...(popover?.querySelectorAll('h1, h2') || [])].map(node => node.textContent.trim()),
             pricingSourcesLast: (() => {
               const sections = [...(popover?.querySelectorAll('.js-debug-cost-details-section') || [])];
@@ -2569,6 +3804,8 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             usageHeaderRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] thead th') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
             usageRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr').length || 0,
             usageGrandRows: popover?.querySelectorAll('[data-js-debug-cost-table="model"] tfoot tr').length || 0,
+            usageModelIcons: popover?.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-icon .agent-icon').length || 0,
+            calculationColumns: popover?.querySelectorAll('[data-js-debug-cost-table="calculation"] thead th').length || 0,
             usageRowAria: popover?.querySelector('[data-js-debug-cost-table="model"] tbody tr')?.getAttribute('aria-label') || '',
             usageMetricTexts: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child .js-debug-cost-table-metric') || [])].map(node => node.textContent.trim()),
             usageMetricRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
@@ -2588,8 +3825,11 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}],
           });
           const yocostSlider = yocostPanel?.querySelector('[data-js-debug-range-slider]');
+          const targetRangeSeconds = 15 * 60;
+          const targetRangeIndex = debugGraphAvailableRangeOptions()
+            .findIndex(option => option.seconds === targetRangeSeconds);
           if (yocostSlider) {
-            yocostSlider.value = '2';
+            yocostSlider.value = String(targetRangeIndex);
             yocostSlider.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
           }
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -2647,6 +3887,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             rangeSeconds: (Number(yocostRangeGrid?.dataset.jsDebugDomainEnd) - Number(yocostRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
             statsRangeSeconds: (Number(statsRangeGrid?.dataset.jsDebugDomainEnd) - Number(statsRangeGrid?.dataset.jsDebugDomainStart)) / 1000,
             rangeSliderValue: yocostAfterRange?.querySelector('[data-js-debug-range-slider]')?.value || '',
+            targetRangeIndex,
             resolutionChoice: yocostResolutionChoice?.value || '',
             resolutionValue: yocostAfterResolution?.querySelector('[data-js-debug-resolution-override]')?.value || '',
             providerAscending,
@@ -2752,7 +3993,9 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert metrics["popover"]["tokenChartKeys"] == ["agentTokens", "modelTokens"], metrics
     assert metrics["popover"]["chartsAboveReport"] is True and metrics["popover"]["rangeControl"] is True and metrics["popover"]["resolutionControl"] is True, metrics
     assert metrics["popover"]["statsVisible"] is True and "Last refreshed" in metrics["popover"]["dataAge"] and metrics["popover"]["refreshButton"] == "Refresh", metrics
-    assert 895 <= metrics["yocostControls"]["rangeSeconds"] <= 905 and metrics["yocostControls"]["rangeSliderValue"] == "2", metrics
+    assert metrics["popover"]["controls"]["rangeRatio"] <= 1 and metrics["popover"]["controls"]["contained"], metrics
+    assert 895 <= metrics["yocostControls"]["rangeSeconds"] <= 905, metrics
+    assert metrics["yocostControls"]["rangeSliderValue"] == str(metrics["yocostControls"]["targetRangeIndex"]), metrics
     assert 895 <= metrics["yocostControls"]["statsRangeSeconds"] <= 905, metrics
     assert metrics["yocostControls"]["resolutionChoice"] and metrics["yocostControls"]["resolutionValue"] == metrics["yocostControls"]["resolutionChoice"], metrics
     assert metrics["yocostControls"]["providerSort"] == "descending" and metrics["yocostControls"]["providerAscending"] == sorted(metrics["yocostControls"]["providerAscending"]), metrics
@@ -2768,7 +4011,8 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
     assert "javascript:alert" not in metrics["popover"]["pricingSourcesText"], metrics
     assert metrics["popover"]["usageTitle"] == "Model Usages" and metrics["popover"]["usageRows"] == 1 and metrics["popover"]["usageGrandRows"] == 1, metrics
     assert metrics["popover"]["usageHeaderLabels"] == ["Model", "Input", "Cached", "Output", "Other", "Total"], metrics
-    assert metrics["popover"]["usageMetricTexts"] == ["60 tokens$0.0120", "60 tokens$0.0180", "60 tokens$0.0300", "0$0", "180 tokens$0.0600"], metrics
+    assert metrics["popover"]["usageMetricTexts"] == ["60$0.0120", "60$0.0180", "60$0.0300", "0$0", "180$0.0600"], metrics
+    assert metrics["popover"]["usageModelIcons"] == 1 and metrics["popover"]["calculationColumns"] == 6, metrics
     assert all(label in metrics["popover"]["usageRowAria"] for label in ("gpt-5.6-terra", "Input 60 tokens $0.0120", "Cached 60 tokens $0.0180", "Output 60 tokens $0.0300", "Other 0 $0", "Total 180 tokens $0.0600")), metrics
     assert len(metrics["popover"]["usageHeaderRects"]) == len(metrics["popover"]["usageMetricRects"]) == 6, metrics
     for header_rect, row_rect in zip(metrics["popover"]["usageHeaderRects"], metrics["popover"]["usageMetricRects"]):
@@ -3084,7 +4328,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
     assert metrics["memoryShown"] is True, metrics
     assert metrics["resolutionLabel"].startswith("Resolution: "), metrics
     assert metrics["layoutLabel"] == "Size:", metrics
-    assert metrics["toggleLabels"] == ["CPU", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
+    assert metrics["toggleLabels"] == ["CPU", "Servers load", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"], metrics
     assert metrics["toggleFocusPaint"] == metrics["activeSubtabPaint"], metrics
     assert metrics["saved"] == {
         "subTab": "events",
@@ -3092,7 +4336,7 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
         "resolutionOverrideSeconds": 0,
             "chartLayout": 0,
             "modelTokenDimension": "output",
-            "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil"],
+            "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil", "serversLoad"],
         "visibleCharts": ["cpu", "memory"],
     }, metrics
 
@@ -3109,6 +4353,418 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
             """
         )
     )
+
+
+def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_all_widths(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphCostUnknownUsageHtml === 'function' && typeof debugGraphCostModelUsageChartHtml === 'function' && typeof debugGraphCostComponentDetailsHtml === 'function' && typeof debugSystemRolesHtml === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const transcript = '/Users/keivenc/.codex/sessions/2026/07/11/rollout-2026-07-11T06-08-41-019f514b-5c1d-7be1-8ffb-276b444ede27.jsonl';
+        const summary = {
+          knownMicroUsd: 668830000,
+          upperMicroUsd: 777540000,
+          unpricedCount: 6,
+          unpricedTokenQuantity: 21000,
+          components: [
+            {provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'input', cache_role: 'none', unit: 'tokens', quantity: 1000, priced: false},
+            {provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'input', cache_role: 'read', unit: 'tokens', quantity: 2000, priced: false},
+            {provider: 'openai', model: 'unknown-model-with-a-long-name', direction: 'output', cache_role: 'none', unit: 'tokens', quantity: 3000, priced: false},
+            {provider: 'anthropic', model: 'another-unknown-model-with-a-long-name', direction: 'input', cache_role: 'none', unit: 'tokens', quantity: 4000, priced: false},
+            {provider: 'anthropic', model: 'another-unknown-model-with-a-long-name', direction: 'output', cache_role: 'none', unit: 'tokens', quantity: 5000, priced: false},
+            {provider: 'example-provider', model: 'third-unknown-model-with-a-long-name', direction: 'input', cache_role: 'write', unit: 'tokens', quantity: 6000, priced: false},
+          ],
+          sources: [{
+            source: transcript,
+            transcript,
+            root_thread_id: 'root',
+            agent_thread_id: 'root',
+            token_quantity: 34200000,
+            input_micro_usd: 1490000,
+            cache_micro_usd: 10450000,
+            output_micro_usd: 1520000,
+            other_micro_usd: 0,
+            lower_micro_usd: 13460000,
+            upper_micro_usd: 13460000,
+          }],
+        };
+        const fixture = document.createElement('div');
+        fixture.style.position = 'fixed';
+        fixture.style.inset = '0 auto auto 0';
+        fixture.style.zIndex = '99999';
+        fixture.style.background = 'var(--panel)';
+        fixture.innerHTML = `
+          <section data-responsive-audit="cost" class="js-yocost-panel">
+            <div class="js-yocost-graphs"><div class="js-yocost-controls">
+              <span>Last refreshed 9s ago</span>${debugGraphRangeControlsHtml(Date.now())}${debugGraphResolutionLabelHtml(Date.now())}<button type="button">Refresh</button>
+            </div></div>
+            ${debugGraphCostModelUsageChartHtml([
+              {provider: 'anthropic', model: 'claude-fable-5', effort: 'unknown', input_tokens: 10, cache_tokens: 1000000, output_tokens: 1400, token_quantity: 1001410},
+              {provider: 'openai', model: 'gpt-5.6-sol', effort: 'medium', input_tokens: 11600, cache_tokens: 1400000, output_tokens: 1900, token_quantity: 1413500},
+            ], summary.components, {report: true})}
+            ${debugGraphCostComponentDetailsHtml(summary.components)}
+            ${debugGraphCostUnknownUsageHtml(summary)}
+            ${debugGraphCostSourceTreeHtml(summary.sources)}
+          </section>
+          <section data-responsive-audit="system" class="js-debug-system-view">
+            ${debugSystemRolesHtml({'a-very-long-distributed-refresh-owner-name': {status: 'follower', refresh_requests: 12345, fallback_count: 2, follower_stale_reads: 1}})}
+            ${debugSystemPerformanceTableHtml([{surface: 'GET /api/a-very-long-endpoint-name', count: 1234, compute_ms_max: 42, payload_bytes_total: 987654}], 'endpoint')}
+          </section>`;
+        document.body.append(fixture);
+
+        const unpricedDisclosure = fixture.querySelector('.js-debug-cost-unpriced-disclosure');
+        const disclosureDefaultOpen = unpricedDisclosure?.open === true;
+        const disclosureAriaLabel = unpricedDisclosure?.querySelector('summary')?.getAttribute('aria-label') || '';
+        if (unpricedDisclosure) unpricedDisclosure.open = true;
+
+        const verticalTextFindings = root => {
+          const findings = [];
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const text = String(node.nodeValue || '').replace(/\\s+/g, ' ').trim();
+            const parent = node.parentElement;
+            if (text.length < 6 || !parent || parent.closest('script, style, svg, [hidden]')) continue;
+            const style = getComputedStyle(parent);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const tops = new Set([...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0).map(rect => Math.round(rect.top)));
+            const lines = tops.size;
+            if (lines >= 6 && Array.from(text).length / lines <= 2) {
+              findings.push({text, lines, selector: parent.closest('[data-js-debug-cost-table], .js-debug-system-table')?.outerHTML.slice(0, 120) || parent.tagName});
+            }
+          }
+          return findings;
+        };
+        const layouts = [];
+        for (const theme of ['dark', 'light']) {
+          document.body.classList.toggle('theme-light', theme === 'light');
+          for (const width of [260, 360, 720, 1200]) {
+            fixture.style.width = `${width}px`;
+            const cost = fixture.querySelector('[data-responsive-audit="cost"]');
+            const system = fixture.querySelector('[data-responsive-audit="system"]');
+            const sourceTable = cost.querySelector('[data-js-debug-cost-table="source"]');
+            const controls = cost.querySelector('.js-yocost-controls');
+            const modelTable = cost.querySelector('[data-js-debug-cost-table="model"]');
+            const calculationTable = cost.querySelector('[data-js-debug-cost-table="calculation"]');
+            const visibleUnpricedRows = [...cost.querySelectorAll('[data-js-debug-cost-table="unpriced"] tbody tr')];
+            const unpricedClassRows = [...cost.querySelectorAll('[data-js-debug-unpriced-class]')];
+            const disclosureRect = unpricedDisclosure?.getBoundingClientRect();
+            const sourceCells = [...sourceTable.rows[1].cells].map(cell => cell.getBoundingClientRect().width);
+            layouts.push({
+              theme,
+              width,
+              costFindings: verticalTextFindings(cost),
+              systemFindings: verticalTextFindings(system),
+              costScrollContained: [...cost.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
+              systemScrollContained: [...system.querySelectorAll('.js-debug-system-table-wrap')].every(wrap => wrap.scrollWidth <= wrap.clientWidth + 1 || getComputedStyle(wrap).overflowX !== 'visible'),
+              sourceCells,
+              controlRows: new Set([...controls.children].map(node => { const rect = node.getBoundingClientRect(); return Math.round(rect.top + (rect.height / 2)); })).size,
+              controlsContained: [...controls.children].every(node => {
+                const child = node.getBoundingClientRect();
+                const parent = controls.getBoundingClientRect();
+                return child.left >= parent.left - 1 && child.right <= parent.right + 1;
+              }),
+              rangeRatio: controls.clientWidth ? controls.querySelector('[data-js-debug-range-control]').getBoundingClientRect().width / controls.clientWidth : 1,
+              modelHeaderCount: modelTable?.tHead?.rows[0]?.cells.length || 0,
+              modelCellCounts: [...(modelTable?.tBodies[0]?.rows || [])].map(row => row.cells.length),
+              modelText: modelTable?.textContent || '',
+              modelIcons: modelTable?.querySelectorAll('.js-debug-cost-model-icon .agent-icon').length || 0,
+              calculationHeaderCount: calculationTable?.tHead?.rows[0]?.cells.length || 0,
+              calculationCellCounts: [...(calculationTable?.tBodies[0]?.rows || [])].map(row => row.cells.length),
+              compactTablesContained: [modelTable, calculationTable].every(table => {
+                const wrap = table?.closest('.js-debug-cost-table-wrap');
+                return Boolean(wrap && (width > 360 || wrap.scrollWidth <= wrap.clientWidth + 1));
+              }),
+              visibleUnpricedRowCount: visibleUnpricedRows.length,
+              visibleUnpricedText: visibleUnpricedRows.map(row => row.textContent.trim()),
+              unpricedClassRowCount: unpricedClassRows.length,
+              unpricedClassCellCounts: unpricedClassRows.map(row => row.cells.length),
+              unpricedClassLabels: unpricedClassRows.map(row => row.cells[0]?.textContent.trim()),
+              unpricedClassTokens: unpricedClassRows.map(row => row.cells[1]?.textContent.trim()),
+              disclosureContained: disclosureRect ? disclosureRect.right <= cost.getBoundingClientRect().right + 1 : false,
+            });
+          }
+        }
+        const link = fixture.querySelector('[data-js-debug-cost-transcript-path]');
+        const source = {
+          text: link?.textContent || '',
+          title: link?.title || '',
+          path: link?.dataset.jsDebugCostTranscriptPath || '',
+          middleParts: link?.querySelectorAll('[data-middle-truncate-part]').length || 0,
+        };
+        fixture.remove();
+        return {layouts, source, transcript, disclosureDefaultOpen, disclosureAriaLabel};
+        """
+    )
+    assert all(not item["costFindings"] and not item["systemFindings"] for item in metrics["layouts"]), metrics
+    assert all(item["costScrollContained"] and item["systemScrollContained"] for item in metrics["layouts"]), metrics
+    assert all(item["modelHeaderCount"] == 6 and item["modelCellCounts"] == [6, 6] for item in metrics["layouts"]), metrics
+    assert all(item["calculationHeaderCount"] == 6 and item["calculationCellCounts"] == [6] * 6 for item in metrics["layouts"]), metrics
+    assert all(item["modelIcons"] == 2 and "1M" in item["modelText"] and "1.0M tokens" not in item["modelText"] for item in metrics["layouts"]), metrics
+    assert all(item["compactTablesContained"] for item in metrics["layouts"]), metrics
+    assert all(item["controlsContained"] for item in metrics["layouts"]), metrics
+    wide_controls = [{key: item[key] for key in ("theme", "width", "controlRows", "rangeRatio", "controlsContained")} for item in metrics["layouts"] if item["width"] == 1200]
+    assert all(item["controlRows"] == 1 and item["rangeRatio"] <= 0.41 for item in wide_controls), wide_controls
+    assert metrics["disclosureDefaultOpen"] is False, metrics
+    assert metrics["disclosureAriaLabel"] == "Unpriced model/classes: 6", metrics
+    assert all(item["visibleUnpricedRowCount"] == 3 for item in metrics["layouts"]), metrics
+    assert all(item["visibleUnpricedText"] == ["Known priced total$668.83", "Unpriced tokens21.0k tokens", "Worst-case estimate$108.71"] for item in metrics["layouts"]), metrics
+    assert all(item["unpricedClassRowCount"] == 6 and item["unpricedClassCellCounts"] == [2] * 6 for item in metrics["layouts"]), metrics
+    assert all(item["unpricedClassLabels"] == [
+        "openai · unknown-model-with-a-long-name · input",
+        "openai · unknown-model-with-a-long-name · cache",
+        "openai · unknown-model-with-a-long-name · output",
+        "anthropic · another-unknown-model-with-a-long-name · input",
+        "anthropic · another-unknown-model-with-a-long-name · output",
+        "example-provider · third-unknown-model-with-a-long-name · cache",
+    ] for item in metrics["layouts"]), metrics
+    assert all(item["unpricedClassTokens"] == ["1.0k tokens", "2.0k tokens", "3.0k tokens", "4.0k tokens", "5.0k tokens", "6.0k tokens"] for item in metrics["layouts"]), metrics
+    assert all(item["disclosureContained"] for item in metrics["layouts"]), metrics
+    assert metrics["source"]["title"] == metrics["transcript"], metrics
+    assert metrics["source"]["path"] == metrics["transcript"], metrics
+    assert metrics["source"]["middleParts"] == 2, metrics
+    assert all(item["sourceCells"][0] > min(item["sourceCells"][1:]) for item in metrics["layouts"] if item["width"] >= 720), metrics
+
+
+def test_yocost_by_agent_cards_scroll_horizontally_at_extreme_narrow_instead_of_squishing(browser, tmp_path):
+    """Extreme-narrow last resort: below the two-column card floor the By Agent section
+    scrolls sideways (contained) rather than squishing/overlapping; normal-narrow reflows."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphCostTmuxBreakdownHtml === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const summary = {tmuxWindows: [
+          {tmux_label: 'orchestrator-worktree-alpha:codex-planning-window', token_quantity: 4200000, input_tokens: 120000, cache_tokens: 3900000, output_tokens: 180000, input_micro_usd: 1490000, cache_micro_usd: 10450000, output_micro_usd: 1520000, upper_micro_usd: 13460000},
+          {tmux_label: 'orchestrator-worktree-beta:claude-review-window', token_quantity: 2100000, input_tokens: 60000, cache_tokens: 1950000, output_tokens: 90000, input_micro_usd: 745000, cache_micro_usd: 5225000, output_micro_usd: 760000, upper_micro_usd: 6730000},
+        ]};
+        const fixture = document.createElement('div');
+        fixture.style.position = 'fixed';
+        fixture.style.inset = '0 auto auto 0';
+        fixture.style.zIndex = '99999';
+        fixture.style.background = 'var(--panel)';
+        fixture.innerHTML = `<section class="js-yocost-panel">${debugGraphCostTmuxBreakdownHtml(summary)}</section>`;
+        document.body.append(fixture);
+        const verticalSquish = root => {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const text = String(node.nodeValue || '').replace(/\\s+/g, ' ').trim();
+            const parent = node.parentElement;
+            if (text.length < 6 || !parent || parent.closest('script, style, svg, [hidden]')) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const tops = new Set([...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0).map(rect => Math.round(rect.top)));
+            if (tops.size >= 6 && Array.from(text).length / tops.size <= 2) return true;
+          }
+          return false;
+        };
+        const layouts = [];
+        for (const width of [260, 360]) {
+          fixture.style.width = `${width}px`;
+          const section = fixture.querySelector('.js-debug-cost-agent-usages');
+          const wrap = section.querySelector('.js-debug-cost-table-wrap');
+          layouts.push({
+            width,
+            overflowX: getComputedStyle(wrap).overflowX,
+            scrolls: wrap.scrollWidth > wrap.clientWidth + 1,
+            paneScrolls: fixture.scrollWidth > fixture.clientWidth + 1,
+            squishes: verticalSquish(section),
+          });
+        }
+        fixture.remove();
+        return {layouts};
+        """
+    )
+    narrow = {item["width"]: item for item in metrics["layouts"]}
+    # Extreme-narrow: contained horizontal scroll, never a squish, never a pane scrollbar.
+    assert narrow[260]["overflowX"] == "auto", metrics
+    assert narrow[260]["scrolls"] is True, metrics
+    assert narrow[260]["squishes"] is False, metrics
+    assert narrow[260]["paneScrolls"] is False, metrics
+    # Normal-narrow still reflows to cards with no horizontal scroll.
+    assert narrow[360]["scrolls"] is False, metrics
+    assert narrow[360]["squishes"] is False, metrics
+
+
+def test_debug_token_hover_reports_real_bucket_span_samples_and_gaps(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphNewBucket === 'function' && typeof debugGraphSetHoverTooltip === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const startMs = new Date(2026, 6, 13, 14, 55, 0, 0).getTime();
+        const burst = debugGraphNewBucket(startMs, 300000);
+        debugGraphApplyServerAgentTokenRates(burst, [{
+          key: '8881|0|codex', label: '8881:0:codex', total: 8200,
+          samples: 3, tokens: 41000, seconds: 300,
+          model_rates: {'gpt-5.6-sol': {total: 8200, samples: 3, tokens: 41000, seconds: 300}},
+        }]);
+        const gap = debugGraphNewBucket(startMs + 300000, 300000);
+        const buckets = [burst, gap];
+        const domain = {startMs, endMs: startMs + 600000, rangeSeconds: 600, zoomed: false};
+        const group = jsDebugGraphChartGroups.find(item => item.key === 'agentTokens');
+        const series = debugGraphSeriesData(buckets);
+        const panel = document.createElement('section');
+        panel.innerHTML = `<div data-js-debug-graph><div data-js-debug-chart-grid
+          data-js-debug-domain-start="${startMs}" data-js-debug-domain-end="${startMs + 600000}">
+          ${debugGraphChartHtml(group, series, domain, buckets)}
+        </div></div>`;
+        document.body.append(panel);
+        const svg = panel.querySelector('.js-debug-line-chart');
+        const tooltip = panel.querySelector('[data-js-debug-hover-tooltip]');
+        const read = ratio => {
+          debugGraphSetHoverTooltip(panel, {target: svg, clientX: 0, clientY: 0}, ratio);
+          return {
+            text: tooltip.textContent.replace(/\\s+/g, ' ').trim(),
+            span: tooltip.querySelector('[data-js-debug-hover-max]').textContent,
+            detail: tooltip.querySelector('[data-js-debug-hover-time]').textContent,
+          };
+        };
+        const result = {burst: read(0.25), gap: read(0.75)};
+        panel.remove();
+        return result;
+        """
+    )
+    assert "14:55" in metrics["burst"]["span"] and "15:00" in metrics["burst"]["span"], metrics
+    assert "8.2k" in metrics["burst"]["detail"].lower(), metrics
+    assert "3 samples" in metrics["burst"]["detail"].lower(), metrics
+    assert "no token samples" in metrics["gap"]["detail"].lower(), metrics
+    assert "0 tokens" not in metrics["gap"]["text"].lower(), metrics
+
+
+def test_debug_agent_billable_dimensions_reconcile_and_label_atomless_windows(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerAgentTokenRates === 'function' && typeof debugGraphSeriesData === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const makeRate = (key, output, available, billable) => ({
+          key, label: key.replaceAll('|', ':'), total: output, samples: output > 0 ? 1 : 0,
+          tokens: output, seconds: 60, model_rates: {},
+          billable_available: available,
+          billable_tokens: billable,
+          billable_samples: available ? {input: 1, cache_read: 1, cache_write: 1, all: 4} : {input: 0, cache_read: 0, cache_write: 0, all: 0},
+        });
+        const bucket = debugGraphNewBucket(Date.now() - 60000, 60000);
+        debugGraphApplyServerAgentTokenRates(bucket, [
+          makeRate('s|0|codex', 30, true, {input: 100, cache_read: 20, cache_write: 10, all: 160}),
+          makeRate('s|1|codex', 0, true, {input: 7, cache_read: 0, cache_write: 0, all: 7}),
+          makeRate('s|2|claude', 5, false, {input: 0, cache_read: 0, cache_write: 0, all: 0}),
+        ]);
+        const valuesFor = dimension => {
+          jsDebugGraphModelTokenDimension = dimension;
+          return debugGraphSeriesData([bucket])
+            .filter(series => series.agentTokenSeries === true)
+            .map(series => ({key: series.agentTokenKey, value: series.values[0]}))
+            .sort((left, right) => left.key.localeCompare(right.key));
+        };
+        const output = valuesFor('output');
+        const all = valuesFor('all');
+        const input = valuesFor('input');
+        const cacheRead = valuesFor('cacheRead');
+        const cacheWrite = valuesFor('cacheWrite');
+        const atomless = debugGraphNewBucket(Date.now(), 60000);
+        debugGraphApplyServerAgentTokenRates(atomless, [makeRate(
+          's|2|claude', 5, false, {input: 0, cache_read: 0, cache_write: 0, all: 0}
+        )]);
+        const group = jsDebugGraphChartGroups.find(item => item.key === 'agentTokens');
+        jsDebugGraphModelTokenDimension = 'all';
+        const emptyHtml = debugGraphChartHtml(
+          group, debugGraphSeriesData([atomless]),
+          {startMs: atomless.startMs, endMs: atomless.startMs + 60000, rangeSeconds: 60, zoomed: false},
+          [atomless]
+        );
+        jsDebugGraphModelTokenDimension = 'output';
+        return {output, all, input, cacheRead, cacheWrite, emptyHtml};
+        """
+    )
+    assert sum(item["value"] for item in metrics["output"]) == 35, metrics
+    assert metrics["all"] == [{"key": "s|0|codex", "value": 160}, {"key": "s|1|codex", "value": 7}], metrics
+    assert sum(item["value"] for item in metrics["all"]) == 167, metrics
+    assert sum(item["value"] for item in metrics["input"]) == 107, metrics
+    assert sum(item["value"] for item in metrics["cacheRead"]) == 20, metrics
+    assert sum(item["value"] for item in metrics["cacheWrite"]) == 10, metrics
+    assert "no billable breakdown for this window" in metrics["emptyHtml"].lower(), metrics
+
+
+def test_debug_token_dimension_switch_repaints_both_surfaces_from_cache_within_one_frame(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof createYoCostPanel === 'function' && typeof debugGraphApplyServerHistory === 'function';"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        let fetches = 0;
+        window.fetch = (...args) => { fetches += 1; return originalFetch(...args); };
+        const cost = createYoCostPanel();
+        document.body.append(cost);
+        const now = Math.floor(Date.now() / 1000) - 60;
+        debugGraphApplyServerHistory({sequence: 91, records: [{
+          start: now, duration: 60, sequence: 91,
+          agent_token_samples: 1, tokens_per_agent_total: 30,
+          agent_token_rates: [{
+            key: 's|0|codex', label: 's:0', total: 30, samples: 1, tokens: 30, seconds: 60,
+            model_rates: {'gpt-5.6-sol': {total: 30, samples: 1, tokens: 30, seconds: 60}},
+            billable_available: true,
+            billable_tokens: {input: 100, cache_read: 20, cache_write: 10, all: 160},
+            billable_samples: {input: 1, cache_read: 1, cache_write: 1, all: 4},
+          }],
+          cost_summary: {components: [{provider: 'openai', model: 'gpt-5.6-sol', effort: 'high', direction: 'input', cache_role: 'none', unit: 'tokens', quantity: 100}]},
+        }]});
+        renderDebugPanels({force: true});
+        renderYoCostPanels({force: true});
+        const initialLoading = document.querySelectorAll('[data-js-debug-history-overlay]:not([hidden])').length;
+        const switchAndRead = value => {
+          const started = performance.now();
+          setDebugGraphModelTokenDimension(value);
+          return new Promise(resolve => requestAnimationFrame(() => resolve({
+            elapsed: performance.now() - started,
+            values: [...document.querySelectorAll('[data-js-debug-model-token-dimension-select]')].map(select => select.value),
+            unavailable: document.querySelectorAll('[data-js-debug-agent-billable-unavailable]').length,
+            loading: document.querySelectorAll('[data-js-debug-history-overlay]:not([hidden])').length,
+          })));
+        };
+        (async () => {
+          const first = await switchAndRead('all');
+          await switchAndRead('output');
+          const repeated = await switchAndRead('all');
+          setDebugGraphModelTokenDimension('output');
+          window.fetch = originalFetch;
+          cost.remove();
+          done({first, repeated, fetches, initialLoading});
+        })().catch(error => {
+          window.fetch = originalFetch;
+          cost.remove();
+          done({error: String(error?.stack || error)});
+        });
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["fetches"] == 0, metrics
+    assert metrics["first"]["elapsed"] < 100 and metrics["repeated"]["elapsed"] < 100, metrics
+    assert metrics["first"]["values"] and set(metrics["first"]["values"]) == {"all"}, metrics
+    assert metrics["repeated"]["values"] and set(metrics["repeated"]["values"]) == {"all"}, metrics
+    assert metrics["first"]["unavailable"] == 0 and metrics["repeated"]["unavailable"] == 0, metrics
+    assert metrics["first"]["loading"] == metrics["initialLoading"], metrics
+    assert metrics["repeated"]["loading"] == metrics["initialLoading"], metrics
 
 
 def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(browser, tmp_path):
@@ -3137,7 +4793,7 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
           chat: {subscribers: 1, store: {message_rows: 4, typing_leases: 0}},
           local_services: {totals: {processes: 2, cpu_percent: 1.5, rss_bytes: 2048}, services: [
             {service: 'indexd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
-            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0, normal: 0, background: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}},
+            {service: 'statsd', pid: 222, healthy: true, started_at: fakeNow / 1000 - 65, uptime_seconds: 65, clients: 2, queues: {interactive: 1, maintenance: 0, normal: 0, background: 0}, resources: {cpu_percent: .5, rss_bytes: 1024}, sampler_families: {agent_status: {cadence_seconds: 10, alive: true, attempts: 3, successes: 2, failures: 1}, system_memory: {cadence_seconds: 60, alive: true, attempts: 2, successes: 2, failures: 0}}},
             {service: 'jobd', pid: 0, healthy: false, restart_backoff_seconds: 0, resources: {cpu_percent: null, rss_bytes: null}},
             {service: 'approvald', pid: 333, healthy: false, started_at: fakeNow / 1000 - 12, uptime_seconds: 12, resources: {cpu_percent: 1, rss_bytes: 1024}},
           ]},
@@ -3183,6 +4839,10 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
             bad: node.querySelector('.js-debug-system-state')?.classList.contains('js-debug-system-state--bad'),
           }));
           const wrap = table.closest('.js-debug-system-local-services-wrap');
+          const samplerTable = view.querySelector('.js-debug-system-sampler-table');
+          const samplerWrap = samplerTable?.closest('.js-debug-system-table-wrap');
+          const samplerFirstCells = [...(samplerTable?.querySelectorAll('tbody th:first-child') || [])];
+          const samplerHeaders = [...(samplerTable?.querySelectorAll('thead th') || [])];
           const labelCells = [...table.querySelectorAll('tbody th')];
           const pidRect = pidCell.getBoundingClientRect();
           const queueRect = queueCell.getBoundingClientRect();
@@ -3199,6 +4859,14 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
             queueWrapStyle: getComputedStyle(queueCell).whiteSpace,
             queueSharesColumnWidth: Math.abs(queueRect.width - pidRect.width) <= 1,
             queueCanWrapTaller: queueRect.height > pidRect.height + 2,
+            samplerScrolls: samplerWrap.scrollWidth > samplerWrap.clientWidth + 1,
+            samplerFamilyNowrap: samplerFirstCells.every(node => getComputedStyle(node).whiteSpace === 'nowrap'),
+            samplerFamilySingleLine: samplerFirstCells.every(node => {
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              return range.getClientRects().length <= 1;
+            }),
+            samplerHeaders: samplerHeaders.map(node => ({text: node.textContent.trim(), title: node.title, aria: node.getAttribute('aria-label')})),
           };
           view.style.width = '920px';
           refreshDebugSystemViews();
@@ -3323,6 +4991,12 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert metrics["narrowMetrics"]["queueWrapStyle"] == "normal", metrics
     assert metrics["narrowMetrics"]["queueSharesColumnWidth"] is True, metrics
     assert metrics["narrowMetrics"]["queueCanWrapTaller"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerScrolls"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerFamilyNowrap"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerFamilySingleLine"] is True, metrics
+    assert metrics["narrowMetrics"]["samplerHeaders"][3] == {
+        "text": "att/succ/fails", "title": "Attempts / successes / failures", "aria": "Attempts / successes / failures",
+    }, metrics
     assert all(service["textAlign"] in {"end", "right"} for service in metrics["wideServices"]), metrics
     assert all(set(service["cellTextAligns"]) == {service["textAlign"]} for service in metrics["wideServices"]), metrics
     assert all(service["aligned"] for service in metrics["wideServices"]), metrics
@@ -3333,6 +5007,64 @@ def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(br
     assert metrics["roleLayouts"][0]["scrolls"] is False, metrics
     assert metrics["roleLayouts"][1]["scrolls"] is True, metrics
     assert all(item["labelWidth"] >= 120 and item["serviceWidth"] >= 120 for item in metrics["roleLayouts"]), metrics
+
+
+def test_servers_load_chart_is_after_cpu_default_off_and_persists(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-chart-toggle=\"serversLoad\"]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const buttons = [...document.querySelectorAll('[data-js-debug-chart-toggle]')];
+        const cpuIndex = buttons.findIndex(button => button.dataset.jsDebugChartToggle === 'cpu');
+        const loadButton = buttons.find(button => button.dataset.jsDebugChartToggle === 'serversLoad');
+        const defaultPressed = loadButton.getAttribute('aria-pressed');
+        const sampleStart = Math.floor(Date.now() / 1000);
+        debugGraphApplyServerHistory({sequence: 41, records: [{
+          start: sampleStart, duration: 10, sequence: 41,
+          host_metrics: {service_load: {
+            statsd: {label: 'statsd', cpu_total_percent: 12, cpu_samples: 2, cpu_min_percent: 4, cpu_max_percent: 8},
+            jobd: {label: 'jobd', cpu_total_percent: 3, cpu_samples: 1, cpu_min_percent: 3, cpu_max_percent: 3},
+          }},
+        }]});
+        loadButton.click();
+        const chart = document.querySelector('[data-js-debug-chart="serversLoad"]');
+        const svg = chart?.querySelector('.js-debug-line-chart');
+        if (svg) {
+          const rect = svg.getBoundingClientRect();
+          const grid = chart.closest('[data-js-debug-chart-grid]');
+          const domainStart = Number(grid.dataset.jsDebugDomainStart);
+          const domainEnd = Number(grid.dataset.jsDebugDomainEnd);
+          const ratio = ((sampleStart * 1000 + 5000) - domainStart) / (domainEnd - domainStart);
+          svg.dispatchEvent(new PointerEvent('pointermove', {bubbles: true, clientX: rect.left + ratio * rect.width, clientY: rect.top + rect.height / 2}));
+        }
+        return {
+          defaultPressed,
+          immediatelyAfterCpu: buttons[cpuIndex + 1]?.dataset.jsDebugChartToggle === 'serversLoad',
+          pressed: loadButton.getAttribute('aria-pressed'),
+          chart: Boolean(chart),
+          legends: [...(chart?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.textContent.trim()).sort(),
+          tooltip: chart?.querySelector('[data-js-debug-hover-max]')?.textContent || '',
+          savedVisible: JSON.parse(localStorage.getItem('yolomux.stats.ui_preferences.v1') || '{}').visibleCharts || [],
+        };
+        """
+    )
+    assert metrics["defaultPressed"] == "false", metrics
+    assert metrics["immediatelyAfterCpu"] is True, metrics
+    assert metrics["pressed"] == "true" and metrics["chart"] is True, metrics
+    assert metrics["legends"] == ["jobd", "statsd"], metrics
+    assert "statsd: 6.0% (min 4.0% · avg 6.0% · max 8.0%)" in metrics["tooltip"], metrics
+    assert metrics["savedVisible"] == ["serversLoad"], metrics
+
+    browser.refresh()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('[data-js-debug-chart-toggle=\"serversLoad\"]')?.getAttribute('aria-pressed') === 'true';"
+        )
+    )
 
 
 def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browser, tmp_path):
@@ -3722,6 +5454,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         const sliderAfterZoomRect = sliderAfterZoom?.getBoundingClientRect();
         const resetRightGap = resetRect && resetControlRect ? resetControlRect.right - resetRect.right : NaN;
         const sliderBeforeLabelGap = labelRect && sliderAfterZoomRect ? labelRect.left - sliderAfterZoomRect.right : NaN;
+        const sliderDisabledWhileZoomed = sliderAfterZoom?.disabled === true && sliderAfterZoom?.getAttribute('aria-disabled') === 'true';
         reset?.dispatchEvent(new PointerEvent('pointerdown', eventInit(endX)));
         const afterResetGrid = document.querySelector('[data-js-debug-chart-grid]');
 
@@ -3748,7 +5481,7 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
           zoomed,
           zoomSeconds: (zoomEnd - zoomStart) / 1000,
           resetText: reset?.textContent || '',
-          sliderDisabledWhileZoomed: sliderAfterZoom?.disabled === true && sliderAfterZoom?.getAttribute('aria-disabled') === 'true',
+          sliderDisabledWhileZoomed,
           resetRightGap,
           sliderBeforeLabelGap,
           resetZoomed: afterResetGrid?.dataset.jsDebugZoomed === 'true',
@@ -3756,18 +5489,18 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["stops"] == [60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], metrics
+    assert metrics["stops"] == [300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400], metrics
     assert metrics["sliderMin"] == "0"
-    assert metrics["sliderMax"] == "9"
+    assert metrics["sliderMax"] == "8"
     assert metrics["sliderStep"] == "any", metrics
-    assert metrics["sliderValue"] == "1"
+    assert metrics["sliderValue"] == "0"
     assert metrics["sliderPointerDefaultAllowed"] is True, metrics
     assert metrics["sliderSurvivedPointerDown"] is True, metrics
     assert metrics["sliderSurvivedInputDrag"] is True, metrics
     assert metrics["sliderSurvivedPassiveRefreshDuringDrag"] is True, metrics
     assert metrics["sliderValueDuringInput"] == "7.4", metrics
     assert metrics["sliderValueAfterSnap"] == "7", metrics
-    assert 28790 <= metrics["sliderInputSeconds"] <= 28810, metrics
+    assert 57590 <= metrics["sliderInputSeconds"] <= 57610, metrics
     assert metrics["hoverFirstX"] == metrics["hoverSecondX"] == "150.0", metrics
     assert float(metrics["hoverOpacity"]) > 0.0, metrics
     assert metrics["hoverTooltip"]["hidden"] is False, metrics
@@ -3878,6 +5611,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
                 mode: 'live', requested_start: requestedStart, requested_end: 0,
                 covered_start: requestedStart, covered_end: nowSeconds,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: requestedStart, end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true, has_more_older: false, next_older_end: 0,
               },
             }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
@@ -3915,6 +5649,68 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
     assert metrics["separateTokenCount"] == 0, metrics
     assert "8002:1:codex" in metrics["legendLabels"], metrics
     assert metrics["barCount"] == 1, metrics
+
+
+def test_debug_graph_store_coverage_paints_token_gap_without_shading_cpu(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof setJsDebugHistoryReadiness === 'function' && typeof renderDebugPanels === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        resetJsDebugHistoryReadiness();
+        const end = Math.ceil(Date.now() / 1000);
+        const start = end - 900;
+        const gapStart = start + 300;
+        const gapEnd = start + 420;
+        const interval = (left, right) => ({startSeconds: left, endSeconds: right, resolutionSeconds: 1, sourceResolutionSeconds: 0});
+        const full = [interval(start, end)];
+        debugGraphApplyServerHistory({sequence: 1, latest_sequence: 1, records: [{
+          start, duration: 1, sequence: 1,
+          system_cpu_total_percent: 10, system_cpu_count: 1,
+          tokens_per_agent_total: 60, agent_token_samples: 1,
+          agent_token_rates: [{key: 'fixture|0|codex', label: 'fixture:0:codex', total: 60, tokens: 60, seconds: 60, samples: 1}],
+        }]});
+        setJsDebugHistoryReadiness('ready', {
+          targetStartSeconds: start,
+          targetEndSeconds: end,
+          coverageIntervals: full,
+          requestCoverageIntervals: full,
+          storeCoverageIntervals: {
+            cpu: full,
+            agent_status: full,
+            agent_tokens: [interval(start, gapStart), interval(gapEnd, end)],
+            cost: [],
+          },
+        });
+        jsDebugGraphRangeSeconds = 900;
+        jsDebugGraphZoomDomain = {startMs: start * 1000, endMs: end * 1000};
+        setDebugGraphChartVisible('agentTokens', true);
+        setDebugGraphChartVisible('cpu', true);
+        renderDebugPanels({force: true});
+        const tokenChart = document.querySelector('[data-js-debug-chart="agentTokens"]');
+        const cpuChart = document.querySelector('[data-js-debug-chart="cpu"]');
+        const tokenRects = [...(tokenChart?.querySelectorAll('[data-js-debug-history-no-data-range]') || [])].map(rect => ({
+          x: Number(rect.getAttribute('x')),
+          width: Number(rect.getAttribute('width')),
+          family: rect.closest('[data-js-debug-history-coverage-family]')?.dataset.jsDebugHistoryCoverageFamily || '',
+        }));
+        return {
+          tokenRects,
+          cpuRects: cpuChart?.querySelectorAll('[data-js-debug-history-no-data-range]').length || 0,
+          errorVisible: Boolean(document.querySelector('[data-js-debug-history-retry]')),
+        };
+        """
+    )
+    assert metrics["errorVisible"] is False, metrics
+    assert metrics["cpuRects"] == 0, metrics
+    assert len(metrics["tokenRects"]) == 1, metrics
+    assert metrics["tokenRects"][0]["family"] == "agent_tokens", metrics
+    assert 70 < metrics["tokenRects"][0]["width"] < 90, metrics
 
 
 def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_history_fetch(browser, tmp_path):
@@ -3972,6 +5768,7 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
                 mode: 'older', requested_start: tokenStart, requested_end: normalEnd,
                 covered_start: tokenStart, covered_end: normalEnd,
                 resolution_seconds: 5, complete: true, has_more_older: false, next_older_end: 0,
+                intervals: [{start: tokenStart, end: normalEnd, resolution_seconds: 5}],
               },
               agent_token_history: {
                 sequence: 50,
@@ -4068,6 +5865,7 @@ def test_debug_graph_server_restart_refetches_complete_history_without_waiting_f
               covered_start: Number(url.searchParams.get('history_start')),
               covered_end: nowSeconds,
               resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              intervals: [{start: Number(url.searchParams.get('history_start')), end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
               complete: true,
               has_more_older: false,
               next_older_end: 0,
@@ -4168,13 +5966,22 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
           const coverageFor = (url, overrides = {}) => {
             const requestedStart = Number(url.searchParams.get('history_start'));
             const requestedEnd = Number(url.searchParams.get('history_end'));
+            const coveredEnd = requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd;
+            const resolutionSeconds = Number(url.searchParams.get('history_resolution'));
+            const interval = {
+              start: requestedStart,
+              end: coveredEnd,
+              resolution_seconds: resolutionSeconds,
+            };
             return {
               mode: requestedEnd === 0 ? 'live' : 'older',
               requested_start: requestedStart,
               requested_end: requestedEnd,
               covered_start: requestedStart,
-              covered_end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd,
-              resolution_seconds: Number(url.searchParams.get('history_resolution')),
+              covered_end: coveredEnd,
+              resolution_seconds: resolutionSeconds,
+              intervals: [interval],
+              store_intervals: {server: [interval], agent_tokens: [interval]},
               complete: true,
               has_more_older: false,
               next_older_end: 0,
@@ -4298,7 +6105,7 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
     assert metrics["finalOverlayHidden"] is True, metrics
 
 
-def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browser, tmp_path):
+def test_debug_graph_history_error_retains_chart_and_explicit_range_retries(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -4353,6 +6160,7 @@ def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browse
                     covered_start: requestedStart,
                     covered_end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                    intervals: [{start: requestedStart, end: requestedEnd === 0 ? Math.floor(Date.now() / 1000) : requestedEnd, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                     complete: true,
                 has_more_older: false,
                 next_older_end: 0,
@@ -4387,10 +6195,10 @@ def test_debug_graph_history_error_retains_chart_and_retry_clears_overlay(browse
               text: errorGraph?.querySelector('[data-js-debug-history-overlay]')?.textContent?.trim() || '',
               retry: Boolean(errorGraph?.querySelector('[data-js-debug-history-retry]')),
             };
-            retryJsDebugHistory();
+            setDebugGraphRange(4 * 60 * 60);
             await window.__yolomuxTestWaitFor(
               () => requestCount >= 2 && !jsDebugStatsPollState.inFlight && jsDebugHistoryReadiness.phase === 'ready',
-              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats history retry readiness'}
+              {timeoutMs: 3000, intervalMs: 20, description: 'YO!stats explicit range retry readiness'}
             );
             const readyGraph = document.querySelector('[data-js-debug-graph]');
             return {
@@ -4489,6 +6297,7 @@ def test_debug_graph_history_upload_ack_does_not_leave_hidden_interval_blank(bro
                 covered_start: Number(url.searchParams.get('history_start')),
                 covered_end: nowSeconds,
                 resolution_seconds: Number(url.searchParams.get('history_resolution')),
+                intervals: [{start: Number(url.searchParams.get('history_start')), end: nowSeconds, resolution_seconds: Number(url.searchParams.get('history_resolution'))}],
                 complete: true,
                 has_more_older: false,
                 next_older_end: 0,
@@ -7998,10 +9807,12 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <div id="terminal" class="terminal"><div class="xterm"></div></div>
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
-            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
+            <div id="smart-key-grabber" class="mobile-terminal-key-grabber" aria-hidden="true"></div>
+            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button></div>
             <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button><button id="smart-key-backspace" class="mobile-terminal-key">⌫</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
-            <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">Copy</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
-            <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Pg↑</button><button class="mobile-terminal-key">Pg↓</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
+            <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">⌘C</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
+            <div id="smart-key-bottom" class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom"><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
+            <div id="smart-key-more-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--more" hidden><button class="mobile-terminal-key">⌘P</button><button class="mobile-terminal-key">Home</button><button class="mobile-terminal-key">End</button><button class="mobile-terminal-key">Del</button><button class="mobile-terminal-key">⇧↹</button><button class="mobile-terminal-key">^D</button><button class="mobile-terminal-key">^Z</button><button class="mobile-terminal-key">^L</button><button class="mobile-terminal-key">^R</button><button id="smart-key-more-return" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
           </div>
       </div>
     """, extra_css="""
@@ -8017,6 +9828,14 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const bar = document.getElementById('smart-keys');
         const row = document.getElementById('smart-key-row');
         const key = row.querySelector('.mobile-terminal-key');
+        const paint = (property, token) => {
+          const probe = document.createElement('i');
+          probe.style[property] = `var(${token})`;
+          document.body.append(probe);
+          const value = getComputedStyle(probe)[property];
+          probe.remove();
+          return value;
+        };
         const hidden = bar.hidden;
         bar.hidden = false;
         const initial = {bar: box(bar), launcher: box(document.getElementById('smart-key-launcher'))};
@@ -8026,19 +9845,24 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         bar.style.insetBlockEnd = 'auto';
         const dpad = document.getElementById('smart-key-dpad');
         const shell = document.getElementById('smart-key-shell');
+        const bottom = document.getElementById('smart-key-bottom');
         const moreRow = document.getElementById('smart-key-more-row');
         const side = document.getElementById('smart-key-side');
         const sideButtons = [...side.querySelectorAll('.mobile-terminal-key')];
-        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), grabber: box(document.getElementById('smart-key-grabber')), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
-        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, dpadDisplay: getComputedStyle(dpad).display};
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, shellVisibility: getComputedStyle(shell).visibility, sideDisplay: getComputedStyle(side).display, sideVisibility: getComputedStyle(side).visibility, bottomDisplay: getComputedStyle(bottom).display, bottomVisibility: getComputedStyle(bottom).visibility, dpadDisplay: getComputedStyle(dpad).display, dpadVisibility: getComputedStyle(dpad).visibility};
         return {
           pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
           paneDisplay: getComputedStyle(pane).display,
           overflowX: getComputedStyle(row).overflowX,
           activeBackground: getComputedStyle(document.getElementById('smart-key-ctrl')).backgroundColor,
           launcherUserSelect: getComputedStyle(document.getElementById('smart-key-launcher')).userSelect,
+          launcherColor: getComputedStyle(document.getElementById('smart-key-launcher')).color,
+          launcherBackground: getComputedStyle(document.getElementById('smart-key-launcher')).backgroundColor,
+          inactiveTabColor: paint('color', '--pane-tab-text'),
+          inactiveTabBackground: paint('backgroundColor', '--panel2'),
           barUserSelect: getComputedStyle(bar).userSelect,
           interruptColor: getComputedStyle(document.getElementById('smart-key-interrupt')).color,
           primaryColumns: getComputedStyle(row).gridTemplateColumns,
@@ -8047,7 +9871,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           shell: normal.shell,
           movedInsetEnd: bar.style.insetBlockEnd,
           initiallyHidden: hidden,
-              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, grabber: normal.grabber, bottom: normal.bottom, bottomLabels: normal.bottomLabels, bottomKeys: normal.bottomKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
           hasClose: Boolean(document.querySelector('.mobile-terminal-key-close, [data-terminal-mobile-close]')),
           hasDrag: Boolean(document.querySelector('.mobile-terminal-key-drag, [data-terminal-mobile-drag]')),
@@ -8066,23 +9890,37 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["overflowX"] == "visible", metrics
     assert metrics["primaryColumns"].startswith("repeat(3,") or len(metrics["primaryColumns"].split()) == 3, metrics
     assert metrics["primaryLabels"] == ["Tab", "^B", "⌫"], metrics
-    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "^C", "Alt", "Cmd"], metrics
+    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], metrics
+    assert metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], metrics
+    assert metrics["copy"]["width"] == metrics["paste"]["width"] and metrics["copy"]["height"] == metrics["paste"]["height"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
     assert metrics["more"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
     assert metrics["more"]["left"] >= metrics["key"]["right"] - 0.5, metrics
     assert metrics["movedInsetEnd"] == "auto", metrics
     assert metrics["bar"]["height"] < metrics["pane"]["height"], metrics
-    assert metrics["normal"]["shellDisplay"] == metrics["normal"]["sideDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
+    assert metrics["normal"]["shellDisplay"] == metrics["normal"]["sideDisplay"] == metrics["normal"]["bottomDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
     assert metrics["overflow"]["rowDisplay"] == "grid", metrics
-    assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == "none" and metrics["overflow"]["dpadDisplay"] == "none", metrics
+    assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == metrics["overflow"]["bottomDisplay"] == "grid" and metrics["overflow"]["dpadDisplay"] == "grid", metrics
+    assert metrics["overflow"]["shellVisibility"] == metrics["overflow"]["sideVisibility"] == metrics["overflow"]["bottomVisibility"] == metrics["overflow"]["dpadVisibility"] == "hidden", metrics
+    assert metrics["overflow"]["bar"] == metrics["normal"]["bar"], metrics
+    assert abs(metrics["overflow"]["more"]["left"] - metrics["normal"]["more"]["left"]) <= 0.5 and abs(metrics["overflow"]["more"]["top"] - metrics["normal"]["more"]["top"]) <= 0.5, metrics
     assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
     assert metrics["overflow"]["more"]["right"] <= metrics["overflow"]["row"]["right"] + 0.5, metrics
     assert metrics["overflow"]["more"]["top"] <= metrics["overflow"]["row"]["top"] + 0.5, metrics
     assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
-    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(5)), metrics
+    assert metrics["launcherColor"] == metrics["inactiveTabColor"] and metrics["launcherBackground"] == metrics["inactiveTabBackground"], metrics
+    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(2)), metrics
     assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["sideKeys"]), metrics
+    assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["bottomKeys"]), metrics
     assert all(key["right"] <= metrics["dpad"]["left"] for key in metrics["sideKeys"]), metrics
+    assert metrics["bottom"]["left"] == metrics["side"]["left"], metrics
+    assert metrics["bottomKeys"][0]["left"] == metrics["sideKeys"][-1]["left"] and metrics["bottomKeys"][0]["right"] == metrics["sideKeys"][-1]["right"], metrics
+    assert abs(metrics["sideKeys"][-1]["bottom"] - metrics["bottomKeys"][0]["top"]) <= 5, metrics
+    assert all(key["width"] == metrics["sideKeys"][0]["width"] for key in metrics["bottomKeys"]), metrics
+    assert metrics["bottom"]["top"] >= metrics["dpad"]["bottom"], metrics
+    assert metrics["overflow"]["hasInterrupt"] is False, metrics
+    assert metrics["grabber"]["width"] > 0 and metrics["grabber"]["top"] >= metrics["bar"]["top"] and metrics["grabber"]["bottom"] <= metrics["key"]["top"], metrics
     assert metrics["up"]["top"] < metrics["left"]["top"] and metrics["up"]["top"] < metrics["right"]["top"], metrics
     assert metrics["left"]["left"] < metrics["up"]["left"] < metrics["right"]["left"], metrics
     assert metrics["down"]["top"] > metrics["left"]["top"] and metrics["down"]["top"] > metrics["right"]["top"], metrics
@@ -8097,12 +9935,24 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const side = document.getElementById('smart-key-side');
         const primary = document.getElementById('smart-key-row');
         const backspace = document.getElementById('smart-key-backspace');
-        return {bar: box(document.getElementById('smart-keys')), side: box(side), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent)};
+        const bottom = document.getElementById('smart-key-bottom');
+        const launcher = document.getElementById('smart-key-launcher');
+        const paint = (property, token) => {
+          const probe = document.createElement('i');
+          probe.style[property] = `var(${token})`;
+          document.body.append(probe);
+          const value = getComputedStyle(probe)[property];
+          probe.remove();
+          return value;
+        };
+        return {bar: box(document.getElementById('smart-keys')), side: box(side), bottom: box(bottom), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent), bottomLabels: [...bottom.querySelectorAll('button')].map(node => node.textContent), launcherColor: getComputedStyle(launcher).color, launcherBackground: getComputedStyle(launcher).backgroundColor, inactiveTabColor: paint('color', '--pane-tab-text'), inactiveTabBackground: paint('backgroundColor', '--panel2')};
         """
     )
-    assert light_metrics["sideLabels"] == ["Esc", "Ctrl", "Shift", "^C", "Alt", "Cmd"], light_metrics
+    assert light_metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], light_metrics
+    assert light_metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], light_metrics
+    assert light_metrics["launcherColor"] == light_metrics["inactiveTabColor"] and light_metrics["launcherBackground"] == light_metrics["inactiveTabBackground"], light_metrics
     assert light_metrics["backspace"]["left"] >= light_metrics["primary"]["left"] and light_metrics["backspace"]["right"] <= light_metrics["primary"]["right"], light_metrics
-    assert light_metrics["bar"]["height"] < metrics["pane"]["height"] and light_metrics["side"]["bottom"] <= light_metrics["bar"]["bottom"], light_metrics
+    assert light_metrics["bar"]["height"] < metrics["pane"]["height"] and light_metrics["side"]["bottom"] <= light_metrics["bar"]["bottom"] and light_metrics["bottom"]["bottom"] <= light_metrics["bar"]["bottom"], light_metrics
 
 
 def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_path):
@@ -8136,6 +9986,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
             const done = arguments[arguments.length - 1];
             const launcher = document.querySelector('[data-terminal-mobile-toggle="1"]');
             const bar = document.querySelector('[data-terminal-mobile-keybar="1"]');
+            const grabber = bar?.querySelector('.mobile-terminal-key-grabber');
             const pane = launcher?.closest('.tab-pane');
             const box = node => {
               const rect = node.getBoundingClientRect();
@@ -8162,15 +10013,15 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
               launcher.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
               if (emitClick) launcher.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y}));
             };
-            const dragPaletteTo = (x, y) => {
-              const rect = bar.getBoundingClientRect();
+            const dragPaletteTo = (x, y, source = bar) => {
+              const rect = source.getBoundingClientRect();
               const startX = rect.left + Math.min(12, Math.max(4, rect.width / 4));
               const startY = rect.top + Math.min(12, Math.max(4, rect.height / 4));
               const pointerId = 73;
               const base = {bubbles: true, cancelable: true, pointerId, pointerType: 'touch', button: 0, buttons: 1, isPrimary: true};
-              bar.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
-              bar.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
-              bar.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
+              source.dispatchEvent(new PointerEvent('pointerdown', {...base, clientX: startX, clientY: startY}));
+              source.dispatchEvent(new PointerEvent('pointermove', {...base, clientX: x, clientY: y}));
+              source.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, clientX: x, clientY: y}));
             };
             const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             (async () => {
@@ -8258,7 +10109,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
                 readyState: WebSocket.OPEN,
                 send(frame) { frames.push(JSON.parse(frame)); },
               };
-              dragPaletteTo(resized.pane.left + 24, resized.pane.bottom - 24);
+              dragPaletteTo(resized.pane.left + 24, resized.pane.bottom - 24, grabber);
               await settle();
               const paletteDragged = {
                 bar: box(bar),
@@ -8275,7 +10126,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
               ];
               const paletteEdgeDrags = [];
               for (const [name, x, y] of edgeTargets) {
-                dragPaletteTo(x, y);
+                dragPaletteTo(x, y, grabber);
                 await settle();
                 paletteEdgeDrags.push({
                   name,
@@ -8304,11 +10155,24 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
                 placement: bar.dataset.terminalMobilePlacement,
                 state: stateSnapshot(),
               };
+              const stableToggleState = terminalMobileAccessoryState('1');
+              stableToggleState.x = 12;
+              stableToggleState.y = 0;
+              stableToggleState.palettePlacement = null;
+              syncTerminalMobileAccessoryState('1');
+              await settle();
+              const toggleSnapshots = [];
+              for (let index = 0; index < 5; index += 1) {
+                const activeMore = bar.querySelector('.mobile-terminal-keyrow--more:not([hidden]) [data-terminal-mobile-key="more"]') || bar.querySelector('.mobile-terminal-keyrow-shell [data-terminal-mobile-key="more"]');
+                toggleSnapshots.push({bar: box(bar), launcher: box(launcher), more: box(activeMore), placement: bar.dataset.terminalMobilePlacement, state: stateSnapshot()});
+                tap(activeMore);
+                await settle();
+              }
               const beforeKeyTapState = stateSnapshot();
               tap(bar.querySelector('[data-terminal-mobile-key="tab"]'));
               await settle();
               const afterKeyTapState = stateSnapshot();
-              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
+              done({coarse, pane: initialPane, initial, opened, dragged, closed, draggedClosedNoClick, staleClamped, resized, reopened, grabber: grabber ? box(grabber) : null, paletteDragged, paletteEdgeDrags, closedAfterPaletteDrag, reopenedAfterPaletteDrag, toggleSnapshots, beforeKeyTapState, afterKeyTapState, keyFrames: frames, errors: window.__bootErrors || []});
             })().catch(error => done({error: String(error?.stack || error)}));
             """
         )
@@ -8322,6 +10186,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     assert metrics["initial"]["barHidden"] is True and metrics["initial"]["state"]["x"] is None, metrics
     assert metrics["opened"]["text"] == "×" and metrics["opened"]["expanded"] == "true", metrics
     assert metrics["opened"]["hidden"] is False and metrics["opened"]["placement"] == "above", metrics
+    assert metrics["grabber"] is not None and metrics["grabber"]["width"] > 0, metrics
     assert 0 <= metrics["opened"]["launcher"]["top"] - metrics["opened"]["bar"]["bottom"] <= 16, metrics
     assert metrics["dragged"]["hidden"] is False and metrics["dragged"]["text"] == "×", metrics
     assert metrics["dragged"]["placement"] == "below", metrics
@@ -8389,9 +10254,97 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     assert metrics["reopenedAfterPaletteDrag"]["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5, metrics
     assert metrics["reopenedAfterPaletteDrag"]["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5, metrics
     assert metrics["reopenedAfterPaletteDrag"]["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5, metrics
+    assert len(metrics["toggleSnapshots"]) == 5, metrics
+    assert {snapshot["placement"] for snapshot in metrics["toggleSnapshots"]} == {"below"}, metrics
+    assert len({round(snapshot["bar"]["top"], 1) for snapshot in metrics["toggleSnapshots"]}) == 1, metrics
+    assert len({round(snapshot["more"]["left"], 1) for snapshot in metrics["toggleSnapshots"]}) == 1 and len({round(snapshot["more"]["top"], 1) for snapshot in metrics["toggleSnapshots"]}) == 1, metrics
+    assert all(snapshot["bar"]["left"] >= metrics["resized"]["pane"]["left"] - 0.5 and snapshot["bar"]["right"] <= metrics["resized"]["pane"]["right"] + 0.5 and snapshot["bar"]["top"] >= metrics["resized"]["pane"]["top"] - 0.5 and snapshot["bar"]["bottom"] <= metrics["resized"]["pane"]["bottom"] + 0.5 for snapshot in metrics["toggleSnapshots"]), metrics
     assert metrics["beforeKeyTapState"]["x"] == metrics["afterKeyTapState"]["x"], metrics
     assert metrics["beforeKeyTapState"]["y"] == metrics["afterKeyTapState"]["y"], metrics
     assert {"type": "input", "data": "\t"} in metrics["keyFrames"], metrics
+
+
+def test_live_touch_terminal_default_above_more_toggle_keeps_physical_corner(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True},
+    )
+    try:
+        load_live_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=8881&layout=slot1&tabs=slot1:8881",
+            sessions=["8881"],
+            terminal_css=".terminal { width: 100%; height: 100%; }",
+            grid_width=834,
+            grid_height=1048,
+        )
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return typeof terminalMobileAccessoryState === 'function' && document.querySelector('[data-terminal-mobile-toggle=\"8881\"]') !== null"
+            )
+        )
+        metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const launcher = document.querySelector('[data-terminal-mobile-toggle="8881"]');
+            const bar = document.querySelector('[data-terminal-mobile-keybar="8881"]');
+            const pane = launcher.closest('.tab-pane');
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height};
+            };
+            const tap = node => {
+              const rect = node.getBoundingClientRect();
+              const clientX = rect.left + rect.width / 2;
+              const clientY = rect.top + rect.height / 2;
+              const init = {bubbles: true, cancelable: true, pointerId: 91, pointerType: 'touch', button: 0, buttons: 1, clientX, clientY, isPrimary: true};
+              node.dispatchEvent(new PointerEvent('pointerdown', init));
+              node.dispatchEvent(new PointerEvent('pointerup', {...init, buttons: 0}));
+              node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0, clientX, clientY}));
+            };
+            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            (async () => {
+              tap(launcher);
+              await settle();
+              const baselineErrorCount = (window.__bootErrors || []).length;
+              const snapshots = [];
+              for (let index = 0; index < 6; index += 1) {
+                const state = {...terminalMobileAccessoryState('8881')};
+                const more = state.more
+                  ? bar.querySelector('.mobile-terminal-keyrow--more [data-terminal-mobile-key="more"]')
+                  : bar.querySelector('.mobile-terminal-keyrow-shell [data-terminal-mobile-key="more"]');
+                snapshots.push({bar: box(bar), more: box(more), launcher: box(launcher), pane: box(pane), placement: bar.dataset.terminalMobilePlacement, state});
+                tap(more);
+                await settle();
+              }
+              done({screen: {width: screen.width, height: screen.height}, viewport: {width: innerWidth, height: innerHeight}, snapshots, errors: (window.__bootErrors || []).slice(baselineErrorCount)});
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+    assert metrics.get("error") is None, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["screen"] == {"width": 834, "height": 1112}, metrics
+    assert len(metrics["snapshots"]) == 6, metrics
+    assert {snapshot["placement"] for snapshot in metrics["snapshots"]} == {"above"}, metrics
+    assert {snapshot["state"]["more"] for snapshot in metrics["snapshots"]} == {False, True}, metrics
+    first = metrics["snapshots"][0]
+    for snapshot in metrics["snapshots"]:
+        assert all(abs(snapshot["bar"][key] - first["bar"][key]) <= 0.5 for key in ("left", "top", "right", "bottom", "width", "height")), metrics
+        assert all(abs(snapshot["more"][key] - first["more"][key]) <= 0.5 for key in ("left", "top", "right", "bottom")), metrics
+        assert 0 <= snapshot["launcher"]["top"] - snapshot["bar"]["bottom"] <= 16, metrics
+        assert snapshot["bar"]["left"] >= snapshot["pane"]["left"] - 0.5 and snapshot["bar"]["right"] <= snapshot["pane"]["right"] + 0.5, metrics
+        assert snapshot["bar"]["top"] >= snapshot["pane"]["top"] - 0.5 and snapshot["bar"]["bottom"] <= snapshot["pane"]["bottom"] + 0.5, metrics
 
 
 def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browser, tmp_path):
@@ -10794,6 +12747,98 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["panelVisible"]
     assert metrics["notifyActive"] is True
     assert metrics["terminalText"] == "fake terminal"
+
+
+def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_or_fails(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1,2&layout=slot1&tabs=slot1:1",
+        sessions=["1", "2"],
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof selectSession === 'function' && typeof tmuxWindow === 'function' && document.querySelector('#panel-1 .terminal .xterm')"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalEnsureSession = ensureSession;
+          const originalApiFetchJson = apiFetchJson;
+          const originalFetch = window.fetch;
+          try {
+            let resolveEnsure;
+            ensureSession = () => new Promise(resolve => { resolveEnsure = resolve; });
+            transcriptMetadataState.loaded = false;
+            if (transcriptMetadataState.payload?.sessions) delete transcriptMetadataState.payload.sessions['2'];
+            const tabStarted = performance.now();
+            void selectSession('2', {userInitiated: true});
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const tabState = document.querySelector('#term-2 [data-terminal-connection-state]');
+            const tabAck = {
+              elapsedMs: performance.now() - tabStarted,
+              visible: activeSessions.includes('2') && document.querySelector('#panel-2')?.isConnected === true,
+              state: tabState?.dataset.terminalConnectionState || '',
+            };
+            resolveEnsure(false);
+            await window.__yolomuxTestWaitFor(
+              () => document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]'),
+              {timeoutMs: 2000, intervalMs: 20, description: 'cold tmux unavailable state'}
+            );
+            const unavailable = document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]');
+            const failedTab = {
+              stillVisible: activeSessions.includes('2'),
+              retry: Boolean(unavailable?.querySelector('[data-terminal-connection-retry]')),
+            };
+
+            activatePaneTab(slotForItem('1'), '1', {userInitiated: true});
+            let rejectWindow;
+            apiFetchJson = (url, options) => String(url).startsWith('/api/tmux-window?')
+              ? new Promise((_resolve, reject) => { rejectWindow = reject; })
+              : originalApiFetchJson(url, options);
+            const windowStarted = performance.now();
+            tmuxWindow('1', {windowIndex: 2}, 'window 2');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const switching = document.querySelector('#term-1 [data-terminal-connection-state="switching"]');
+            const windowAck = {
+              elapsedMs: performance.now() - windowStarted,
+              state: switching?.dataset.terminalConnectionState || '',
+              dimmed: document.querySelector('#term-1')?.classList.contains('terminal-connection-pending') || false,
+            };
+            rejectWindow(new Error('switch failed'));
+            await window.__yolomuxTestWaitFor(
+              () => !document.querySelector('#term-1 [data-terminal-connection-state="switching"]'),
+              {timeoutMs: 2000, intervalMs: 20, description: 'failed tmux switch rollback'}
+            );
+            window.fetch = () => Promise.reject(new TypeError('server unavailable'));
+            await Promise.allSettled([apiFetch('/api/test-a'), apiFetch('/api/test-b'), apiFetch('/api/test-c')]);
+            const degraded = document.querySelector('[data-backend-health="unresponsive"]');
+            window.fetch = () => Promise.resolve(new Response('{}', {status: 200, headers: {'Content-Type': 'application/json'}}));
+            await apiFetch('/api/test-recovery');
+            return {
+              tabAck, failedTab, windowAck, windowCleared: !terminalConnectionStateNode('1'),
+              backendHealth: {shown: Boolean(degraded), cleared: !document.querySelector('[data-backend-health]')},
+            };
+          } finally {
+            ensureSession = originalEnsureSession;
+            apiFetchJson = originalApiFetchJson;
+            window.fetch = originalFetch;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["tabAck"]["elapsedMs"] <= 50, metrics
+    assert metrics["tabAck"]["visible"] is True, metrics
+    assert metrics["tabAck"]["state"] == "connecting", metrics
+    assert metrics["failedTab"] == {"stillVisible": True, "retry": True}, metrics
+    assert metrics["windowAck"]["elapsedMs"] <= 50, metrics
+    assert metrics["windowAck"]["state"] == "switching", metrics
+    assert metrics["windowAck"]["dimmed"] is True, metrics
+    assert metrics["windowCleared"] is True, metrics
+    assert metrics["backendHealth"] == {"shown": True, "cleared": True}, metrics
 
 
 def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp_path):

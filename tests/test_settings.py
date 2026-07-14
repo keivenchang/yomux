@@ -335,7 +335,8 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
         "gui": {"section": "YO!chat", "section_locale_key": "brand.tab.chat", "visible": True},
     }
     assert catalog["updates.notify_level"]["choices"] == ["major", "minor", "patch", "none"]
-    assert catalog["uploads.subdir"]["empty_allowed"] is True
+    assert catalog["uploads.retention_days"]["default"] == 7
+    assert catalog["uploads.retention_days"]["limits"] == {"min": 1, "max": 365}
     assert catalog["uploads.image_action_order"]["list_limit"] == 9
     assert catalog["general.language"]["aliases"]["japanese"] == "ja"
     assert catalog["yoagent.backend"]["choices"] == ["auto", "claude", "codex"]
@@ -759,12 +760,12 @@ def test_editor_boolean_defaults_and_coercion():
     assert sanitize_settings({"editor": {"ensure_final_newline_on_save": "yes"}})["editor"]["ensure_final_newline_on_save"] is True
 
 
-def test_uploads_subdir_defaults_to_dot_uploads():
-    assert default_settings()["uploads"]["subdir"] == ".uploads"
-
-
-def test_uploads_subdir_allows_empty_for_cwd_opt_out():
-    assert sanitize_settings({"uploads": {"subdir": ""}})["uploads"]["subdir"] == ""
+def test_upload_retention_defaults_clamps_and_drops_obsolete_subdir():
+    assert default_settings()["uploads"]["retention_days"] == 7
+    assert sanitize_settings({"uploads": {"retention_days": 0}})["uploads"]["retention_days"] == 1
+    settings = sanitize_settings({"uploads": {"retention_days": 999, "subdir": ".uploads"}})
+    assert settings["uploads"]["retention_days"] == 365
+    assert "subdir" not in settings["uploads"]
 
 
 def test_uploads_blank_filename_template_still_reverts_to_default():

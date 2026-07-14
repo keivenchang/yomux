@@ -193,27 +193,36 @@ async function runLayoutAsyncSuite() {
       assert.equal(batches.length, 1);
       const newer = resource.fetch(api, resource.path, {fresh: true});
       const newerFlush = api.flushFileExplorerFsBatchForTest();
-      assert.equal(batches.length, 2, `${resource.type}: independent fresh reads stay independently batched`);
-      resolveBatch(1, 'new');
-      await newerFlush;
-      assert.equal(resource.marker(await newer), 'new');
-      resolveBatch(0, 'old');
-      await olderFlush;
-      assert.equal(resource.marker(await older), 'old', `${resource.type}: the original caller still receives its own response`);
+      const coalescedList = resource.type === 'list';
+      assert.equal(batches.length, coalescedList ? 1 : 2, `${resource.type}: list fan-out is coalesced while independent info reads retain stale-generation coverage`);
+      if (coalescedList) {
+        resolveBatch(0, 'new');
+        await Promise.all([olderFlush, newerFlush]);
+        assert.equal(resource.marker(await older), 'new');
+        assert.equal(resource.marker(await newer), 'new');
+      } else {
+        resolveBatch(1, 'new');
+        await newerFlush;
+        assert.equal(resource.marker(await newer), 'new');
+        resolveBatch(0, 'old');
+        await olderFlush;
+        assert.equal(resource.marker(await older), 'old', `${resource.type}: the original caller still receives its own response`);
+      }
       assert.equal(resource.marker(await resource.fetch(api, resource.path, {})), 'new', `${resource.type}: the slower older response cannot overwrite the newer cache generation`);
 
       const invalidated = resource.fetch(api, resource.path, {fresh: true});
       const invalidatedFlush = api.flushFileExplorerFsBatchForTest();
-      assert.equal(batches.length, 3);
+      const invalidatedIndex = coalescedList ? 1 : 2;
+      assert.equal(batches.length, invalidatedIndex + 1);
       api.invalidateFileExplorerFsCachesForTest();
-      resolveBatch(2, 'retired');
+      resolveBatch(invalidatedIndex, 'retired');
       await invalidatedFlush;
       assert.equal(resource.marker(await invalidated), 'retired');
       assert.equal(api.fileExplorerFsResourceRecordsForTest().length, 0, `${resource.type}: invalidated completion cannot recreate its retired resource record`);
 
       const current = resource.fetch(api, resource.path, {fresh: true});
       const currentFlush = api.flushFileExplorerFsBatchForTest();
-      resolveBatch(3, 'current');
+      resolveBatch(invalidatedIndex + 1, 'current');
       await currentFlush;
       assert.equal(resource.marker(await current), 'current');
       const records = api.fileExplorerFsResourceRecordsForTest();
@@ -2652,7 +2661,7 @@ async function runLayoutAsyncSuite() {
       assert.ok(allSent.includes('multi-a.png') && allSent.includes('multi-b.png'), '78.4: both pasted images become text references in the terminal (no attachment)');
     }
 
-    // Markdown editor image paste uploads beside the Markdown file and inserts relative image links into CodeMirror.
+    // Markdown editor image paste inserts the server-owned absolute central-upload paths into CodeMirror.
     {
       const api = loadYolomux('', ['1']);
       const sent = [];
@@ -2687,8 +2696,8 @@ async function runLayoutAsyncSuite() {
         calls.push({url: String(url), method: options.method || 'GET', body: options.body});
         if (String(url).startsWith('/api/upload')) {
           return Promise.resolve(jsonResponse({files: [
-            {path: '/repo/docs/.uploads/one.png', relative_path: '.uploads/one.png'},
-            {path: '/repo/docs/.uploads/two file.png', relative_path: '.uploads/two file.png'},
+            {path: '/tmp/yolomux.alice/uploads/editor/one.png', relative_path: '/tmp/yolomux.alice/uploads/editor/one.png'},
+            {path: '/tmp/yolomux.alice/uploads/editor/two file.png', relative_path: '/tmp/yolomux.alice/uploads/editor/two file.png'},
           ]}));
         }
         return Promise.resolve(jsonResponse({items: [], session: '1'}));
@@ -2711,7 +2720,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(calls[0].url, `/api/upload?editor_path=${encodeURIComponent(path)}`, 'Markdown editor paste uploads with the editor path');
       assert.equal(calls[0].method, 'POST');
       assert.equal(calls[0].body.fields.length, 2, 'Markdown editor paste uploads every image');
-      assert.equal(content, 'hello\n![image](.uploads/one.png)\n![image](.uploads/two%20file.png)', 'Markdown editor paste inserts relative image links at the cursor');
+      assert.equal(content, 'hello\n![image](/tmp/yolomux.alice/uploads/editor/one.png)\n![image](/tmp/yolomux.alice/uploads/editor/two%20file.png)', 'Markdown editor paste inserts absolute central-upload links at the cursor');
       assert.equal(focused, true, 'Markdown editor paste restores CodeMirror focus');
       assert.equal(sent.length, 0, 'Markdown editor paste never sends raw image data to xterm');
     }
@@ -2886,15 +2895,12 @@ async function runLayoutAsyncSuite() {
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [
-          {id: 1, path: '/home/test', type: 'list'},
-          {id: 2, path: '/home/test', type: 'list'},
-        ],
+        requests: [{id: 1, path: '/home/test', type: 'list'}],
         url: '/api/fs/batch',
-      }], 'explicit fresh directory listings stay distinct inside one batch');
+      }], 'concurrent fresh directory listings bypass stale values but share one in-flight backend request');
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
       assert.equal(firstEntries[0].name, 'a.txt');
-      assert.equal(secondEntries[0].name, 'b.txt');
+      assert.strictEqual(secondEntries, firstEntries, 'fresh coalesced callers share the same response object');
     }
 
     {
@@ -3681,7 +3687,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
       assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
       assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
-      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: false, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
+      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: false, palettePlacement: null, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
       assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
       assert.equal(frames.at(-1).data, '\x1bx', 'Alt prefixes the next key with Escape');
@@ -3704,7 +3710,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
       const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
-      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"/.test(keyboardHtml), 'the touch palette keeps Ctrl-C above bottom Alt/Cmd and exposes Backspace beside Tab/Ctrl-B');
+      assert.ok(/mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*mobile-terminal-keyrow-bottom[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"/.test(keyboardHtml) && !/mobile-terminal-keyrow--more[\s\S]*data-terminal-mobile-key="interrupt"/.test(keyboardHtml), 'the touch palette keeps Esc/Ctrl/Shift left and direct Ctrl-C/Alt/Cmd in its primary bottom row');
       assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 

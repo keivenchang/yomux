@@ -81,6 +81,20 @@ def test_transcript_view_returns_bounded_compact_facts_without_raw_text(tmp_path
     assert "Inspect this shared CPU path" not in json.dumps({key: value for key, value in result.items() if key != "items"})
 
 
+def test_indexed_repo_discovery_runs_as_a_registered_worker_task(tmp_path):
+    outer = tmp_path / "indexed"
+    repo = outer / "group" / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (outer / "ignored" / "node_modules" / "not-a-repo" / ".git").mkdir(parents=True)
+
+    result = json.loads(jobd.run_registered_task(
+        "indexed_repo_roots",
+        json.dumps({"indexed_dirs": [str(outer)]}).encode("utf-8"),
+    ))
+
+    assert result == {"roots": [str(repo.resolve())]}
+
+
 def test_transcript_view_rejects_relative_path_and_stays_bounded_on_sparse_large_file(tmp_path):
     with (tmp_path / "large.jsonl").open("wb") as handle:
         handle.truncate(100 * 1024 * 1024)
@@ -311,3 +325,8 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
     assert crashed.status == "failed"
     assert recovered.status == "completed"
     assert json.loads(recovered.result) == {"a": 2, "z": 1}
+
+
+def test_jobd_task_registry_generation_is_independent_from_transport_version():
+    assert jobd.JOBD_PROTOCOL_VERSION == 2
+    assert jobd.JOBD_PROTOCOL_VERSION != jobd.LOCAL_RPC_VERSION

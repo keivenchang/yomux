@@ -336,7 +336,10 @@ async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   return requestFileExplorerFsResource('list', root, options, async () => {
       hydrateFileExplorerRepoInfoCache();
-      const payload = await fetchFilesystemBatchItem('list', root, {dedupe: options.fresh !== true});
+      // `fresh` bypasses the completed-value TTL; it must not multiply an
+      // identical in-flight list request when several UI refresh owners fire
+      // in the same batch window.
+      const payload = await fetchFilesystemBatchItem('list', root);
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),

@@ -86,6 +86,10 @@ yolomux_bootout_macos_server() {
   fi
 }
 
+yolomux_macos_server_launcher() {
+  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; primary_port=$6; shift 6; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port" && unset TMUX TMUX_PANE && exec "$python_bin" -u "$script" "$@"'
+}
+
 yolomux_submit_macos_server() {
   local repo_root="$1"
   local python_bin="$2"
@@ -96,7 +100,8 @@ yolomux_submit_macos_server() {
   local primary_port="$7"
   shift 7
   local label="local.yolomux.$port"
-  local launcher='repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; primary_port=$6; shift 6; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port" && unset TMUX TMUX_PANE && exec "$python_bin" -u "$script" "$@"'
+  local launcher
+  launcher="$(yolomux_macos_server_launcher)"
   launchctl submit -l "$label" -o "$log_path" -e "$log_path" -- \
     /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yolomux.py" "$primary_port" "$@"
 }

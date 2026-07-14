@@ -93,6 +93,7 @@ def test_main_process_cpu_work_has_named_allowlist():
     }
     assert thread_owners == {
         "chat_yoagent",
+        "indexed_repo_roots_snapshot",
         "start_auto_approve_cache_refresh",
         "start_client_directory_poll",
         "start_client_event_watcher",
@@ -101,6 +102,7 @@ def test_main_process_cpu_work_has_named_allowlist():
         "start_native_filesystem_watcher",
         "start_session_files_cache_refresh",
         "start_stats_agent_token_work",
+        "start_stats_metric_scheduler",
         "start_tabber_activity_cache_refresh",
         "start_tabber_activity_cache_warmer",
         "start_transcripts_payload_refresh",

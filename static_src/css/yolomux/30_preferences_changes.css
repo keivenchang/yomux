@@ -223,21 +223,25 @@
   display: grid;
   gap: var(--space-5);
   margin: 0;
+  max-width: 100%;
+  overflow-x: auto;
 }
 .js-debug-system-kv > div {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  grid-template-columns: max-content minmax(8rem, 1fr);
   gap: var(--space-8);
   align-items: baseline;
 }
 .js-debug-system-kv dt {
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--muted);
 }
 .js-debug-system-kv dd {
-  min-width: 0;
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--text);
   text-align: end;
   font-family: var(--mono-font);
@@ -256,22 +260,27 @@
 .js-debug-system-state--bad {
   color: var(--bad);
 }
-.js-debug-system-local-services-wrap {
-  max-width: 100%;
-  overflow-x: auto;
-}
-.js-debug-system-local-services-table {
-  --js-debug-system-local-services-field-width: 10rem;
-  --js-debug-system-local-services-service-width: 9rem;
+.js-debug-system-fixed-table {
+  --js-debug-system-first-column-width: 10rem;
+  --js-debug-system-table-min-width: 46rem;
   table-layout: fixed;
-  width: max(100%, var(--js-debug-system-local-services-min-width, 46rem));
+  width: max(100%, var(--js-debug-system-table-min-width));
 }
-.js-debug-system-table.js-debug-system-local-services-table th:first-child,
-.js-debug-system-table.js-debug-system-local-services-table td:first-child {
-  width: var(--js-debug-system-local-services-field-width);
-  min-width: var(--js-debug-system-local-services-field-width);
+.js-debug-system-table.js-debug-system-fixed-table th:first-child,
+.js-debug-system-table.js-debug-system-fixed-table td:first-child {
+  width: var(--js-debug-system-first-column-width);
+  min-width: var(--js-debug-system-first-column-width);
   white-space: nowrap;
   overflow-wrap: normal;
+}
+.js-debug-system-local-services-table {
+  --js-debug-system-first-column-width: 10rem;
+  --js-debug-system-local-services-service-width: 9rem;
+  --js-debug-system-table-min-width: var(--js-debug-system-local-services-min-width, 46rem);
+}
+.js-debug-system-sampler-table {
+  --js-debug-system-first-column-width: 9rem;
+  --js-debug-system-table-min-width: 56rem;
 }
 .js-debug-system-local-services-table th:not(:first-child) {
   width: var(--js-debug-system-local-services-service-width);
@@ -313,10 +322,13 @@
 }
 .js-debug-system-table-wrap {
   max-width: 100%;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: visible;
+  overscroll-behavior-inline: contain;
 }
 .js-debug-system-table {
-  width: 100%;
+  inline-size: max-content;
+  min-inline-size: 100%;
   border-collapse: collapse;
   font: var(--ui-font-size-xs)/1.35 var(--mono-font);
 }
@@ -326,13 +338,15 @@
   border-block-end: 1px solid var(--line);
   text-align: end;
   white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-system-table th:first-child,
 .js-debug-system-table td:first-child {
-  width: 100%;
+  inline-size: 1%;
   text-align: start;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 .js-debug-system-loading,
 .js-debug-system-empty {
@@ -365,7 +379,8 @@
   color: var(--disclosure-triangle-expanded-color);
   transform: rotate(90deg);
 }
-.js-debug-graph-view {
+.js-debug-graph-view,
+.js-yocost-graphs {
   --js-debug-idle-agent-status: var(--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1);
   --js-debug-agent-attention: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2);
   --js-debug-agent-working: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3);
@@ -385,6 +400,8 @@
   --js-debug-agent-token-violet: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11);
   --js-debug-agent-token-pattern-ink: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12);
   --js-debug-agent-token-pattern-ink-rgb: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13);
+}
+.js-debug-graph-view {
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -610,9 +627,10 @@
   inset: 0;
   display: block;
   min-height: 100%;
+  z-index: var(--z-layer-control);
   padding: var(--space-12);
   color: var(--text);
-  background: color-mix(in srgb, var(--panel) 76%, transparent);
+  background: var(--inactive-pane-overlay);
   pointer-events: none;
 }
 .js-debug-history-overlay[hidden] {
@@ -621,6 +639,7 @@
 .js-debug-history-overlay-message {
   position: sticky;
   top: 50%;
+  z-index: var(--z-layer-raised);
   display: flex;
   width: max-content;
   max-width: min(100%, 42rem);
@@ -634,6 +653,7 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: var(--panel2);
+  opacity: 1;
   font: 700 var(--ui-font-size-xs)/1.35 var(--ui-font);
   text-align: center;
 }
@@ -793,7 +813,10 @@
   background: var(--js-debug-agent-token-beige);
 }
 .js-debug-cost-model-list > li {
-  overflow-wrap: anywhere;
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-compact {
   display: grid;
@@ -806,9 +829,12 @@
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-6);
-  min-width: 0;
+  min-width: max-content;
 }
 .js-debug-cost-compact dt {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--muted);
   font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
 }
@@ -817,6 +843,9 @@
   color: var(--text);
   font: 700 var(--ui-font-size-xs)/1.15 var(--mono-font);
   text-align: end;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-token-count {
   margin-inline-start: var(--space-4);
@@ -839,7 +868,40 @@
   max-inline-size: 100%;
 }
 .js-debug-cost-table {
-  min-inline-size: min(100%, var(--dialog-compact-inline-size));
+  min-inline-size: 100%;
+}
+.js-debug-cost-table th,
+.js-debug-cost-table td {
+  padding-inline: var(--space-5);
+}
+.js-debug-cost-unpriced-disclosure {
+  margin-block-start: var(--space-5);
+  border-block-start: 1px solid var(--line);
+}
+.js-debug-cost-unpriced-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  min-inline-size: 0;
+  padding-block: var(--space-5);
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-cost-unpriced-disclosure > summary span {
+  min-inline-size: 0;
+}
+.js-debug-cost-unpriced-disclosure > summary strong {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-unpriced-disclosure[open] > summary {
+  color: var(--active-control-text);
+}
+.js-debug-cost-unpriced-disclosure > .js-debug-cost-table-wrap {
+  margin-block-start: 0;
 }
 .js-debug-cost-table th:not(:first-child) {
   color: var(--muted);
@@ -890,8 +952,108 @@
 .js-debug-cost-table-metric small {
   color: var(--muted);
 }
+.js-debug-cost-model-identity {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+.js-debug-cost-model-icon {
+  flex: none;
+  margin-block-start: var(--space-1);
+}
+.js-debug-cost-model-icon .agent-icon {
+  inline-size: 1.15em;
+  min-inline-size: 1.15em;
+  block-size: 1.15em;
+  margin: 0;
+  padding: 0;
+  vertical-align: 0;
+}
+.js-debug-cost-model-icon .agent-icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+.js-debug-cost-model-copy,
+.js-debug-cost-stacked-cell {
+  display: grid;
+  gap: var(--space-1);
+  min-inline-size: 0;
+}
+.js-debug-cost-model-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-inline-size: 0;
+}
+.js-debug-cost-model-meta .js-debug-cost-pricing-links {
+  flex: none;
+  margin-inline-start: 0;
+}
+.js-debug-cost-model-copy strong,
+.js-debug-cost-model-copy small,
+.js-debug-cost-stacked-cell strong,
+.js-debug-cost-stacked-cell small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-model-copy small,
+.js-debug-cost-stacked-cell small {
+  color: var(--muted);
+  font-weight: 500;
+}
+.js-debug-cost-table[data-js-debug-cost-table="model"] th:first-child {
+  inline-size: auto;
+  max-inline-size: 24ch;
+  white-space: normal;
+}
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(2),
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(3),
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(5),
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
+  text-align: start;
+}
+.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
+  white-space: normal;
+}
 .js-debug-cost-transcript-link {
-  overflow-wrap: anywhere;
+  display: block;
+  min-inline-size: 22ch;
+  max-inline-size: 100%;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.js-debug-responsive-text {
+  min-inline-size: 0;
+}
+.js-debug-responsive-text--middle {
+  display: flex;
+  max-inline-size: 100%;
+  white-space: nowrap;
+}
+.js-debug-responsive-text-prefix {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.js-debug-responsive-text-suffix {
+  flex: none;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:first-child,
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:first-child {
+  inline-size: 100%;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:nth-child(2),
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:nth-child(2) {
+  inline-size: max-content;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:last-child,
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:last-child {
+  inline-size: auto;
+  white-space: normal;
+  overflow-wrap: normal;
 }
 .js-debug-cost-report-title {
   flex: none;
@@ -924,15 +1086,137 @@
   overflow: auto;
   overscroll-behavior: contain;
 }
-.js-yocost-data-age {
+.js-yocost-graphs {
+  container-type: inline-size;
+}
+.js-yocost-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-5);
   margin-block-end: var(--space-6);
   color: var(--muted);
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-yocost-controls > [data-js-yocost-data-age-label],
+.js-yocost-controls > .js-debug-resolution-label,
+.js-yocost-controls > button {
+  flex: none;
+}
+.js-yocost-controls > .js-debug-range-slider-control {
+  flex: 1 1 20ch;
+  max-inline-size: 40%;
+}
+.js-yocost-controls > button {
+  margin-inline-start: auto;
+}
+@container (max-width: 40rem) {
+  .js-yocost-controls > .js-debug-range-slider-control {
+    flex-basis: 100%;
+    max-inline-size: 100%;
+    order: 2;
+  }
+  .js-yocost-controls > .js-debug-resolution-label {
+    order: 3;
+  }
+  .js-yocost-controls > button {
+    order: 1;
+  }
+}
+@container (max-width: 40rem) {
+  .js-debug-cost-usage-table-section .js-debug-cost-table-wrap,
+  .js-debug-cost-details-section .js-debug-cost-component-table {
+    overflow-x: visible;
+  }
+  .js-debug-cost-usage-table-section .js-debug-cost-table,
+  .js-debug-cost-component-table,
+  .js-debug-cost-usage-table-section thead,
+  .js-debug-cost-usage-table-section tbody,
+  .js-debug-cost-usage-table-section tfoot,
+  .js-debug-cost-component-table thead,
+  .js-debug-cost-component-table tbody {
+    display: block;
+    inline-size: 100%;
+    min-inline-size: 0;
+  }
+  .js-debug-cost-usage-table-section thead {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .js-debug-cost-usage-table-section tbody,
+  .js-debug-cost-component-table tbody {
+    display: grid;
+    gap: var(--space-5);
+  }
+  .js-debug-cost-usage-table-section tbody tr,
+  .js-debug-cost-usage-table-section tfoot tr,
+  .js-debug-cost-component-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    inline-size: 100%;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
+  .js-debug-cost-usage-table-section tbody th,
+  .js-debug-cost-usage-table-section tfoot th {
+    grid-column: 1 / -1;
+    max-inline-size: none;
+  }
+  .js-debug-cost-usage-table-section th,
+  .js-debug-cost-usage-table-section td,
+  .js-debug-cost-component-table td {
+    inline-size: auto;
+    padding: var(--space-4);
+    border-block-end: 0;
+  }
+  .js-debug-cost-usage-table-section td,
+  .js-debug-cost-component-table td {
+    display: grid;
+    gap: var(--space-2);
+    min-inline-size: 0;
+    text-align: start;
+  }
+  .js-debug-cost-usage-table-section td::before,
+  .js-debug-cost-component-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+  }
+  .js-debug-cost-component-table thead tr {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-block-end: var(--space-5);
+  }
+  .js-debug-cost-component-table thead th {
+    display: block;
+    inline-size: auto;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
+}
+/* Extreme-narrow last resort. Precedence stays reflow-first: full table on wide, then
+   two-column labeled cards at <=40rem. Below the width where those cards can no longer
+   hold both columns without collision, keep the By-Agent/By-model usage cards at a
+   readable minimum width and let the section scroll horizontally instead of squishing or
+   overlapping text — readable-with-scroll beats unreadable-but-fits. The scroll is the
+   fallback, not the default, so it never triggers at normal-narrow widths (360px still
+   reflows with no scrollbar). Overflow is contained to this section (overflow-x: auto,
+   not the visible the 40rem block sets) so the whole pane never gains a scrollbar, and it
+   is scoped to the usage cards — the compact model/calculation tables stay contained at
+   every width. */
+@container (max-width: 17rem) {
+  .js-debug-cost-agent-usages .js-debug-cost-table-wrap {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+  .js-debug-cost-agent-usages .js-debug-cost-table {
+    min-inline-size: 18rem;
+  }
 }
 .js-debug-range-slider:disabled {
   cursor: not-allowed;
@@ -953,6 +1237,7 @@
   line-height: 1.5;
 }
 .js-debug-cost-details-section {
+  container-type: inline-size;
   margin-top: var(--space-10);
 }
 .js-debug-cost-details-section h2 {
@@ -1028,7 +1313,10 @@
   margin: var(--space-2) 0 0;
   color: var(--text);
   font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
-  overflow-wrap: anywhere;
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-source-tree {
   display: grid;
@@ -1048,10 +1336,14 @@
   margin-inline-start: var(--space-8);
 }
 .js-debug-cost-source-label {
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .js-debug-cost-source-subtotals {
-  overflow-wrap: anywhere;
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--muted);
   font-family: var(--mono-font);
 }
@@ -1156,6 +1448,19 @@
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+.js-debug-live-pulse.heartbeat-pulse {
+  fill: rgb(var(--active-accent-rgb) / 0.14);
+  pointer-events: none;
+  animation-name: agent-status-opacity-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
+body.theme-light .js-debug-live-pulse.heartbeat-pulse {
+  fill: rgb(var(--active-accent-rgb) / 0.1);
 }
 .js-debug-hover-line {
   opacity: 0;

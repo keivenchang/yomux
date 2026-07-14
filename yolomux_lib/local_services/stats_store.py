@@ -16,11 +16,23 @@ from pathlib import Path
 from typing import Any
 
 
-STATS_STORE_SCHEMA_VERSION = 2
+STATS_STORE_SCHEMA_VERSION = 3
 STATS_STORE_MAX_JSON_BYTES = 256 * 1024
 STATS_STORE_MAX_ROWS_PER_QUERY = 20_000
 STATS_COST_SUMMARY_MAX_COMPONENTS = 4096
 STATS_COST_SUMMARY_MAX_BYTES = 160 * 1024
+STATS_COVERAGE_MAX_INTERVALS = 128
+STATS_COVERAGE_FAMILIES = ("raw", "cpu", "service_load", "agent_status", "agent_tokens", "cost", "gpu", "system_memory")
+STATS_COVERAGE_LEGACY_CADENCE = {
+    "raw": 1,
+    "cpu": 1,
+    "service_load": 10,
+    "agent_status": 10,
+    "agent_tokens": 60,
+    "cost": 60,
+    "gpu": 10,
+    "system_memory": 60,
+}
 
 BROWSER_FIELDS = (
     "api_count",
@@ -61,6 +73,7 @@ def empty_host_metrics() -> dict[str, Any]:
         "gpu_util_processes": {},
         "gpu_memory_processes": {},
         "gpu_devices": {},
+        "service_load": {},
     }
 
 
@@ -158,11 +171,16 @@ class StatsStore:
     are committed or rolled back together.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
         self.path = Path(path)
+        self.read_only = bool(read_only)
         self.connection: sqlite3.Connection | None = None
 
     def open(self) -> None:
+        if self.read_only:
+            self.connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=2.0)
+            self.connection.execute("PRAGMA query_only=ON")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=2.0)
         connection.execute("PRAGMA journal_mode=WAL")
@@ -207,14 +225,65 @@ class StatsStore:
               PRIMARY KEY (start, duration)
             );
             CREATE INDEX IF NOT EXISTS stats_rollups_duration_start ON stats_rollups(duration, start);
+            CREATE TABLE IF NOT EXISTS stats_coverage_intervals (
+              family TEXT NOT NULL, epoch_id TEXT NOT NULL,
+              start INTEGER NOT NULL, end INTEGER NOT NULL,
+              cadence INTEGER NOT NULL, owner_generation INTEGER NOT NULL,
+              source TEXT NOT NULL DEFAULT 'sampler',
+              PRIMARY KEY (family, epoch_id, start)
+            );
+            CREATE INDEX IF NOT EXISTS stats_coverage_family_range
+              ON stats_coverage_intervals(family, start, end);
             """
         )
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(STATS_STORE_SCHEMA_VERSION),),
         )
+        self._repair_coverage_overlaps(connection)
         connection.commit()
         self.connection = connection
+
+    @staticmethod
+    def _repair_coverage_overlaps(connection: sqlite3.Connection) -> int:
+        """Clip any pre-existing cross-epoch overlaps durably (idempotent).
+
+        Databases written before write-time handoff clipping can hold boundary
+        overlaps from statsd restarts.  Detection is a cheap self-join; when it
+        finds none this is a no-op, so it is safe to run on every open.  Repair
+        mirrors the serve-time rule: the later owner is authoritative, so the
+        earlier interval's ``end`` is clipped to the later interval's ``start``
+        and zero-width rows are removed.
+        """
+
+        overlaps = connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals a "
+            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+            "AND a.end > b.start AND b.end > a.start"
+        ).fetchone()
+        if not overlaps or int(overlaps[0]) == 0:
+            return 0
+        repaired = 0
+        families = [row[0] for row in connection.execute(
+            "SELECT DISTINCT family FROM stats_coverage_intervals"
+        ).fetchall()]
+        for family in families:
+            rows = connection.execute(
+                "SELECT rowid,start,end FROM stats_coverage_intervals WHERE family=? ORDER BY start,end",
+                (family,),
+            ).fetchall()
+            prev_rowid = prev_start = prev_end = None
+            for rowid, start, end in rows:
+                if prev_rowid is not None and prev_end > int(start):
+                    clipped = int(start)
+                    if clipped <= int(prev_start):
+                        connection.execute("DELETE FROM stats_coverage_intervals WHERE rowid=?", (prev_rowid,))
+                    else:
+                        connection.execute("UPDATE stats_coverage_intervals SET end=? WHERE rowid=?", (clipped, prev_rowid))
+                    repaired += 1
+                prev_rowid, prev_start, prev_end = rowid, int(start), int(end)
+        connection.execute("DELETE FROM stats_coverage_intervals WHERE end<=start")
+        return repaired
 
     def close(self) -> None:
         if self.connection is not None:
@@ -259,13 +328,99 @@ class StatsStore:
             if isinstance(values, dict):
                 connection.execute("INSERT INTO stats_agent_rates VALUES(?,?,?,?)", (start, duration, str(rate_key), self._encode(values)))
         for metric_key, values in host_metrics.items():
-            if isinstance(values, dict):
+            if isinstance(values, dict) and (metric_key != "service_load" or values):
                 connection.execute("INSERT INTO stats_host_metrics VALUES(?,?,?,?)", (start, duration, str(metric_key), self._encode(values)))
 
     def upsert_bucket(self, bucket: dict[str, Any]) -> None:
         connection = self._connection()
         with connection:
             self._upsert_bucket(connection, bucket)
+
+    def record_sample_coverage(
+        self,
+        *,
+        family: str,
+        sample_time: float,
+        cadence: float,
+        epoch_id: str,
+        owner_generation: int = 0,
+    ) -> None:
+        """Extend one sampler epoch without ever bridging a real epoch boundary."""
+
+        if self.read_only:
+            raise RuntimeError("read-only stats store cannot record coverage")
+        family = str(family or "").strip()
+        epoch_id = str(epoch_id or "").strip()
+        if family not in STATS_COVERAGE_FAMILIES or not epoch_id:
+            raise ValueError("invalid stats coverage sample")
+        start = max(0, int(math.floor(float(sample_time))))
+        cadence_seconds = max(1, int(math.ceil(float(cadence))))
+        end = start + cadence_seconds
+        generation = max(0, int(owner_generation))
+        connection = self._connection()
+        with connection:
+            self._record_sample_coverage(
+                connection,
+                family=family,
+                start=start,
+                end=end,
+                cadence=cadence_seconds,
+                epoch_id=epoch_id,
+                owner_generation=generation,
+            )
+
+    @staticmethod
+    def _record_sample_coverage(
+        connection: sqlite3.Connection,
+        *,
+        family: str,
+        start: int,
+        end: int,
+        cadence: int,
+        epoch_id: str,
+        owner_generation: int,
+    ) -> None:
+        row = connection.execute(
+            "SELECT start,end,cadence FROM stats_coverage_intervals "
+            "WHERE family=? AND epoch_id=? ORDER BY end DESC LIMIT 1",
+            (family, epoch_id),
+        ).fetchone()
+        if row is not None and start <= int(row[1]) + cadence:
+            connection.execute(
+                "UPDATE stats_coverage_intervals SET end=?,cadence=?,owner_generation=? "
+                "WHERE family=? AND epoch_id=? AND start=?",
+                (max(end, int(row[1])), cadence, owner_generation, family, epoch_id, int(row[0])),
+            )
+        else:
+            # A new interval (owner handoff or an in-epoch gap) authoritatively
+            # ends any earlier same-family interval that still extends past this
+            # start, so a restarting owner can never persist a boundary overlap.
+            connection.execute(
+                "UPDATE stats_coverage_intervals SET end=? WHERE family=? AND start<? AND end>?",
+                (start, family, start, start),
+            )
+            connection.execute(
+                "DELETE FROM stats_coverage_intervals WHERE family=? AND end<=start",
+                (family,),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO stats_coverage_intervals"
+                "(family,epoch_id,start,end,cadence,owner_generation,source) VALUES(?,?,?,?,?,?,'sampler')",
+                (family, epoch_id, start, end, cadence, owner_generation),
+            )
+
+    def upsert_bucket_with_coverage(
+        self,
+        bucket: dict[str, Any],
+        coverage_samples: list[dict[str, Any]],
+    ) -> None:
+        """Commit one bucket revision and all of its coverage facts atomically."""
+
+        connection = self._connection()
+        with connection:
+            self._upsert_bucket(connection, bucket)
+            for sample in coverage_samples:
+                self._record_sample_coverage(connection, **sample)
 
     def bucket(self, start: int, duration: int) -> dict[str, Any] | None:
         row = self._connection().execute(
@@ -306,12 +461,15 @@ class StatsStore:
         ).fetchall()
         return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
-    def replace_buckets(self, buckets: list[dict[str, Any]]) -> None:
+    def replace_buckets(self, buckets: list[dict[str, Any]], *, preserve_coverage: bool = False) -> None:
         """Atomically replace the durable history after compaction/import."""
         connection = self._connection()
         normalized = [normalize_bucket(bucket) for bucket in buckets]
         with connection:
-            for table in ("stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics", "stats_buckets"):
+            tables = ["stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics", "stats_buckets"]
+            if not preserve_coverage:
+                tables.append("stats_coverage_intervals")
+            for table in tables:
                 connection.execute(f"DELETE FROM {table}")
             for bucket in normalized:
                 self._upsert_bucket(connection, bucket)
@@ -321,7 +479,7 @@ class StatsStore:
         connection = self._connection()
         normalized = [normalize_bucket(bucket) for bucket in buckets]
         with connection:
-            for table in ("stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics", "stats_buckets"):
+            for table in ("stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics", "stats_buckets", "stats_coverage_intervals"):
                 connection.execute(f"DELETE FROM {table}")
             for bucket in normalized:
                 self._upsert_bucket(connection, bucket)
@@ -393,6 +551,52 @@ class StatsStore:
         ).fetchall()
         return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
+    def retention_candidate(
+        self, *, now: float, retention_seconds: int, tiers: tuple[tuple[int, int], ...]
+    ) -> dict[str, Any] | None:
+        """Return one row that is expired or finer than its current age tier."""
+
+        clauses = ["start <= 0", "start < ?"]
+        values: list[Any] = [float(now) - int(retention_seconds)]
+        previous_age = 0
+        for max_age, bucket_seconds in tiers:
+            clauses.append("(start >= ? AND start < ? AND duration < ?)")
+            values.extend((float(now) - int(max_age), float(now) - previous_age, int(bucket_seconds)))
+            previous_age = int(max_age)
+        row = self._connection().execute(
+            f"SELECT bucket_json FROM stats_buckets WHERE {' OR '.join(clauses)} ORDER BY start,duration LIMIT 1",
+            values,
+        ).fetchone()
+        return normalize_bucket(json.loads(str(row[0]))) if row is not None else None
+
+    def replace_compacted_bucket(
+        self, source_start: int, source_duration: int, replacement: dict[str, Any] | None
+    ) -> None:
+        """Atomically retire one source row and optionally merge its replacement."""
+
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "DELETE FROM stats_buckets WHERE start=? AND duration=?",
+                (int(source_start), int(source_duration)),
+            )
+            if replacement is not None:
+                self._upsert_bucket(connection, replacement)
+
+    def oldest_rollup_before(self, cutoff_time: float) -> tuple[int, int] | None:
+        row = self._connection().execute(
+            "SELECT start,duration FROM stats_rollups WHERE start + duration < ? ORDER BY start,duration LIMIT 1",
+            (float(cutoff_time),),
+        ).fetchone()
+        return (int(row[0]), int(row[1])) if row is not None else None
+
+    def delete_rollup(self, start: int, duration: int) -> None:
+        connection = self._connection()
+        with connection:
+            connection.execute(
+                "DELETE FROM stats_rollups WHERE start=? AND duration=?", (int(start), int(duration))
+            )
+
     def rollup_source_page(
         self,
         *,
@@ -416,8 +620,109 @@ class StatsStore:
         row = self._connection().execute("SELECT COALESCE(MAX(sequence), 0) FROM stats_buckets").fetchone()
         return int(row[0] or 0)
 
-    def query_coverage(self, *, start: int = 0, end: int = 0) -> dict[str, int]:
-        """Return bounded range facts without materializing historical buckets."""
+    @staticmethod
+    def _legacy_bucket_has_family(bucket: dict[str, Any], family: str) -> bool:
+        if family == "raw":
+            return True
+        if family == "cpu":
+            return bool(float(bucket.get("cpu_count") or 0) or float(bucket.get("system_cpu_count") or 0))
+        if family == "agent_status":
+            return bool(float(bucket.get("agent_activity_samples") or 0))
+        if family == "agent_tokens":
+            return bool(
+                float(bucket.get("agent_token_samples") or 0)
+                or bucket.get("agent_token_rates")
+            )
+        if family == "cost":
+            summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
+            return bool(summary.get("components") or int(summary.get("priced_components") or 0) or int(summary.get("unpriced_components") or 0))
+        metrics = bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else {}
+        if family == "gpu":
+            return bool(metrics.get("gpu_devices") or metrics.get("gpu_util_processes") or metrics.get("gpu_memory_processes"))
+        if family == "system_memory":
+            return bool(float(metrics.get("system_memory_count") or 0))
+        return False
+
+    @staticmethod
+    def _bounded_intervals(intervals: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+        """Sort/coalesce within an epoch, clip cross-epoch overlaps, and bound.
+
+        Coalescing joins same-epoch adjacency but keeps distinct sampler epochs
+        as separate intervals so per-owner identity survives for diagnostics.
+        A statsd restart/owner handoff can still leave the previous owner's
+        finalized ``end`` a few seconds past the new owner's backfilled
+        ``start`` (the old owner's last flush races the new owner opening its
+        interval).  Those boundary overlaps must never reach the client, which
+        requires a strictly disjoint, sorted interval list: the later owner is
+        authoritative at the seam, so the earlier interval's ``end`` is clipped
+        down to the later interval's ``start`` and any interval that collapses
+        to zero/negative width is dropped.
+        """
+
+        merged: list[dict[str, Any]] = []
+        for raw in sorted(intervals, key=lambda item: (int(item["start"]), int(item["end"]), str(item["epoch_id"]))):
+            item = dict(raw)
+            if merged and merged[-1]["epoch_id"] == item["epoch_id"] and int(item["start"]) <= int(merged[-1]["end"]):
+                merged[-1]["end"] = max(int(merged[-1]["end"]), int(item["end"]))
+                continue
+            merged.append(item)
+        disjoint: list[dict[str, Any]] = []
+        for item in merged:
+            if disjoint and int(disjoint[-1]["end"]) > int(item["start"]):
+                disjoint[-1]["end"] = int(item["start"])
+            if disjoint and int(disjoint[-1]["end"]) <= int(disjoint[-1]["start"]):
+                disjoint.pop()
+            if int(item["end"]) <= int(item["start"]):
+                continue
+            disjoint.append(item)
+        truncated = len(disjoint) > STATS_COVERAGE_MAX_INTERVALS
+        return (disjoint[-STATS_COVERAGE_MAX_INTERVALS:] if truncated else disjoint), truncated
+
+    def _legacy_coverage_intervals(
+        self,
+        buckets: list[dict[str, Any]],
+        family: str,
+        *,
+        start: int,
+        end: int,
+        before: int = 0,
+    ) -> list[dict[str, Any]]:
+        cadence = STATS_COVERAGE_LEGACY_CADENCE[family]
+        result: list[dict[str, Any]] = []
+        epoch_number = 0
+        previous_end = 0
+        for bucket in buckets:
+            if not self._legacy_bucket_has_family(bucket, family):
+                continue
+            interval_start = max(start, int(bucket["start"])) if start else int(bucket["start"])
+            interval_end = int(bucket["start"]) + max(1, int(bucket["duration"]))
+            if before and interval_start >= before:
+                continue
+            interval_end = min(interval_end, before) if before else interval_end
+            interval_end = min(interval_end, end) if end else interval_end
+            if interval_end <= interval_start:
+                continue
+            if not result or interval_start > previous_end + cadence:
+                epoch_number += 1
+                result.append({
+                    "start": interval_start,
+                    "end": interval_end,
+                    "epoch_id": f"legacy:{family}:{epoch_number}",
+                    "owner_generation": 0,
+                    "source": "legacy-derived",
+                })
+            else:
+                result[-1]["end"] = max(int(result[-1]["end"]), interval_end)
+            previous_end = max(previous_end, interval_end)
+        return result
+
+    def query_coverage(self, *, start: int = 0, end: int = 0) -> dict[str, Any]:
+        """Return bounded multi-interval and per-store coverage facts.
+
+        Explicit sampler epochs are authoritative for new writes.  Old schema
+        databases remain readable: their pre-epoch prefix is derived from real
+        metric presence and split whenever a cadence-sized outage occurs.
+        """
         clauses: list[str] = []
         values: list[int] = []
         if start:
@@ -427,21 +732,168 @@ class StatsStore:
             clauses.append("start < ?")
             values.append(max(0, int(end)))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        row = self._connection().execute(
+        connection = self._connection()
+        row = connection.execute(
             f"SELECT COALESCE(MIN(start), 0), COALESCE(MAX(start + duration), 0), COALESCE(MAX(duration), 0), COUNT(*) FROM stats_buckets {where}",
             values,
         ).fetchone()
+        # Coverage needs only presence fields. Avoid normalize/deep-copy of
+        # every nested agent/cost/process map on this latency-sensitive reader
+        # path; SQLite/WAL remains the source and malformed legacy JSON is
+        # treated as an uncovered row.
+        bucket_rows = connection.execute(
+            f"SELECT bucket_json FROM stats_buckets {where} ORDER BY start,duration LIMIT ?",
+            (*values, STATS_STORE_MAX_ROWS_PER_QUERY),
+        ).fetchall()
+        buckets: list[dict[str, Any]] = []
+        for bucket_row in bucket_rows:
+            try:
+                decoded = json.loads(str(bucket_row[0]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(decoded, dict):
+                buckets.append(decoded)
+        explicit_clauses: list[str] = []
+        explicit_values: list[int] = []
+        if start:
+            explicit_clauses.append("end > ?")
+            explicit_values.append(max(0, int(start)))
+        if end:
+            explicit_clauses.append("start < ?")
+            explicit_values.append(max(0, int(end)))
+        explicit_where = f"WHERE {' AND '.join(explicit_clauses)}" if explicit_clauses else ""
+        has_epoch_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stats_coverage_intervals'"
+        ).fetchone() is not None
+        explicit_rows = connection.execute(
+            "SELECT family,epoch_id,start,end,cadence,owner_generation,source "
+            f"FROM stats_coverage_intervals {explicit_where} ORDER BY family,start,end",
+            explicit_values,
+        ).fetchall() if has_epoch_table else []
+        by_family: dict[str, list[dict[str, Any]]] = {family: [] for family in STATS_COVERAGE_FAMILIES}
+        first_explicit: dict[str, int] = {}
+        for family, epoch_id, item_start, item_end, _cadence, generation, source in explicit_rows:
+            family = str(family)
+            if family not in by_family:
+                continue
+            clipped_start = max(int(item_start), int(start)) if start else int(item_start)
+            clipped_end = min(int(item_end), int(end)) if end else int(item_end)
+            if clipped_end <= clipped_start:
+                continue
+            first_explicit[family] = min(first_explicit.get(family, clipped_start), clipped_start)
+            by_family[family].append({
+                "start": clipped_start,
+                "end": clipped_end,
+                "epoch_id": str(epoch_id),
+                "owner_generation": int(generation),
+                "source": str(source),
+            })
+        stores: dict[str, dict[str, Any]] = {}
+        for family in STATS_COVERAGE_FAMILIES:
+            legacy = self._legacy_coverage_intervals(
+                buckets,
+                family,
+                start=start,
+                end=end,
+                before=first_explicit.get(family, 0),
+            )
+            intervals, truncated = self._bounded_intervals(legacy + by_family[family])
+            requested_start = int(start) if start else (int(intervals[0]["start"]) if intervals else 0)
+            requested_end = int(end) if end else (int(intervals[-1]["end"]) if intervals else 0)
+            cursor = requested_start
+            for interval in intervals:
+                if int(interval["end"]) <= cursor:
+                    continue
+                if int(interval["start"]) > cursor:
+                    break
+                cursor = max(cursor, int(interval["end"]))
+            stores[family] = {
+                "intervals": intervals,
+                "interval_count": len(intervals),
+                "epoch_count": len({item["epoch_id"] for item in intervals}),
+                "truncated": truncated,
+                "covered_start": int(intervals[0]["start"]) if intervals else 0,
+                "covered_end": int(intervals[-1]["end"]) if intervals else 0,
+                "complete": bool(intervals and cursor >= requested_end),
+            }
+        # Server/raw records and their rollup projections share the same
+        # sampler epoch authority; aliases make that cross-store contract
+        # explicit without duplicating interval rows in SQLite.
+        stores["server"] = copy.deepcopy(stores["raw"])
+        stores["rollups"] = copy.deepcopy(stores["raw"])
+        raw = stores["raw"]
+        epoch_summaries: dict[str, dict[str, Any]] = {}
+        for family, facts in stores.items():
+            for interval in facts["intervals"]:
+                epoch_id = str(interval["epoch_id"])
+                summary = epoch_summaries.setdefault(epoch_id, {
+                    "epoch_id": epoch_id,
+                    "start": int(interval["start"]),
+                    "end": int(interval["end"]),
+                    "families": [],
+                    "owner_generation": int(interval.get("owner_generation") or 0),
+                    "source": str(interval.get("source") or ""),
+                })
+                summary["start"] = min(int(summary["start"]), int(interval["start"]))
+                summary["end"] = max(int(summary["end"]), int(interval["end"]))
+                if family not in summary["families"]:
+                    summary["families"].append(family)
+        epochs = sorted(epoch_summaries.values(), key=lambda item: (int(item["start"]), str(item["epoch_id"])))
+        epochs_truncated = len(epochs) > STATS_COVERAGE_MAX_INTERVALS
+        if epochs_truncated:
+            epochs = epochs[-STATS_COVERAGE_MAX_INTERVALS:]
+        available_start = int(row[0] or 0)
+        available_end = int(row[1] or 0)
         return {
-            "available_start": int(row[0] or 0),
-            "available_end": int(row[1] or 0),
+            "available_start": available_start,
+            "available_end": available_end,
             "retained_resolution": int(row[2] or 0),
             "source_records": int(row[3] or 0),
+            "intervals": raw["intervals"],
+            "store_intervals": {family: facts["intervals"] for family, facts in stores.items()},
+            "stores": stores,
+            "epochs": epochs,
+            "epochs_truncated": epochs_truncated,
+        }
+
+    def coverage_integrity_report(self) -> dict[str, Any]:
+        """Read-only durable coverage self-check for boot/on-demand monitoring.
+
+        Returns the count of cross-epoch overlapping pairs and inverted rows per
+        family so the system can detect a broken coverage table itself instead
+        of waiting for a blank chart.  ``ok`` is True when the disjointness
+        invariant holds.
+        """
+
+        connection = self._connection()
+        overlaps = int(connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals a "
+            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+            "AND a.end > b.start AND b.end > a.start"
+        ).fetchone()[0])
+        inverted = int(connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals WHERE end <= start"
+        ).fetchone()[0])
+        offenders = [
+            {"family": str(row[0]), "overlaps": int(row[1])}
+            for row in connection.execute(
+                "SELECT a.family, COUNT(*) FROM stats_coverage_intervals a "
+                "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+                "AND a.end > b.start AND b.end > a.start GROUP BY a.family"
+            ).fetchall()
+        ]
+        return {
+            "ok": overlaps == 0 and inverted == 0,
+            "overlapping_pairs": overlaps,
+            "inverted_rows": inverted,
+            "families": offenders,
         }
 
     def retain_after(self, cutoff_time: float) -> int:
         connection = self._connection()
         with connection:
             cursor = connection.execute("DELETE FROM stats_buckets WHERE start + duration < ?", (float(cutoff_time),))
+            connection.execute("DELETE FROM stats_coverage_intervals WHERE end < ?", (float(cutoff_time),))
         return int(cursor.rowcount)
 
     def diagnostics(self) -> dict[str, Any]:

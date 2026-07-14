@@ -1233,6 +1233,8 @@ globalThis.__layoutTestApi = {
   debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
   debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
+  debugGraphAvailableResolutionChoicesForTest: nowMs => debugGraphAvailableResolutionChoices(debugGraphDomain(nowMs), nowMs),
+  debugGraphResolutionOverrideForTest() { return jsDebugGraphResolutionOverrideSeconds; },
   debugGraphEventRecordsForTest() {
     return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
       id,
@@ -1256,11 +1258,17 @@ globalThis.__layoutTestApi = {
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
+  debugGraphHistoryCoverageGapRunsForTest: debugGraphHistoryCoverageGapRuns,
+  debugGraphHistoryCoverageGapRectsHtmlForTest: debugGraphHistoryCoverageGapRectsHtml,
+  debugGraphHeldProvenanceTextForTest: debugGraphHeldProvenanceText,
   debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
   debugGraphInnerHtmlForTest: debugGraphInnerHtml,
   debugGraphCostSummaryForTest: debugGraphCostSummaryForBuckets,
   debugGraphCostReportHtmlForTest: debugGraphCostReportHtml,
+  debugCostAgeLabelTextForTest(...args) {
+    return typeof debugCostAgeLabelText === 'function' ? debugCostAgeLabelText(...args) : '';
+  },
   debugGraphGeometryForTest() { return {...jsDebugGraphGeometry}; },
   debugGraphPlotYForValueForTest: debugGraphPlotYForValue,
   debugGraphGridLineYForTest: debugGraphGridLineY,
@@ -1273,7 +1281,16 @@ globalThis.__layoutTestApi = {
   debugGraphCostTmuxBreakdownHtmlForTest: debugGraphCostTmuxBreakdownHtml,
   debugGraphCostModelUsageChartHtmlForTest: debugGraphCostModelUsageChartHtml,
   debugGraphCostSourceTreeHtmlForTest: debugGraphCostSourceTreeHtml,
+  debugSystemStatsSamplerCardHtmlForTest: debugSystemStatsSamplerCardHtml,
+  debugSystemCpuBudgetCardHtmlForTest: debugSystemCpuBudgetCardHtml,
   jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
+  jsDebugStatsLayoutItemsVisibleForTest: jsDebugStatsLayoutItemsVisible,
+  jsDebugStatsLivePushEnabledForTest(...args) {
+    return typeof jsDebugStatsLivePushEnabled === 'function' ? jsDebugStatsLivePushEnabled(...args) : false;
+  },
+  jsDebugStatsPollIntervalMsForTest(...args) {
+    return typeof jsDebugStatsPollIntervalMs === 'function' ? jsDebugStatsPollIntervalMs(...args) : 0;
+  },
   jsDebugStatsPollingStateForTest() {
     return {
       firstSampleReceived: jsDebugStatsPollState.firstSampleReceived,
@@ -1285,6 +1302,7 @@ globalThis.__layoutTestApi = {
     };
   },
   jsDebugHistoryReadinessForTest: jsDebugHistoryReadinessSnapshot,
+  normalizedJsDebugHistoryCoverageForTest: normalizedJsDebugHistoryCoverage,
   setJsDebugHistoryReadinessForTest: setJsDebugHistoryReadiness,
   applyJsDebugHistoryCoverageForTest: applyJsDebugHistoryCoverage,
   jsDebugHistoryCoverageNeedsRefreshForTest: jsDebugHistoryCoverageNeedsRefresh,
@@ -1293,6 +1311,8 @@ globalThis.__layoutTestApi = {
   debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
   resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
   retryJsDebugHistoryForTest: retryJsDebugHistory,
+  initializeJsDebugStatsBeforeStreamsForTest: initializeJsDebugStatsBeforeStreams,
+  pollJsDebugStatsOnIntervalForTest: pollJsDebugStatsOnInterval,
   startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
   syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
   stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
@@ -2173,6 +2193,8 @@ globalThis.__layoutTestApi = {
   ensureFileTabStateForItem,
   setDragSessionForTest(session) { dragState.item = session; },
   dragStateForTest() { return {...dragState}; },
+  scheduleJsDebugPanelRefreshForTest: scheduleJsDebugPanelRefresh,
+  jsDebugRenderDragDeferredForTest() { return jsDebugRenderDragDeferred; },
   pendingTabStripRenderForTest() { return pendingTabStripRender; },
   renderSessionButtonsForTest: renderSessionButtons,
   sessionButtonsForTest() { return sessionButtons; },

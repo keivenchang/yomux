@@ -1853,6 +1853,7 @@ function endSessionDrag(event) {
   // flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
+  flushDeferredJsDebugPanelRefresh();
   // flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
   dragTimingReport();
