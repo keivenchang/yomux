@@ -41682,7 +41682,7 @@ const jsDebugGraphModelTokenDimensions = Object.freeze([
   Object.freeze({key: 'output', labelKey: 'debug.cost.output', fallback: 'Output'}),
   Object.freeze({key: 'all', labelKey: 'debug.modelTokens.allBillable', fallback: 'All billable'}),
   Object.freeze({key: 'input', labelKey: 'debug.cost.input', fallback: 'Input'}),
-  Object.freeze({key: 'cacheRead', labelKey: 'debug.modelTokens.cacheRead', fallback: 'Cache read'}),
+  Object.freeze({key: 'cacheRead', labelKey: 'debug.modelTokens.cacheRead', fallback: 'Cache hits & refreshes'}),
   Object.freeze({key: 'cacheWrite', labelKey: 'debug.modelTokens.cacheWrite', fallback: 'Cache write'}),
 ]);
 let jsDebugGraphModelTokenDimension = 'output';
@@ -46427,6 +46427,24 @@ function debugGraphCostComponentSortHeaderHtml(key, label) {
   return `<th scope="col" aria-sort="${ariaSort}"><button type="button" class="js-debug-cost-sort control-active-hover" data-js-debug-cost-sort="${esc(key)}" data-js-debug-cost-next-sort="${nextDirection}">${esc(label)}</button></th>`;
 }
 
+// Render a usage class with the provider's own conventions (Anthropic's price
+// sheet: Base input, 5m/1h cache write, Cache hits & refreshes, Output) instead
+// of the raw `direction · cache_role`. Anything not covered (other modalities/
+// providers) falls back to the raw joined form so nothing is mislabeled.
+function debugGraphCostUsageClassLabel(direction, cacheRole) {
+  const dir = String(direction || '').trim().toLowerCase();
+  const role = String(cacheRole || '').trim().toLowerCase();
+  if (dir === 'output') return debugGraphCostText('debug.cost.class.output', 'Output');
+  if (dir === 'input' || dir === '') {
+    if (role === 'read') return debugGraphCostText('debug.cost.class.cacheHits', 'Cache hits & refreshes');
+    if (role === 'write_5m') return debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write');
+    if (role === 'write_1h') return debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write');
+    if (role.startsWith('write')) return debugGraphCostText('debug.cost.class.cacheWrite', 'Cache write');
+    if (role === 'none' || role === '') return debugGraphCostText('debug.cost.class.baseInput', 'Base input');
+  }
+  return [direction, cacheRole].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
+}
+
 function debugGraphCostComponentDetailsHtml(rows) {
   if (!rows.length) return '';
   const headers = [
@@ -46438,7 +46456,7 @@ function debugGraphCostComponentDetailsHtml(rows) {
     <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
     <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
       const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      const usageClass = [row?.direction, row?.cache_role].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
+      const usageClass = debugGraphCostUsageClassLabel(row?.direction, row?.cache_role);
       const usageMeta = [row?.modality, row?.unit].map(value => String(value || '').trim()).filter(Boolean).join(' · ');
       const exactQuantity = `${Math.max(0, Number(row?.quantity) || 0).toLocaleString()} ${String(row?.unit || 'units')}`;
       return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell"><strong>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</strong><small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;

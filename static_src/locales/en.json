@@ -347,7 +347,7 @@
   "debug.meta": "debug=1 - {count} events",
   "debug.modelTokens.allBillable": "All billable",
   "debug.modelTokens.allBillable.desc": "All model tokens that count toward billable usage, including input, cache, and output tokens.",
-  "debug.modelTokens.cacheRead": "Cache read",
+  "debug.modelTokens.cacheRead": "Cache hits & refreshes",
   "debug.modelTokens.cacheRead.desc": "Tokens served from model cache reads, usually cheaper than uncached input.",
   "debug.modelTokens.cacheWrite": "Cache write",
   "debug.modelTokens.cacheWrite.desc": "Input tokens written into the model cache for possible reuse later.",

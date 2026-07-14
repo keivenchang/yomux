@@ -19409,3 +19409,45 @@ def test_yostats_metric_descriptions_are_native_title_tooltips_not_custom_boxes(
     assert out["describedCount"] >= 1, out
     assert out["withTitleCount"] == out["describedCount"], out
     assert out["customBoxes"] == 0, out
+
+
+def test_cost_calculation_usage_class_uses_anthropic_conventions(browser, tmp_path):
+    """The Cost calculation Usage class uses provider conventions (Base input,
+    5m/1h cache write, Cache hits & refreshes, Output) — not raw direction·role."""
+    browser.set_window_size(1400, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const comp = (cache_role, direction) => ({key: `${direction}-${cache_role}`, direction, cache_role, modality: 'text', quantity: 10, unit: 'tokens', micro_usd: 1000, provider: 'anthropic', model: 'claude-sonnet-4-6', source_url: 'https://a'});
+          const mk = (i) => ({start: now - ((5 - i) * 60), duration: 60, sequence: i + 1, tokens_per_agent_total: 100 + i, agent_token_samples: 1,
+            agent_token_rates: [{key: 'a|0|claude', label: 'a:0:claude', total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60, source: 'transcript', model_rates: {'claude-sonnet-4-6': {total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60}}}],
+            cost_summary: {total_micro_usd: 5000, known_micro_usd: 5000, priced_count: 5, complete: true, unpriced_count: 0,
+              components: [comp('none', 'input'), comp('read', 'input'), comp('write_5m', 'input'), comp('write_1h', 'input'), comp('none', 'output')],
+              models: [{provider: 'anthropic', model: 'claude-sonnet-4-6', effort: '', token_quantity: 50, input_tokens: 30, cache_tokens: 20, output_tokens: 10, input_micro_usd: 3000, cache_micro_usd: 1000, output_micro_usd: 1000, other_micro_usd: 0, micro_usd: 5000}],
+              sources: [], catalog_revision: 't', freshness: 'verified'}});
+          debugGraphApplyServerHistory({sequence: 6, records: Array.from({length: 6}, (_u, i) => mk(i))});
+          setDebugGraphChartVisible('modelTokens', true); setDebugGraphChartVisible('costSummary', true); setDebugGraphRange(6 * 60); renderDebugPanels({force: true});
+          document.querySelector('[data-js-debug-graph]')?.querySelector('[data-js-debug-summary-group="costSummary"] [data-js-debug-cost-details]')?.click();
+          await window.__yolomuxTestWaitFor(() => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-cost-table="calculation"]'), {timeoutMs: 3000, intervalMs: 20, description: 'yocost calc'});
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const panel = document.getElementById(panelDomId(yocostItemId));
+          const table = panel.querySelector('[data-js-debug-cost-table="calculation"]');
+          const usageClasses = [...table.querySelectorAll('tbody tr td[data-label="Usage class"] strong')].map(n => n.textContent.trim());
+          done({usageClasses});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    labels = set(out["usageClasses"])
+    assert "Base input" in labels, out
+    assert "Cache hits & refreshes" in labels, out
+    assert "5m cache write" in labels, out
+    assert "1h cache write" in labels, out
+    assert "Output" in labels, out
+    # No raw direction·role form leaks through.
+    assert not any(" · " in label and ("write_" in label or label.startswith("input")) for label in out["usageClasses"]), out
