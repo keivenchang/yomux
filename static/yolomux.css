@@ -4669,16 +4669,25 @@ body :is(
   inline-size: max-content;
   min-inline-size: 100%;
   border-collapse: collapse;
+  /* Plain ruled table: an outer frame plus per-cell gridlines on BOTH axes
+     (below) so every cost/system table reads as a normal bordered table. */
+  border: 1px solid var(--line);
   font: var(--ui-font-size-xs)/1.35 var(--mono-font);
 }
 .js-debug-system-table th,
 .js-debug-system-table td {
   padding: var(--space-5) var(--space-7);
   border-block-end: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   text-align: end;
   white-space: nowrap;
   overflow-wrap: normal;
   word-break: normal;
+}
+.js-debug-system-table th:last-child,
+.js-debug-system-table td:last-child {
+  /* The outer frame already draws the right edge. */
+  border-inline-end: 0;
 }
 .js-debug-system-table th:first-child,
 .js-debug-system-table td:first-child {
@@ -5208,6 +5217,19 @@ body :is(
 }
 .js-debug-cost-table {
   min-inline-size: 100%;
+  /* Fixed layout with a shared column template so sibling tables (By Agent /
+     Model Usages) put their columns at the SAME x — they no longer each size to
+     their own content and drift out of alignment. */
+  table-layout: fixed;
+}
+.js-debug-cost-table th:first-child,
+.js-debug-cost-table td:first-child {
+  inline-size: 22%;
+}
+.js-debug-cost-table th:not(:first-child),
+.js-debug-cost-table td:not(:first-child) {
+  /* The five value columns share the remaining width equally in both tables. */
+  inline-size: calc(78% / 5);
 }
 .js-debug-cost-table th,
 .js-debug-cost-table td {
