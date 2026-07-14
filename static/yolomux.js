@@ -44316,6 +44316,17 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
           return Number(modelRate?.samples || 0) > 0 || Number(modelRate?.tokens || 0) > 0;
         });
       },
+      sampleCount: bucket => {
+        if (dimension === 'agent') {
+          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
+          return Math.max(0, Number(tokenItem?.samples) || 0);
+        }
+        let samples = 0;
+        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
+          samples += Math.max(0, Number(agentRate?.modelRates?.get(key)?.samples) || 0);
+        }
+        return samples;
+      },
     }));
 }
 
@@ -44469,6 +44480,19 @@ function debugGraphModelTokenSeriesDefs(buckets) {
         if (components.length) return components.some(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
         if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return false;
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => Number(agentRate?.modelRates?.get(item.model)?.tokens || 0) > 0);
+      },
+      sampleCount: bucket => {
+        const components = debugGraphModelTokenComponentRecords(bucket)
+          .filter(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
+        if (components.length) {
+          return components.reduce((total, component) => total + Math.max(1, Number(component?.samples ?? component?.sample_count) || 0), 0);
+        }
+        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return 0;
+        let samples = 0;
+        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
+          samples += Math.max(0, Number(agentRate?.modelRates?.get(item.model)?.samples) || 0);
+        }
+        return samples;
       },
     }));
 }
@@ -45562,6 +45586,34 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
     ? values.reduce((total, item) => total + item, 0)
     : Math.max(0, ...values);
   return debugGraphValueText(value, data.group.unit);
+}
+
+function debugGraphTokenHoverDetailAtTime(chart, timestamp) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  if (!data || !['agentTokens', 'modelTokens'].includes(data.group?.key)) return null;
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  const bucket = index >= 0 ? data.buckets[index] : null;
+  const startMs = Number(bucket?.startMs);
+  const endMs = startMs + Math.max(1, Number(bucket?.durationMs) || 0);
+  const hoveredTime = debugGraphTimeLabel(timestamp, {includeSeconds: false});
+  const span = Number.isFinite(startMs)
+    ? `${debugGraphTimeLabel(startMs, {includeSeconds: false})}–${debugGraphTimeLabel(endMs, {includeSeconds: false})}`
+    : hoveredTime;
+  if (index < 0) return {span, detail: debugGraphCostText('debug.graph.tokens.noData', 'No token samples'), noData: true};
+  const activeSeries = data.groupSeries
+    .filter(series => !data.group.dynamicTokenDimension || series.tokenDimension === data.group.dynamicTokenDimension)
+    .filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
+  const sampleCount = activeSeries.reduce((total, series) => {
+    const provenance = Array.isArray(series.provenanceValues) ? series.provenanceValues[index] : null;
+    return total + Math.max(0, Number(provenance?.sampleCount) || 0);
+  }, 0);
+  if (!activeSeries.length || sampleCount <= 0) {
+    return {span, detail: debugGraphCostText('debug.graph.tokens.noData', 'No token samples'), noData: true};
+  }
+  const value = debugGraphHoverValueAtTime(chart, timestamp);
+  const sampleLabel = sampleCount === 1 ? 'sample' : 'samples';
+  return {span, detail: `${value} · ${debugSystemNumber(sampleCount)} ${sampleLabel}`, noData: false};
 }
 
 function debugGraphHoverProvenanceAtTime(chart, timestamp) {
@@ -48044,8 +48096,10 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   const spanMs = Number(domain.endMs) - Number(domain.startMs);
   if (!Number.isFinite(spanMs) || spanMs <= 0) return;
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
-  tooltip.querySelector('[data-js-debug-hover-max]').textContent = debugGraphHoverValueAtTime(chart, timestamp);
-  tooltip.querySelector('[data-js-debug-hover-time]').textContent = debugGraphExactTimeLabel(timestamp);
+  const tokenDetail = debugGraphTokenHoverDetailAtTime(chart, timestamp);
+  tooltip.querySelector('[data-js-debug-hover-max]').textContent = tokenDetail?.span || debugGraphHoverValueAtTime(chart, timestamp);
+  tooltip.querySelector('[data-js-debug-hover-time]').textContent = tokenDetail?.detail || debugGraphExactTimeLabel(timestamp);
+  tooltip.toggleAttribute('data-js-debug-hover-no-data', tokenDetail?.noData === true);
   const provenance = debugGraphHoverProvenanceAtTime(chart, timestamp);
   if (provenance.length) tooltip.setAttribute('data-js-debug-hover-provenance', JSON.stringify(provenance));
   else tooltip.removeAttribute('data-js-debug-hover-provenance');

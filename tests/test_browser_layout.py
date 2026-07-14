@@ -4248,6 +4248,55 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
     assert all(item["sourceCells"][0] > min(item["sourceCells"][1:]) for item in metrics["layouts"] if item["width"] >= 720), metrics
 
 
+def test_debug_token_hover_reports_real_bucket_span_samples_and_gaps(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphNewBucket === 'function' && typeof debugGraphSetHoverTooltip === 'function';"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const startMs = new Date(2026, 6, 13, 14, 55, 0, 0).getTime();
+        const burst = debugGraphNewBucket(startMs, 300000);
+        debugGraphApplyServerAgentTokenRates(burst, [{
+          key: '8881|0|codex', label: '8881:0:codex', total: 8200,
+          samples: 3, tokens: 41000, seconds: 300,
+          model_rates: {'gpt-5.6-sol': {total: 8200, samples: 3, tokens: 41000, seconds: 300}},
+        }]);
+        const gap = debugGraphNewBucket(startMs + 300000, 300000);
+        const buckets = [burst, gap];
+        const domain = {startMs, endMs: startMs + 600000, rangeSeconds: 600, zoomed: false};
+        const group = jsDebugGraphChartGroups.find(item => item.key === 'agentTokens');
+        const series = debugGraphSeriesData(buckets);
+        const panel = document.createElement('section');
+        panel.innerHTML = `<div data-js-debug-graph><div data-js-debug-chart-grid
+          data-js-debug-domain-start="${startMs}" data-js-debug-domain-end="${startMs + 600000}">
+          ${debugGraphChartHtml(group, series, domain, buckets)}
+        </div></div>`;
+        document.body.append(panel);
+        const svg = panel.querySelector('.js-debug-line-chart');
+        const tooltip = panel.querySelector('[data-js-debug-hover-tooltip]');
+        const read = ratio => {
+          debugGraphSetHoverTooltip(panel, {target: svg, clientX: 0, clientY: 0}, ratio);
+          return {
+            text: tooltip.textContent.replace(/\\s+/g, ' ').trim(),
+            span: tooltip.querySelector('[data-js-debug-hover-max]').textContent,
+            detail: tooltip.querySelector('[data-js-debug-hover-time]').textContent,
+          };
+        };
+        const result = {burst: read(0.25), gap: read(0.75)};
+        panel.remove();
+        return result;
+        """
+    )
+    assert "14:55" in metrics["burst"]["span"] and "15:00" in metrics["burst"]["span"], metrics
+    assert "8.2k" in metrics["burst"]["detail"].lower(), metrics
+    assert "3 samples" in metrics["burst"]["detail"].lower(), metrics
+    assert "no token samples" in metrics["gap"]["detail"].lower(), metrics
+    assert "0 tokens" not in metrics["gap"]["text"].lower(), metrics
+
+
 def test_debug_system_dashboard_fetches_runtime_report_and_collapses_narrowly(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
