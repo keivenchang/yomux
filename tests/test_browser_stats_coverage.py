@@ -158,11 +158,22 @@ def _install_morning_after_fetch(browser, fixture):
           const url = new URL(String(input), 'https://localhost');
           if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
           const requestedStart = Number(url.searchParams.get('history_start'));
+          const since = Number(url.searchParams.get('since')) || 0;
           const requestedSpan = Math.max(1, Number(fixture.now) - requestedStart);
           const key = Object.keys(fixture.histories).sort(
             (left, right) => Math.abs(Number(left) - requestedSpan) - Math.abs(Number(right) - requestedSpan)
           )[0];
           window.__morningAfterFetchCounts[key] = Number(window.__morningAfterFetchCounts[key] || 0) + 1;
+          window.__morningAfterLastSince = since;
+          const base = fixture.histories[key];
+          // Honor the reader cursor exactly as the real reader does: a nonzero `since` is a
+          // cursor delta that returns ONLY records newer than the cursor, never a full
+          // re-snapshot. This is what makes a wrong cursor-delta refinement request visibly
+          // sparse instead of silently full — the prior stub ignored `since` and was
+          // false-green (a poisoned since=N refinement looked as complete as a since=0 one).
+          const history = since > 0
+            ? {...base, records: (Array.isArray(base.records) ? base.records : []).filter(record => Number(record.sequence) > since)}
+            : base;
           return jsonResponse({
             ok: true,
             time: Number(fixture.now),
@@ -171,7 +182,7 @@ def _install_morning_after_fetch(browser, fixture):
             cpu_percent: 25,
             system_cpu_percent: 40,
             rss_bytes: 64 * 1024 * 1024,
-            history: fixture.histories[key],
+            history,
           });
         };
         """,
@@ -412,6 +423,49 @@ def test_switching_from_wide_range_does_not_coarsen_short_range_to_stale_resolut
     # The 1h retained tier is <= 60s; it must NOT be the stale 600s wide-range value.
     assert out["displayResSec"] <= 60, out
     assert out["displayResSec"] != 600, out
+
+
+def test_wide_to_narrow_refines_with_since_zero_and_prefetch_cannot_repoison(browser, tmp_path):
+    """The full reported sequence WITHOUT reload: 16h -> 30m AUTO -> explicit 60s. The first
+    post-switch request must be a since=0 snapshot (not a cursor delta), the view must settle
+    to the fine tier, and a later full-retention prefetch must not drag it back to 600s."""
+    fixture = _morning_after_protocol_history(tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    _install_morning_after_fetch(browser, fixture)
+    # Establish the coarse wide coverage (24h tail is 600s) and advance the live cursor.
+    _run_morning_after_range(browser, 16 * 3600)
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          // No clear/reset between ranges: switch straight from the wide view.
+          window.__morningAfterLastSince = -1;
+          setDebugGraphRange(30 * 60, {render: false});
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(3);
+          const sinceAfterSwitch = Number(window.__morningAfterLastSince);
+          setDebugGraphResolutionOverride(60);
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(2);
+          const beforePrefetch = debugGraphDisplayResolutionMs(debugGraphDomain(), 0) / 1000;
+          // Force the full-retention prefetch to run now; it must not re-coarsen the view.
+          await prefetchJsDebugHistoryFullRetention();
+          await window.__yolomuxTestHelpers.settle(2);
+          done({
+            sinceAfterSwitch,
+            rangeSeconds: jsDebugGraphRangeSeconds,
+            beforePrefetch,
+            afterPrefetch: debugGraphDisplayResolutionMs(debugGraphDomain(), 0) / 1000,
+          });
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    assert out["sinceAfterSwitch"] == 0, out  # a full since=0 refinement, not a poisoned cursor delta
+    assert out["rangeSeconds"] == 30 * 60, out  # the range stays 30m
+    assert out["beforePrefetch"] != 600 and out["beforePrefetch"] <= 60, out
+    assert out["afterPrefetch"] != 600 and out["afterPrefetch"] <= 60, out  # prefetch cannot re-poison
 
 
 def test_full_retention_prefetch_fills_cache_so_wide_range_renders_stale_without_touching_readiness(browser, tmp_path):
