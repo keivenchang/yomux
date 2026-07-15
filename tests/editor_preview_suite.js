@@ -7007,6 +7007,23 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.debugGraphLivePulseHtmlForTest([], [], {...liveDomain, zoomed: true}, now), '', 'the pulse is suppressed on a zoomed view');
   });
 
+  test('YO!stats exact-resolution dark-launch requests and renders at the preset', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    // Default OFF: always requests 1s, no exact_resolution flag (unchanged contract).
+    assert.equal(api.jsDebugRequestedHistoryResolutionSecondsForTest(), 1, 'default asks for 1s');
+    assert.ok(!api.jsDebugStatsSampleQueryForTest({historyResolution: 1}).includes('exact_resolution'), 'default omits exact flag');
+    // ON: 5m at an explicit 10s pick requests exactly 10s + the exact flag.
+    api.setDebugGraphExactResolutionForTest(true);
+    api.setDebugGraphRangeForTest(5 * 60, {render: false});
+    api.setDebugGraphResolutionOverrideForTest(10);
+    assert.equal(api.jsDebugRequestedHistoryResolutionSecondsForTest(), 10, 'exact mode requests the picked 10s');
+    assert.ok(api.jsDebugStatsSampleQueryForTest({historyResolution: 10, exactResolution: true}).includes('exact_resolution=1'), 'exact mode sends the flag');
+    // AUTO (override 0) requests the range's finest offered choice (5m -> 1s).
+    api.setDebugGraphResolutionOverrideForTest(0);
+    assert.equal(api.jsDebugRequestedHistoryResolutionSecondsForTest(), 1, '5m AUTO requests finest offered (1s)');
+    api.setDebugGraphExactResolutionForTest(false);
+  });
+
   test('YO!stats x-axis shows seconds only when rendering at 1s resolution', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.UTC(2026, 6, 15, 8, 14, 15);

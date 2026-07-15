@@ -42626,9 +42626,31 @@ function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolution
   return cursor <= startSeconds;
 }
 
+// DOIT.1 cutover, DARK-LAUNCHED: when true, the browser requests the exact preset
+// resolution (server returns exactly that, honest no-data past each tier) instead of
+// always asking for 1s and coarsening/stitching client-side. Default false so live
+// charts and the never-regress invariant sweep are byte-unchanged; flip to true (or
+// set window.__yolomuxExactStats) after reviewing the exact path on a live chart.
+let jsDebugGraphExactResolutionEnabled = (typeof globalThis !== 'undefined' && globalThis.__yolomuxExactStats === true);
+
+function debugGraphExactRequestResolutionSeconds() {
+  // The concrete resolution to request: the explicit pick, or the range's AUTO
+  // (finest offered choice) when the picker is on AUTO. Matches the server matrix.
+  const override = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0);
+  if (override > 0) return override;
+  const choices = debugGraphAvailableResolutionChoices();
+  return choices.length ? Number(choices[0]) : 1;
+}
+
+function setDebugGraphExactResolutionEnabled(value) {
+  jsDebugGraphExactResolutionEnabled = value === true;
+}
+
 function jsDebugRequestedHistoryResolutionSeconds() {
-  // The server chooses the coarsest retained source tier for the domain. Asking
-  // for the finest resolution lets a later zoom recover finer retained history.
+  // EXACT mode: request the exact preset resolution the chart will render at.
+  if (jsDebugGraphExactResolutionEnabled) return debugGraphExactRequestResolutionSeconds();
+  // DEFAULT: ask for the finest resolution; the server coarsens to the retained
+  // tier and the client stitches/aggregates. A later zoom recovers finer history.
   return 1;
 }
 
@@ -44022,6 +44044,12 @@ function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, 
 }
 
 function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, nowMs = Date.now()) {
+  // EXACT mode: render at exactly the requested preset resolution (the server
+  // already returned uniform buckets at it), so the client never re-coarsens the
+  // exact data down to the 120-point display cap.
+  if (jsDebugGraphExactResolutionEnabled && !debugGraphZoomDomainValid()) {
+    return debugGraphExactRequestResolutionSeconds() * 1000;
+  }
   const domainStartMs = Number(domain?.startMs);
   const domainEndMs = Number(domain?.endMs);
   const domainSpanMs = Number.isFinite(domainStartMs) && Number.isFinite(domainEndMs)
@@ -47384,6 +47412,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       historyEnd,
       historyResolution,
       history: !historyRequestSuppressed,
+      exactResolution: jsDebugGraphExactResolutionEnabled,
     }), {
       cache: 'no-store',
       timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
