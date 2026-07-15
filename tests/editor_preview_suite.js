@@ -6365,6 +6365,34 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(100, 200, 60), true, 'a user-selected coarse response does not block a later finer request');
   });
 
+  test('YO!stats wide coarse coverage does not satisfy a narrow finer domain (range cache poisoning)', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000);
+    const wideStart = now - 16 * 60 * 60;
+    const narrowStart = now - 20 * 60;  // safely inside the 1s retained tier
+    // A 16h fetch stamps its whole coverage with the server's whole-query MAX(duration)=600s,
+    // including the recent portion that actually retains 1s data.
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('loading-initial', {targetStartSeconds: wideStart, targetEndSeconds: now});
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: wideStart, requestedEnd: 0, coveredStart: wideStart, coveredEnd: now,
+      resolutionSeconds: 600, sourceResolutionSeconds: 600, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    // The recent domain needs 1s; the coarse wide interval must NOT satisfy it.
+    const narrowTier = api.jsDebugHistoryCoverageResolutionSecondsForTest(narrowStart, 1);
+    assert.equal(narrowTier, 1, 'a recent domain requires one-second retained data');
+    assert.equal(
+      api.jsDebugHistoryCoverageNeedsRefreshForTest(narrowStart, now, narrowTier), true,
+      'a wide 600s response must not falsely satisfy the finer recent domain (would leave the view stuck at 600s)',
+    );
+    // But a genuinely-old domain (16h) still accepts the coarse retained tier — no infinite retry.
+    const wideTier = api.jsDebugHistoryCoverageResolutionSecondsForTest(wideStart, 1);
+    assert.equal(
+      api.jsDebugHistoryCoverageNeedsRefreshForTest(wideStart, now, wideTier), false,
+      'the 16h domain accepts the 600s retained tier it actually needs',
+    );
+  });
+
   test('YO!stats finer replacement preserves coarse bucket portions outside unaligned coverage', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const start = Math.floor(Date.now() / 1000 / 10) * 10 - 20;

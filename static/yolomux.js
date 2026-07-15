@@ -42559,18 +42559,31 @@ function applyJsDebugHistoryCoverage(coverage, request = null) {
   return jsDebugHistoryReadinessSnapshot();
 }
 
-function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
+function jsDebugHistoryAcceptableResolutionSeconds(rangeStartSeconds, requestedResolutionSeconds, sourceResolutionSeconds, nowMs = Date.now()) {
+  // The coarsest resolution a cached interval may use to satisfy this range. We trust an
+  // interval's server-reported `sourceResolutionSeconds` (its retention floor) ONLY up to
+  // the age-derived tier for the requested range start: a wide 16h/24h response stamps one
+  // whole-query MAX(duration)=600s across ALL its coverage — including the recent portion
+  // that truly retains 1s — and that inflated claim must not certify coarse data over a
+  // recent domain. Capping at the range-start age tier keeps genuinely old 120s/300s/600s
+  // retention acceptable (no infinite retry) while rejecting the stale wide-superset claim.
+  const rangeTierSeconds = debugGraphBucketDurationForTime(Math.max(0, Number(rangeStartSeconds) || 0) * 1000, nowMs) / 1000;
+  const trustedSource = Math.min(Math.max(0, Number(sourceResolutionSeconds) || 0), rangeTierSeconds);
+  return Math.max(Number(requestedResolutionSeconds) || 0, trustedSource);
+}
+
+function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds, nowMs = Date.now()) {
+  const acceptableFor = interval => jsDebugHistoryAcceptableResolutionSeconds(startSeconds, maxResolutionSeconds, interval.sourceResolutionSeconds, nowMs);
   const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
-    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(maxResolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
+    .filter(interval => Number(interval.resolutionSeconds) <= acceptableFor(interval))
     .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
   let cursor = startSeconds;
   for (const interval of intervals) {
     const intervalStart = Number(interval.startSeconds);
     const intervalEnd = Number(interval.endSeconds);
-    const sourceResolution = Math.max(0, Number(interval.sourceResolutionSeconds) || 0);
     if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
     if (intervalStart > cursor) return false;
-    if (Number(interval.resolutionSeconds) > Math.max(maxResolutionSeconds, sourceResolution)) return false;
+    if (Number(interval.resolutionSeconds) > acceptableFor(interval)) return false;
     cursor = Math.max(cursor, intervalEnd);
     if (cursor >= endSeconds) return true;
   }
@@ -42584,11 +42597,11 @@ function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
   return resolutions.find(resolution => jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolution)) ?? Infinity;
 }
 
-function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds) {
+function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds, nowMs = Date.now()) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return true;
-  if (jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds)) return false;
+  if (jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds, nowMs)) return false;
   const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
-    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(resolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
+    .filter(interval => Number(interval.resolutionSeconds) <= jsDebugHistoryAcceptableResolutionSeconds(startSeconds, resolutionSeconds, interval.sourceResolutionSeconds, nowMs))
     .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
   let cursor = startSeconds;
   for (const interval of intervals) {
