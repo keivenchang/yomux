@@ -974,6 +974,47 @@ class PersistentStatsService:
     def materialization_generation(self) -> int:
         return int(self._materialization["generation"])
 
+    def _materialized_snapshot_response(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Additive exact-resolution serve action (DOIT.1 item 5, non-switching).
+
+        The request key is a preset `range_seconds` and a concrete `resolution_seconds`
+        (or AUTO, resolved here by the single policy owner). It returns exactly the
+        cached layer's buckets within the window, the ECHOED key, the source
+        generation, and uniform `record.duration == resolution` — never a coarser or
+        mixed substitute. An unsupported key returns a structured error; a not-yet-built
+        cache returns `pending` with retry, never a synchronous DB build. This runs
+        ALONGSIDE the existing `history` action; nothing is switched or removed.
+        """
+        try:
+            range_seconds = int(request.get("range_seconds") or 0)
+            resolution = request.get("resolution_seconds", stats_resolution.AUTO)
+            if resolution in (None, "", 0):
+                resolution = stats_resolution.AUTO
+            concrete = stats_resolution.resolve_requested(range_seconds, resolution)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "unsupported": True,
+                    "choices": stats_resolution.wire_capabilities()}
+        if self._materialization["generation"] <= 0:
+            return {"ok": True, "pending": True, "retry_after_seconds": 1,
+                    "range_seconds": range_seconds, "resolution_seconds": concrete}
+        window_start, window_end = self._materialization["window"]
+        end = int(request.get("end") or window_end)
+        start = end - range_seconds
+        records = [
+            copy.deepcopy(bucket)
+            for bucket in self._materialization["layers"].get(concrete, ())
+            if start <= int(bucket.get("start") or 0) < end
+        ]
+        return {
+            "ok": True,
+            "range_seconds": range_seconds,
+            "resolution_seconds": concrete,
+            "generation": int(self._materialization["generation"]),
+            "window_start": start,
+            "window_end": end,
+            "records": records,
+        }
+
     def read_materialized_layer(self, resolution: int) -> list[dict[str, Any]]:
         """Return a deep copy of the cached exact-resolution layer, or [] if unbuilt.
 
@@ -3818,6 +3859,8 @@ class PersistentStatsService:
                 return {"ok": True, **self._encoded_history(request)}, b""
             except (TypeError, ValueError, sqlite3.Error) as exc:
                 return {"ok": False, "error": str(exc)}, b""
+        if action == "materialized_snapshot":
+            return self._materialized_snapshot_response(request), b""
         if action == "retain_after":
             try:
                 deleted = self.store.retain_after(float(request.get("cutoff_time") or 0.0))

@@ -162,3 +162,33 @@ def test_status_reports_materialization_health(tmp_path):
     mat = status["materialization"]
     assert mat["generation"] == 1 and mat["built_at"] == 5.0
     assert set(mat["layers"]) == {1, 10, 60, 300}
+
+
+def test_materialized_snapshot_serves_exact_key_or_structured_states(tmp_path):
+    svc = _service(tmp_path)
+    # Not built yet -> pending, never a synchronous DB build.
+    pending, _ = svc.handle_with_binary({"action": "materialized_snapshot", "range_seconds": 300, "resolution_seconds": 1})
+    assert pending["ok"] and pending["pending"] and pending["retry_after_seconds"] >= 1
+
+    conn = svc.store._connection()
+    with conn:
+        for t in range(0, 300, 10):
+            conn.execute(
+                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
+                ("cpu", "", float(t), "e", '{"cpu_total_percent": 10.0, "cpu_count": 1.0}'),
+            )
+    svc.rebuild_materialization(0, 300, now=300.0)
+
+    ok, _ = svc.handle_with_binary({"action": "materialized_snapshot", "range_seconds": 300, "resolution_seconds": 1, "end": 300})
+    assert ok["ok"] and ok["range_seconds"] == 300 and ok["resolution_seconds"] == 1
+    # Contract: every returned record has duration == the echoed resolution, no mixing.
+    assert ok["records"] and {r["duration"] for r in ok["records"]} == {1}
+    assert ok["generation"] == 1
+
+    # AUTO resolves server-side to the concrete value (5m -> 1s).
+    auto, _ = svc.handle_with_binary({"action": "materialized_snapshot", "range_seconds": 300, "resolution_seconds": "AUTO", "end": 300})
+    assert auto["resolution_seconds"] == 1
+
+    # An unsupported key is rejected with the valid choices, never a coarser substitute.
+    bad, _ = svc.handle_with_binary({"action": "materialized_snapshot", "range_seconds": 7200, "resolution_seconds": 10})
+    assert bad["ok"] is False and bad["unsupported"] and "choices" in bad
