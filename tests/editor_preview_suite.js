@@ -6434,6 +6434,42 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start - 100, start - 90, 1), 0, 'a refinement disjoint from every coarse bucket removes nothing');
   });
 
+  await testAsync('YO!stats refines a wide-to-narrow switch with a since=0 snapshot, not a cursor delta', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    const nowSec = Math.floor(Date.now() / 1000);
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      const parsed = new URL(String(url), 'http://localhost');
+      const historyStart = Number(parsed.searchParams.get('history_start')) || 0;
+      // A wide (>=4h) request returns coarse 600s coverage across its whole span — the
+      // server whole-query MAX(duration) scalar; a narrow request returns fine 1s data.
+      const wide = historyStart > 0 && historyStart <= nowSec - (4 * 60 * 60);
+      const sourceRes = wide ? 600 : 1;
+      return Promise.resolve(jsonResponse({history: {
+        sequence: wide ? 500 : 900,
+        records: [{start: nowSec - 60, duration: sourceRes, sequence: wide ? 500 : 900, api_count: 1}],
+        coverage: statsHistoryCoverageForRequest(String(url), {resolution_seconds: sourceRes, source_resolution_seconds: sourceRes}),
+      }}));
+    });
+    // Load the wide 16h range: applies coarse 600s coverage and advances the live cursor.
+    api.setDebugGraphRangeForTest(16 * 60 * 60);
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    const wideCount = requests.length;
+    // Switch to 30m: the coarse cache must NOT be reused through a cursor delta.
+    api.setDebugGraphRangeForTest(30 * 60);
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    const refineUrl = requests[wideCount];
+    assert.ok(refineUrl, 'switching to the finer range issues a refinement request');
+    assert.equal(
+      new URL(refineUrl, 'http://localhost').searchParams.get('since'), '0',
+      'the first post-switch request is a full since=0 snapshot bounded to the domain, not a cursor delta',
+    );
+  });
+
   await testAsync('YO!stats ignores an obsolete history response after the requested domain changes', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
