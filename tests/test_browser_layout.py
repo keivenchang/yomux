@@ -5647,11 +5647,15 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert drag_metrics["rangeSeconds"] > 300, drag_metrics
 
 
-def test_debug_graph_short_range_refetches_token_rates_after_compact_token_history(browser, tmp_path):
+def test_debug_graph_token_rates_render_inline_from_the_single_history_stream(browser, tmp_path):
+    """ONE history stream: a range change fetches ordinary history WITHOUT any
+    legacy token_* params, and the token chart renders the inline
+    agent_token_rates that ride the returned records (the retired compact
+    token side-stream no longer exists on the client)."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return typeof setDebugGraphRange === 'function' && typeof debugGraphApplyServerAgentTokenHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+            "return typeof setDebugGraphRange === 'function' && typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
         )
     )
     metrics = browser.execute_async_script(
@@ -5667,19 +5671,6 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
           jsDebugStatsPollState.pendingForceGraphRefresh = false;
           const nowSeconds = Math.floor(Date.now() / 1000);
           jsDebugGraphRangeSeconds = 8 * 60 * 60;
-          jsDebugStatsAgentTokenResolutionSeconds = 120;
-          debugGraphApplyServerAgentTokenHistory({
-            sequence: 9,
-            resolution_seconds: 120,
-            records: [{
-              start: nowSeconds - (60 * 60),
-              duration: 120,
-              sequence: 9,
-              tokens_per_agent_total: 100,
-              agent_token_samples: 1,
-              agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}],
-            }],
-          });
           setJsDebugHistoryReadiness('ready', {
             loadedStartSeconds: nowSeconds - (8 * 60 * 60),
             loadedEndSeconds: nowSeconds,
@@ -5696,7 +5687,6 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
             return Promise.resolve(new Response(JSON.stringify({history: {
               sequence: 50,
               latest_sequence: 50,
-              agent_token_schema_version: 2,
               records: [{
                 start: nowSeconds - 60,
                 duration: 60,
@@ -5718,7 +5708,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
             setDebugGraphRange(2 * 60 * 60);
             await window.__yolomuxTestWaitFor(
               () => requests.length >= 1 && !jsDebugStatsPollState.inFlight,
-              {timeoutMs: 3000, intervalMs: 20, description: 'short-range token history refetch'},
+              {timeoutMs: 3000, intervalMs: 20, description: 'short-range history refetch'},
             );
             renderDebugPanels({force: true});
             const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
@@ -5727,8 +5717,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
               requestCount: requests.length,
               since: url.searchParams.get('since'),
               historyStart: Number(url.searchParams.get('history_start')),
-              tokenResolution: url.searchParams.get('token_resolution'),
-              separateTokenCount: jsDebugGraphAgentTokenBuckets.size,
+              legacyTokenParams: requests.flatMap(request => [...new URL(request).searchParams.keys()].filter(key => key.startsWith('token_') && key !== 'token_consumer')),
               legendLabels: [...(chart?.querySelectorAll('[data-js-debug-legend] span') || [])].map(node => node.textContent),
               barCount: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:8002|1|codex"]').length || 0,
             };
@@ -5743,8 +5732,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
     assert metrics["requestCount"] >= 1, metrics
     assert metrics["since"] == "0", metrics
     assert metrics["historyStart"] > 0, metrics
-    assert metrics["tokenResolution"] is None, metrics
-    assert metrics["separateTokenCount"] == 0, metrics
+    assert metrics["legacyTokenParams"] == [], metrics
     assert "8002:1:codex" in metrics["legendLabels"], metrics
     assert metrics["barCount"] == 1, metrics
 
@@ -5811,7 +5799,12 @@ def test_debug_graph_store_coverage_paints_token_gap_without_shading_cpu(browser
     assert 70 < metrics["tokenRects"][0]["width"] < 90, metrics
 
 
-def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_history_fetch(browser, tmp_path):
+def test_debug_graph_inline_tokens_cover_the_full_domain_across_widening_range_changes(browser, tmp_path):
+    """Widening 4h -> 8h -> 16h sends plain history requests (no legacy token_*
+    params) and the token chart keeps BOTH edges of the domain rendered from
+    the inline token detail of each response — the regression the retired
+    compact token stream once guarded (newer token bars must not blank while
+    an older segment loads) now holds through the single unified cache."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -5842,46 +5835,27 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
           const requests = [];
           const waitForRequests = expectedCount => window.__yolomuxTestWaitFor(
             () => requests.length >= expectedCount && !jsDebugStatsPollState.inFlight,
-            {timeoutMs: 3000, intervalMs: 20, description: `compact-token history request ${expectedCount}`},
+            {timeoutMs: 3000, intervalMs: 20, description: `inline-token history request ${expectedCount}`},
           );
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
             if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
             requests.push(url);
-            const tokenStart = Number(url.searchParams.get('token_history_start'));
+            const requestedStart = Number(url.searchParams.get('history_start'));
             const normalEnd = Number(url.searchParams.get('history_end'));
-            const tokenResolution = Number(url.searchParams.get('token_resolution'));
+            // Inline token detail rides the ordinary records at both domain edges.
             return Promise.resolve(new Response(JSON.stringify({history: {
               sequence: 50,
               latest_sequence: 50,
-              agent_token_schema_version: 2,
-              records: [{
-                start: tokenStart,
-                duration: 5,
-                sequence: 50,
-                active_agent_total: 1,
-                agent_activity_samples: 1,
-              }],
+              records: [
+                {start: requestedStart, duration: 600, sequence: 40, active_agent_total: 1, agent_activity_samples: 1, tokens_per_agent_total: 100, agent_token_samples: 1, agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}]},
+                {start: nowSeconds - 600, duration: 600, sequence: 50, tokens_per_agent_total: 200, agent_token_samples: 1, agent_token_rates: [{key: 'recent|0|codex', label: 'recent:0:codex', total: 200, samples: 1, tokens: 200, seconds: 60}]},
+              ],
               coverage: {
-                mode: 'older', requested_start: tokenStart, requested_end: normalEnd,
-                covered_start: tokenStart, covered_end: normalEnd,
-                resolution_seconds: 5, complete: true, has_more_older: false, next_older_end: 0,
-                intervals: [{start: tokenStart, end: normalEnd, resolution_seconds: 5}],
-              },
-              agent_token_history: {
-                sequence: 50,
-                latest_sequence: 50,
-                resolution_seconds: tokenResolution,
-                snapshot: true,
-                coverage: {
-                  mode: 'live', requested_start: tokenStart, requested_end: 0,
-                  covered_start: tokenStart, covered_end: nowSeconds,
-                  resolution_seconds: 120, complete: true, has_more_older: false, next_older_end: 0,
-                },
-                records: [
-                  {start: tokenStart, duration: tokenResolution, sequence: 40, tokens_per_agent_total: 100, agent_token_samples: 1, agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}]},
-                  {start: nowSeconds - tokenResolution, duration: tokenResolution, sequence: 50, tokens_per_agent_total: 200, agent_token_samples: 1, agent_token_rates: [{key: 'recent|0|codex', label: 'recent:0:codex', total: 200, samples: 1, tokens: 200, seconds: 60}]},
-                ],
+                mode: 'older', requested_start: requestedStart, requested_end: normalEnd,
+                covered_start: requestedStart, covered_end: normalEnd,
+                resolution_seconds: 600, complete: true, has_more_older: false, next_older_end: 0,
+                intervals: [{start: requestedStart, end: normalEnd, resolution_seconds: 600}],
               },
             }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
           };
@@ -5897,12 +5871,9 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
             return {
               requestCount: requests.length,
               requests: requests.map(request => ({
-                normalHistoryEnd: Number(request.searchParams.get('history_end')),
-                tokenHistoryStart: Number(request.searchParams.get('token_history_start')),
-                tokenHistoryEnd: request.searchParams.get('token_history_end'),
-                tokenResolution: Number(request.searchParams.get('token_resolution')),
+                historyStart: Number(request.searchParams.get('history_start')),
+                legacyTokenParams: [...request.searchParams.keys()].filter(key => key.startsWith('token_') && key !== 'token_consumer'),
               })),
-              tokenStarts: [...jsDebugGraphAgentTokenBuckets.values()].map(bucket => Math.floor(bucket.startMs / 1000)).sort((left, right) => left - right),
               oldBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:old|0|codex"]').length || 0,
               recentBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:recent|0|codex"]').length || 0,
             };
@@ -5915,13 +5886,9 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
     )
     assert "error" not in metrics, metrics
     assert metrics["requestCount"] >= 3, metrics
-    assert [request["tokenResolution"] for request in metrics["requests"][:3]] == [120, 120, 300], metrics
-    assert all(request["normalHistoryEnd"] > request["tokenHistoryStart"] for request in metrics["requests"][:3]), metrics
-    assert all(request["tokenHistoryEnd"] == "0" for request in metrics["requests"][:3]), metrics
-    assert metrics["requests"][0]["tokenHistoryStart"] > metrics["requests"][1]["tokenHistoryStart"] > metrics["requests"][2]["tokenHistoryStart"], metrics
-    assert len(metrics["tokenStarts"]) == 2, metrics
-    assert metrics["tokenStarts"][1] - metrics["tokenStarts"][0] > 3 * 60 * 60, metrics
-    assert metrics["oldBars"] == 1 and metrics["recentBars"] == 1, metrics
+    assert all(request["legacyTokenParams"] == [] for request in metrics["requests"]), metrics
+    assert metrics["requests"][0]["historyStart"] > metrics["requests"][1]["historyStart"] > metrics["requests"][2]["historyStart"], metrics
+    assert metrics["oldBars"] >= 1 and metrics["recentBars"] >= 1, metrics
 
 
 def test_debug_graph_server_restart_refetches_complete_history_without_waiting_for_the_poll_interval(browser, tmp_path):

@@ -11,11 +11,7 @@
         "historyStart": 1799999700,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 0,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799999700,
-        "tokenHistoryEnd": 0
+        "history": true
       },
       "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799999700&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
@@ -42,11 +38,7 @@
         "historyStart": 1799999100,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 0,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799999100,
-        "tokenHistoryEnd": 0
+        "history": true
       },
       "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799999100&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
@@ -73,11 +65,7 @@
         "historyStart": 1799998200,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 0,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799998200,
-        "tokenHistoryEnd": 0
+        "history": true
       },
       "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799998200&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
@@ -104,11 +92,7 @@
         "historyStart": 1799996400,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 0,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799996400,
-        "tokenHistoryEnd": 0
+        "history": true
       },
       "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799996400&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
@@ -135,11 +119,7 @@
         "historyStart": 1799992800,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 0,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799992800,
-        "tokenHistoryEnd": 0
+        "history": true
       },
       "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799992800&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
@@ -166,21 +146,17 @@
         "historyStart": 1799985600,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 120,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799985600,
-        "tokenHistoryEnd": 0
+        "history": true
       },
-      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799985600&history_end=1800000000&history_resolution=1&history_max_points=6000&token_since=0&token_resolution=120&token_history_start=1799985600&token_history_end=0",
+      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799985600&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
         "include_history": true,
         "since": 0,
         "client_id": "golden-client",
         "token_since": 0,
-        "token_resolution_seconds": 120,
-        "token_history_start": 1799985600,
-        "token_history_end": 0,
+        "token_resolution_seconds": 0,
+        "token_history_start": null,
+        "token_history_end": null,
         "start": 1799985600,
         "end": 0,
         "resolution_seconds": 1,
@@ -197,21 +173,17 @@
         "historyStart": 1799971200,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 120,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799971200,
-        "tokenHistoryEnd": 0
+        "history": true
       },
-      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799971200&history_end=1800000000&history_resolution=1&history_max_points=6000&token_since=0&token_resolution=120&token_history_start=1799971200&token_history_end=0",
+      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799971200&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
         "include_history": true,
         "since": 0,
         "client_id": "golden-client",
         "token_since": 0,
-        "token_resolution_seconds": 120,
-        "token_history_start": 1799971200,
-        "token_history_end": 0,
+        "token_resolution_seconds": 0,
+        "token_history_start": null,
+        "token_history_end": null,
         "start": 1799971200,
         "end": 0,
         "resolution_seconds": 1,
@@ -228,21 +200,17 @@
         "historyStart": 1799942400,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 300,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799942400,
-        "tokenHistoryEnd": 0
+        "history": true
       },
-      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799942400&history_end=1800000000&history_resolution=1&history_max_points=6000&token_since=0&token_resolution=300&token_history_start=1799942400&token_history_end=0",
+      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799942400&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
         "include_history": true,
         "since": 0,
         "client_id": "golden-client",
         "token_since": 0,
-        "token_resolution_seconds": 300,
-        "token_history_start": 1799942400,
-        "token_history_end": 0,
+        "token_resolution_seconds": 0,
+        "token_history_start": null,
+        "token_history_end": null,
         "start": 1799942400,
         "end": 0,
         "resolution_seconds": 1,
@@ -259,21 +227,17 @@
         "historyStart": 1799913600,
         "historyEnd": 1800000000,
         "historyResolution": 1,
-        "history": true,
-        "tokenResolution": 300,
-        "tokenSince": 0,
-        "tokenHistoryStart": 1799913600,
-        "tokenHistoryEnd": 0
+        "history": true
       },
-      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799913600&history_end=1800000000&history_resolution=1&history_max_points=6000&token_since=0&token_resolution=300&token_history_start=1799913600&token_history_end=0",
+      "query": "/api/stats-sample?since=0&client_id=golden-client&token_consumer=1&history_start=1799913600&history_end=1800000000&history_resolution=1&history_max_points=6000",
       "readerRequest": {
         "include_history": true,
         "since": 0,
         "client_id": "golden-client",
         "token_since": 0,
-        "token_resolution_seconds": 300,
-        "token_history_start": 1799913600,
-        "token_history_end": 0,
+        "token_resolution_seconds": 0,
+        "token_history_start": null,
+        "token_history_end": null,
         "start": 1799913600,
         "end": 0,
         "resolution_seconds": 1,

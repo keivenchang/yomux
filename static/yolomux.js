@@ -41732,9 +41732,6 @@ const jsDebugStatsUploadState = {
   generation: 0,
 };
 let jsDebugStatsServerSequence = 0;
-let jsDebugStatsAgentTokenSequence = 0;
-let jsDebugStatsAgentTokenResolutionSeconds = 0;
-let jsDebugStatsAgentTokenSchemaVersion = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
@@ -41977,7 +41974,6 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 ]);
 const jsDebugGraphRawBuckets = new Map();
 const jsDebugGraphRollupBuckets = new Map();
-const jsDebugGraphAgentTokenBuckets = new Map();
 const jsDebugGraphEventRecords = new Map();
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
@@ -43576,8 +43572,6 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 function clearJsDebugGraphData() {
   jsDebugGraphRawBuckets.clear();
   jsDebugGraphRollupBuckets.clear();
-  resetDebugGraphAgentTokenHistory();
-  jsDebugStatsAgentTokenSchemaVersion = 0;
   jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
   // Invalidate any in-flight silent prefetch so its late response cannot repopulate
@@ -43878,11 +43872,6 @@ function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, r
   // Compact local fine buckets before applying an authoritative server coarse bucket. Applying
   // first would merge the same measurements a second time at the 1h/2h tier boundaries.
   compactJsDebugGraphBuckets();
-  const tokenSchemaVersion = Number(history.agent_token_schema_version);
-  if (Number.isFinite(tokenSchemaVersion) && tokenSchemaVersion > 0 && tokenSchemaVersion !== jsDebugStatsAgentTokenSchemaVersion) {
-    clearDebugGraphAgentTokenData();
-    jsDebugStatsAgentTokenSchemaVersion = tokenSchemaVersion;
-  }
   const sequence = Number(history.latest_sequence ?? history.sequence);
   if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
   const backfill = history.usage_atom_backfill;
@@ -43894,63 +43883,18 @@ function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, r
   }
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
-  debugGraphApplyServerAgentTokenHistory(history.agent_token_history, {advanceLiveCursor});
   compactJsDebugGraphBuckets();
 }
 
-function debugGraphApplyServerAgentTokenHistory(history = {}, {advanceLiveCursor = true} = {}) {
-  if (!history || typeof history !== 'object') return;
-  const resolutionSeconds = Number(history.resolution_seconds);
-  if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return;
-  if (history.snapshot || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds) jsDebugGraphAgentTokenBuckets.clear();
-  jsDebugStatsAgentTokenResolutionSeconds = resolutionSeconds;
-  const sequence = Number(history.sequence);
-  if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
-  const records = Array.isArray(history.records) ? history.records : [];
-  for (const record of records) {
-    const startSeconds = Number(record?.start);
-    const durationSeconds = Number(record?.duration);
-    if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) continue;
-    const bucket = debugGraphBucket(jsDebugGraphAgentTokenBuckets, Math.floor(startSeconds * 1000), durationSeconds * 1000);
-    bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
-    bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
-    debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
-    debugGraphApplyServerCostSummary(bucket, record.cost_summary);
-  }
-}
-
+// The compact token side-stream is gone (ONE history stream since 2026-07):
+// token detail rides every history record and lands in the same unified bucket
+// cache. This per-range value survives ONLY as the token charts' display
+// floor, so wide-range token bars keep their pre-unification widths
+// (>=120s at 4h+, >=300s at 16h+); it is not a second fetch resolution.
 function debugGraphAgentTokenResolution(nowMs = Date.now()) {
   const rangeSeconds = debugGraphDomain(nowMs).rangeSeconds;
   if (rangeSeconds < 4 * 60 * 60) return 0;
   return rangeSeconds >= 16 * 60 * 60 ? 5 * 60 : 2 * 60;
-}
-
-function resetDebugGraphAgentTokenHistory() {
-  jsDebugStatsAgentTokenSequence = 0;
-  jsDebugStatsAgentTokenResolutionSeconds = 0;
-  jsDebugGraphAgentTokenBuckets.clear();
-}
-
-function syncDebugGraphAgentTokenResolution() {
-  const resolutionSeconds = debugGraphAgentTokenResolution();
-  if (resolutionSeconds === jsDebugStatsAgentTokenResolutionSeconds) return false;
-  resetDebugGraphAgentTokenHistory();
-  // Long ranges intentionally omit token rates from normal history and use the separate compact
-  // token stream. Returning to a short range must fetch normal history again with token rates;
-  // otherwise the old coverage marker leaves only new live samples to render.
-  if (resolutionSeconds === 0) resetJsDebugHistoryReadiness();
-  return true;
-}
-
-function clearDebugGraphAgentTokenData() {
-  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
-    for (const bucket of map.values()) {
-      bucket.tokensPerAgentTotal = 0;
-      bucket.agentTokenSamples = 0;
-      bucket.agentTokenRates = new Map();
-    }
-  }
-  resetDebugGraphAgentTokenHistory();
 }
 
 function debugGraphAggregateBucket(map, source, scaleMs, multiplier = 1) {
@@ -44139,15 +44083,13 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds 
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
 
+// Token/model charts read the SAME unified bucket cache as every other chart.
+// The only token-specific behavior left is the display floor: at least the
+// token sampling cadence (60s), coarsened per range by
+// debugGraphAgentTokenResolution so wide-range bars keep their legacy widths.
 function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
-  const resolutionSeconds = debugGraphAgentTokenResolution(nowMs);
-  if (!resolutionSeconds || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds || !jsDebugGraphAgentTokenBuckets.size) {
-    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: jsDebugGraphAgentTokenBucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
-  }
-  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
-  return [...jsDebugGraphAgentTokenBuckets.values()]
-    .filter(bucket => debugGraphBucketInRange(bucket, domain.startMs, domain.endMs))
-    .sort((a, b) => a.startMs - b.startMs);
+  const floorSeconds = Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs));
+  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
 }
 
 function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
@@ -46411,7 +46353,7 @@ function debugGraphCostAggregateRows(rows, keyFields) {
 
 function debugGraphCostSummarySignature(buckets) {
   if (!Array.isArray(buckets) || !buckets.length) {
-    return `0:${jsDebugStatsAgentTokenSequence}:${jsDebugUsageAtomBackfill.state || ''}:${jsDebugUsageAtomBackfill.sources || 0}:${jsDebugUsageAtomBackfill.missing || 0}`;
+    return `0:${jsDebugStatsServerSequence}:${jsDebugUsageAtomBackfill.state || ''}:${jsDebugUsageAtomBackfill.sources || 0}:${jsDebugUsageAtomBackfill.missing || 0}`;
   }
   const first = buckets[0] || {};
   const last = buckets[buckets.length - 1] || {};
@@ -46423,7 +46365,7 @@ function debugGraphCostSummarySignature(buckets) {
     Number(last.startMs ?? last.start ?? 0) || 0,
     Number(last.durationMs ?? last.duration ?? 0) || 0,
     Number(last.sequence ?? 0) || 0,
-    jsDebugStatsAgentTokenSequence,
+    jsDebugStatsServerSequence,
     jsDebugUsageAtomBackfill.state || '',
     jsDebugUsageAtomBackfill.sources || 0,
     jsDebugUsageAtomBackfill.missing || 0,
@@ -47026,8 +46968,8 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
         ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {tokenAxis})]
         : [];
       // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
-      // displayed bucket array, including the compact wide-range history, but adds no axes,
-      // bars, or independent range state.
+      // displayed bucket array from the unified cache, but adds no axes, bars, or
+      // independent range state.
       if (includeCostSummary && group.key === 'modelTokens' && debugGraphChartVisible('costSummary')) {
         items.push(debugGraphCostSummaryHtml(groupBuckets, domain));
       }
@@ -47079,9 +47021,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     oldBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
     tierBucketCounts: jsDebugGraphTiers.map(tier => [...jsDebugGraphRawBuckets.values(), ...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === tier.bucketMs).length),
     displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
-    agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
-    agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
-    agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
+    agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
     eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
@@ -47220,8 +47160,11 @@ async function prefetchJsDebugHistoryFullRetention() {
 // fixture, and diagnostic probe must build its query through this function or its
 // contract-tested python mirror (tests/browser_helpers/stats_request_shapes.py):
 // the 2026-07-14 host-metrics outage escaped because a diagnosis probe hand-rolled
-// a request WITHOUT token_resolution and validated the wrong serve path. The shared
-// goldens live in tests/fixtures/stats_request_shapes.json.
+// a request that validated the wrong serve path. The shared goldens live in
+// tests/fixtures/stats_request_shapes.json. There are NO token_* params anymore:
+// token rates and cost ride every history record of the one history stream (the
+// server still accepts the legacy params from old clients; this client never
+// sends them).
 function jsDebugStatsSampleQuery(params = {}) {
   const {
     since = 0,
@@ -47232,10 +47175,6 @@ function jsDebugStatsSampleQuery(params = {}) {
     historyResolution = 1,
     historyMaxPoints = jsDebugStatsHistoryMaxPoints,
     history = true,
-    tokenResolution = 0,
-    tokenSince = 0,
-    tokenHistoryStart = 0,
-    tokenHistoryEnd = 0,
   } = params;
   const parts = [
     `since=${encodeURIComponent(String(since))}`,
@@ -47247,12 +47186,6 @@ function jsDebugStatsSampleQuery(params = {}) {
     `history_max_points=${encodeURIComponent(String(historyMaxPoints))}`,
   ];
   if (!history) parts.push('history=0');
-  if (Number(tokenResolution) > 0) {
-    parts.push(`token_since=${encodeURIComponent(String(tokenSince))}`);
-    parts.push(`token_resolution=${encodeURIComponent(String(tokenResolution))}`);
-    parts.push(`token_history_start=${encodeURIComponent(String(tokenHistoryStart))}`);
-    parts.push(`token_history_end=${encodeURIComponent(String(tokenHistoryEnd))}`);
-  }
   return `/api/stats-sample?${parts.join('&')}`;
 }
 
@@ -47333,8 +47266,6 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
-    const tokenResolution = debugGraphAgentTokenResolution();
-    syncDebugGraphAgentTokenResolution();
     const domain = debugGraphDomain();
     const targetStart = Math.max(0, Math.floor(domain.startMs / 1000));
     const targetEnd = Math.max(targetStart + 1, Math.ceil(domain.endMs / 1000));
@@ -47378,10 +47309,6 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       historyEnd,
       historyResolution,
       history: !historyRequestSuppressed,
-      tokenResolution,
-      tokenSince: readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0),
-      tokenHistoryStart: targetStart,
-      tokenHistoryEnd: 0,
     }), {
       cache: 'no-store',
       timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
@@ -48656,7 +48583,6 @@ function setDebugSubTab(tab) {
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
   if (!jsDebugStatsPanelVisible()) return false;
-  syncDebugGraphAgentTokenResolution();
   const domain = debugGraphDomain();
   const requestedStartSeconds = Math.max(0, Math.floor(domain.startMs / 1000));
   const requestedDomainEndSeconds = Math.max(requestedStartSeconds + 1, Math.ceil(domain.endMs / 1000));
@@ -48690,7 +48616,6 @@ function setDebugGraphRange(value, {render = true} = {}) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
-  syncDebugGraphAgentTokenResolution();
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));

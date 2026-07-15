@@ -8,6 +8,7 @@ fixture can silently drift from what the browser actually sends again."""
 import json
 from pathlib import Path
 
+from tests.browser_helpers.stats_request_shapes import legacy_reader_history_request
 from tests.browser_helpers.stats_request_shapes import reader_history_request
 from tests.browser_helpers.stats_request_shapes import stats_sample_query
 from tests.browser_helpers.stats_request_shapes import token_resolution_for_range
@@ -20,9 +21,7 @@ def _mirror_params(params: dict) -> dict:
         "since": "since", "clientId": "client_id", "tokenConsumer": "token_consumer",
         "historyStart": "history_start", "historyEnd": "history_end",
         "historyResolution": "history_resolution", "historyMaxPoints": "history_max_points",
-        "history": "history", "tokenResolution": "token_resolution",
-        "tokenSince": "token_since", "tokenHistoryStart": "token_history_start",
-        "tokenHistoryEnd": "token_history_end",
+        "history": "history",
     }
     return {mapping[key]: value for key, value in params.items()}
 
@@ -33,10 +32,21 @@ def test_python_mirror_matches_every_client_golden_query():
         assert stats_sample_query(**_mirror_params(case["params"])) == case["query"], case["name"]
 
 
-def test_reader_request_shapes_match_the_goldens_including_token_resolution():
+def test_client_queries_carry_no_legacy_token_params():
+    """ONE history stream: current clients never send the retired compact
+    token-stream params. The server still ACCEPTS them from old clients
+    (legacy compat, retired in a later release), but no golden — and therefore
+    no runtime query — may reintroduce them."""
+    for case in GOLDENS["cases"]:
+        for param in ("token_since=", "token_resolution=", "token_history_start=", "token_history_end="):
+            assert param not in case["query"], f"{case['name']}: legacy token param {param!r} returned to the client wire"
+
+
+def test_reader_request_shapes_match_the_goldens_without_token_params():
     """The reader dialect is `start`/`end`/`resolution_seconds`/`max_points` — produced by
     the REAL web-layer translator, never hand-mapped wire names (a hand-mapped
-    `history_*` dict silently queries the whole unwindowed store)."""
+    `history_*` dict silently queries the whole unwindowed store). Token detail
+    rides every record, so the translated request carries no live token selection."""
     now = int(GOLDENS["nowSeconds"])
     checked = 0
     for case in GOLDENS["cases"]:
@@ -46,11 +56,28 @@ def test_reader_request_shapes_match_the_goldens_including_token_resolution():
         produced = reader_history_request(case["rangeSeconds"], now, client_id="golden-client")
         assert produced == expected, case["name"]
         assert "history_start" not in produced and produced["start"] == now - case["rangeSeconds"], case["name"]
+        assert produced["token_resolution_seconds"] == 0, case["name"]
         checked += 1
     assert checked >= 9
 
 
-def test_token_resolution_rule_matches_the_client_tiers():
+def test_legacy_reader_request_still_builds_the_old_client_shape():
+    """The server keeps serving old clients (never-hard-gate): the legacy request
+    builder produces the pre-single-stream shape, token params included, through
+    the REAL translator. Retire together with the server's legacy path."""
+    now = int(GOLDENS["nowSeconds"])
+    legacy = legacy_reader_history_request(24 * 3600, now)
+    assert legacy["token_resolution_seconds"] == 300
+    assert legacy["token_history_start"] == now - 24 * 3600
+    assert legacy["token_history_end"] == 0
+    short = legacy_reader_history_request(3600, now)
+    assert short["token_resolution_seconds"] == 0
+
+
+def test_token_display_floor_rule_matches_the_client_tiers():
+    """token_resolution_for_range is the token charts' DISPLAY FLOOR mirror
+    (debugGraphAgentTokenResolution) — no longer a wire parameter for current
+    clients, still the legacy-compat resolution an old client would send."""
     assert token_resolution_for_range(300) == 0
     assert token_resolution_for_range(3600) == 0
     assert token_resolution_for_range(4 * 3600 - 1) == 0

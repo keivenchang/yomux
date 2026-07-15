@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.browser_helpers.stats_request_shapes import legacy_reader_history_request
 from tests.browser_helpers.stats_request_shapes import reader_history_request
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
@@ -2983,58 +2984,147 @@ def test_coverage_soak_every_range_window_serves_disjoint(tmp_path):
     store.close()
 
 
+def _seed_graduated_host_and_token_store(service, now: int) -> None:
+    """Graduated history like the real retention: coarse old tiers through fine
+    recent ones, every bucket carrying all three host families plus token rates
+    and cost detail."""
+    sequence = 0
+    for span_start, span_end, step in (
+        (now - 24 * 3600, now - 12 * 3600, 600),
+        (now - 12 * 3600, now - 8 * 3600, 300),
+        (now - 8 * 3600, now - 4 * 3600, 120),
+        (now - 4 * 3600, now - 1800, 60),
+        (now - 1800, now, 10),
+    ):
+        for start in range(span_start, span_end, step):
+            sequence += 1
+            bucket = stats_store.empty_bucket(start, step)
+            bucket.update({
+                "sequence": sequence, "server_sequence": sequence,
+                "cpu_total_percent": 20.0, "cpu_count": 1.0,
+                "tokens_per_agent_total": 120.0, "agent_token_samples": 1.0,
+            })
+            bucket["agent_token_rates"] = {"s|0|codex": {"label": "s:0", "total": 120.0, "samples": 1.0, "tokens": 120.0, "seconds": 60.0, "source": "transcript", "model_rates": {}}}
+            bucket["cost_summary"] = {"components": [{
+                "event_id": f"seed-{sequence}", "provider": "openai", "model": "gpt-5.6",
+                "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens",
+                "quantity": 30, "count": 1, "priced": True, "telemetry_complete": True,
+            }]}
+            bucket["host_metrics"] = {
+                "system_memory_used_total_bytes": 48e9,
+                "system_memory_capacity_total_bytes": 64e9,
+                "system_memory_count": 1.0,
+                "service_load": {"web:8881": {"label": "web", "cpu_total_percent": 12.0, "cpu_samples": 1.0, "rss_total_bytes": 2e8, "rss_samples": 1.0}},
+                "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_total_percent": 0.0, "memory_used_total_bytes": 2.9e9, "memory_capacity_total_bytes": 51.5e9, "samples": 1.0}},
+            }
+            service.store.upsert_bucket(bucket)
+
+
 def test_host_metrics_survive_history_at_every_range_with_the_real_client_request_shape(tmp_path):
     """Regression for the blank Server Load / System memory / GPU charts at >= 4h ranges
-    (screenshots 012/013, 2026-07-14): ranges that use the separate compact token stream send
-    token_resolution > 0, which sets include_agent_tokens=False — and BOTH the display-bucket
-    merge and the record encoder gated host_metrics on that flag, silently stripping every
-    host family from wide-range history. Host metrics have no other delivery path, so they
-    must ride every history record regardless of agent-token slimming. This test uses the
-    REAL request shape per range (token_resolution set exactly as the client sends it); the
-    earlier diagnosis missed the bug by probing without token_resolution."""
+    (screenshots 012/013, 2026-07-14): the retired compact-token-stream slimming once gated
+    host_metrics, silently stripping every host family from wide-range history. Host metrics
+    have no other delivery path, so they ride every history record. Since the single-stream
+    cutover (2026-07) the token-slimming contract INVERTED for current clients: token detail
+    (scalars, rates, cost summary) ALSO rides every record at every range — the client sends
+    no token params and there is no separate token payload. This test uses the REAL request
+    shape per range from the ONE contract-tested mirror (never hand-rolled — a hand-rolled
+    probe is how the original bug escaped diagnosis)."""
     now = int(time.time() // 600 * 600)
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     try:
-        sequence = 0
-        # Graduated history like the real retention: coarse old tiers through fine recent ones,
-        # every bucket carrying all three host families.
-        for span_start, span_end, step in (
-            (now - 24 * 3600, now - 8 * 3600, 600),
-            (now - 8 * 3600, now - 4 * 3600, 120),
-            (now - 4 * 3600, now - 1800, 60),
-            (now - 1800, now, 10),
-        ):
-            for start in range(span_start, span_end, step):
-                sequence += 1
-                bucket = stats_store.empty_bucket(start, step)
-                bucket.update({"sequence": sequence, "server_sequence": sequence, "cpu_total_percent": 20.0, "cpu_count": 1.0})
-                bucket["host_metrics"] = {
-                    "system_memory_used_total_bytes": 48e9,
-                    "system_memory_capacity_total_bytes": 64e9,
-                    "system_memory_count": 1.0,
-                    "service_load": {"web:8881": {"label": "web", "cpu_total_percent": 12.0, "cpu_samples": 1.0, "rss_total_bytes": 2e8, "rss_samples": 1.0}},
-                    "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_total_percent": 0.0, "memory_used_total_bytes": 2.9e9, "memory_capacity_total_bytes": 51.5e9, "samples": 1.0}},
-                }
-                service.store.upsert_bucket(bucket)
-
-        # The exact per-range request shapes the browser sends, built through the ONE
-        # contract-tested request-shape mirror (never hand-rolled — a hand-rolled probe
-        # without token_resolution is how this bug originally escaped diagnosis).
+        _seed_graduated_host_and_token_store(service, now)
         for range_seconds in (1800, 3600, 4 * 3600, 8 * 3600, 24 * 3600):
             request = reader_history_request(range_seconds, now)
-            token_resolution = request.get("token_resolution", 0)
+            assert not request.get("token_resolution_seconds"), "current clients never send token params"
             history = service._encoded_history(request)
             records = history.get("records", [])
             assert records, f"range {range_seconds}s returned no records"
+            assert "agent_token_history" not in history, f"range {range_seconds}s served the legacy token side-stream without being asked"
             with_memory = sum(1 for record in records if (record.get("host_metrics") or {}).get("system_memory_count", 0) > 0)
             with_service = sum(1 for record in records if (record.get("host_metrics") or {}).get("service_load"))
             with_gpu = sum(1 for record in records if (record.get("host_metrics") or {}).get("gpu_devices"))
+            with_tokens = sum(1 for record in records if (record.get("tokens_per_agent_total") or 0) > 0 and record.get("agent_token_rates"))
+            with_cost = sum(1 for record in records if (record.get("cost_summary") or {}).get("components"))
             floor = int(len(records) * 0.9)  # the live edge bucket may be partial
-            assert with_memory >= floor, f"range {range_seconds}s tr={token_resolution}: memory in {with_memory}/{len(records)}"
-            assert with_service >= floor, f"range {range_seconds}s tr={token_resolution}: service_load in {with_service}/{len(records)}"
-            assert with_gpu >= floor, f"range {range_seconds}s tr={token_resolution}: gpu in {with_gpu}/{len(records)}"
-            token_records = sum(1 for record in records if (record.get("tokens_per_agent_total") or 0) > 0 or record.get("agent_token_rates"))
-            if token_resolution:
-                assert token_records == 0, f"range {range_seconds}s: token slimming must still apply (got {token_records})"
+            assert with_memory >= floor, f"range {range_seconds}s: memory in {with_memory}/{len(records)}"
+            assert with_service >= floor, f"range {range_seconds}s: service_load in {with_service}/{len(records)}"
+            assert with_gpu >= floor, f"range {range_seconds}s: gpu in {with_gpu}/{len(records)}"
+            assert with_tokens >= floor, f"range {range_seconds}s: token detail in {with_tokens}/{len(records)} (must ride every record now)"
+            assert with_cost >= floor, f"range {range_seconds}s: cost summary in {with_cost}/{len(records)} (must ride every record now)"
+
+        # LEGACY COMPAT (never-hard-gate; retire with the server path): an OLD client
+        # still sending token_resolution > 0 keeps the pre-cutover wire — slimmed main
+        # records plus the separate agent_token_history payload.
+        legacy = service._encoded_history(legacy_reader_history_request(24 * 3600, now))
+        assert legacy["agent_token_history"]["records"], "legacy clients lost the compact token stream"
+        assert all("agent_token_rates" not in record and "cost_summary" not in record for record in legacy["records"]), "legacy main records must stay slimmed"
+        assert all("host_metrics" in record for record in legacy["records"]), "legacy records must keep host metrics"
+    finally:
+        service.store.close()
+
+
+def test_token_detail_12_to_24h_band_serves_at_the_600s_tier_like_the_legacy_stream(tmp_path):
+    """DOCUMENTED TRADEOFF of the single-stream cutover: token bars in the 12-24h band
+    render at the 600s retention tier. This is NOT a regression — the legacy compact
+    token stream's 300s request was only a floor (`effective_resolution =
+    max(requested, retained)`), and the durable tiers retain only 600s buckets past
+    12h, so the old stream really served 600s there too. This test proves BOTH: the
+    unified records carry token detail at 600s in that band, and the still-served
+    legacy stream yields the same 600s records (nothing finer was lost)."""
+    now = int(time.time() // 600 * 600)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        _seed_graduated_host_and_token_store(service, now)
+        history = service._encoded_history(reader_history_request(24 * 3600, now))
+        old_band = [record for record in history["records"] if now - int(record["start"]) > 12 * 3600]
+        assert old_band, "the 24h response covers the 12-24h band"
+        assert {int(record["duration"]) for record in old_band} == {600}, "12-24h unified records serve at the 600s tier"
+        assert all(record.get("agent_token_rates") and (record.get("cost_summary") or {}).get("components") for record in old_band), \
+            "12-24h unified records must still carry token rates and cost detail"
+        # The 8-12h band retains 300s buckets, and the single stream serves them at
+        # the retained tier — as fine as anything the legacy stream ever returned.
+        mid_band = [record for record in history["records"] if 8 * 3600 < now - int(record["start"]) <= 12 * 3600]
+        assert mid_band and max(int(record["duration"]) for record in mid_band) <= 600
+
+        legacy = service._encoded_history(legacy_reader_history_request(24 * 3600, now))
+        legacy_old_band = [record for record in legacy["agent_token_history"]["records"] if now - int(record["start"]) > 12 * 3600]
+        assert legacy_old_band, "the legacy stream covers the 12-24h band"
+        assert {int(record["duration"]) for record in legacy_old_band} == {600}, \
+            "the legacy compact stream serves the same 600s tier there — its 300s request was a floor, not a guarantee"
+    finally:
+        service.store.close()
+
+
+def test_agent_token_rates_fold_beyond_24_agents_into_one_other_row_preserving_totals(tmp_path):
+    """BOUND: a record carrying more than 24 agents folds the smallest into one
+    aggregate `other` row so the 24h single-stream payload stays within budget.
+    Totals (scalars, billable dimensions, model rates) are preserved exactly."""
+    now = int(time.time() // 600 * 600)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        agent_count = 30
+        bucket = stats_store.empty_bucket(now - 600, 60)
+        bucket.update({"sequence": 1, "server_sequence": 1, "cpu_total_percent": 20.0, "cpu_count": 1.0, "tokens_per_agent_total": 465.0, "agent_token_samples": 1.0})
+        bucket["agent_token_rates"] = {
+            f"s|{index}|codex": {"label": f"s:{index}", "total": float(index + 1), "samples": 1.0, "tokens": float(index + 1), "seconds": 60.0, "source": "transcript",
+                                 "model_rates": {"gpt-5.6": {"label": "gpt-5.6", "total": float(index + 1), "samples": 1.0, "tokens": float(index + 1), "seconds": 60.0}}}
+            for index in range(agent_count)
+        }
+        service.store.upsert_bucket(bucket)
+        history = service._encoded_history(reader_history_request(1800, now))
+        record = next(record for record in history["records"] if record.get("agent_token_rates"))
+        rates = record["agent_token_rates"]
+        assert len(rates) == statsd.STATS_AGENT_TOKEN_RATES_MAX_AGENTS, f"got {len(rates)} rows"
+        other = rates[-1]
+        assert other["key"] == "other" and other["source"] == "fold"
+        folded_count = agent_count - (statsd.STATS_AGENT_TOKEN_RATES_MAX_AGENTS - 1)
+        assert other["label"] == f"other ({folded_count} agents)"
+        assert sum(row["total"] for row in rates) == sum(range(1, agent_count + 1))
+        assert sum(row["tokens"] for row in rates) == sum(range(1, agent_count + 1))
+        assert sum((row["model_rates"].get("gpt-5.6") or {}).get("total", 0) for row in rates) == sum(range(1, agent_count + 1))
+        # The kept rows are the LARGEST agents; the fold row aggregates the smallest.
+        kept_keys = {row["key"] for row in rates if row["key"] != "other"}
+        assert kept_keys == {f"s|{index}|codex" for index in range(agent_count - (statsd.STATS_AGENT_TOKEN_RATES_MAX_AGENTS - 1), agent_count)}
     finally:
         service.store.close()

@@ -1,13 +1,17 @@
-"""WIRE PARITY: the family-manifest refactor must not change one wire byte.
+"""WIRE PARITY: the exact YO!stats wire bytes are pinned per request shape.
 
 tests/fixtures/stats_wire_parity.json pins, for every request shape in
-tests/fixtures/stats_request_shapes.json (the Phase 0a contract-tested goldens),
-the sha256/length/record-count of the exact JSON wire bytes `_encoded_history`
-produced BEFORE the Phase 1 family-manifest refactor — captured with the
-ORIGINAL per-flag code path (`include_agent_tokens` field branching,
-`merge_agent_details`/`merge_cost_summary` booleans) on a deterministic fixture
-store (the golden-pipeline seeder plus detail-rich token/cost/client/process
-records). The manifest path must reproduce those bytes exactly.
+tests/fixtures/stats_request_shapes.json (the contract-tested goldens) PLUS the
+legacy old-client shapes (token_resolution > 0), the sha256/length/record-count
+of the exact JSON wire bytes `_encoded_history` produces on a deterministic
+fixture store (the golden-pipeline seeder plus detail-rich
+token/cost/client/process records).
+
+Captured 2026-07 for the ONE-history-stream cutover (Phase 2): current clients
+send NO token_* params and receive token rates + cost_summary inline on every
+history record; the legacy shapes keep receiving the pre-cutover slimmed
+records plus the separate `agent_token_history` payload until that compat path
+is retired.
 
 The fixture store and `nowSeconds` are fully deterministic, so any hash drift
 is a REAL wire change. Regenerate ONLY for an intentional wire change, in the
@@ -22,6 +26,8 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.browser_helpers.stats_request_shapes import legacy_reader_history_request
+from tests.test_stats_golden_pipeline import seed_detail_samples
 from tests.test_stats_golden_pipeline import seed_real_store
 from yolomux_lib import statsd
 
@@ -50,65 +56,16 @@ class _FrozenPricingCatalog:
         )
 
 
-def _usage_atom(event_id: str, tmux_key: str, direction: str, quantity: int, *, timestamp: int, model: str = "gpt-5.6", cache_role: str = "none") -> dict:
-    session, window, kind = tmux_key.split("|")
-    return {
-        "event_id": event_id,
-        "timestamp": timestamp,
-        "source": "rollout",
-        "provider": "openai",
-        "model": model,
-        "direction": direction,
-        "modality": "text",
-        "cache_role": cache_role,
-        "unit": "tokens",
-        "quantity": quantity,
-        "telemetry_complete": True,
-        "tmux_key": tmux_key,
-        "tmux_label": f"{session}:{window}",
-        "tmux_session": session,
-        "tmux_window": window,
-        "tmux_window_label": window,
-        "agent_kind": kind,
-    }
-
-
 def _seed_parity_service(tmp_path, now: int):
     service = statsd.PersistentStatsService(
         tmp_path / "statsd.sock", tmp_path / "stats.sqlite3", pricing_catalog=_FrozenPricingCatalog()
     )
     seed_real_store(service, now)
-    # Detail-rich samples at a near, mid, and far age so EVERY encode path —
+    # Detail-rich samples (shared with the golden pipeline) so EVERY encode path —
     # agent token rates, model rates, priced + unpriced cost components, browser
     # client aggregates, and per-process CPU — has real data in the ranges the
-    # request shapes read, on both sides of the token-stream cutover (>= 4h).
-    for index, offset in enumerate((900, 2 * 3600 + 30, 10 * 3600 + 90)):
-        sample_time = now - offset
-        service.merge_server_records([{
-            "time": sample_time,
-            "tokens_per_agent_total": 35 + index,
-            "agent_token_samples": 1,
-            "agent_token_rates": [
-                {"key": "s|0|codex", "label": "s:0", "total": 30, "samples": 1, "tokens": 30, "seconds": 60,
-                 "model_rates": {"gpt-5.6": {"label": "gpt-5.6", "total": 30, "samples": 1, "tokens": 30, "seconds": 60}}},
-                {"key": "s|2|claude", "label": "s:2", "total": 5 + index, "samples": 1, "tokens": 5 + index, "seconds": 60},
-            ],
-            "usage_atoms": [
-                _usage_atom(f"parity-{index}-input", "s|0|codex", "input", 100 + index, timestamp=sample_time),
-                _usage_atom(f"parity-{index}-cache", "s|0|codex", "input", 20, timestamp=sample_time, cache_role="read"),
-                _usage_atom(f"parity-{index}-output", "s|0|codex", "output", 30, timestamp=sample_time),
-                _usage_atom(f"parity-{index}-unpriced", "s|2|claude", "output", 9, timestamp=sample_time, model="unpriced-model"),
-            ],
-            "process": {"id": f"yolomux:{8881 + index}", "label": f"web:{8881 + index}", "pid": 4000 + index, "port": 8881 + index, "started_at": float(now - 86_000), "cpu_percent": 12.5, "cpu_count": 1},
-        }], now=sample_time)
-        service.merge_records([{
-            "time": sample_time,
-            "api_count": 3 + index,
-            "sse_count": 2,
-            "latency_total_ms": 120 + index,
-            "latency_count": 3,
-            "bandwidth_bytes": 4096,
-        }], client_id="golden-client", now=sample_time)
+    # request shapes read.
+    seed_detail_samples(service, now)
     return service
 
 
@@ -122,17 +79,28 @@ def _sha256(payload) -> str:
     return hashlib.sha256(_wire_bytes(payload)).hexdigest()
 
 
-def _encode_all_cases(service) -> dict:
+def _parity_requests(now: int) -> list[tuple[str, dict]]:
+    """Every pinned request: the client goldens (no token params) plus the
+    LEGACY old-client shapes for each range that used the compact token stream
+    (retire with the server's legacy path)."""
     shapes = json.loads(SHAPES_PATH.read_text(encoding="utf-8"))
+    requests = [
+        (case["name"], dict(case["readerRequest"]))
+        for case in shapes["cases"]
+        if isinstance(case.get("readerRequest"), dict)
+    ]
+    for range_seconds in (4 * 3600, 8 * 3600, 16 * 3600, 24 * 3600):
+        requests.append((f"legacy-token-stream-{range_seconds}s", legacy_reader_history_request(range_seconds, now, client_id="golden-client")))
+    return requests
+
+
+def _encode_all_cases(service, now: int) -> dict:
     cases = {}
-    for case in shapes["cases"]:
-        request = case.get("readerRequest")
-        if not isinstance(request, dict):
-            continue
+    for name, request in _parity_requests(now):
         payload = service._encoded_history(dict(request))
         records = payload.get("records") or []
-        assert records, f"request shape {case['name']!r} produced no records — the parity capture would be vacuous"
-        cases[case["name"]] = {
+        assert records, f"request shape {name!r} produced no records — the parity capture would be vacuous"
+        cases[name] = {
             "sha256": _sha256(payload),
             "bytes": len(_wire_bytes(payload)),
             "records": len(records),
@@ -143,37 +111,41 @@ def _encode_all_cases(service) -> dict:
     return cases
 
 
-def test_encoded_history_wire_bytes_match_the_pre_manifest_capture(tmp_path):
+def test_encoded_history_wire_bytes_match_the_single_stream_capture(tmp_path):
     shapes = json.loads(SHAPES_PATH.read_text(encoding="utf-8"))
     now = int(shapes["nowSeconds"])
     service = _seed_parity_service(tmp_path, now)
     try:
-        cases = _encode_all_cases(service)
+        cases = _encode_all_cases(service, now)
 
-        # Field-group behavior spec (not just hashes): the token-stream groups are
-        # slimmed from main records exactly when the compact token stream carries
-        # them, and host metrics ride EVERY record regardless.
+        # Field-group behavior spec (not just hashes): ONE history stream — every
+        # record of every current-client shape carries host metrics AND token
+        # detail (rates, cost, token scalars); the separate agent_token_history
+        # payload appears ONLY for the legacy old-client shapes, which also keep
+        # the pre-cutover slimmed main records.
         inline_rates_seen = False
-        for case in json.loads(SHAPES_PATH.read_text(encoding="utf-8"))["cases"]:
-            request = case.get("readerRequest")
-            if not isinstance(request, dict):
-                continue
+        for name, request in _parity_requests(now):
             payload = service._encoded_history(dict(request))
-            token_streamed = bool(request.get("token_resolution_seconds"))
-            assert cases[case["name"]]["has_agent_token_history"] is token_streamed
+            legacy_token_streamed = bool(request.get("token_resolution_seconds"))
+            assert cases[name]["has_agent_token_history"] is legacy_token_streamed
             for record in payload["records"]:
-                assert "host_metrics" in record, f"{case['name']}: host metrics stripped from a history record"
-                assert ("agent_token_rates" in record) is not token_streamed
-                assert ("cost_summary" in record) is not token_streamed
-                assert ("tokens_per_agent_total" in record) is not token_streamed
-            if token_streamed:
+                assert "host_metrics" in record, f"{name}: host metrics stripped from a history record"
+                assert ("agent_token_rates" in record) is not legacy_token_streamed, f"{name}: token rates wire presence"
+                assert ("cost_summary" in record) is not legacy_token_streamed, f"{name}: cost summary wire presence"
+                assert ("tokens_per_agent_total" in record) is not legacy_token_streamed, f"{name}: token scalars wire presence"
+            if legacy_token_streamed:
                 token_records = payload["agent_token_history"]["records"]
-                assert token_records, f"{case['name']}: the compact token stream is empty"
+                assert token_records, f"{name}: the legacy compact token stream is empty"
                 assert any(record.get("agent_token_rates") for record in token_records)
                 assert any(record.get("cost_summary", {}).get("components") for record in token_records)
             else:
                 inline_rates_seen = inline_rates_seen or any(record.get("agent_token_rates") for record in payload["records"])
-        assert inline_rates_seen, "no non-streamed case carried inline agent token rates — the detail seeding is broken"
+        assert inline_rates_seen, "no current-client case carried inline agent token rates — the detail seeding is broken"
+
+        # PAYLOAD BUDGET: the single-stream 24h response stays within 1.5x of the
+        # old combined history+token payload for the same range (292,920 bytes in
+        # the pre-cutover capture of this same deterministic store).
+        assert cases["fresh-range-86400s"]["bytes"] <= int(1.5 * 292_920), cases["fresh-range-86400s"]
     finally:
         service.store.close()
 
@@ -186,5 +158,5 @@ def test_encoded_history_wire_bytes_match_the_pre_manifest_capture(tmp_path):
     for name, expected in golden["cases"].items():
         assert cases[name] == expected, (
             f"wire bytes drifted for request shape {name!r}: the encoding no longer matches the "
-            f"pre-manifest capture (expected {expected}, got {cases[name]})"
+            f"pinned single-stream capture (expected {expected}, got {cases[name]})"
         )

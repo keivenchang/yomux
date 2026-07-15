@@ -4,7 +4,7 @@ Real sampler-shaped payloads (every family at its true cadence, plus a genuine m
 outage with coverage epochs around it) are ingested through the REAL statsd service into
 the REAL durable store; per-range history responses are encoded through the REAL
 `_encoded_history` using the contract-tested request shapes (Phase 0a mirror); and the
-node half (tests/golden_pipeline_render.test.js) feeds those responses to the REAL
+node half (tests/golden_pipeline_render.node.js) feeds those responses to the REAL
 client fetch machinery (pollJsDebugStatsSample -> apply -> coverage -> readiness) and
 asserts the rendered HTML per range — every family drawn, the outage kept honest.
 
@@ -39,6 +39,67 @@ def _host_metrics(step: int) -> dict:
         },
         "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_total_percent": 5.0 * samples, "memory_used_total_bytes": 2.9e9 * samples, "memory_capacity_total_bytes": 51.5e9 * samples, "samples": samples}},
     }
+
+
+def _usage_atom(event_id: str, tmux_key: str, direction: str, quantity: int, *, timestamp: int, model: str = "gpt-5.6", cache_role: str = "none") -> dict:
+    session, window, kind = tmux_key.split("|")
+    return {
+        "event_id": event_id,
+        "timestamp": timestamp,
+        "source": "rollout",
+        "provider": "openai",
+        "model": model,
+        "direction": direction,
+        "modality": "text",
+        "cache_role": cache_role,
+        "unit": "tokens",
+        "quantity": quantity,
+        "telemetry_complete": True,
+        "tmux_key": tmux_key,
+        "tmux_label": f"{session}:{window}",
+        "tmux_session": session,
+        "tmux_window": window,
+        "tmux_window_label": window,
+        "agent_kind": kind,
+    }
+
+
+def seed_detail_samples(service, now: int) -> None:
+    """Detail-rich token/cost/client/process samples at a near, mid, and far age.
+
+    Shared with tests/test_stats_wire_parity.py. Every encode path — agent token
+    rates, model rates, priced + unpriced cost components, browser client
+    aggregates, and per-process CPU — gets real data in the ranges the request
+    shapes read, so the single history stream must carry token/cost detail at
+    EVERY range for the render half to draw it.
+    """
+    for index, offset in enumerate((900, 2 * 3600 + 30, 10 * 3600 + 90)):
+        sample_time = now - offset
+        service.merge_server_records([{
+            "time": sample_time,
+            "tokens_per_agent_total": 35 + index,
+            "agent_token_samples": 1,
+            "agent_token_rates": [
+                {"key": "s|0|codex", "label": "s:0", "total": 30, "samples": 1, "tokens": 30, "seconds": 60,
+                 "model_rates": {"gpt-5.6": {"label": "gpt-5.6", "total": 30, "samples": 1, "tokens": 30, "seconds": 60}}},
+                {"key": "s|2|claude", "label": "s:2", "total": 5 + index, "samples": 1, "tokens": 5 + index, "seconds": 60},
+            ],
+            "usage_atoms": [
+                _usage_atom(f"parity-{index}-input", "s|0|codex", "input", 100 + index, timestamp=sample_time),
+                _usage_atom(f"parity-{index}-cache", "s|0|codex", "input", 20, timestamp=sample_time, cache_role="read"),
+                _usage_atom(f"parity-{index}-output", "s|0|codex", "output", 30, timestamp=sample_time),
+                _usage_atom(f"parity-{index}-unpriced", "s|2|claude", "output", 9, timestamp=sample_time, model="unpriced-model"),
+            ],
+            "process": {"id": f"yolomux:{8881 + index}", "label": f"web:{8881 + index}", "pid": 4000 + index, "port": 8881 + index, "started_at": float(now - 86_000), "cpu_percent": 12.5, "cpu_count": 1},
+        }], now=sample_time)
+        service.merge_records([{
+            "time": sample_time,
+            "api_count": 3 + index,
+            "sse_count": 2,
+            "latency_total_ms": 120 + index,
+            "latency_count": 3,
+            "bandwidth_bytes": 4096,
+        }], client_id="golden-client", now=sample_time)
 
 
 def seed_real_store(service, now: int) -> None:
@@ -102,11 +163,19 @@ def _seed_real_pipeline(tmp_path, now: int) -> dict:
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     try:
         seed_real_store(service, now)
+        seed_detail_samples(service, now)
         histories = {}
         for range_seconds in RANGES:
             history = service._encoded_history(reader_history_request(range_seconds, now, client_id="golden-pipeline"))
             records = history.get("records", [])
             assert records, f"range {range_seconds}s produced no records"
+            # ONE history stream: token and cost detail must ride the records at
+            # EVERY range (the retired compact token side-stream no longer exists
+            # for current clients), or the node half's token/cost render checks
+            # would be drawing from nothing.
+            assert any(record.get("agent_token_rates") for record in records), f"range {range_seconds}s carries no inline agent token rates"
+            assert any((record.get("cost_summary") or {}).get("components") for record in records), f"range {range_seconds}s carries no inline cost components"
+            assert "agent_token_history" not in history, f"range {range_seconds}s reintroduced the legacy token side-stream without token params"
             histories[str(range_seconds)] = history
         return histories
     finally:
@@ -127,7 +196,7 @@ def test_golden_pipeline_every_layer_boundary_serves_and_renders_every_family(tm
     payload_path = tmp_path / "golden-pipeline.json"
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
     result = subprocess.run(
-        ["node", "tests/golden_pipeline_render.test.js", str(payload_path)],
+        ["node", "tests/golden_pipeline_render.node.js", str(payload_path)],
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, f"golden pipeline render failed:\nstdout:\n{result.stdout[-4000:]}\nstderr:\n{result.stderr[-4000:]}"

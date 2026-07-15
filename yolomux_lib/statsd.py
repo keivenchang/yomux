@@ -67,6 +67,11 @@ STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
 STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 60
+# One retention schedule for EVERY family, token detail included. The 12-24h
+# band retains 600s buckets, so 12-24h token bars render at 600s — the same
+# tier the retired compact token side-stream really served there (its 300s
+# request was a floor clamped by max(requested, retained); regression:
+# tests/test_statsd.py::test_token_detail_12_to_24h_band_serves_at_the_600s_tier_like_the_legacy_stream).
 STATS_HISTORY_TIERS = (
     (STATS_HISTORY_RAW_WINDOW_SECONDS, 1),
     (STATS_HISTORY_MIDDLE_WINDOW_SECONDS, 10),
@@ -81,7 +86,11 @@ STATSD_ROLLUP_MAINTENANCE_BUDGET_SECONDS = 0.08
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
 STATS_AGENT_TOKEN_SCHEMA_VERSION = 5
-STATS_AGENT_TOKEN_HISTORY_FIELDS = stats_families.TOKEN_STREAM_BUCKET_FIELDS
+STATS_AGENT_TOKEN_HISTORY_FIELDS = stats_families.TOKEN_DETAIL_BUCKET_FIELDS
+# BOUND: a history record folds all but the top-N agents of ``agent_token_rates``
+# into one aggregate ``other`` row (totals preserved), so a many-agent host
+# cannot blow the 24h single-stream payload budget.
+STATS_AGENT_TOKEN_RATES_MAX_AGENTS = 24
 STATS_COST_COMPONENT_DIMENSION_FIELDS = (
     "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
     "root_thread_id", "agent_thread_id", "parent_thread_id", "depth", "endpoint", "tool_name",
@@ -708,7 +717,53 @@ def agent_token_rates_response(value: Any, cost_value: Any) -> list[dict[str, An
             "billable_tokens": billable_tokens,
             "billable_samples": billable_samples,
         })
-    return result
+    return _fold_agent_token_rates(result)
+
+
+def _fold_agent_token_rates(rows: list[dict[str, Any]], limit: int = STATS_AGENT_TOKEN_RATES_MAX_AGENTS) -> list[dict[str, Any]]:
+    """Fold all but the top-``limit`` agents into one ``other`` row.
+
+    Token detail rides every history record of the single history stream, so a
+    record's per-agent detail must stay bounded. The kept rows are the largest
+    by billable-or-output volume; the fold row preserves every numeric total
+    (scalars, model rates, billable dimensions) so chart sums and Σ-displayed
+    reconciliation stay exact.
+    """
+    if len(rows) <= limit:
+        return rows
+
+    def volume(row: dict[str, Any]) -> float:
+        billable_all = float((row.get("billable_tokens") or {}).get("all") or 0.0)
+        return max(billable_all, float(row.get("tokens") or 0.0), float(row.get("total") or 0.0))
+
+    ranked = sorted(rows, key=lambda row: (-volume(row), str(row.get("key") or "")))
+    kept, folded = ranked[: limit - 1], ranked[limit - 1:]
+    other = {
+        "key": "other",
+        "label": f"other ({len(folded)} agents)",
+        "total": 0.0,
+        "samples": 0.0,
+        "tokens": 0.0,
+        "seconds": 0.0,
+        "source": "fold",
+        "model_rates": {},
+        "billable_available": any(row.get("billable_available") for row in folded),
+        "billable_tokens": {"input": 0.0, "cache_read": 0.0, "cache_write": 0.0, "all": 0.0},
+        "billable_samples": {"input": 0, "cache_read": 0, "cache_write": 0, "all": 0},
+    }
+    for row in folded:
+        for field in ("total", "samples", "tokens", "seconds"):
+            other[field] += float(row.get(field) or 0.0)
+        for dimension in ("input", "cache_read", "cache_write", "all"):
+            other["billable_tokens"][dimension] += float((row.get("billable_tokens") or {}).get(dimension) or 0.0)
+            other["billable_samples"][dimension] += int((row.get("billable_samples") or {}).get(dimension) or 0)
+        for model, values in (row.get("model_rates") or {}).items():
+            if not isinstance(values, dict):
+                continue
+            merged = other["model_rates"].setdefault(str(model), {"label": str(values.get("label") or model), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0})
+            for field in ("total", "samples", "tokens", "seconds"):
+                merged[field] = float(merged.get(field) or 0.0) + float(values.get(field) or 0.0)
+    return sorted(kept, key=lambda row: str(row.get("key") or "")) + [other]
 
 
 def _tmux_usage_fields_from_row(row: dict[str, Any], *, key: str = "", label: str = "", kind: str = "") -> dict[str, str]:
@@ -2835,9 +2890,9 @@ class PersistentStatsService:
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
         # Host metrics ride EVERY history record: they are an 'always' wire
         # group in the manifest because Server Load / System memory / GPU have
-        # no other delivery path, while token rates and cost have the separate
-        # compact token stream at wide ranges. Gating them on the token
-        # slimming blanked those charts at every range >= 4h (2026-07-14).
+        # no other delivery path. Gating them on the retired token slimming
+        # blanked those charts at every range >= 4h (2026-07-14). Token detail
+        # now rides every record too; only the legacy compat path slims it.
         if stats_families.FIELD_GROUP_HOST_METRICS in groups:
             record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
         return record
@@ -3001,6 +3056,11 @@ class PersistentStatsService:
         resolution = max(0, int(request.get("resolution_seconds") or 0))
         max_points = max(0, int(request.get("max_points") or 0))
         client_id = stats_history_client_id(request.get("client_id") or "")
+        # LEGACY COMPAT (retire in a later release): current clients send NO
+        # token_* params — token detail rides every history record of the ONE
+        # history stream. Old clients still send token_resolution > 0 and are
+        # served the pre-Phase-2 wire unchanged: slimmed main records plus the
+        # separate compact agent_token_history payload below.
         token_resolution = max(0, int(request.get("token_resolution_seconds", request.get("token_resolution", 0)) or 0))
         include_agent_tokens = bool(request.get("include_agent_tokens", token_resolution <= 0))
         generation = self.store.latest_sequence()
@@ -3070,10 +3130,11 @@ class PersistentStatsService:
         query_ms = (time.perf_counter() - query_started) * 1000
         if persisted_rollup:
             effective_resolution = persisted_rollup
-        # The manifest wire groups a returned record carries: 'always' groups
-        # plus, when the client did not request the separate compact token
-        # stream, the token_stream groups (rates, cost, token scalars).
-        record_field_groups = stats_families.wire_field_groups(include_token_stream=include_agent_tokens)
+        # The manifest wire groups a returned record carries: everything —
+        # token detail (rates, cost, token scalars) rides every record of the
+        # single history stream. Only the legacy compat path (an old client
+        # sending token_resolution > 0) still receives the slimmed records.
+        record_field_groups = stats_families.wire_field_groups(legacy_token_stream=not include_agent_tokens)
         include_cost_projection = stats_families.FIELD_GROUP_COST_SUMMARY in record_field_groups
         # Cost components accumulate through the incremental dimension
         # accumulator below (rebuilding a growing component list per merge is
@@ -3197,6 +3258,10 @@ class PersistentStatsService:
             "client_id": client_id,
             "usage_atom_backfill": self._usage_atom_migration_status(),
         }
+        # LEGACY COMPAT (retire in a later release): the separate compact token
+        # side-stream, served ONLY when an old client still sends
+        # token_resolution > 0. Current clients never request it — their token
+        # detail arrived inline on the records above.
         if token_resolution:
             token_request = {
                 "_internal_history": True,
@@ -3232,7 +3297,7 @@ class PersistentStatsService:
                 "sequence": token_payload["sequence"],
                 "latest_sequence": token_payload["latest_sequence"],
                 "records": [
-                    {key: record[key] for key in stats_families.TOKEN_STREAM_RECORD_KEYS}
+                    {key: record[key] for key in stats_families.LEGACY_TOKEN_STREAM_RECORD_KEYS}
                     for record in token_payload["records"]
                 ],
                 "resolution_seconds": token_request["resolution_seconds"],

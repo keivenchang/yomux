@@ -4260,7 +4260,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*display:\s*flex[\s\S]*overflow:\s*auto/.test(debugPaneCss) && /\.js-debug-chart-shell\s*\{[\s\S]*flex:\s*1 0 auto/.test(debugPaneCss) && /\.js-debug-chart-shell > \.js-debug-chart-grid\s*\{[\s\S]*grid-auto-rows:\s*minmax\(var\(--js-debug-chart-min-height\), 1fr\)[\s\S]*height:\s*100%/.test(debugPaneCss) && /\.js-debug-chart-shell > \.js-debug-chart-grid > \.js-debug-chart\s*\{[\s\S]*max-height:\s*var\(--js-debug-chart-max-height\)/.test(debugPaneCss), 'YO!stats grows chart cards into tall panes within shared minimum and maximum height bounds, while short panes scroll whole cards');
     assert.ok(/\.js-debug-hover-tooltip\s*\{[\s\S]*position:\s*absolute/.test(debugPaneCss) && debugPaneSource.includes('data-js-debug-hover-tooltip') && debugPaneSource.includes('debugGraphSetHoverTooltip'), 'YO!stats chart hover shows a contained, chart-owned max-and-time tooltip beside the cursor');
     assert.ok(debugPaneSource.includes("data.group.key === 'activity'") && debugPaneSource.includes("item.key !== 'idleAgents'") && debugPaneSource.includes('debugGraphHoverValueAtTime'), 'YO!stats hover reads the plotted value at the cursor and excludes idle agents from the Agent-status total');
-    assert.ok(debugPaneSource.includes('function syncDebugGraphAgentTokenResolution()') && debugPaneSource.includes('if (resolutionSeconds === 0) resetJsDebugHistoryReadiness()'), 'YO!stats reloads token-inclusive normal history when returning from compact token history to a short range');
+    // ONE history stream: the compact token side-stream machinery stays deleted; token
+    // charts read the unified cache with debugGraphAgentTokenResolution as a display floor.
+    for (const retired of ['jsDebugGraphAgentTokenBuckets', 'jsDebugStatsAgentTokenSequence', 'jsDebugStatsAgentTokenResolutionSeconds', 'jsDebugStatsAgentTokenSchemaVersion', 'debugGraphApplyServerAgentTokenHistory', 'resetDebugGraphAgentTokenHistory', 'syncDebugGraphAgentTokenResolution', 'token_resolution', 'token_since', 'token_history_start', 'token_history_end']) {
+      assert.equal(debugPaneSource.includes(retired), false, `YO!stats retired compact-token-stream symbol ${retired} stays deleted`);
+    }
+    assert.ok(/function debugGraphAgentTokenDisplayBuckets\([\s\S]{0,400}debugGraphAgentTokenResolution\(nowMs\)[\s\S]{0,200}debugGraphDisplayBuckets\(/.test(debugPaneSource), 'YO!stats token charts read the unified bucket cache with the per-range display floor');
     assert.equal(debugPaneSource.includes('${debugGraphLegendHtml(legendItems)}'), false, 'YO!stats does not append a redundant all-series legend after the chart grid');
     const debugGraphLegendSource = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphLegendHtml'), debugPaneSource.indexOf('function debugGraphAxisHtml'));
     assert.equal(debugGraphLegendSource.includes('debugGraphValueText'), false, 'YO!stats chart legends show labels only, without current values');
@@ -4872,31 +4877,30 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
   });
 
-  test('YO!stats uses server-aggregated token points for wide time ranges', () => {
+  test('YO!stats renders wide-range token bars from the unified history stream at the coarse display floor', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(86400);
+    // ONE history stream: wide-range token detail arrives INLINE on ordinary
+    // history records (no agent_token_history side payload exists anymore).
     api.debugGraphApplyServerHistoryForTest({
       sequence: 40,
-      records: [{start: Math.floor(now / 1000), duration: 1, sequence: 40, cpu_total_percent: 1, cpu_count: 1}],
-      agent_token_history: {
-        sequence: 40,
-        resolution_seconds: 300,
-        snapshot: true,
-        records: Array.from({length: 12}, (_item, index) => ({
-          start: Math.floor((now - (60 * 60 * 1000) + index * 300000) / 1000 / 300) * 300,
-          duration: 300,
-          sequence: 29 + index,
-          agent_token_samples: 1,
-          agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 10, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
-        })),
-      },
+      records: Array.from({length: 12}, (_item, index) => ({
+        start: Math.floor((now - (60 * 60 * 1000) + index * 300000) / 1000 / 300) * 300,
+        duration: 300,
+        sequence: 29 + index,
+        cpu_total_percent: 1,
+        cpu_count: 1,
+        agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 10, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
+      })),
     });
     const summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.agentTokenResolutionSeconds, 300, '24-hour token history retains the server-selected five-minute resolution');
-    assert.equal(summary.agentTokenBuckets, 12, 'wide token history stores only server-aggregated points');
-    assert.equal(api.debugGraphAgentTokenDisplayBucketsForTest(now).length, 12, 'Agent tokens/min chart reads the downsampled server point series');
+    assert.equal(summary.agentTokenDisplayFloorSeconds, 300, 'the 24-hour token charts keep the legacy five-minute display floor');
+    const displayBuckets = api.debugGraphAgentTokenDisplayBucketsForTest(now);
+    assert.ok(displayBuckets.length >= 6, `Agent tokens/min chart reads the unified bucket cache (got ${displayBuckets.length} buckets)`);
+    assert.ok(displayBuckets.every(bucket => bucket.durationMs >= 300000), 'wide-range token buckets never render finer than the display floor');
     assert.ok(/data-js-debug-displayed-token-sum="1200"[^>]*>\(1\.2k, Σ displayed\)<\/span>/.test(api.debugPanelHtmlForTest()), 'displayed token sum adds all retained token deltas and uses the shared compact formatter');
   });
 
@@ -4905,53 +4909,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const now = Date.now();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(4 * 60 * 60);
+    // Token detail arrives inline on the ordinary two-minute history record.
     api.debugGraphApplyServerHistoryForTest({
       sequence: 41,
       records: [{
-        start: Math.floor(now / 1000),
-        duration: 1,
+        start: Math.floor((now - 120000) / 1000 / 120) * 120,
+        duration: 120,
         sequence: 41,
         cpu_total_percent: 1,
         cpu_count: 1,
+        agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
       }],
-      agent_token_history: {
-        sequence: 41,
-        resolution_seconds: 120,
-        snapshot: true,
-        records: [{
-          start: Math.floor((now - 120000) / 1000 / 120) * 120,
-          duration: 120,
-          sequence: 41,
-          agent_token_samples: 1,
-          agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
-        }],
-      },
     });
     const html = api.debugPanelHtmlForTest();
     assert.ok(/data-js-debug-axis-max="agentTokens"[^>]*>100</.test(html), '100 tokens over one sampled minute stays 100 tokens/min after the server stores it in a two-minute history bucket');
-  });
-
-  test('YO!stats clears incompatible token history when the server schema changes', () => {
-    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
-    const now = Date.now();
-    api.clearJsDebugEventsForTest();
-    api.debugGraphApplyServerHistoryForTest({
-      sequence: 42,
-      agent_token_schema_version: 1,
-      records: [{
-        start: Math.floor(now / 1000),
-        duration: 1,
-        sequence: 42,
-        agent_token_samples: 1,
-        agent_token_rates: [{key: 'stale|0|codex', label: 'stale:0:codex', total: 500, samples: 1, tokens: 500, seconds: 60, source: 'transcript'}],
-      }],
-    });
-    assert.ok(api.debugPanelHtmlForTest().includes('stale:0:codex'), 'the initial token schema renders its token series');
-
-    api.debugGraphApplyServerHistoryForTest({sequence: 43, agent_token_schema_version: 2, records: []});
-
-    assert.equal(api.debugGraphBucketSummaryForTest(now).agentTokenSchemaVersion, 2, 'the client tracks the replacement token schema');
-    assert.equal(api.debugPanelHtmlForTest().includes('stale:0:codex'), false, 'a schema change removes stale token bars and legend entries');
   });
 
   test('YO!stats split charts render deterministic Y-axis max labels with units', () => {

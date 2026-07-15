@@ -3,10 +3,14 @@
 `GET /api/stats-sample` returns the current server sample and optional durable
 history. Integer query parameters are non-negative; `history_resolution` is
 at most 86,400 seconds and `history_max_points` at most 100,000. `history=0`
-returns no history. `token_*` parameters select independently cursorable
-Agent/Model token history. The GET reads the latest cached CPU sample and
-durable history; it never invokes CPU, Agent Status, GPU, memory, or transcript
-collectors in the request thread.
+returns no history. There is ONE history stream: token rates and the cost
+summary ride every history record, and current clients send no `token_*`
+parameters. The server still ACCEPTS the legacy `token_*` parameters and, when
+an old client sends `token_resolution > 0`, serves the pre-cutover wire
+(slimmed records plus the separate `agent_token_history` payload) — a compat
+path scheduled for retirement in a later release. The GET reads the latest
+cached CPU sample and durable history; it never invokes CPU, Agent Status,
+GPU, memory, or transcript collectors in the request thread.
 
 `POST /api/stats-history` accepts at most 1,000 records and 128 KiB.
 `ack_only` returns an empty record list and durable sequence, never a retained
@@ -54,13 +58,18 @@ family it declares the canonical name — identical to the
 cadence, storage fields, wire field group, delivery path, merge rule, chart
 groups, and coverage companions. Wire field groups replace the retired
 cross-family booleans (`include_agent_tokens` field branching,
-`merge_agent_details`, `merge_cost_summary`): `token_stream` groups (token
-scalars, agent token rates, cost summary) are slimmed from main history records
-exactly when the client requests the separate compact token stream, while
-`always` groups (server scalars, host metrics) are structurally non-excludable,
-so no future flag derived from one family's needs can strip an unrelated
-family. `tests/test_stats_wire_parity.py` pins the encoded wire bytes against
-the pre-manifest capture.
+`merge_agent_details`, `merge_cost_summary`): `always` groups (server scalars,
+host metrics) are structurally non-excludable, so no future flag derived from
+one family's needs can strip an unrelated family, and `token_detail` groups
+(token scalars, agent token rates, cost summary) ALSO ride every history
+record — they stay excludable only for the response-path cost merge
+optimization and for the legacy old-client compat path above. A record's
+`agent_token_rates` is bounded: beyond 24 agents the smallest fold into one
+aggregate `other` row that preserves every numeric total. Token bars in the
+12-24h band render at the 600s retention tier — the same tier the retired
+compact stream actually served there (its 300s request was a floor clamped by
+the retained resolution). `tests/test_stats_wire_parity.py` pins the encoded
+wire bytes for current-client and legacy shapes alike.
 
 The requested/available/covered bounds, `complete`, older-page facts,
 resolution, source/returned counts, and cursor facts remain as a compatibility

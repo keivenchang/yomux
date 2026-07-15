@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //
 // Node consumer half of the GOLDEN PIPELINE test (tests/test_stats_golden_pipeline.py).
+// Named .node.js (not .test.js) deliberately: it requires an argv payload path and is
+// launched ONLY by the python half, so it cannot join the layout_url.test.js shard
+// launcher that owns every standalone *.test.js shard.
 // The python half ingests REAL sampler-shaped payloads through the real statsd service
 // (durable store, coverage epochs, an outage) and encodes per-range history responses
 // through the contract-tested request shapes. This half feeds those REAL responses to
@@ -16,7 +19,7 @@ const fs = require('fs');
 
 const payloadPath = process.argv[2];
 if (!payloadPath) {
-  console.error('usage: node tests/golden_pipeline_render.test.js <payloads.json>');
+  console.error('usage: node tests/golden_pipeline_render.node.js <payloads.json>');
   process.exit(2);
 }
 const fixture = JSON.parse(fs.readFileSync(payloadPath, 'utf8'));
@@ -40,7 +43,7 @@ async function runGoldenPipelineSuite() {
       }));
     });
     api.setDateNowForTest ? api.setDateNowForTest(nowMs) : (Date.now = () => nowMs);
-    for (const key of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']) api.setDebugGraphChartVisibleForTest(key, true);
+    for (const key of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory', 'modelTokens', 'costSummary']) api.setDebugGraphChartVisibleForTest(key, true);
 
     const failures = [];
     for (const rangeSeconds of fixture.ranges) {
@@ -64,6 +67,15 @@ async function runGoldenPipelineSuite() {
       check(lineCount('gpu:gpuMemory:gpu:0') >= 1, 'GPU memory device missing');
       // Agent-status bars render (bar series, not polylines).
       check((html.match(/data-js-debug-bar-series="(workingAgents|idleAgents)"/g) || []).length >= 1, 'agent status bars missing');
+      // ONE history stream: token and cost detail ride the same response at EVERY
+      // range (the compact token side-stream is retired), so per-agent token bars,
+      // model-token bars, and a non-empty cost summary must render from it.
+      check((html.match(/data-js-debug-bar-series="agentToken:/g) || []).length >= 1, 'agent token bars missing (inline token detail lost)');
+      check((html.match(/data-js-debug-bar-series="modelToken:/g) || []).length >= 1, 'model token bars missing (inline token detail lost)');
+      const displayedTokenSum = Number((html.match(/data-js-debug-displayed-token-sum="([0-9.]+)"/) || [])[1] || 0);
+      check(displayedTokenSum > 0, `displayed token sum is ${displayedTokenSum} (inline token detail lost)`);
+      check(/data-js-debug-summary-group="costSummary"/.test(html), 'cost summary card missing');
+      check(!/est\. —/.test(html), 'cost summary shows no estimate (inline cost detail lost)');
       // The genuine mid-range outage must stay HONEST for ranges that include it: a red
       // coverage band, and no line bridging drawn through it would be caught by the band's
       // absence (the client derives gaps from the response's per-family coverage).

@@ -4,6 +4,7 @@ import json
 import time
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
+from tests.test_stats_golden_pipeline import _seed_real_pipeline
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
 
@@ -120,6 +121,8 @@ def _morning_after_protocol_history(tmp_path):
 
         histories = {}
         for range_seconds in (3600, 4 * 3600, 24 * 3600):
+            # The current client sends NO token_* params: token detail rides
+            # every history record of the one history stream.
             history = service.handle({
                 "action": "history",
                 "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
@@ -128,9 +131,6 @@ def _morning_after_protocol_history(tmp_path):
                 "resolution_seconds": 1,
                 "max_points": 6000,
                 "client_id": "morning-after-browser",
-                "token_resolution_seconds": 60,
-                "token_history_start": now - range_seconds,
-                "token_history_end": 0,
             })
             assert history["ok"] is True
             assert history["coverage"]["complete"] is (range_seconds == 3600)
@@ -245,7 +245,7 @@ def _run_morning_after_range(browser, range_seconds):
               rawBuckets: summary.rawBuckets,
               rollupBuckets: summary.rollupBuckets,
               displayBuckets: summary.displayBuckets,
-              agentTokenBuckets: summary.agentTokenBuckets,
+              tokenDetailBuckets: debugGraphAgentTokenDisplayBuckets(Date.now()).filter(bucket => Number(bucket.agentTokenSamples || 0) > 0).length,
               rangeSeconds: summary.rangeSeconds,
               resolutionSeconds: summary.resolutionSeconds,
             },
@@ -280,7 +280,9 @@ def test_morning_after_sleep_gap_protocol_history_is_honest_and_reload_idempoten
         assert result["retryButtons"] == 0 and result["errorText"] is False, result
         assert result["degradedMessages"] == [], result
         assert result["summary"]["displayBuckets"] > 0, result
-        assert result["summary"]["agentTokenBuckets"] > 0, result
+        # Token detail rides the same records (no separate token stream), so the
+        # unified token display buckets must carry samples at every range.
+        assert result["summary"]["tokenDetailBuckets"] > 0, result
         assert result["stores"]["status"] == result["stores"]["tokens"] == result["stores"]["cost"], result
         assert result["gaps"]["status"] == result["gaps"]["tokens"] == result["gaps"]["cost"], result
 
@@ -335,7 +337,7 @@ def _mixed_resolution_history(tmp_path):
                 service.store.upsert_bucket(bucket)
         for family, cadence in (("cpu", 3600),):
             service.handle({"action": "merge_server_records", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "records": [{"time": now - 3600, "_stats_coverage": {"family": family, "cadence_seconds": cadence, "epoch_id": f"e:{family}", "owner_generation": 1}}], "now": now - 3600, "compact": False, "refresh_rollups": False})
-        history = service.handle({"action": "history", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "start": now - 3600, "end": 0, "resolution_seconds": 1, "max_points": 6000, "client_id": "mixres", "token_resolution_seconds": 60, "token_history_start": now - 3600, "token_history_end": 0})
+        history = service.handle({"action": "history", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "start": now - 3600, "end": 0, "resolution_seconds": 1, "max_points": 6000, "client_id": "mixres"})
         assert history["ok"] is True
     finally:
         service.store.close()
@@ -543,8 +545,6 @@ def test_yostats_boot_smoke_fresh_open_renders_every_family_at_15m_4h_24h(browse
     range, then across 4h and 24h switches through the real poll + stale-while-revalidate
     path — never an axes-only shell. History payloads come from the real statsd service +
     encode via the contract-tested request shapes (the golden-pipeline seeder)."""
-    from tests.test_stats_golden_pipeline import _seed_real_pipeline
-
     now = int(time.time() // 600 * 600)
     histories = _seed_real_pipeline(tmp_path, now)
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")

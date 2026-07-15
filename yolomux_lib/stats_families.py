@@ -13,8 +13,8 @@ Consumers READ this table instead of hard-coding per-family special cases:
   ``empty_host_metrics``.
 - ``yolomux_lib/statsd.py`` derives the coverage companion fan-out, the merge
   field groups of ``_merge_bucket``, the wire field groups of
-  ``_record_from_bucket`` / ``_encoded_history``, and the compact token-stream
-  record keys.
+  ``_record_from_bucket`` / ``_encoded_history``, and the LEGACY compact
+  token-stream record keys (compat only; see below).
 - The client mirror ``jsDebugStatsFamilyManifest``
   (static_src/js/yolomux/83_debug_panel.js) carries the same canonical names,
   aliases, cadences, and chart-group mapping; tests/yostats_performance.test.js
@@ -32,12 +32,28 @@ booleans (``include_agent_tokens``, ``merge_agent_details``,
                    ``normalized_field_groups`` re-adds always groups to any
                    caller-provided selection, so no future flag can strip an
                    unrelated family again.
-- ``token_stream`` is slimmed from main history records exactly when the
-                   client fetches the separate compact token stream (ranges
-                   >= 4h) and is delivered there instead.
+- ``token_detail`` (token scalars, agent token rates, cost summary) ALSO rides
+                   every history record — there is ONE history stream since
+                   2026-07 (Phase 2); the client no longer requests a separate
+                   compact token side-stream. Unlike ``always`` it stays
+                   excludable for exactly two internal reasons: (a) the
+                   response-path cost merge optimization accumulates cost
+                   components once instead of per-bucket, and (b) the LEGACY
+                   compat path keeps serving the old slimmed wire plus the
+                   ``agent_token_history`` side payload to old clients that
+                   still send ``token_resolution > 0`` (retire that path in a
+                   later release; new clients never send token_* params).
 
-tests/test_stats_wire_parity.py pins the wire bytes this structure produces
-against the pre-manifest capture.
+12-24h token resolution (documented tradeoff): the durable retention tiers
+hold only 600s buckets for data older than 12h, so token bars in the 12-24h
+band render at 600s — exactly what the legacy compact stream really served
+there (its requested 300s was a floor that ``effective_resolution =
+max(requested, retained)`` clamped to the 600s tier; see
+tests/test_statsd.py::test_token_detail_12_to_24h_band_serves_at_the_600s_tier_like_the_legacy_stream).
+No per-family 300s retention was added: it would preserve nothing the old
+wire actually delivered.
+
+tests/test_stats_wire_parity.py pins the wire bytes this structure produces.
 """
 
 from __future__ import annotations
@@ -46,7 +62,7 @@ from types import MappingProxyType
 from typing import Any
 
 WIRE_GROUP_ALWAYS = "always"
-WIRE_GROUP_TOKEN_STREAM = "token_stream"
+WIRE_GROUP_TOKEN_DETAIL = "token_detail"
 
 FIELD_GROUP_SERVER_SCALARS = "server_scalars"
 FIELD_GROUP_TOKEN_SCALARS = "token_scalars"
@@ -170,8 +186,7 @@ STATS_FAMILY_MANIFEST = (
         legacy_coverage_cadence_seconds=60,
         bucket_fields=("tokens_per_agent_total", "agent_token_samples"),
         detail_field="agent_token_rates",
-        wire_group=WIRE_GROUP_TOKEN_STREAM,
-        delivery="token_stream",
+        wire_group=WIRE_GROUP_TOKEN_DETAIL,
         chart_groups=("agentTokens",),
         series_keys=("tokensPerAgent",),
         coverage_companions=("cost",),
@@ -184,8 +199,7 @@ STATS_FAMILY_MANIFEST = (
         idle_cadence_seconds=60,
         legacy_coverage_cadence_seconds=60,
         detail_field="cost_summary",
-        wire_group=WIRE_GROUP_TOKEN_STREAM,
-        delivery="token_stream",
+        wire_group=WIRE_GROUP_TOKEN_DETAIL,
     ),
     _family(
         name="gpu",
@@ -222,21 +236,24 @@ STATS_COVERAGE_LEGACY_CADENCE = MappingProxyType(
     {family["name"]: family["legacy_coverage_cadence_seconds"] for family in STATS_FAMILY_MANIFEST}
 )
 SERVER_BUCKET_FIELDS = tuple(field for family in STATS_FAMILY_MANIFEST for field in family["bucket_fields"])
-TOKEN_STREAM_BUCKET_FIELDS = tuple(
+TOKEN_DETAIL_BUCKET_FIELDS = tuple(
     field
     for family in STATS_FAMILY_MANIFEST
-    if family["wire_group"] == WIRE_GROUP_TOKEN_STREAM
+    if family["wire_group"] == WIRE_GROUP_TOKEN_DETAIL
     for field in family["bucket_fields"]
 )
-# The compact token-stream record projection: identity keys plus every
-# token_stream field and detail document, in wire order.
-TOKEN_STREAM_RECORD_KEYS = (
+# LEGACY (retire in a later release): the compact token side-stream record
+# projection — identity keys plus every token_detail field and detail document,
+# in wire order. Served only when an OLD client still sends
+# ``token_resolution > 0``; current clients receive token detail inline on
+# every history record and never request this payload.
+LEGACY_TOKEN_STREAM_RECORD_KEYS = (
     ("start", "duration", "sequence")
-    + TOKEN_STREAM_BUCKET_FIELDS
+    + TOKEN_DETAIL_BUCKET_FIELDS
     + tuple(
         family["detail_field"]
         for family in STATS_FAMILY_MANIFEST
-        if family["wire_group"] == WIRE_GROUP_TOKEN_STREAM and family["detail_field"]
+        if family["wire_group"] == WIRE_GROUP_TOKEN_DETAIL and family["detail_field"]
     )
 )
 
@@ -277,7 +294,7 @@ ALL_FIELD_GROUPS = frozenset(STATS_FIELD_GROUPS)
 ALWAYS_FIELD_GROUPS = frozenset(
     name for name, entry in STATS_FIELD_GROUPS.items() if entry["wire_group"] == WIRE_GROUP_ALWAYS
 )
-TOKEN_STREAM_FIELD_GROUPS = ALL_FIELD_GROUPS - ALWAYS_FIELD_GROUPS
+TOKEN_DETAIL_FIELD_GROUPS = ALL_FIELD_GROUPS - ALWAYS_FIELD_GROUPS
 
 
 def coverage_families_for(family_name: str) -> tuple[str, ...]:
@@ -303,13 +320,17 @@ def normalized_field_groups(field_groups: Any) -> frozenset[str]:
     return groups | ALWAYS_FIELD_GROUPS
 
 
-def wire_field_groups(*, include_token_stream: bool) -> frozenset[str]:
+def wire_field_groups(*, legacy_token_stream: bool = False) -> frozenset[str]:
     """The field groups a main history record carries on the wire.
 
-    ``token_stream`` groups appear inline only when the client did NOT request
-    the separate compact token stream; ``always`` groups appear regardless.
+    There is ONE history stream: every group — including ``token_detail`` —
+    rides every record. The single exception is the LEGACY compat path
+    (``legacy_token_stream=True``): an old client that still sends
+    ``token_resolution > 0`` keeps receiving the pre-Phase-2 slimmed records
+    plus the separate ``agent_token_history`` payload, byte-compatible with
+    what it was built against. Retire with that path in a later release.
     """
-    return ALL_FIELD_GROUPS if include_token_stream else ALWAYS_FIELD_GROUPS
+    return ALWAYS_FIELD_GROUPS if legacy_token_stream else ALL_FIELD_GROUPS
 
 
 def bucket_fields_for_groups(field_groups: Any) -> tuple[str, ...]:
