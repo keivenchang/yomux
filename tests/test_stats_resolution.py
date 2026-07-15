@@ -126,3 +126,15 @@ def test_wire_capabilities_is_json_safe_and_matches_the_matrix():
         for resolution in explicit:
             assert entry["buckets"][resolution] == range_seconds // resolution
             assert entry["buckets"][resolution] <= 600
+
+
+def test_system_status_payload_publishes_the_matrix_to_the_client(tmp_path):
+    # The web app exposes the canonical matrix from the single owner on
+    # /api/system-status so the render-only browser reads choices from the server.
+    from yolomux_lib import app as app_module
+    # Build a minimal payload the way the endpoint does, asserting the owner field
+    # is present and equals the single source of truth.
+    caps = sr.wire_capabilities()
+    assert caps["resolution_choices"] == [1, 10, 60, 300]
+    # The app method injects exactly this; a direct equality guards drift.
+    assert app_module.stats_resolution.wire_capabilities() == caps

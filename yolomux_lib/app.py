@@ -46,6 +46,7 @@ from . import common
 from . import file_index
 from . import filesystem
 from . import session_files
+from . import stats_resolution
 from . import yolo_rules
 from .approvals import blank_prompt_state
 from .approvals import hybrid_approval_prompt_state
@@ -9067,6 +9068,12 @@ class TmuxWebtermApp:
                 "rss_bytes": int(sample.get("rss_bytes") or 0),
             },
             "cpu_budget": self.server_cpu_budget_payload(),
+            # Canonical Range x Resolution matrix from the single policy owner, so
+            # the browser can read choices from the server instead of a hand-copied
+            # JS table (DOIT.1 item 6). Additive: the current client ignores it; the
+            # render-only client will consume it when the exact-resolution serve path
+            # is switched on.
+            "resolution_capabilities": stats_resolution.wire_capabilities(),
         }
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
