@@ -103,6 +103,9 @@ STATSD_VACUUM_INTERVAL_MAX_SECONDS = 75 * 60
 # old-table deletion and the exact-resolution serve switch defer to items 3-5.
 STATSD_RAW_MIGRATION_MARKER = "raw_schema_version"
 STATSD_RAW_MIGRATION_VERSION = 1
+# Background materialization refresh cadence (DOIT.1 item 4). Rebuilds the exact
+# resolution layers from raw samples off the request path so requests read memory.
+STATSD_MATERIALIZATION_REBUILD_INTERVAL_SECONDS = 300
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
@@ -942,6 +945,28 @@ class PersistentStatsService:
         # see one consistent generation and a stale builder cannot overwrite a newer
         # one. Empty until the first rebuild; additive — does not affect serving yet.
         self._materialization: dict[str, Any] = {"generation": 0, "layers": {}, "built_at": 0.0, "window": (0, 0)}
+        self._last_materialization_rebuild_at = 0.0
+
+    def _maybe_rebuild_materialization(self, now: float) -> bool:
+        """Refresh the materialization off the request path on a bounded cadence.
+
+        Skips when no raw samples exist (nothing to build — avoids churning an empty
+        generation) or when the cadence has not elapsed. This is the background warm
+        path (DOIT.1 item 4); requests always read the last published generation and
+        never trigger a synchronous build. Returns True iff it rebuilt.
+        """
+        if now - self._last_materialization_rebuild_at < STATSD_MATERIALIZATION_REBUILD_INTERVAL_SECONDS:
+            return False
+        try:
+            has_raw = self.store._connection().execute("SELECT 1 FROM stats_raw_samples LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return False
+        if has_raw is None:
+            self._last_materialization_rebuild_at = now  # nothing to build; back off
+            return False
+        self.rebuild_materialization(now - STATS_HISTORY_RETENTION_SECONDS, now, now)
+        self._last_materialization_rebuild_at = now
+        return True
 
     def rebuild_materialization(self, start: float, end: float, now: float) -> dict[str, Any]:
         """Build every preset resolution layer from raw samples and publish atomically.
@@ -1102,7 +1127,7 @@ class PersistentStatsService:
         # The listener and SQLite writer are intentionally one thread. Advance
         # exactly one maintenance family after an actual 100ms accept timeout;
         # doing token + pricing + retention work in one turn starves queued CPU RPCs.
-        maintenance_kind = self.maintenance_turn % 4
+        maintenance_kind = self.maintenance_turn % 5
         self.maintenance_turn += 1
         if maintenance_kind == 0:
             self._drain_agent_token_scan_result()
@@ -1110,8 +1135,10 @@ class PersistentStatsService:
             self._maybe_reproject_cost_summaries()
         elif maintenance_kind == 2:
             self._retention_maintenance_step()
-        else:
+        elif maintenance_kind == 3:
             self._maybe_vacuum(time.time())
+        else:
+            self._maybe_rebuild_materialization(time.time())
         with self.agent_token_scan_lock:
             scan_active = (
                 self.agent_token_scan_worker is not None

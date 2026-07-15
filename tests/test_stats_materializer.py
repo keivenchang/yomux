@@ -192,3 +192,22 @@ def test_materialized_snapshot_serves_exact_key_or_structured_states(tmp_path):
     # An unsupported key is rejected with the valid choices, never a coarser substitute.
     bad, _ = svc.handle_with_binary({"action": "materialized_snapshot", "range_seconds": 7200, "resolution_seconds": 10})
     assert bad["ok"] is False and bad["unsupported"] and "choices" in bad
+
+
+def test_background_rebuild_skips_empty_and_builds_when_raw_present(tmp_path):
+    svc = _service(tmp_path)
+    # No raw samples -> back off, no generation churn.
+    assert svc._maybe_rebuild_materialization(now=10_000.0) is False
+    assert svc.materialization_generation() == 0
+
+    conn = svc.store._connection()
+    with conn:
+        conn.execute(
+            "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
+            ("cpu", "", 9_999.0, "e", '{"cpu_total_percent": 10.0, "cpu_count": 1.0}'),
+        )
+    # Cadence not yet elapsed since the back-off stamp -> still skips.
+    assert svc._maybe_rebuild_materialization(now=10_100.0) is False
+    # Past the cadence with raw data present -> builds.
+    assert svc._maybe_rebuild_materialization(now=10_000.0 + statsd.STATSD_MATERIALIZATION_REBUILD_INTERVAL_SECONDS + 1) is True
+    assert svc.materialization_generation() == 1
