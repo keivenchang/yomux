@@ -13045,7 +13045,8 @@ def test_tmux_window_switch_masks_old_window_output_until_confirmed_target_paint
             };
 
             // Old-window PTY frames (a blank redraw plus recognizable 1:claude output) arrive while
-            // the POST is held. They must keep flowing into xterm but must not lift the mask.
+            // the POST is held. They must keep flowing into xterm but must not lift the mask —
+            // this pre-confirmation race is the ONLY thing the mask exists to cover.
             socket.onmessage({data: binaryFrame('\\u001b[2J\\u001b[H')});
             socket.onmessage({data: binaryFrame('CLAUDE-OLD-WINDOW-OUTPUT')});
             await new Promise(resolve => requestAnimationFrame(resolve));
@@ -13055,39 +13056,22 @@ def test_tmux_window_switch_masks_old_window_output_until_confirmed_target_paint
               xtermGotOldBytes: (item.term.writes || []).some(text => text.includes('CLAUDE-OLD-WINDOW-OUTPUT')),
             };
 
-            // Release the POST; the forced signal readback answers stale (window 1 still active).
+            // Release the POST: select-window returned, so tmux HAS switched and its repaint is the
+            // next thing on the wire. The signal readback is deliberately NEVER answered — it is
+            // button-state truth only and must not gate the reveal (native tmux feels instant).
+            const revealStartedAt = performance.now();
             releasePost({ok: true});
-            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'first signal readback'});
-            signalReleases.shift()(signalsPayload(1));
-            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'stale readback retry'});
-            const afterStaleSignals = {
-              mask: maskMetrics(),
-              activeButtons: activeWindowButtons(),
-            };
-
-            // Now confirm window 0 through raw signals: the mask must still hold for the paint barrier.
-            signalReleases.shift()(signalsPayload(0));
-            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'post-confirm forced refresh request'});
-            const txn = refreshFrames(socket)[0].txn;
-            const afterConfirm = {mask: maskMetrics(), txn};
-
-            // The structured text acknowledgement is consumed, never written to xterm, and alone
-            // does not reveal.
-            const writesBeforeAck = (item.term.writes || []).length;
-            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn})});
-            await new Promise(resolve => requestAnimationFrame(resolve));
-            const afterAck = {
-              mask: maskMetrics(),
-              ackWrittenToXterm: (item.term.writes || []).slice(writesBeforeAck).some(text => text.includes('refresh-ack')),
-            };
-
-            // A refreshed binary frame consumed by xterm plus a paint frame finally reveals.
             socket.onmessage({data: binaryFrame('CODEX-WINDOW-0-READY')});
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'mask reveal after confirmed target paint'});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'instant reveal after POST success + painted repaint frame'});
+            const revealMs = performance.now() - revealStartedAt;
             const container = document.getElementById('term-1');
+            const refreshTxnFrames = refreshFrames(socket);
             return {
-              afterClick, afterOldOutput, afterStaleSignals, afterConfirm, afterAck,
+              afterClick, afterOldOutput,
               afterReveal: {
+                revealMs,
+                unansweredSignalRequests: signalReleases.length,
+                refreshTxnFrames: refreshTxnFrames.length,
                 maskGone: !maskNode(),
                 switchingClass: container.classList.contains('terminal-connection-switching'),
                 pendingClass: container.classList.contains('terminal-connection-pending'),
@@ -13109,13 +13093,12 @@ def test_tmux_window_switch_masks_old_window_output_until_confirmed_target_paint
     assert_opaque_switch_mask(metrics["afterOldOutput"]["mask"], "0:codex")
     assert metrics["afterOldOutput"]["activeButtons"] == ["0"], metrics["afterOldOutput"]
     assert metrics["afterOldOutput"]["xtermGotOldBytes"] is True, metrics["afterOldOutput"]
-    assert_opaque_switch_mask(metrics["afterStaleSignals"]["mask"], "0:codex")
-    assert metrics["afterStaleSignals"]["activeButtons"] == ["0"], metrics["afterStaleSignals"]
-    assert_opaque_switch_mask(metrics["afterConfirm"]["mask"])
-    assert metrics["afterConfirm"]["txn"], metrics["afterConfirm"]
-    assert_opaque_switch_mask(metrics["afterAck"]["mask"])
-    assert metrics["afterAck"]["ackWrittenToXterm"] is False, metrics["afterAck"]
+    # The reveal must feel like native tmux: POST success + painted repaint frame, with the
+    # signals readback UNANSWERED and no refresh/ack ceremony — well under half a second.
     assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterReveal"]["revealMs"] < 500, metrics["afterReveal"]
+    assert metrics["afterReveal"]["unansweredSignalRequests"] >= 1, metrics["afterReveal"]
+    assert metrics["afterReveal"]["refreshTxnFrames"] == 0, metrics["afterReveal"]
     assert metrics["afterReveal"]["switchingClass"] is False, metrics["afterReveal"]
     assert metrics["afterReveal"]["pendingClass"] is False, metrics["afterReveal"]
     assert metrics["afterReveal"]["xtermGotTargetBytes"] is True, metrics["afterReveal"]
@@ -13123,7 +13106,7 @@ def test_tmux_window_switch_masks_old_window_output_until_confirmed_target_paint
     assert metrics["afterReveal"]["activeButtons"] == ["0"], metrics["afterReveal"]
 
 
-def test_tmux_window_switch_timeout_shows_retry_cancel_and_reconnect_resends_refresh(browser, tmp_path):
+def test_tmux_window_switch_stalls_only_when_the_select_post_hangs_with_retry_and_cancel(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -13148,19 +13131,21 @@ def test_tmux_window_switch_timeout_shows_retry_cancel_and_reconnect_resends_ref
         + TMUX_WINDOW_SWITCH_TEST_PRELUDE
         + """
             installWindowBar();
-            const item = terminals.get('1');
-            let signalAnswer = () => signalsPayload(1); // stale: readback can never confirm window 0
+            let signalAnswer = () => signalsPayload(1); // authoritative window stays 1
+            let releasePost = null;
             apiFetchJson = (url, options) => {
               const text = String(url);
-              if (text.startsWith('/api/tmux-window?')) return Promise.resolve({ok: true});
+              if (text.startsWith('/api/tmux-window?')) return new Promise(resolve => { releasePost = resolve; });
               if (text.startsWith('/api/tmux-signals')) return Promise.resolve(signalAnswer());
               return originalApiFetchJson(url, options);
             };
 
+            // A HANGING select POST is the only stall: no confirmation ever arrives, so the mask
+            // degrades to the explicit stalled state instead of revealing unconfirmed content.
             tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
             await window.__yolomuxTestWaitFor(
               () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
-              {timeoutMs: 6000, intervalMs: 25, description: 'exhausted stale readbacks become an explicit stalled state'}
+              {timeoutMs: 7000, intervalMs: 25, description: 'a hung select POST becomes an explicit stalled state'}
             );
             const stalled = {
               mask: maskMetrics(),
@@ -13169,46 +13154,26 @@ def test_tmux_window_switch_timeout_shows_retry_cancel_and_reconnect_resends_ref
               activeButtons: activeWindowButtons(),
             };
 
-            // Retry re-runs signal confirmation; signals now confirm, and the barrier completes.
-            signalAnswer = () => signalsPayload(0);
+            // Retry reveals through the normal confirm+paint path (the user explicitly asked;
+            // the terminal then honestly shows whatever tmux actually shows).
             maskNode().querySelector('[data-terminal-connection-retry]').click();
-            const socket = socketFor();
-            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 1, {timeoutMs: 3000, intervalMs: 10, description: 'retry re-runs confirmation and requests refresh'});
-            const retryTxn = refreshFrames(socket)[0].txn;
-            const afterRetryConfirm = {mask: maskMetrics()};
-            // Reconnect during the pending switch: the mask must survive and the new socket must
-            // re-request the transaction's refresh.
-            item.manualClose = true;
-            item.socket.close();
-            startTerminal('1');
-            await window.__yolomuxTestWaitFor(
-              () => socketFor() !== socket && socketFor()?.readyState === WebSocket.OPEN,
-              {timeoutMs: 3000, intervalMs: 10, description: 'reconnected terminal socket'}
-            );
-            const reconnected = socketFor();
-            await window.__yolomuxTestWaitFor(() => refreshFrames(reconnected).length >= 1, {timeoutMs: 3000, intervalMs: 10, description: 'reconnect re-sends the pending refresh request'});
-            const afterReconnect = {
-              mask: maskMetrics(),
-              resentTxn: refreshFrames(reconnected)[0].txn,
-            };
-            reconnected.onmessage({data: JSON.stringify({type: 'refresh-ack', txn: afterReconnect.resentTxn})});
-            reconnected.onmessage({data: binaryFrame('CODEX-WINDOW-0-READY')});
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'reveal after reconnect completes the barrier'});
-            const afterReveal = {maskGone: !maskNode(), activeButtons: activeWindowButtons()};
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'retry reveals through the paint path'});
+            const afterRetry = {maskGone: !maskNode()};
+            const stalePost = releasePost;
+            if (stalePost) stalePost({ok: true}); // the hung POST resolving late must be inert
 
-            // A second switch that stalls again can be cancelled back to the confirmed window.
-            signalAnswer = () => signalsPayload(0); // window 0 stays the authoritative window
+            // A second hung switch can be cancelled back to the authoritative window.
+            releasePost = null;
             tmuxWindow('1', {windowIndex: 2}, 'tmux sub-window 2:bash');
-            signalAnswer = () => signalsPayload(0); // stale for the expected window 2
             await window.__yolomuxTestWaitFor(
               () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
-              {timeoutMs: 6000, intervalMs: 25, description: 'second stalled switch'}
+              {timeoutMs: 7000, intervalMs: 25, description: 'second hung switch stalls'}
             );
             maskNode().querySelector('[data-terminal-connection-cancel]').click();
             await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 3000, intervalMs: 10, description: 'cancel clears the mask'});
-            await window.__yolomuxTestWaitFor(() => activeWindowButtons().join(',') === '0', {timeoutMs: 3000, intervalMs: 10, description: 'cancel returns to the authoritative confirmed window'});
+            await window.__yolomuxTestWaitFor(() => activeWindowButtons().join(',') === '1', {timeoutMs: 3000, intervalMs: 10, description: 'cancel returns to the authoritative window'});
             return {
-              stalled, afterRetryConfirm, retryTxn, afterReconnect, afterReveal,
+              stalled, afterRetry,
               afterCancel: {maskGone: !maskNode(), activeButtons: activeWindowButtons()},
             };
           } finally {
@@ -13223,13 +13188,9 @@ def test_tmux_window_switch_timeout_shows_retry_cancel_and_reconnect_resends_ref
     assert metrics["stalled"]["retry"] is True, metrics["stalled"]
     assert metrics["stalled"]["cancel"] is True, metrics["stalled"]
     assert metrics["stalled"]["activeButtons"] == ["0"], metrics["stalled"]
-    assert_opaque_switch_mask(metrics["afterRetryConfirm"]["mask"])
-    assert metrics["retryTxn"], metrics
-    assert_opaque_switch_mask(metrics["afterReconnect"]["mask"])
-    assert metrics["afterReconnect"]["resentTxn"] == metrics["retryTxn"], metrics["afterReconnect"]
-    assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterRetry"]["maskGone"] is True, metrics["afterRetry"]
     assert metrics["afterCancel"]["maskGone"] is True, metrics["afterCancel"]
-    assert metrics["afterCancel"]["activeButtons"] == ["0"], metrics["afterCancel"]
+    assert metrics["afterCancel"]["activeButtons"] == ["1"], metrics["afterCancel"]
 
 
 def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_sequence(browser, tmp_path):
@@ -13274,9 +13235,8 @@ def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_seque
             tmuxWindow('1', {windowIndex: 1}, 'tmux sub-window 1:claude');
             await new Promise(resolve => requestAnimationFrame(resolve));
             const afterClicks = {mask: maskMetrics(), activeButtons: activeWindowButtons()};
-            const newestSequence = tmuxWindowNavigationRecord('1').sequence;
 
-            // Old transactions completing must not start readbacks, reveal, or roll back the newest.
+            // Old transactions completing must not confirm, reveal, or roll back the newest.
             postReleases[0]({ok: true});
             postReleases[1]({ok: true});
             await new Promise(resolve => setTimeout(resolve, 60));
@@ -13286,35 +13246,38 @@ def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_seque
               staleReadbacks: signalReleases.length,
             };
 
+            // The newest POST success confirms; the painted repaint frame reveals immediately —
+            // signal readbacks stay unanswered and no refresh/ack ceremony exists.
+            const revealStartedAt = performance.now();
             postReleases[2]({ok: true});
-            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'newest readback'});
-            signalReleases.shift()(signalsPayload(1));
-            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'newest transaction refresh'});
-            const txn = refreshFrames(socket)[0].txn;
-            // A stray acknowledgement from an older transaction must not advance the newest barrier.
-            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn: txn - 2})});
-            socket.onmessage({data: binaryFrame('EARLY-FRAME-BEFORE-ACK')});
-            await new Promise(resolve => requestAnimationFrame(resolve));
-            const afterStaleAck = {mask: maskMetrics()};
-            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn})});
             socket.onmessage({data: binaryFrame('CLAUDE-WINDOW-1-READY')});
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'newest transaction reveals'});
-            const afterReveal = {maskGone: !maskNode(), activeButtons: activeWindowButtons(), newestTxn: txn === newestSequence};
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'newest transaction reveals instantly'});
+            const afterReveal = {
+              maskGone: !maskNode(),
+              revealMs: performance.now() - revealStartedAt,
+              activeButtons: activeWindowButtons(),
+              refreshTxnFrames: refreshFrames(socket).length,
+            };
 
-            // Relative next/previous switching uses the same masked transaction.
+            // Relative next/previous: the keystroke send IS the confirmation (native Ctrl-B N feel);
+            // the repaint frame reveals with no readback answered.
+            const relativeStartedAt = performance.now();
             tmuxWindow('1', 'n', 'next tmux sub-window');
             await new Promise(resolve => requestAnimationFrame(resolve));
             const relative = {mask: maskMetrics(), inputFrame: sentFrames(socket).some(frame => frame.type === 'input' && frame.data === '\\u0002n')};
-            await window.__yolomuxTestWaitFor(() => signalReleases.length >= 1, {timeoutMs: 2000, intervalMs: 10, description: 'relative readback'});
-            signalReleases.shift()(signalsPayload(2));
-            await window.__yolomuxTestWaitFor(() => refreshFrames(socket).length >= 2, {timeoutMs: 2000, intervalMs: 10, description: 'relative transaction refresh'});
-            const relativeTxn = refreshFrames(socket)[1].txn;
-            socket.onmessage({data: JSON.stringify({type: 'refresh-ack', txn: relativeTxn})});
             socket.onmessage({data: binaryFrame('BASH-WINDOW-2-READY')});
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'relative switch reveals after confirmed paint'});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'relative switch reveals instantly after the repaint frame'});
+            const relativeRevealMs = performance.now() - relativeStartedAt;
+            // Button truth reconciles through the readback once signals answer. Earlier
+            // transactions' unanswered readbacks queue ahead: answer every request with the
+            // authoritative window until the newest readback lands and reconciles.
+            await window.__yolomuxTestWaitFor(() => {
+              while (signalReleases.length) signalReleases.shift()(signalsPayload(2));
+              return activeWindowButtons().join(',') === '2';
+            }, {timeoutMs: 4000, intervalMs: 25, description: 'buttons reconcile to the signalled window'});
             return {
-              afterClicks, afterStalePosts, afterStaleAck, afterReveal, relative,
-              afterRelativeReveal: {maskGone: !maskNode(), activeButtons: activeWindowButtons()},
+              afterClicks, afterStalePosts, afterReveal, relative,
+              afterRelativeReveal: {maskGone: !maskNode(), relativeRevealMs, activeButtons: activeWindowButtons()},
             };
           } finally {
             apiFetchJson = originalApiFetchJson;
@@ -13328,13 +13291,14 @@ def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_seque
     assert_opaque_switch_mask(metrics["afterStalePosts"]["mask"], "1:claude")
     assert metrics["afterStalePosts"]["activeButtons"] == ["1"], metrics["afterStalePosts"]
     assert metrics["afterStalePosts"]["staleReadbacks"] == 0, metrics["afterStalePosts"]
-    assert_opaque_switch_mask(metrics["afterStaleAck"]["mask"])
     assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterReveal"]["revealMs"] < 500, metrics["afterReveal"]
+    assert metrics["afterReveal"]["refreshTxnFrames"] == 0, metrics["afterReveal"]
     assert metrics["afterReveal"]["activeButtons"] == ["1"], metrics["afterReveal"]
-    assert metrics["afterReveal"]["newestTxn"] is True, metrics["afterReveal"]
     assert_opaque_switch_mask(metrics["relative"]["mask"], "next tmux sub-window")
     assert metrics["relative"]["inputFrame"] is True, metrics["relative"]
     assert metrics["afterRelativeReveal"]["maskGone"] is True, metrics["afterRelativeReveal"]
+    assert metrics["afterRelativeReveal"]["relativeRevealMs"] < 500, metrics["afterRelativeReveal"]
     assert metrics["afterRelativeReveal"]["activeButtons"] == ["2"], metrics["afterRelativeReveal"]
 
 

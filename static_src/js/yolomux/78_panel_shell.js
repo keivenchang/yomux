@@ -1567,11 +1567,13 @@ function pruneTmuxWindowNavigationRecord(session, record = tmuxWindowNavigationR
 }
 
 // One masked switch transaction per session, owned by the same navigation record as the
-// optimistic override/sequence/guard. Phases: requested -> confirmed (raw tmux signals name the
-// expected window) -> refresh-acknowledged (server issued the forced refresh) -> painted (xterm
-// consumed a refreshed frame and the browser crossed a paint frame). `failed` marks an explicit
-// rollback. Only a phase walk that survives every sequence check may lift the opaque mask.
-const tmuxWindowSwitchPhases = Object.freeze(['requested', 'confirmed', 'refresh-acknowledged', 'painted', 'failed']);
+// optimistic override/sequence/guard. Phases: requested -> confirmed (the select POST returned
+// success, or the relative keystroke was delivered — tmux switches synchronously and repaints
+// immediately) -> painted (xterm consumed a frame / the paint cap elapsed and the browser
+// crossed a paint frame). `failed` marks an explicit rollback. Only a phase walk that survives
+// every sequence check may lift the mask; the mask exists solely to bridge the
+// click -> confirmation race, so the web reveals as instantly as native tmux.
+const tmuxWindowSwitchPhases = Object.freeze(['requested', 'confirmed', 'painted', 'failed']);
 
 function tmuxWindowSwitchLoading(session) {
   return tmuxWindowNavigationRecord(session)?.switchLoading || null;

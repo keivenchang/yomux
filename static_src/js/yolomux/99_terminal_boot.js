@@ -4807,6 +4807,11 @@ function tmuxWindow(session, key, label) {
     apiFetchJson(`/api/tmux-window?session=${encodeURIComponent(session)}&window=${encodeURIComponent(String(directIndex))}`, {method: 'POST'})
       .then(() => {
         if (!tmuxWindowSwitchSequenceMatches(session, sequence)) return;
+        // The select POST returning success IS tmux's confirmation (select-window is
+        // synchronous and the repaint is already flowing) — reveal on the next painted
+        // frame or the short cap. The readback below is button-state truth only; it no
+        // longer gates the reveal.
+        beginTmuxWindowSwitchPaintBarrier(session, {sequence});
         scheduleTmuxWindowReadback(session, {delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence});
       })
       .catch(error => {
@@ -4841,6 +4846,10 @@ function tmuxWindow(session, key, label) {
   statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusAfterAcknowledgedSwitch();
+  // The keystroke was delivered on an open socket: tmux processes it and repaints in
+  // milliseconds, exactly like typing Ctrl-B N in a native terminal. Confirm at send and
+  // reveal on the next painted frame/cap; the readback remains button-state truth only.
+  beginTmuxWindowSwitchPaintBarrier(session, {sequence});
   scheduleTmuxWindowReadback(session, {requireChanged: previousIndex !== null, previousIndex, sequence});
 }
 
@@ -4947,9 +4956,11 @@ function retryTmuxWindowSwitchLoading(session) {
   loading.phase = 'requested';
   showTerminalConnectionState(session, 'switching', t('terminal.window.switchLoading', {target: loading.targetLabel}), {sequence: loading.sequence});
   armTmuxWindowSwitchRevealTimeout(session, loading);
+  // Re-run the readback for button truth, then reveal through the normal confirm+paint path.
   scheduleTmuxWindowReadback(session, loading.expectedIndex !== null
     ? {delayMs: 0, clearActiveIndexOverride: true, expectedIndex: loading.expectedIndex, sequence: loading.sequence}
     : {delayMs: 0, sequence: loading.sequence});
+  beginTmuxWindowSwitchPaintBarrier(session, {sequence: loading.sequence});
   return true;
 }
 
@@ -4968,9 +4979,13 @@ function cancelTmuxWindowSwitchLoading(session) {
   return true;
 }
 
-// Post-confirmation paint barrier: raw signals already named the expected window; now request the
-// forced refresh through the terminal socket and reveal only after its structured acknowledgement,
-// a subsequent binary frame consumed by xterm, and a crossed paint frame.
+// Reveal barrier — tuned for tmux's actual behavior: select-window is synchronous and tmux
+// repaints every attached client IMMEDIATELY, so the new window's bytes are typically already
+// ingested behind the mask before the select POST even resolves. Confirmation IS the POST
+// success (or the sent keystroke for relative switches); the mask exists only to bridge the
+// click -> confirmation race where a stale old-window frame could flash. After confirmation,
+// reveal on the next painted binary frame — or after the short paint cap when the repaint
+// already landed and no further frame is coming. The web must feel exactly like native tmux.
 function beginTmuxWindowSwitchPaintBarrier(session, options = {}) {
   const sequence = tmuxWindowSwitchOptionSequence(options);
   const loading = setTmuxWindowSwitchLoadingPhase(session, 'confirmed', {sequence});
@@ -4979,50 +4994,30 @@ function beginTmuxWindowSwitchPaintBarrier(session, options = {}) {
     // keep the legacy sequence-guarded clear.
     return clearTerminalConnectionState(session, {sequence: options.sequence});
   }
-  sendTmuxWindowSwitchRefresh(session, loading);
-  armTmuxWindowSwitchAckFallback(session, Number(loading.sequence));
-  return true;
-}
-
-// The refresh-ack accelerates the reveal but must never hard-gate it: a backend that
-// predates the ack protocol still honors the refresh and redraws (client/server skew is
-// inherent while the static bundle ships from disk). If the ack has not landed shortly
-// after the AUTHORITATIVELY CONFIRMED readback, self-promote so the remaining barrier
-// (painted refreshed binary frame) can complete instead of stalling every switch.
-function armTmuxWindowSwitchAckFallback(session, sequence) {
-  if (typeof setTimeout !== 'function') return;
-  setTimeout(() => promoteTmuxWindowSwitchAckFallback(session, sequence), tmuxWindowSwitchAckFallbackMs);
-}
-
-function promoteTmuxWindowSwitchAckFallback(session, sequence) {
-  const loading = tmuxWindowSwitchLoading(session);
-  if (!loading || loading.phase !== 'confirmed' || Number(loading.sequence) !== Number(sequence)) return false;
-  return Boolean(setTmuxWindowSwitchLoadingPhase(session, 'refresh-acknowledged', {sequence: Number(sequence)}));
-}
-
-function sendTmuxWindowSwitchRefresh(session, loading = tmuxWindowSwitchLoading(session)) {
-  if (!loading) return false;
-  const item = terminals.get(session);
-  if (item?.socket?.readyState !== WebSocket.OPEN) return false;
-  item.socket.send(JSON.stringify({type: 'refresh', reason: 'tmux-window-switch', txn: Number(loading.sequence)}));
-  return true;
-}
-
-function consumeTerminalControlMessage(session, data) {
-  if (typeof data !== 'string' || data.charCodeAt(0) !== 123) return false;
-  let message = null;
-  try { message = JSON.parse(data); } catch (_) { return false; }
-  if (!message || message.type !== 'refresh-ack') return false;
-  const loading = tmuxWindowSwitchLoading(session);
-  if (loading && loading.phase === 'confirmed' && Number(loading.sequence) === Number(message.txn)) {
-    setTmuxWindowSwitchLoadingPhase(session, 'refresh-acknowledged', {sequence: Number(message.txn)});
+  if (typeof setTimeout === 'function') {
+    setTimeout(() => {
+      const current = tmuxWindowSwitchLoading(session);
+      if (!current || current.phase !== 'confirmed' || Number(current.sequence) !== Number(loading.sequence)) return;
+      // The repaint was ingested before confirmation (the common case): the xterm buffer is
+      // already the new window, so reveal now instead of waiting for a frame that came and went.
+      requestAnimationFrame(() => finishTmuxWindowSwitchPaint(session, Number(loading.sequence)));
+    }, tmuxWindowSwitchPaintCapMs);
   }
   return true;
 }
 
+// A structured text control frame from a newer backend must never be written into xterm,
+// whatever the client no longer waits on (protocol-skew safety in both directions).
+function consumeTerminalControlMessage(session, data) {
+  if (typeof data !== 'string' || data.charCodeAt(0) !== 123) return false;
+  let message = null;
+  try { message = JSON.parse(data); } catch (_) { return false; }
+  return Boolean(message && message.type === 'refresh-ack');
+}
+
 function tmuxWindowSwitchPaintCallback(session) {
   const loading = tmuxWindowSwitchLoading(session);
-  if (!loading || loading.phase !== 'refresh-acknowledged') return undefined;
+  if (!loading || loading.phase !== 'confirmed') return undefined;
   const sequence = Number(loading.sequence);
   return () => {
     requestAnimationFrame(() => finishTmuxWindowSwitchPaint(session, sequence));
@@ -5031,7 +5026,7 @@ function tmuxWindowSwitchPaintCallback(session) {
 
 function finishTmuxWindowSwitchPaint(session, sequence) {
   const current = tmuxWindowSwitchLoading(session);
-  if (!current || current.phase !== 'refresh-acknowledged') return false;
+  if (!current || current.phase !== 'confirmed') return false;
   const loading = setTmuxWindowSwitchLoadingPhase(session, 'painted', {sequence});
   if (!loading) return false;
   clearTerminalConnectionState(session, {sequence});
@@ -5094,14 +5089,14 @@ function connectTerminalSocket(session, item) {
     item.reconnectAttempt = 0;
     dismissTerminalConnectionToasts(session);
     // Generic open clears only ordinary connecting/reconnecting states; a sequenced switching
-    // mask survives reconnect and re-requests its pending post-confirmation refresh instead.
+    // mask survives reconnect and completes through the normal paint barrier (the reconnected
+    // PTY's first frames are tmux's current window — exactly what the reveal waits for).
     clearTerminalConnectionState(session);
     const switchLoading = tmuxWindowSwitchLoading(session);
     if (switchLoading
-      && ['confirmed', 'refresh-acknowledged'].includes(switchLoading.phase)
+      && switchLoading.phase === 'confirmed'
       && tmuxWindowSwitchSequenceMatches(session, switchLoading.sequence)) {
-      switchLoading.phase = 'confirmed';
-      sendTmuxWindowSwitchRefresh(session, switchLoading);
+      beginTmuxWindowSwitchPaintBarrier(session, {sequence: switchLoading.sequence});
     }
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
