@@ -7052,7 +7052,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setDebugGraphRangeForTest(30 * 60);
     assert.equal(api.debugGraphSlidingAxisActiveForTest(), true, 'a 30m live view still slides');
     api.setDebugGraphRangeForTest(60 * 60);
-    assert.equal(api.debugGraphSlidingAxisActiveForTest(), false, 'ranges above 30m stay static (range-scaled cadence)');
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), true, 'a 1h live view slides (extended from 30m) even though data ticks every 60s');
+    api.setDebugGraphRangeForTest(2 * 60 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), false, 'ranges above 1h stay static (range-scaled cadence)');
     api.setDebugGraphRangeForTest(5 * 60);
     api.setDebugGraphZoomDomainForTest(Date.now() - 60000, Date.now());
     assert.equal(api.debugGraphSlidingAxisActiveForTest(), false, 'a zoomed view stays static regardless of range');

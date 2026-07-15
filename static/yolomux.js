@@ -41831,6 +41831,11 @@ const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 // Display/animation cadence (AGENTS.md timing rule) -> round 1000, not an odd
 // backend poll interval: this only re-paints the view, it never fetches.
 const jsDebugGraphSlideRenderMs = 1000;
+// The wall-clock slide extends to 1h, independent of the 30m SSE-demand range: a live,
+// non-zoomed view up to an hour re-renders ~1/sec so its axis advances and content drifts
+// left between the coarser (60s) data fetches — the chart stays visibly live even where
+// data no longer streams. Ranges over 1h, zoomed, and hidden views stay static.
+const jsDebugGraphSlideMaxRangeSeconds = 60 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
 const jsDebugStatsHistoryFlushMs = 30000;
@@ -48497,10 +48502,10 @@ function refreshDebugCostAgeLabels(nowMs = Date.now()) {
 }
 
 function debugGraphSlidingAxisActive() {
-  // Short live ranges advance continuously with the wall clock so the axis
-  // slides and content drifts left even between data ticks. Coarse (>30m),
-  // zoomed, and hidden views stay static per the range-scaled cadence contract.
-  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugStatsLivePushRangeSeconds;
+  // Live ranges up to 1h advance continuously with the wall clock so the axis
+  // slides and content drifts left even between (up to 60s) data ticks. Coarser
+  // (>1h), zoomed, and hidden views stay static per the range-scaled cadence contract.
+  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
 }
 
 function debugGraphLiveTickerNeeded() {
