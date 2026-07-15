@@ -164,6 +164,12 @@ Three standing rules exist because each was violated by a real incident (2026-07
 
 The gate enforces the pipeline end-to-end: the render invariant sweep and serve-shape sweep, the golden pipeline (real store → real encode → real client render), the YO!stats browser boot smoke, and the wire-parity fixture (`tests/test_stats_wire_parity.py`) which must pass UNCHANGED for pure refactors and be regenerated deliberately (with size deltas reported) for intentional wire changes.
 
+### Storage maintenance and the exact-resolution migration (in progress)
+
+`statsd` now VACUUMs the history DB on a jittered ~1h cadence (`_maybe_vacuum`), persisting `last_vacuum_at` in `schema_meta` so the cadence survives its exit-when-idle/respawn. Retention/compaction only mark pages free (`auto_vacuum` is off), so without this the file bloats — a live DB was observed at 210 MB (85 % dead freelist) over ~32 MB of real data; a plain VACUUM in WAL mode needs a `wal_checkpoint(TRUNCATE)` to actually shrink the file.
+
+The exact-resolution rewrite (`DOIT.1.md`) is being landed additively AHEAD of any switch, so current serving is unchanged: `yolomux_lib/stats_resolution.py` is the single owner of the `{1,10,60,300}` Range×Resolution matrix (advertised by statsd `status` as `resolution_capabilities`); `stats_raw_samples`/`stats_usage_atoms` are the durable-originals tables populated by the marker-gated `migrate_to_raw_observations_once()` (NOT yet auto-run on the live DB); `materialize_buckets()`/`rebuild_materialization()` fold raw samples into immutable per-resolution generations reusing `_merge_bucket`; and the additive `materialized_snapshot` RPC action serves exact snapshots alongside the existing `history` action. The destructive cutover (running the migration live, switching the default serve path, retiring the browser aggregation) is deliberately gated and not yet done — until then, `history` + `StatsHistoryReader` remain the live serve path.
+
 ## Login rate limiting
 
 `yolomux_lib/login_rate_limit.py` is the one owner of login throttling; both password paths (`AuthMixin.handle_login_submit` and the Basic-auth branch of `require_auth`) route through `AuthMixin.verify_login_credentials`, which checks admission BEFORE the PBKDF2 verifier and records the outcome after. Design rules to preserve:
