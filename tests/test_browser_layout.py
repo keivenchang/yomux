@@ -5249,6 +5249,7 @@ def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browse
 
 def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_script("if (typeof setDebugGraphExactResolutionEnabled === 'function') setDebugGraphExactResolutionEnabled(false);")  # legacy coarsen-stitch path (exact is default)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             "return typeof debugGraphAgentStatusNoDataRuns === 'function' && typeof debugGraphApplyServerHistory === 'function' && document.querySelector('.js-debug-panel') !== null;"
