@@ -26,6 +26,8 @@ from .common import error_payload
 from .common import test_auth_bypass_enabled
 from .locales import normalize_locale
 from .locales import resolve_locale_preference
+from .login_escalation import ESCALATION_EDGE_DROP
+from .login_escalation import escalation_level
 from .login_rate_limit import ADMIT
 from .login_rate_limit import AdmissionDecision
 from .login_rate_limit import RETRY_BAND_HOURS
@@ -91,10 +93,22 @@ class AuthMixin:
         client_ip = self.client_source_ip()
         decision = limiter.check_and_reserve(client_ip, username)
         if not decision.admitted:
+            self._maybe_escalate_edge_block(client_ip, decision)
             return None, decision
         identity = auth_identity_for_credentials(username, password)
         limiter.record_result(client_ip, username, identity is not None)
         return identity, decision
+
+    def _maybe_escalate_edge_block(self, client_ip: str, decision: AdmissionDecision) -> None:
+        """When the OPT-IN edge controller is enabled and a VOLUMETRIC (network/global)
+        bucket fired, install an expiring firewall DROP. A username-only block never
+        escalates here (a botnet must not be able to make us firewall innocent IPs).
+        No-op when the controller is absent or disabled — the default."""
+        controller = getattr(self.server.app, "login_edge_controller", None)
+        if controller is None:
+            return
+        if escalation_level(decision.blocked_scope, decoy_enabled=False, edge_enabled=controller.enabled) == ESCALATION_EDGE_DROP:
+            controller.block(client_ip)
 
     def reject_rate_limited(self, decision: AdmissionDecision) -> None:
         """Generic throttling response for the protected-route (Basic/JSON or HTML) path.

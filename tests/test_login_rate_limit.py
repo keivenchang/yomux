@@ -375,6 +375,37 @@ def test_coarse_retry_band_never_promises_admission_early():
 # --- diagnostics are privacy-safe -----------------------------------------------
 
 
+# --- policy override loading (validated, fail-safe to defaults) ------------------
+
+
+def test_missing_override_file_returns_defaults(tmp_path):
+    assert lrl.load_login_rate_policy(tmp_path / "absent.json") is lrl.DEFAULT_LOGIN_RATE_POLICY
+
+
+def test_valid_override_file_layers_on_defaults(tmp_path):
+    path = tmp_path / "login-rate-limit.json"
+    path.write_text('{"username_initial_allowance": 3, "exact_bucket": {"capacity": 4, "refill_per_minute": 2}, "unknown_key": 99}', encoding="utf-8")
+    policy = lrl.load_login_rate_policy(path)
+    assert policy.username_initial_allowance == 3
+    assert policy.exact_bucket == lrl.BucketPolicy(4, 2)
+    # Unspecified fields keep their defaults; unknown keys are ignored.
+    assert policy.nearby_bucket == lrl.DEFAULT_LOGIN_RATE_POLICY.nearby_bucket
+
+
+def test_malformed_override_json_falls_back_to_defaults(tmp_path):
+    path = tmp_path / "login-rate-limit.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert lrl.load_login_rate_policy(path) is lrl.DEFAULT_LOGIN_RATE_POLICY
+
+
+def test_incoherent_override_policy_falls_back_to_defaults(tmp_path):
+    # A broad bucket stricter than the exact one is rejected by validation, so the safe
+    # defaults are kept rather than installing a weaker-than-intended policy.
+    path = tmp_path / "login-rate-limit.json"
+    path.write_text('{"exact_bucket": {"capacity": 500, "refill_per_minute": 5}}', encoding="utf-8")
+    assert lrl.load_login_rate_policy(path) is lrl.DEFAULT_LOGIN_RATE_POLICY
+
+
 def test_diagnostics_expose_only_aggregates(tmp_path):
     limiter, _ = make_limiter(tmp_path)
     for _ in range(limiter.policy.exact_bucket.capacity + 3):

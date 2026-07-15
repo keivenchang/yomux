@@ -18,6 +18,7 @@ from yolomux_lib import common
 from yolomux_lib import server_auth
 from yolomux_lib import web
 from yolomux_lib import login_rate_limit as lrl
+from yolomux_lib.login_escalation import EdgeBlockController
 from yolomux_lib.login_rate_limit import BucketPolicy
 from yolomux_lib.login_rate_limit import LoginRatePolicy
 from yolomux_lib.login_rate_limit import LoginRateLimiter
@@ -206,6 +207,45 @@ def test_blocked_attempt_never_runs_pbkdf2(monkeypatch, tmp_path):
         # Every admitted attempt hashed exactly once; blocked attempts added zero hashes.
         admitted = statuses.count(HTTPStatus.UNAUTHORIZED)
         assert verified_before_block == admitted, "a throttled attempt must not reach the verifier"
+    finally:
+        stop_server(server, thread)
+
+
+def test_enabled_edge_controller_blocks_a_volumetric_source(monkeypatch, tmp_path):
+    # Tight exact-IP bucket so the loopback source trips a VOLUMETRIC (ip_exact) block;
+    # an enabled edge controller (mock runner — never a real firewall) then installs a rule.
+    runner_calls = []
+    controller = EdgeBlockController(runner=lambda argv: runner_calls.append(argv) or True, enabled=True)
+    policy = loose_network_policy(exact_bucket=BucketPolicy(3, 1), username_initial_allowance=50)
+    server, thread, _limiter = start_server(
+        monkeypatch, tmp_path, policy=policy, extra_app={"login_edge_controller": controller}
+    )
+    port = server.server_address[1]
+    try:
+        for _ in range(8):
+            post_login(port, VALID_USER, "wrong")
+        # The loopback peer was blocked at the edge exactly once, via an argv command.
+        assert controller.active_rules() == ["127.0.0.1"]
+        assert runner_calls and all(isinstance(token, str) for token in runner_calls[0])
+    finally:
+        stop_server(server, thread)
+
+
+def test_username_only_block_does_not_trigger_edge(monkeypatch, tmp_path):
+    # Wide network buckets so only the USERNAME backoff fires; the edge must stay empty
+    # (a botnet targeting one account must never get innocent IPs firewalled).
+    runner_calls = []
+    controller = EdgeBlockController(runner=lambda argv: runner_calls.append(argv) or True, enabled=True)
+    server, thread, _limiter = start_server(
+        monkeypatch, tmp_path, policy=loose_network_policy(username_initial_allowance=3),
+        extra_app={"login_edge_controller": controller},
+    )
+    port = server.server_address[1]
+    try:
+        for _ in range(10):
+            post_login(port, VALID_USER, "wrong")
+        assert controller.active_rules() == [], "a username-scope block must never edge-DROP an IP"
+        assert runner_calls == []
     finally:
         stop_server(server, thread)
 

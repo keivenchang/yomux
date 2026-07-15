@@ -1589,6 +1589,11 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
     assert set(payload["chat"]["events"]) == {"chat_messages_changed", "chat_typing_changed"}
     assert set(payload["chat"]["store"]) >= {"database_bytes", "message_rows", "typing_leases", "prune_runs"}
     assert "body" not in payload["chat"] and "query" not in payload["chat"] and "browser" not in payload["chat"]
+    # Login throttle aggregates are present and privacy-safe (counts/latency only).
+    throttle = payload["login_throttle"]
+    assert set(throttle) >= {"allowed", "blocked", "blocked_total", "active_rows", "locked_usernames", "decision_ms_avg", "healthy", "schema_version"}
+    assert isinstance(throttle["blocked"], dict)
+    assert "row_key" not in throttle and "username" not in throttle and "ip" not in throttle
 
 
 def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(monkeypatch):

@@ -96,6 +96,8 @@ from .common import YOLOMUX_VERSION
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
 from .locales import LANGUAGE_PREFERENCES
+from .login_escalation import EdgeBlockController
+from .login_escalation import default_edge_runner
 from .login_rate_limit import LOGIN_THROTTLE_DATABASE_NAME
 from .login_rate_limit import LOGIN_THROTTLE_OVERRIDE_NAME
 from .login_rate_limit import LoginRateLimiter
@@ -1763,6 +1765,10 @@ class TmuxWebtermApp:
             common.STATE_DIR / LOGIN_THROTTLE_DATABASE_NAME,
             policy=load_login_rate_policy(common.CONFIG_DIR / LOGIN_THROTTLE_OVERRIDE_NAME),
         )
+        # Optional, OFF-BY-DEFAULT attack-response escalation (defense in depth, not the
+        # core 429). The edge controller only ever spawns a firewall process when an
+        # operator enables it; disabled, block() is a no-op. See login_escalation.py.
+        self.login_edge_controller = EdgeBlockController(runner=default_edge_runner, enabled=False)
         # DOIT.58 Phase 1: per-session/window user+agent activity ledger (heartbeat-coalesced
         # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.
         self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
@@ -9031,6 +9037,12 @@ class TmuxWebtermApp:
                 **self.chat_service.diagnostics(),
                 "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)),
                 "events": chat_events,
+            },
+            # Privacy-safe login-throttle aggregates: allowed/blocked-by-scope counts,
+            # active rows, locked accounts, decision latency — never raw usernames/IPs.
+            "login_throttle": {
+                **self.login_rate_limiter.diagnostics(),
+                "edge": self.login_edge_controller.diagnostics(),
             },
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
