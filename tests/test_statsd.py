@@ -1510,10 +1510,13 @@ def test_stats_client_runtime_status_exposes_sampler_and_history_diagnostics(mon
         "pid": 123, "sampler_alive": True, "sampler_last_cycle_seconds": 1.25,
         "sampler_late_cycles": 2, "sampler_missed_cycles": 3,
         "sampler_families": {"cpu": {"cadence_seconds": 1.0, "attempts": 4, "successes": 4}},
-        "history_requests": 8, "history_cache_hits": 6,
-        "history_profile": {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2},
     }})
     monkeypatch.setattr(client.registry, "resources", lambda _pid: {"cpu_percent": 1.0})
+    # History encoding merged into the web process: the client's status must
+    # report the IN-PROCESS facade counters, not stale daemon-side numbers.
+    client.history_reader.engine.history_request_count = 8
+    client.history_reader.engine.history_cache_hit_count = 6
+    client.history_reader.engine.last_history_profile = {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2}
 
     status = client.runtime_status()
 
@@ -1811,7 +1814,7 @@ def test_statsd_browser_writes_use_live_socket_without_probe_or_inline_compactio
         or {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION},
     )
     monkeypatch.setattr(client, "ensure_started", lambda: pytest.fail("live browser writes must not health-probe"))
-    monkeypatch.setattr(client.reader, "history", lambda **_query: {"ok": True, "records": []})
+    monkeypatch.setattr(client.history_reader, "history", lambda **_query: {"ok": True, "records": []})
 
     assert client.merge_records([{"time": 1000, "api_count": 1}], client_id="browser-a")["ok"] is True
     assert client.merge_and_history(
@@ -1838,16 +1841,16 @@ def test_statsd_hot_write_replaces_stale_protocol_once(monkeypatch, tmp_path):
     assert starts == [True]
 
 
-def test_statsd_encoded_sample_routes_to_read_only_peer(monkeypatch, tmp_path):
+def test_statsd_encoded_sample_routes_to_in_process_read_only_facade(monkeypatch, tmp_path):
     client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     monkeypatch.setattr(client, "ensure_started", lambda: True)
     monkeypatch.setattr(
         client, "request_with_binary",
-        lambda *_args, **_kwargs: pytest.fail("writer must not encode history responses"),
+        lambda *_args, **_kwargs: pytest.fail("history/sample encoding must not cross the writer socket"),
     )
     calls = []
     monkeypatch.setattr(
-        client.reader, "encoded_sample",
+        client.history_reader, "encoded_sample",
         lambda sample, shared, query: calls.append((sample, shared, query)) or ({"ok": True}, b"{}"),
     )
 
@@ -2030,13 +2033,9 @@ def test_statsd_history_contract_distinguishes_empty_complete_and_partial_covera
         assert partial["coverage"]["complete"] is False
         assert (partial["coverage"]["covered_start"], partial["coverage"]["covered_end"]) == (100, 101)
 
-        status, encoded = service.handle_with_binary({
-            "action": "write_encoded_sample",
-            "sample": {"time": 101.0, "pid": 8881},
-            "shared_stats": {"enabled": True},
-            "query": {"start": 100, "end": 101},
-        })
-        assert status == {"ok": True, "encoding": "json", "size": len(encoded)}
+        encoded = service.encoded_sample(
+            {"time": 101.0, "pid": 8881}, {"enabled": True}, {"start": 100, "end": 101},
+        )
         assert json.loads(encoded)["history"]["coverage"]["complete"] is True
     finally:
         service.store.close()
@@ -2150,10 +2149,10 @@ def test_stats_coverage_read_only_reader_and_legacy_database_derive_holes(tmp_pa
     writer.connection.commit()
     writer.close()
 
-    reader = statsd.StatsReaderService(tmp_path / "reader.sock", database)
+    reader = statsd.StatsHistoryReader(database)
     try:
-        response, encoded = reader.handle_with_binary({"action": "history", "start": 90, "end": 220})
-        assert encoded == b"" and response["ok"] is True
+        response = reader.history(start=90, end=220)
+        assert response["ok"] is True
         facts = response["coverage"]
         expected = [(100, 110), (200, 210)]
         for family in ("raw", "cpu", "agent_status", "agent_tokens", "cost"):
@@ -2164,7 +2163,7 @@ def test_stats_coverage_read_only_reader_and_legacy_database_derive_holes(tmp_pa
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stats_coverage_intervals'"
         ).fetchone() is None
     finally:
-        reader.engine.store.close()
+        reader.close()
 
 
 def test_statsd_history_latency_budget_scales_below_linux_baseline_cores():
@@ -2175,8 +2174,14 @@ def test_statsd_history_latency_budget_scales_below_linux_baseline_cores():
 
 
 def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_path):
-    """Dense retained history stays exact, bounded, and responsive."""
+    """Dense retained history stays exact, bounded, and responsive.
+
+    Measured on the production read path: the web process's in-process
+    StatsHistoryReader encoding from a read-only WAL handle while the writer
+    holds the same database open.
+    """
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    reader = statsd.StatsHistoryReader(tmp_path / "stats.sqlite3")
     start = 1_000_200  # aligned to every retained and persisted rollup tier
     end = start + (24 * 60 * 60)
     try:
@@ -2201,11 +2206,10 @@ def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_pat
 
         for span in (3600, 24 * 3600):
             latency_budget = _statsd_history_latency_budget_seconds(span)
-            service._encoded_query_cache.clear()
+            reader.engine._encoded_query_cache.clear()
             requested_start = end - span
             started = time.perf_counter()
-            status, encoded = service.handle_with_binary({
-                "action": "write_encoded_history",
+            status, encoded = reader.encoded_sample({"time": float(end), "pid": 8881}, {"enabled": True}, {
                 "start": requested_start,
                 "end": end,
                 "max_points": 360,
@@ -2213,7 +2217,7 @@ def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_pat
                 "token_resolution_seconds": 60,
             })
             elapsed = time.perf_counter() - started
-            payload = json.loads(encoded)
+            payload = json.loads(encoded)["history"]
             token_records = payload["agent_token_history"]["records"]
             token_total = sum(float(record["tokens_per_agent_total"]) for record in token_records)
             agent_total = sum(
@@ -2237,6 +2241,7 @@ def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_pat
             assert len(gzip.compress(encoded)) <= 768 * 1024
             assert elapsed <= latency_budget
     finally:
+        reader.close()
         service.store.close()
 
 
@@ -2617,13 +2622,12 @@ def test_statsd_cpu_write_stays_responsive_during_browser_retention_maintenance(
     assert elapsed < 0.9
 
 
-def test_stats_reader_blocked_history_does_not_delay_cpu_writer(monkeypatch, tmp_path):
+def test_stats_history_blocked_in_process_encode_does_not_delay_cpu_writer(monkeypatch, tmp_path):
+    """A slow web-side history encode must never occupy the writer socket."""
     writer = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    reader = statsd.StatsReaderService(tmp_path / "statsd-reader.sock", tmp_path / "stats.sqlite3")
     writer_thread = threading.Thread(target=writer.run, daemon=True)
-    reader_thread = threading.Thread(target=reader.run, daemon=True)
     writer_thread.start()
-    client = statsd.StatsClient(writer.socket_path, writer.store.path, reader.socket_path)
+    client = statsd.StatsClient(writer.socket_path, writer.store.path)
     deadline = time.monotonic() + 2.0
     while not client.healthy() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -2637,24 +2641,18 @@ def test_stats_reader_blocked_history_does_not_delay_cpu_writer(monkeypatch, tmp
 
     history_started = threading.Event()
     release_history = threading.Event()
-    original_history = reader.engine._encoded_history
+    original_history = client.history_reader.engine._encoded_history
 
     def blocked_history(request):
         history_started.set()
         assert release_history.wait(3.0) is True
         return original_history(request)
 
-    monkeypatch.setattr(reader.engine, "_encoded_history", blocked_history)
-    reader_thread.start()
-    deadline = time.monotonic() + 2.0
-    while not client.reader.registry.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert client.reader.registry.healthy() is True
+    monkeypatch.setattr(client.history_reader.engine, "_encoded_history", blocked_history)
     history_result = {}
 
     def load_history():
-        metadata, encoded = client.encoded_history(start=int(now) - 1, end=int(now) + 30)
-        history_result.update({"metadata": metadata, "encoded": encoded})
+        history_result.update(client.history(start=int(now) - 1, end=int(now) + 30))
 
     history_thread = threading.Thread(target=load_history, daemon=True)
     history_thread.start()
@@ -2669,17 +2667,16 @@ def test_stats_reader_blocked_history_does_not_delay_cpu_writer(monkeypatch, tmp
     history_thread.join(timeout=3.0)
 
     client.request({"action": "shutdown"})
-    reader_thread.join(timeout=2.0)
     writer_thread.join(timeout=2.0)
+    client.history_reader.close()
     assert cpu["ok"] is True
     assert elapsed < 0.9
     assert history_thread.is_alive() is False
-    assert reader_thread.is_alive() is False
-    payload = json.loads(history_result["encoded"])
-    assert sum(float(record.get("cpu_count") or 0) for record in payload["records"]) == 21
+    assert history_result["ok"] is True
+    assert sum(float(record.get("cpu_count") or 0) for record in history_result["records"]) == 21
 
 
-def test_stats_reader_is_read_only_and_rejects_writer_actions(tmp_path):
+def test_stats_history_reader_is_read_only_and_never_writes_during_encode(monkeypatch, tmp_path):
     database = tmp_path / "stats.sqlite3"
     writer = statsd.stats_store.StatsStore(database)
     writer.upsert_bucket(_bucket(start=100, sequence=1))
@@ -2693,17 +2690,119 @@ def test_stats_reader_is_read_only_and_rejects_writer_actions(tmp_path):
         reader_store.upsert_bucket(_bucket(start=101, sequence=2))
     reader_store.close()
 
-    service = statsd.StatsReaderService(tmp_path / "reader.sock", database, idle_seconds=1.0)
-    rejected, _binary = service.handle_with_binary({"action": "merge_server_records", "records": []})
-    assert rejected == {"ok": False, "error": "stats reader rejects action: merge_server_records"}
-    status, _binary = service.handle_with_binary({"action": "status"})
-    assert status["ok"] is True
-    assert status["version"] == statsd.STATSD_PROTOCOL_VERSION
-    assert status["cache"]["sequence"] == 1
-    assert status["queues"] == {"interactive": 0, "normal": 0, "maintenance": 0}
-    service.engine.store.close()
-    service.last_client_at = time.monotonic() - 2.0
-    assert service._idle_shutdown_ready() is True
+    # The in-process facade's encode path must be a pure read: no upsert,
+    # replace, compaction, or retention write may run behind history/sample
+    # encoding (the old encoded_history_from_buckets replace path is retired).
+    reader = statsd.StatsHistoryReader(database)
+    for method in ("upsert_bucket", "replace_buckets", "upsert_rollup", "retain_after", "record_sample_coverage", "replace_metadata_value"):
+        if hasattr(reader.engine.store, method):
+            monkeypatch.setattr(
+                reader.engine.store, method,
+                lambda *args, _method=method, **kwargs: pytest.fail(f"read-only encode called store.{_method}"),
+            )
+    history = reader.history(start=90, end=220, client_id="browser-a")
+    assert history["ok"] is True and history["records"]
+    response, encoded = reader.encoded_sample({"time": 101.0}, {"enabled": True}, {"start": 90, "end": 220})
+    assert response["ok"] is True and json.loads(encoded)["history"]["records"]
+    assert reader.engine.store.read_only is True
+    reader.close()
+
+
+def test_stats_history_reader_survives_wal_read_only_open_quirk(tmp_path):
+    """Read-only opens must work with a live writer, with no writer, and must
+    degrade to a clean retryable error while the database does not exist yet."""
+    database = tmp_path / "stats.sqlite3"
+    reader = statsd.StatsHistoryReader(database)
+    missing = reader.history()
+    assert missing["ok"] is False and missing["error"]
+
+    # The statsd owner appears (live writer holding a WAL connection): the SAME
+    # facade instance recovers lazily on its next request without a restart.
+    writer = statsd.PersistentStatsService(tmp_path / "statsd.sock", database)
+    try:
+        writer.store.upsert_bucket(_bucket(start=100, sequence=1))
+        with_live_writer = reader.history(client_id="browser-a")
+        assert with_live_writer["ok"] is True
+        assert len(with_live_writer["records"]) == 1
+        # New commits are visible through the held read-only connection.
+        writer.store.upsert_bucket(_bucket(start=101, sequence=2))
+        assert len(reader.history(client_id="browser-a")["records"]) == 2
+    finally:
+        writer.store.close()
+
+    # No writer running at all (clean shutdown checkpointed the WAL).
+    without_writer = reader.history(client_id="browser-a")
+    assert without_writer["ok"] is True and len(without_writer["records"]) == 2
+    reader.close()
+
+
+def test_stats_history_reader_concurrent_encodes_match_sequential_while_writer_appends(tmp_path):
+    """N request threads encode a fixed snapshot range while the owner keeps
+    writing: no OperationalError and no torn payloads (byte-equal results)."""
+    database = tmp_path / "stats.sqlite3"
+    writer = statsd.PersistentStatsService(tmp_path / "statsd.sock", database)
+    reader = statsd.StatsHistoryReader(database)
+    base = 1_000_000
+    try:
+        for index in range(60):
+            bucket = _bucket(start=base + index, sequence=index + 1)
+            writer.store.upsert_bucket(bucket)
+        fixed_query = {"start": base, "end": base + 60, "client_id": "browser-a", "max_points": 120}
+
+        def frozen_view(payload):
+            # The writer keeps appending OUTSIDE the fixed range, so global
+            # cursors (latest_sequence, available_end) legitimately advance;
+            # the returned records and their in-range coverage must not tear.
+            return json.dumps({"sequence": payload["sequence"], "records": payload["records"]}, sort_keys=True)
+
+        sequential = frozen_view(reader.history(**fixed_query))
+
+        stop_writes = threading.Event()
+        write_failures = []
+
+        def keep_writing():
+            # The real owner writes from its own listener thread; SQLite pins
+            # a connection to its creating thread, so this thread owns one.
+            thread_store = stats_store.StatsStore(database)
+            sequence = 10_000
+            try:
+                while not stop_writes.is_set():
+                    thread_store.upsert_bucket(_bucket(start=base + 3600 + sequence, sequence=sequence))
+                    sequence += 1
+            except sqlite3.Error as exc:  # pragma: no cover - failure evidence
+                write_failures.append(str(exc))
+            finally:
+                thread_store.close()
+
+        results: dict[int, list[str]] = {index: [] for index in range(4)}
+        errors = []
+
+        def encode_loop(worker: int):
+            for _ in range(25):
+                payload = reader.history(**fixed_query)
+                if not payload.get("ok"):
+                    errors.append(payload.get("error"))
+                    return
+                results[worker].append(frozen_view(payload))
+
+        writer_thread = threading.Thread(target=keep_writing, daemon=True)
+        writer_thread.start()
+        workers = [threading.Thread(target=encode_loop, args=(index,), daemon=True) for index in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30.0)
+        stop_writes.set()
+        writer_thread.join(timeout=5.0)
+
+        assert errors == []
+        assert write_failures == []
+        for worker, payloads in results.items():
+            assert len(payloads) == 25, f"worker {worker} did not finish"
+            assert all(payload == sequential for payload in payloads), f"worker {worker} saw a torn/mutated payload for a fixed range"
+    finally:
+        reader.close()
+        writer.store.close()
 
 
 def test_statsd_merge_server_records_owns_global_process_and_host_deltas(tmp_path):
@@ -2728,18 +2827,18 @@ def test_statsd_merge_server_records_owns_global_process_and_host_deltas(tmp_pat
     service.store.close()
 
 
-def test_statsd_returns_preencoded_bounded_history_bytes(tmp_path):
+def test_statsd_writer_socket_no_longer_serves_encoded_history_actions(tmp_path):
+    """The binary side-channel is retired: encoding is in-process only."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     service.store.upsert_bucket(_bucket())
 
-    response = service.handle({"action": "write_encoded_history", "client_id": "browser-a"})
+    for action in ("write_encoded_history", "write_encoded_sample", "replace_and_write_encoded_history"):
+        response = service.handle({"action": action, "client_id": "browser-a"})
+        assert response == {"ok": False, "error": f"unknown stats action: {action}"}
+    service.store.close()
 
-    assert response["ok"] is True
-    assert response["encoding"] == "json"
-    assert response["size"] == len(response["bytes"].encode("utf-8"))
 
-
-def test_statsd_rpc_returns_preencoded_history_as_binary_without_metadata_copy(tmp_path):
+def test_statsd_client_encodes_sample_in_process_without_a_reader_socket(tmp_path):
     socket_path = tmp_path / "statsd.sock"
     database_path = tmp_path / "stats.sqlite3"
     service = statsd.PersistentStatsService(socket_path, database_path, idle_seconds=10.0)
@@ -2751,14 +2850,18 @@ def test_statsd_rpc_returns_preencoded_history_as_binary_without_metadata_copy(t
         time.sleep(0.01)
     assert client.request({"action": "upsert_bucket", "bucket": _bucket()})["ok"] is True
 
-    response, encoded = client.encoded_history(client_id="browser-a")
+    response, encoded = client.encoded_sample({"time": 1000.0, "pid": 8881}, {"enabled": True}, query={"client_id": "browser-a"})
 
     assert response == {"ok": True, "encoding": "json", "size": len(encoded)}
-    assert json.loads(encoded)["records"][0]["sequence"] == 1
+    payload = json.loads(encoded)
+    assert payload["history"]["records"][0]["sequence"] == 1
     assert "bytes" not in response
-    client.reader.request({"action": "shutdown"})
+    # The merged architecture runs exactly one stats process (the writer):
+    # no reader socket may exist or be spawned by the read path.
+    assert not list(tmp_path.glob("*reader*.sock"))
     assert client.request({"action": "shutdown"}) == {"ok": True}
     worker.join(timeout=2.0)
+    client.history_reader.close()
 
 
 def test_statsd_history_wire_shape_for_mixed_bucket(tmp_path):

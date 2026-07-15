@@ -70,8 +70,9 @@ def _seed_parity_service(tmp_path, now: int):
 
 
 def _wire_bytes(payload) -> bytes:
-    # The public wire encoding (`encoded_sample` / `encoded_history_from_buckets`):
-    # insertion-ordered keys, compact separators. Key-order drift IS wire drift.
+    # The public wire encoding (`encoded_sample`, run in-process by the web's
+    # StatsHistoryReader): insertion-ordered keys, compact separators.
+    # Key-order drift IS wire drift.
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 

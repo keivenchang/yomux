@@ -106,12 +106,17 @@ daily attempt, while failure publishes status and retries with bounded
 exponential backoff. Fetching and parsing run on a daemon worker and never
 block an HTTP request or startup thread.
 
-statsd is the sole SQLite writer. A separate persistent `stats-reader` service
-opens the same WAL database with SQLite `mode=ro` and `PRAGMA query_only=ON`.
-It accepts only `history`, `write_encoded_history`, and
-`write_encoded_sample` (plus lifecycle/status actions), and returns the
-history envelope or pre-encoded bounded JSON bytes plus metadata. Long-range
-aggregation therefore cannot occupy the statsd listener that owns CPU writes.
+statsd is the sole SQLite writer. The `stats-reader` process is retired: each
+web server reads the same durable WAL database directly through its in-process
+`StatsHistoryReader` facade, which opens SQLite with `mode=ro` and
+`PRAGMA query_only=ON` (lazily, with one close-and-reopen retry for the WAL
+read-only open quirk — a database file that does not exist yet or a racing
+concurrent open) and runs the writer's encode internals (`_encoded_history`,
+`encoded_sample`) as pure reads. One facade lock serializes encodes per web
+process, so long-range aggregation still cannot occupy the statsd listener
+that owns CPU writes — it never touches the writer socket at all, and the
+reader socket, spawn-on-demand reader lifecycle, JSON socket size cap, and
+`write_encoded_history` binary side-channel are gone with the process.
 Bucket queries and merges are bounded; merges accept at most 1,000 records. A
 timed-out current-protocol request is not replayed through legacy transport.
 Restart/failover may return unavailable, but subsequent cursors remain
@@ -128,8 +133,7 @@ errors do not fall back to a second writer or replay through a legacy request.
 | --- | --- | --- |
 | Lifecycle | `ping`, `status`, `profile`, `lease`, `release`, `shutdown_if_idle`, `shutdown` | Protocol/process identity, bounded diagnostics, lease identifiers, or an explicit shutdown decision. These actions never return history bytes. |
 | Sampler diagnostics/demand | `set_token_consumer_until`, `update_sampler_family`, `mark_sampler_success` | A finite token-consumer deadline, named bounded family status, or compatibility success timestamp. Family status exposes cadence, attempt/success/failure, late/missed, runtime, alive/running, and failure text. There is no statsd-to-web sampler-owner RPC. |
-| Bucket reads | `stats-reader: history`; `statsd: query_buckets` | The public history envelope is isolated on the read-only peer; the writer's bounded normalized bucket query remains an internal maintenance/compatibility action. `since`/`after_sequence`, inclusive `start`, exclusive `end`, resolution, client, token, and point-limit selectors are non-negative. |
-| Encoded reads | `stats-reader: write_encoded_history`, `write_encoded_sample` | Metadata `{ok:true,encoding:"json",size}` plus one JSON byte frame. Sample bytes contain the public sample, optional history, and shared-owner facts. A compatibility replacement commits through statsd first, then reads the committed WAL snapshot through stats-reader. |
+| Bucket reads | `statsd: history`, `query_buckets` | The writer keeps a JSON `history` action for direct service tests/compat and a bounded normalized bucket query as an internal maintenance action. The PUBLIC history envelope is not an RPC at all: the web process encodes it in-process (`StatsHistoryReader.history` / `.encoded_sample`) from a read-only WAL handle. `since`/`after_sequence`, inclusive `start`, exclusive `end`, resolution, client, token, and point-limit selectors are non-negative. |
 | Browser writes | `merge_records`, `merge_and_history` | At most 1,000 normalized browser records plus client/cursor facts. The first returns a compact changed/sequence acknowledgement; the compatibility form returns that acknowledgement plus a bounded history envelope. |
 | Server writes | `upsert_bucket`, `merge_server_records`, `replace_buckets`, `retain_after` | Single-writer normalized upsert/merge, explicit maintenance replacement, or retention cutoff; returns changed/sequence/store diagnostics, never an unbounded bucket echo. |
 | Token counters | `claim_agent_token_deltas`, `claim_agent_token_deltas_from_rows`, `recover_agent_token_history`, `recover_agent_token_history_from_rows`, `finish_agent_token_scan` | Validated counter/row snapshots or a scan identifier. Large filesystem work is single-flight and detached; finish/drain responses stay metadata-bounded and stable event IDs make retries idempotent. |
@@ -144,9 +148,11 @@ and do not synchronously compact history or rebuild rollups. Queued RPC writes
 run before maintenance; after a real listener-idle turn, statsd round-robins
 one bounded token, cost, rollup, or retention step. Browser/client uploads also
 enqueue rollup and retention work instead of compacting the full store inline.
-History and response encoding use stats-reader's independent read-only process;
-the System view reports both services separately, including process/version,
-socket, health, cache/failure, queue, and resource facts.
+History and response encoding run in-process in each web server against a
+read-only WAL handle; the System view's Local-services roster reports the four
+spawned services (indexd, statsd, jobd, approvald) — the statsd row's history
+request/cache-hit/profile diagnostics come from the web process's in-process
+encoder, which is where history is actually served now.
 Retention atomically advances one expired or mis-tiered row per turn and lets
 concurrent live writes schedule the next frozen pass. A timeout never triggers daemon launch
 arbitration; only a structured absent/refused socket does. CPU uses a

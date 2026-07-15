@@ -543,8 +543,10 @@ def test_yostats_boot_smoke_fresh_open_renders_every_family_at_15m_4h_24h(browse
     """Phase-0c boot smoke (the screenshot-012 scenario): a FRESH YO!stats open against a
     REAL seeded store must render every family with real drawn geometry at the default
     range, then across 4h and 24h switches through the real poll + stale-while-revalidate
-    path — never an axes-only shell. History payloads come from the real statsd service +
-    encode via the contract-tested request shapes (the golden-pipeline seeder)."""
+    path — never an axes-only shell. History payloads come from the real statsd writer
+    store encoded by the web's in-process StatsHistoryReader via the contract-tested
+    request shapes (the golden-pipeline seeder, which also asserts the retired
+    stats-reader process/socket never reappears)."""
     now = int(time.time() // 600 * 600)
     histories = _seed_real_pipeline(tmp_path, now)
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")

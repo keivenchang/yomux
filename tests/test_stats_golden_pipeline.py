@@ -161,12 +161,17 @@ def seed_real_store(service, now: int) -> None:
 
 def _seed_real_pipeline(tmp_path, now: int) -> dict:
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    # Serve through the production read path: the writer seeds the durable
+    # store, and the web's IN-PROCESS StatsHistoryReader encodes from a
+    # read-only WAL handle (the stats-reader process is retired).
+    reader = statsd.StatsHistoryReader(tmp_path / "stats.sqlite3")
     try:
         seed_real_store(service, now)
         seed_detail_samples(service, now)
         histories = {}
         for range_seconds in RANGES:
-            history = service._encoded_history(reader_history_request(range_seconds, now, client_id="golden-pipeline"))
+            history = reader.history(**reader_history_request(range_seconds, now, client_id="golden-pipeline"))
+            assert history.pop("ok") is True
             records = history.get("records", [])
             assert records, f"range {range_seconds}s produced no records"
             # ONE history stream: token and cost detail must ride the records at
@@ -177,8 +182,12 @@ def _seed_real_pipeline(tmp_path, now: int) -> dict:
             assert any((record.get("cost_summary") or {}).get("components") for record in records), f"range {range_seconds}s carries no inline cost components"
             assert "agent_token_history" not in history, f"range {range_seconds}s reintroduced the legacy token side-stream without token params"
             histories[str(range_seconds)] = history
+        # Retired-path negative check: the in-process read must never spawn a
+        # reader process or create a reader socket beside the writer's.
+        assert not list(tmp_path.glob("**/*reader*.sock")), "the retired stats-reader socket reappeared"
         return histories
     finally:
+        reader.close()
         service.store.close()
 
 

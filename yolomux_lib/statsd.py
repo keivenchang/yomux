@@ -24,7 +24,9 @@ from decimal import Decimal
 from decimal import ROUND_HALF_UP
 from pathlib import Path
 from time import monotonic as monotonic_clock
+from time import time as wall_clock
 from typing import Any
+from typing import Callable
 
 from . import stats_families
 from .common import STATE_DIR
@@ -49,7 +51,6 @@ STATSD_PROTOCOL_VERSION = 21
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
-STATS_READER_SOCKET_NAME = "stats-reader.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
 STATSD_LEGACY_IMPORT_VERSION = 1
 STATSD_LEGACY_IMPORT_MARKER = "legacy_import_version"
@@ -795,10 +796,6 @@ def default_socket_path() -> Path:
     return safe_socket_path(STATE_DIR / "services" / STATSD_SOCKET_NAME, prefix="yolomux-statsd")
 
 
-def default_reader_socket_path() -> Path:
-    return safe_socket_path(STATE_DIR / "services" / STATS_READER_SOCKET_NAME, prefix="yolomux-stats-reader")
-
-
 def default_database_path() -> Path:
     return STATE_DIR / STATSD_DATABASE_NAME
 
@@ -836,8 +833,12 @@ class PersistentStatsService:
         self.stop_event = threading.Event()
         self.leases: dict[str, int] = {}
         self.idle_seconds = max(1.0, float(idle_seconds))
-        self.started_at = time.time()
-        self.last_client_at = time.monotonic()
+        # Import-time clock bindings: this engine is also constructed inside
+        # the web process (StatsHistoryReader), where tests pin time.time /
+        # time.monotonic sequences for app sample math — infrastructure
+        # timestamps must not consume those pinned values.
+        self.started_at = wall_clock()
+        self.last_client_at = monotonic_clock()
         self._encoded_query_cache: dict[tuple[Any, ...], tuple[dict[str, Any], float]] = {}
         self._query_cache_ttl_seconds = 1.0
         self.last_history_profile: dict[str, Any] = {}
@@ -3084,7 +3085,10 @@ class PersistentStatsService:
             generation,
         )
         cached = self._encoded_query_cache.get(cache_key)
-        if cached is not None and time.monotonic() - cached[1] <= self._query_cache_ttl_seconds:
+        # monotonic_clock (bound at import) rather than time.monotonic: the
+        # encode path runs in-process in the web server, so it must not be
+        # perturbed by app-level clock monkeypatching in tests.
+        if cached is not None and monotonic_clock() - cached[1] <= self._query_cache_ttl_seconds:
             if public_request:
                 self.history_cache_hit_count += 1
             self.last_history_profile = {
@@ -3304,7 +3308,7 @@ class PersistentStatsService:
                 "snapshot": token_request["after_sequence"] == 0 and token_history_end <= 0,
                 "coverage": token_coverage,
             }
-        self._encoded_query_cache = {cache_key: (copy.deepcopy(payload), time.monotonic())}
+        self._encoded_query_cache = {cache_key: (copy.deepcopy(payload), monotonic_clock())}
         self.last_history_profile = {
             "cache_hit": False,
             "coverage_ms": round(coverage_ms, 3),
@@ -3314,12 +3318,6 @@ class PersistentStatsService:
             "returned_records": len(records),
         }
         return payload
-
-    def encoded_history_from_buckets(self, buckets: list[dict[str, Any]], request: dict[str, Any]) -> bytes:
-        """Encode a bounded legacy snapshot without making the caller serialize it."""
-        self.store.replace_buckets(buckets)
-        self._encoded_query_cache.clear()
-        return json.dumps(self._encoded_history(request), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], query: dict[str, Any]) -> bytes:
         """Encode the complete public stats response without an HTTP round-trip through Python objects."""
@@ -3388,11 +3386,12 @@ class PersistentStatsService:
         }
 
     def handle_with_binary(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
-        """Return response metadata plus optional pre-encoded JSON bytes.
+        """Handle one writer RPC action.
 
-        ``write_encoded_history`` is the only RPC action that returns a binary
-        payload.  This keeps cached history opaque after statsd encodes it;
-        HTTP still owns compression, HEAD, auth cookies, and response metrics.
+        No writer action returns a binary payload anymore: public history and
+        sample encoding run in-process in the web server through
+        ``StatsHistoryReader`` against a read-only WAL handle, so the socket
+        carries only bounded JSON control/write responses.
         """
         action = str(request.get("action") or "")
         try:
@@ -3591,33 +3590,6 @@ class PersistentStatsService:
             except (TypeError, ValueError, sqlite3.Error) as exc:
                 return {"ok": False, "error": str(exc)}, b""
             return {"ok": True, "buckets": buckets, "status": self.store.diagnostics()}, b""
-        if action == "write_encoded_history":
-            try:
-                encoded = json.dumps(self._encoded_history(request), sort_keys=True, separators=(",", ":")).encode("utf-8")
-            except (TypeError, ValueError, sqlite3.Error) as exc:
-                return {"ok": False, "error": str(exc)}, b""
-            return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
-        if action == "write_encoded_sample":
-            sample = request.get("sample")
-            shared_stats = request.get("shared_stats")
-            query = request.get("query")
-            if not isinstance(sample, dict) or not isinstance(shared_stats, dict) or not isinstance(query, dict):
-                return {"ok": False, "error": "sample, shared_stats, and query are required"}, b""
-            try:
-                encoded = self.encoded_sample(sample, shared_stats, query)
-            except (TypeError, ValueError, sqlite3.Error) as exc:
-                return {"ok": False, "error": str(exc)}, b""
-            return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
-        if action == "replace_and_write_encoded_history":
-            buckets = request.get("buckets")
-            query = request.get("query")
-            if not isinstance(buckets, list) or not isinstance(query, dict):
-                return {"ok": False, "error": "buckets and query are required"}, b""
-            try:
-                encoded = self.encoded_history_from_buckets([bucket for bucket in buckets if isinstance(bucket, dict)], query)
-            except (TypeError, ValueError, sqlite3.Error) as exc:
-                return {"ok": False, "error": str(exc)}, b""
-            return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
         if action == "history":
             try:
                 return {"ok": True, **self._encoded_history(request)}, b""
@@ -3695,112 +3667,86 @@ class PersistentStatsService:
         self.store.close()
 
 
-class StatsReaderService:
-    """Read-only WAL peer for aggregation and JSON encoding."""
+class StatsHistoryReader:
+    """In-process read-only YO!stats history facade for the web server.
 
-    READ_ACTIONS = {"history", "write_encoded_history", "write_encoded_sample"}
+    This replaces the retired ``stats-reader`` process: the web server encodes
+    history and sample responses directly from the durable SQLite database
+    through a read-only WAL connection, while the ``statsd`` owner remains the
+    sole writer.  It reuses ``PersistentStatsService``'s encode internals
+    (`_encoded_history` and friends) against a read-only store handle; every
+    method here is a pure read — the encode path never upserts, compacts, or
+    replaces buckets.
 
-    def __init__(self, socket_path: Path, database_path: Path, *, idle_seconds: float = STATSD_DEFAULT_IDLE_SECONDS):
-        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-stats-reader")
-        self.lock_path = self.socket_path.with_suffix(".lock")
-        self.stop_event = threading.Event()
-        self.idle_seconds = max(1.0, float(idle_seconds))
-        self.started_at = time.time()
-        self.last_client_at = monotonic_clock()
-        self.last_failure = ""
-        self.engine = PersistentStatsService(self.socket_path, database_path, pricing_catalog=None)
-        self.engine.store = StatsStore(database_path, read_only=True)
+    Concurrency: request threads share ONE engine (so the short encoded-query
+    cache keeps working) and one lock serializes encodes exactly like the old
+    single-threaded reader socket did.  The read-only SQLite connection opens
+    lazily and is shared across request threads (``check_same_thread=False``
+    in the read-only store open), which is safe because the lock serializes
+    every use.
 
-    def handle_with_binary(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
-        action = str(request.get("action") or "")
-        if action == "ping":
-            return {
-                "ok": True, "version": STATSD_PROTOCOL_VERSION,
-                "pid": os.getpid(), "started_at": self.started_at,
-            }, b""
-        if action == "status":
-            try:
-                cache = self.engine.store.diagnostics()
-            except sqlite3.Error as exc:
-                cache = {"error": str(exc)}
-                self.last_failure = str(exc)
-            return {
-                "ok": True, "version": STATSD_PROTOCOL_VERSION, "pid": os.getpid(),
-                "started_at": self.started_at, "socket": str(self.socket_path),
-                "cache": cache, "last_failure": self.last_failure,
-                "queues": {"interactive": 0, "normal": 0, "maintenance": 0},
-                "history_requests": self.engine.history_request_count,
-                "history_cache_hits": self.engine.history_cache_hit_count,
-            }, b""
-        if action == "shutdown":
-            self.stop_event.set()
-            return {"ok": True}, b""
-        if action not in self.READ_ACTIONS:
-            return {"ok": False, "error": f"stats reader rejects action: {action}"}, b""
-        return self.engine.handle_with_binary(request)
+    WAL read-only open quirk: opening ``mode=ro`` can raise
+    ``sqlite3.OperationalError`` when the database file does not exist yet
+    (fresh state directory before the statsd owner has created it) or while a
+    concurrent open races schema creation.  Both cases degrade to one lazy
+    close-and-reopen retry, and a persistent failure returns an error payload
+    instead of crashing the request thread.
+    """
 
-    def _idle_shutdown_ready(self) -> bool:
-        return monotonic_clock() - self.last_client_at >= self.idle_seconds
-
-    def run(self) -> int:
-        return run_local_rpc_service(
-            socket_path=self.socket_path,
-            lock_path=self.lock_path,
-            service_name="stats-reader",
-            stop_event=self.stop_event,
-            handle=self.handle_with_binary,
-            on_idle=self._idle_shutdown_ready,
-            on_client=lambda: setattr(self, "last_client_at", monotonic_clock()),
-            on_start=self.engine.store.open,
-            on_shutdown=self.engine.store.close,
-        )
-
-
-class StatsReaderClient(LocalServiceClient):
-    def __init__(self, socket_path: Path, database_path: Path):
+    def __init__(self, database_path: Path):
         self.database_path = Path(database_path)
-        super().__init__(
-            "stats-reader", "yolomux_lib.statsd", socket_path, STATSD_PROTOCOL_VERSION,
-            idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
-            extra_args=("--reader", "--database", str(self.database_path)),
+        self.lock = threading.Lock()
+        self.last_failure = ""
+        # The engine is never run as a service: the socket path is required by
+        # the constructor but never bound, and the writer store it builds is
+        # swapped for a read-only handle before anything opens a connection.
+        self.engine = PersistentStatsService(
+            self.database_path.with_name("stats-history-reader.unbound.sock"),
+            self.database_path,
+            pricing_catalog=None,
         )
+        self.engine.store = StatsStore(self.database_path, read_only=True)
+
+    def _reopen_store(self) -> None:
+        try:
+            self.engine.store.close()
+        except sqlite3.Error:
+            pass
+        self.engine.store = StatsStore(self.database_path, read_only=True)
+
+    def _read(self, operation: Callable[[], Any]) -> Any:
+        with self.lock:
+            try:
+                return operation()
+            except sqlite3.OperationalError:
+                # WAL read-only open quirk (see class docstring): retry once on
+                # a fresh lazy connection so a writer that appeared, restarted,
+                # or checkpointed between requests cannot strand this handle.
+                self._reopen_store()
+                return operation()
 
     def history(self, **request: Any) -> dict[str, Any]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "stats reader unavailable"}
-        return self.request({"action": "history", **request}, timeout=10.0)
-
-    def runtime_status(self) -> dict[str, Any]:
-        status = self.registry.status()
-        payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        pid = int(payload.get("pid") or 0)
-        return {
-            "service": "stats-reader", "pid": pid,
-            "started_at": float(payload.get("started_at") or 0.0),
-            "version": int(payload.get("version") or 0),
-            "socket": str(payload.get("socket") or self.socket_path),
-            "healthy": bool(status.get("healthy")),
-            "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
-            "last_failure": str(payload.get("last_failure") or ""),
-            "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
-            "history_requests": int(payload.get("history_requests") or 0),
-            "history_cache_hits": int(payload.get("history_cache_hits") or 0),
-            "resources": self.registry.resources(pid),
-            "record": status.get("record") if isinstance(status.get("record"), dict) else {},
-        }
-
-    def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "stats reader unavailable"}, b""
-        return self.request_with_binary({"action": "write_encoded_history", **request}, timeout=10.0)
+        try:
+            payload = self._read(lambda: self.engine._encoded_history(dict(request)))
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            self.last_failure = str(exc)
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **payload}
 
     def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], query: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "stats reader unavailable"}, b""
-        return self.request_with_binary(
-            {"action": "write_encoded_sample", "sample": sample, "shared_stats": shared_stats, "query": query},
-            timeout=10.0,
-        )
+        try:
+            encoded = self._read(lambda: self.engine.encoded_sample(sample, shared_stats, dict(query)))
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            self.last_failure = str(exc)
+            return {"ok": False, "error": str(exc)}, b""
+        return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
+
+    def close(self) -> None:
+        with self.lock:
+            try:
+                self.engine.store.close()
+            except sqlite3.Error:
+                pass
 
 
 def remove_legacy_zero_byte_service_database(service_dir: Path, configured_database: Path) -> bool:
@@ -3824,10 +3770,7 @@ def remove_legacy_zero_byte_service_database(service_dir: Path, configured_datab
 class StatsClient(LocalServiceClient):
     """Thin cross-port client for the ``statsd`` durable owner."""
 
-    def __init__(
-        self, socket_path: Path | None = None, database_path: Path | None = None,
-        reader_socket_path: Path | None = None,
-    ):
+    def __init__(self, socket_path: Path | None = None, database_path: Path | None = None):
         self.database_path = Path(database_path or default_database_path())
         writer_socket = Path(socket_path or default_socket_path())
         remove_legacy_zero_byte_service_database(writer_socket.parent, self.database_path)
@@ -3839,19 +3782,10 @@ class StatsClient(LocalServiceClient):
             idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
             extra_args=("--database", str(self.database_path), "--sampler-owner", str(default_sampler_owner_path(self.database_path.parent))),
         )
-        reader_socket = reader_socket_path or (
-            default_reader_socket_path()
-            if socket_path is None
-            else writer_socket.with_name(f"{writer_socket.stem}-reader{writer_socket.suffix}")
-        )
-        self.reader = StatsReaderClient(reader_socket, self.database_path)
-
-    def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:
-        # A deliberate writer shutdown owns cleanup of its read peer too;
-        # crashes remain independently recoverable through each registry.
-        if str(payload.get("action") or "") == "shutdown":
-            self.reader.request({"action": "shutdown"}, timeout=min(timeout, 0.5))
-        return super().request(payload, timeout=timeout)
+        # History/sample reads no longer cross a socket: the web process
+        # encodes them in-process from a read-only WAL handle on the same
+        # durable database the statsd owner writes.
+        self.history_reader = StatsHistoryReader(self.database_path)
 
     def healthy(self) -> bool:
         response = self.request({"action": "ping", "protocol_version": STATSD_PROTOCOL_VERSION}, timeout=0.15)
@@ -3873,9 +3807,12 @@ class StatsClient(LocalServiceClient):
             "sampler_missed_cycles": int(payload.get("sampler_missed_cycles") or 0),
             "sampler_late_cycles": int(payload.get("sampler_late_cycles") or 0),
             "sampler_last_cycle_seconds": float(payload.get("sampler_last_cycle_seconds") or 0.0),
-            "history_profile": payload.get("history_profile") if isinstance(payload.get("history_profile"), dict) else {},
-            "history_requests": int(payload.get("history_requests") or 0),
-            "history_cache_hits": int(payload.get("history_cache_hits") or 0),
+            # History encoding is in-process (StatsHistoryReader) since the
+            # stats-reader process retired; these diagnostics are honest only
+            # when they come from where history is actually served now.
+            "history_profile": dict(self.history_reader.engine.last_history_profile),
+            "history_requests": int(self.history_reader.engine.history_request_count),
+            "history_cache_hits": int(self.history_reader.engine.history_cache_hit_count),
             "sampler_alive": payload.get("sampler_alive") is True,
             "sampler_families": payload.get("sampler_families") if isinstance(payload.get("sampler_families"), dict) else {},
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - monotonic_clock()),
@@ -3884,9 +3821,12 @@ class StatsClient(LocalServiceClient):
         }
 
     def history(self, **request: Any) -> dict[str, Any]:
+        # The writer owner must exist first: it creates/migrates the database
+        # and holds the WAL open, which is what makes the in-process read-only
+        # open below reliable (see StatsHistoryReader's quirk note).
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
-        return self.reader.history(**request)
+        return self.history_reader.history(**request)
 
     def merge_records(self, records: list[dict[str, Any]], *, client_id: str, now: float | None = None, clear: bool = False) -> dict[str, Any]:
         return self._request_live_or_start(
@@ -3901,7 +3841,7 @@ class StatsClient(LocalServiceClient):
         merged = self.merge_records(records, client_id=client_id, now=now, clear=clear)
         if not merged.get("ok"):
             return merged
-        history = self.reader.history(**query)
+        history = self.history_reader.history(**query)
         if not history.get("ok"):
             return history
         return {"ok": True, "merged": merged, "history": history, "version": STATSD_PROTOCOL_VERSION}
@@ -4035,29 +3975,15 @@ class StatsClient(LocalServiceClient):
             {"action": "update_sampler_family", "family": family, "status": status}, timeout=1.0,
         )
 
-    def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}, b""
-        return self.reader.encoded_history(**request)
-
     def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], *, query: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}, b""
-        return self.reader.encoded_sample(sample, shared_stats, query)
-
-    def replace_and_encoded_history(self, buckets: list[dict[str, Any]], **query: Any) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}, b""
-        replaced = self.request({"action": "replace_buckets", "buckets": buckets}, timeout=3.0)
-        if not replaced.get("ok"):
-            return replaced, b""
-        return self.reader.encoded_history(**query)
+        return self.history_reader.encoded_sample(sample, shared_stats, query)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="YOLOmux persistent stats service")
     parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--reader", action="store_true")
     parser.add_argument("--socket", default=str(default_socket_path()))
     parser.add_argument("--database", default=str(default_database_path()))
     parser.add_argument("--sampler-owner", default=str(default_sampler_owner_path()))
@@ -4066,10 +3992,6 @@ def main(argv: list[str] | None = None) -> int:
     if not args.serve:
         parser.error("--serve is required")
     apply_service_process_priority()
-    if args.reader:
-        return StatsReaderService(
-            Path(args.socket), Path(args.database), idle_seconds=args.idle_seconds,
-        ).run()
     # The daemon, rather than an individual web process, owns projection onto
     # the shared catalog.  Direct unit-service construction can still inject a
     # fake catalog or leave it absent without touching a developer's cache.

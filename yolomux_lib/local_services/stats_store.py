@@ -150,7 +150,15 @@ class StatsStore:
 
     def open(self) -> None:
         if self.read_only:
-            self.connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=2.0)
+            # Read-only WAL peers (the web's in-process StatsHistoryReader)
+            # serve HTTP request threads, so the shared connection must not be
+            # pinned to its creating thread; every caller serializes use behind
+            # its own lock. The open itself can raise OperationalError when the
+            # database file does not exist yet (fresh state dir before the
+            # statsd owner created it) — callers open lazily and retry.
+            self.connection = sqlite3.connect(
+                f"file:{self.path}?mode=ro", uri=True, timeout=2.0, check_same_thread=False,
+            )
             self.connection.execute("PRAGMA query_only=ON")
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)

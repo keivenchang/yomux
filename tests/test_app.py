@@ -167,14 +167,15 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
     try:
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
-        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {"service": "stats-reader", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()
     finally:
         webapp.control_server.stop()
 
-    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "stats-reader", "jobd", "approvald"]
+    # stats-reader retired: history encodes run in-process in the web server,
+    # so the honest roster is exactly the four spawned local services.
+    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "jobd", "approvald"]
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
@@ -185,7 +186,6 @@ def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch)
         # A running service reports a started_at; an idle one has no pid.
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "started_at": now - 42.0, "resources": {"cpu_percent": 1.0, "rss_bytes": 2048}})
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "started_at": 0.0, "resources": {}})
-        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {"service": "stats-reader", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()["services"]
@@ -206,7 +206,6 @@ def test_record_service_load_records_every_known_service_including_idle(monkeypa
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "resources": {"cpu_percent": 12.0, "rss_bytes": 2048}})
         # A running service whose first-sample CPU delta is not yet known.
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 4322, "resources": {"cpu_percent": None, "rss_bytes": 4096}})
-        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {"service": "stats-reader", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {"time": 100.0, "pid": 999, "cpu_percent": 5.0, "rss_bytes": 8192})
@@ -220,8 +219,9 @@ def test_record_service_load_records_every_known_service_including_idle(monkeypa
     assert captured["family"] == "service_load"
     services = captured["record"]["host_metrics"]["service_load"]
     # Every known service — running or idle — plus the web process is present so
-    # the Servers Load chart shows all series instead of only web.
-    assert set(services) == {"indexd", "statsd", "stats-reader", "jobd", "approvald", "web"}
+    # the Servers Load chart shows all series instead of only web. stats-reader
+    # is retired (merged into the web process), so it is no longer a known series.
+    assert set(services) == {"indexd", "statsd", "jobd", "approvald", "web"}
     # Idle spawn-on-demand services read as an honest zero with no RSS series.
     assert services["jobd"]["cpu_total_percent"] == 0.0 and "rss_total_bytes" not in services["jobd"]
     # A running service contributes real CPU%/RSS.
@@ -544,7 +544,6 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
         payload, status = webapp.record_stats_history_payload({"records": records})
         incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
     finally:
-        webapp.stats_client.reader.request({"action": "shutdown"})
         webapp.stats_client.request({"action": "shutdown"})
         webapp.control_server.stop()
 
@@ -1554,9 +1553,6 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
         })
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {
             "service": "statsd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
-        })
-        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {
-            "service": "stats-reader", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
         })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
             "service": "jobd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},

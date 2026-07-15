@@ -8935,11 +8935,13 @@ class TmuxWebtermApp:
     def runtime_local_services(self) -> dict[str, Any]:
         """Return bounded worker diagnostics without exposing service payloads."""
         indexd = self.search_indexer.runtime_status()
+        # stats-reader retired: history encodes run in-process in this web
+        # server (StatsHistoryReader), so the honest roster is the four spawned
+        # services; in-process encode cost is part of the `web` row.
         statsd = self.stats_client.runtime_status()
-        stats_reader = self.stats_client.reader.runtime_status()
         jobd = self.job_client.runtime_status()
         approvald = self.approval_client.runtime_status()
-        rows = [indexd, statsd, stats_reader, jobd, approvald]
+        rows = [indexd, statsd, jobd, approvald]
         totals = {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
         now = time.time()
         for row in rows:

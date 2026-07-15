@@ -32,7 +32,7 @@ Open `https://localhost:9998/`. The first launch shows a setup page — see [Fir
 
 ## Runtime architecture
 
-YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one `statsd` writer, one read-only `stats-reader`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, and zero or one `approvald` while YO targets are enabled. A normal stats + Quick Open session has four Python processes (`yolomux.py`, `statsd`, `stats-reader`, `indexd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
+YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one `statsd` writer, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, and zero or one `approvald` while YO targets are enabled. YO!stats history reads do not need a service at all: each web process encodes history and sample responses in-process from a read-only WAL connection to the same durable database (`statsd` remains the sole writer). A normal stats + Quick Open session has three Python processes (`yolomux.py`, `statsd`, `indexd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
 
 ```mermaid
 flowchart TB
@@ -59,7 +59,6 @@ flowchart TB
   subgraph services["Shared local services per YOLOMUX_STATE_DIR"]
     direction TB
     statsd["statsd writer\nSTATE_DIR/services/statsd.sock\nsole SQLite mutator\npartial merges + maintenance"]
-    statsreader["stats-reader\nSTATE_DIR/services/stats-reader.sock\nread-only WAL peer\nhistory aggregation + encoding"]
     indexd["indexd\nSTATE_DIR/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
     jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\n60s idle when queue empty"]
     execs["jobd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
@@ -97,12 +96,11 @@ flowchart TB
   app --> caches
   app <--> control
   app <--> statsd
-  app <--> statsreader
   app <--> indexd
   app <--> jobd
   app <--> approvald
   statsd --> statsdb
-  statsreader -. read-only .-> statsdb
+  app -. read-only WAL .-> statsdb
   indexd --> indexdb
   app --> locks
   app --> caches_state
@@ -125,7 +123,7 @@ flowchart TB
   class events,native,signals,owner,caches worker
   class bridge request
   class attach,tmuxctl,tmuxd,pane,fs child
-  class control,statsd,statsreader,indexd,jobd,execs,approvald local
+  class control,statsd,indexd,jobd,execs,approvald local
   class statsdb,indexdb,locks,caches_state database
 ```
 
@@ -176,7 +174,6 @@ flowchart TB
   end
   subgraph svc["Shared service PIDs"]
     statsd2["statsd writer\nservices/statsd.sock\npartial merges + maintenance"]
-    statsreader2["stats-reader\nservices/stats-reader.sock\nread-only history + encoding"]
     indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
     jobd2["jobd\nservices/jobd.sock\n60s empty-queue idle"]
     approvald2["approvald\nservices/approvald.sock\nexits when no targets"]
@@ -194,8 +191,6 @@ flowchart TB
   app2 --> records
   app1 --> statsd2
   app2 --> statsd2
-  app1 --> statsreader2
-  app2 --> statsreader2
   app1 --> indexer
   app2 --> indexer
   app1 --> jobd2
@@ -203,7 +198,8 @@ flowchart TB
   app1 --> approvald2
   app2 --> approvald2
   statsd2 --> statsdb
-  statsreader2 -. read-only .-> statsdb
+  app1 -. read-only WAL .-> statsdb
+  app2 -. read-only WAL .-> statsdb
   indexer --> indexes
   app1 <--> caches
   app2 <--> caches
@@ -215,7 +211,7 @@ flowchart TB
   class app1,app2 process
   class sock1,sock2 socket
   class ownerlock,ownerjson,records,statsdb,indexes,caches durable
-  class statsd2,statsreader2,indexer,jobd2,approvald2 localChild
+  class statsd2,indexer,jobd2,approvald2 localChild
 ```
 
 | Communication path | Used for | Transport |
@@ -226,7 +222,7 @@ flowchart TB
 | Server ↔ server | Owner refresh requests, status, runtime profiling, release/takeover | Local Unix-domain socket; versioned length-framed JSON with legacy newline compatibility, mode `0600` |
 | Server ↔ server election | One owner for expensive cross-process work | `flock` plus atomic JSON generation records under the state directory |
 | Elected server → `statsd` | Independently scheduled YO!stats CPU/status/GPU/memory/token partial records and bounded maintenance | Local Unix RPC; the elected server collects each family asynchronously and `statsd` is the sole SQLite WAL writer for `STATE_DIR/stats-history.sqlite3` |
-| Server → `stats-reader` | Retained-history queries, aggregation, and pre-encoded responses | Local Unix RPC to an independent SQLite `mode=ro`/`query_only` WAL reader, so a long range query cannot occupy the writer listener or suppress a CPU deadline |
+| Server → stats history (in-process) | Retained-history queries, aggregation, and pre-encoded responses | No RPC: each web process encodes directly from its own SQLite `mode=ro`/`query_only` WAL connection to `STATE_DIR/stats-history.sqlite3`, so a long range query cannot occupy the writer listener or suppress a CPU deadline |
 | Server ↔ `indexd` | Quick Open enqueue/search/unindex and index diagnostics | Local Unix RPC; `indexd` writes `STATE_DIR/search_index/<digest>.sqlite3` row deltas, servers read committed snapshots |
 | Server ↔ `jobd` | Stateless bounded CPU tasks such as `transcript_view` and indexed-repository discovery | Local Unix RPC to the broker; broker supervises 1-2 spawned executors and bounded queues. The web process consumes the last completed repository snapshot and never recursively walks configured index roots. |
 | Server ↔ `approvald` | YO auto-approval start/status/stop/pending-prompt checks | Local Unix RPC; `approvald` owns target locks and target-keyed `AutoApproveWorker` threads |
@@ -241,7 +237,7 @@ flowchart TB
 | Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. `YOLOMUX_TMUX_SOCKET` adds `tmux -S <socket>` when a non-default tmux socket is required. |
 | Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOLOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
 | Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_STATE_DIR/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
-| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Service sockets are `$YOLOMUX_STATE_DIR/services/statsd.sock`, `$YOLOMUX_STATE_DIR/services/stats-reader.sock`, `$YOLOMUX_STATE_DIR/search_index/indexer.sock`, `$YOLOMUX_STATE_DIR/services/jobd.sock`, and `$YOLOMUX_STATE_DIR/services/approvald.sock`; `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include stats writes/maintenance, read-only history/encoding, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. |
+| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Service sockets are `$YOLOMUX_STATE_DIR/services/statsd.sock`, `$YOLOMUX_STATE_DIR/search_index/indexer.sock`, `$YOLOMUX_STATE_DIR/services/jobd.sock`, and `$YOLOMUX_STATE_DIR/services/approvald.sock`; `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include stats writes/maintenance, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. History/sample encoding is not an RPC action: it runs in-process in each web server from a read-only WAL connection. |
 | Markdown → visual preview | Browser-local rendering; there is no SVG server or preview port. A changed Markdown content generation replaces its derived DOM, reruns Mermaid to a sanitized SVG/blob image, recreates inline media nodes, and rejects any late render from an older generation. |
 
 The owner role is deliberately narrow: every server still accepts browser traffic and owns its own WebSocket/PTy children, while the elected process coordinates shared refresh demand and service leases. A configured preferred port has higher election priority than later-started followers, while followers still take over if it dies. Lower-priority processes cannot force the preferred live owner to release its lock. Service startup is serialized by `services/<name>.service.lock`; stale records are cleaned only after PID checks, incompatible protocol peers are retired, and repeated spawn failures back off from 0.25 seconds up to 8 seconds. Singleton service locks and one-writer SQLite ownership prevent split writers; idle shutdown only happens after leases and queued work drain.
