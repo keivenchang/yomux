@@ -7007,19 +7007,26 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.debugGraphLivePulseHtmlForTest([], [], {...liveDomain, zoomed: true}, now), '', 'the pulse is suppressed on a zoomed view');
   });
 
-  test('YO!stats x-axis omits seconds except on a sub-minute zoom', () => {
+  test('YO!stats x-axis shows seconds only when rendering at 1s resolution', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.UTC(2026, 6, 15, 8, 14, 15);
     const tickText = html => [...html.matchAll(/data-js-debug-x-tick="[^"]+"[^>]*>([^<]+)</g)].map(m => m[1]);
-    // 1h range: ticks are 30 minutes apart, so HH:MM (no seconds).
-    for (const rangeSeconds of [60 * 60, 4 * 3600, 5 * 60]) {
+    const hasSeconds = labels => labels.some(label => /\d{1,2}:\d{2}:\d{2}/.test(label));
+    // Coarser ranges render at 10s/60s/300s, so seconds are fake precision -> HH:MM.
+    for (const rangeSeconds of [60 * 60, 4 * 3600]) {
       const labels = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - rangeSeconds * 1000, endMs: now}));
-      assert.ok(labels.length >= 3, `${rangeSeconds}s axis renders ticks`);
-      assert.ok(labels.every(label => !/\d{1,2}:\d{2}:\d{2}/.test(label)), `${rangeSeconds}s x-axis labels omit seconds: ${labels.join(', ')}`);
+      assert.ok(labels.length >= 3 && !hasSeconds(labels), `${rangeSeconds}s x-axis omits seconds: ${labels.join(', ')}`);
     }
-    // A tight sub-minute drag-zoom keeps seconds (the half-span is under a minute).
-    const zoomLabels = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - 40 * 1000, endMs: now}));
-    assert.ok(zoomLabels.some(label => /\d{1,2}:\d{2}:\d{2}/.test(label)), `a sub-minute zoom keeps seconds: ${zoomLabels.join(', ')}`);
+    // 5m at an explicit 1s resolution genuinely ticks every second -> show seconds.
+    api.setDebugGraphRangeForTest(5 * 60, {render: false});
+    api.setDebugGraphResolutionOverrideForTest(1);
+    const oneSecond = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - 5 * 60 * 1000, endMs: now}));
+    assert.ok(hasSeconds(oneSecond), `5m/1s x-axis shows seconds: ${oneSecond.join(', ')}`);
+    // The same 5m range at 10s is coarse -> no seconds.
+    api.setDebugGraphResolutionOverrideForTest(10);
+    const tenSecond = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - 5 * 60 * 1000, endMs: now}));
+    assert.ok(!hasSeconds(tenSecond), `5m/10s x-axis omits seconds: ${tenSecond.join(', ')}`);
+    api.setDebugGraphResolutionOverrideForTest(0);
   });
 
   test('YO!stats slides only short live ranges with the wall clock', () => {

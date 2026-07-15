@@ -45918,10 +45918,13 @@ function debugGraphXAxisHtml(domain) {
     {name: 'end', ms: endMs},
   ];
   const includeDate = debugGraphLocalDateKey(startMs) !== debugGraphLocalDateKey(endMs);
-  // Seconds are noise once the three ticks are more than a minute apart (every real range
-  // from 5m up, and 1h/4h/... where the ticks span many minutes): show HH:MM. Seconds
-  // return only on a tight drag-zoom whose half-span is under a minute.
-  const includeSeconds = !includeDate && ((endMs - startMs) / 2) < 60 * 1000;
+  // Show seconds when the chart is actually rendering at 1-second resolution — where
+  // the data (and the wall-clock slide) genuinely tick every second — regardless of the
+  // range's span. Coarser resolutions (10s/60s/300s) show HH:MM because a seconds digit
+  // there is fake precision. Keyed off the same effective-resolution owner the Resolution
+  // label reads, not a span proxy.
+  const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, Date.now()) / 1000;
+  const includeSeconds = !includeDate && resolutionSeconds <= 1;
   return `<div class="js-debug-x-axis" data-js-debug-x-axis>
     ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate, includeSeconds}))}</span>`).join('')}
   </div>`;
