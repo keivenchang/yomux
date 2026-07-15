@@ -8,9 +8,7 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import re
-import secrets
 import threading
 import time
 from collections import defaultdict
@@ -20,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 
+from .atomic_file import load_or_create_secret_key
 from .chat_questions import chat_message_is_question
 from .chat_store import CHAT_CONTEXT_LIMIT_MAX
 from .chat_store import CHAT_DEFAULT_RETENTION_DAYS
@@ -108,20 +107,10 @@ class ChatCursorCodec:
         with self._lock:
             if self._secret is not None:
                 return self._secret
-            self.secret_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                secret = self.secret_path.read_bytes()
-            except FileNotFoundError:
-                secret = secrets.token_bytes(32)
-                try:
-                    descriptor = os.open(self.secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                except FileExistsError:
-                    secret = self.secret_path.read_bytes()
-                else:
-                    with os.fdopen(descriptor, "wb") as output:
-                        output.write(secret)
-            if len(secret) < 32:
-                raise ChatServiceError("invalid chat cursor key", code="server_error", status=500)
+                secret = load_or_create_secret_key(self.secret_path)
+            except ValueError as error:
+                raise ChatServiceError("invalid chat cursor key", code="server_error", status=500) from error
             self._secret = secret
             return secret
 

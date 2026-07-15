@@ -57,6 +57,35 @@ def file_lock(path: Path, dir_mode: int | None = None) -> Any:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def load_or_create_secret_key(path: Path, num_bytes: int = 32) -> bytes:
+    """Load a raw secret key from `path`, creating it race-safely on first use.
+
+    The chat cursor codec and the login rate-limiter both need a private HMAC key that
+    is generated once and shared across every process pointing at the same state
+    directory. This is the one owner of that pattern (raw bytes, mode 0600, exclusive
+    create so two concurrent starters agree on one key). The auth-cookie secret is
+    deliberately NOT routed here: it stores a hex-text form with truncate-on-rewrite
+    semantics, and unifying it would change that on-disk format and invalidate every
+    live login cookie.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        secret = path.read_bytes()
+    except FileNotFoundError:
+        secret = os.urandom(num_bytes)
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # A concurrent starter won the create; adopt its key so all agree.
+            secret = path.read_bytes()
+        else:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(secret)
+    if len(secret) < num_bytes:
+        raise ValueError(f"secret key at {path} is too short ({len(secret)} < {num_bytes} bytes)")
+    return secret
+
+
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
     """Write `text` to `path` atomically: unique temp sibling, fsync, then os.replace.
 
