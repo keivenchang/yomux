@@ -47176,7 +47176,7 @@ async function prefetchJsDebugHistoryFullRetention() {
     const historyStart = Math.max(0, nowSeconds - jsDebugHistoryPrefetchRetentionSeconds);
     const clientId = jsDebugStatsClientIdForRequest();
     const payload = await fetchJsDebugStatsJson(
-      `/api/stats-sample?since=0&client_id=${encodeURIComponent(clientId)}&token_consumer=0&history_start=${encodeURIComponent(String(historyStart))}&history_end=0&history_resolution=1&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}`,
+      jsDebugStatsSampleQuery({clientId, historyStart, historyEnd: 0, historyResolution: 1}),
       {cache: 'no-store', timeoutMs: jsDebugStatsHistoryTimeoutMs(jsDebugHistoryPrefetchRetentionSeconds)},
     );
     // The cache was cleared (range reset / history clear) while this fetch was in flight:
@@ -47195,6 +47195,46 @@ async function prefetchJsDebugHistoryFullRetention() {
   } finally {
     jsDebugHistoryPrefetchState.inFlight = false;
   }
+}
+
+// THE one owner of the /api/stats-sample request shape. Every runtime fetch, test
+// fixture, and diagnostic probe must build its query through this function or its
+// contract-tested python mirror (tests/browser_helpers/stats_request_shapes.py):
+// the 2026-07-14 host-metrics outage escaped because a diagnosis probe hand-rolled
+// a request WITHOUT token_resolution and validated the wrong serve path. The shared
+// goldens live in tests/fixtures/stats_request_shapes.json.
+function jsDebugStatsSampleQuery(params = {}) {
+  const {
+    since = 0,
+    clientId = '',
+    tokenConsumer = '0',
+    historyStart = 0,
+    historyEnd = 0,
+    historyResolution = 1,
+    historyMaxPoints = jsDebugStatsHistoryMaxPoints,
+    history = true,
+    tokenResolution = 0,
+    tokenSince = 0,
+    tokenHistoryStart = 0,
+    tokenHistoryEnd = 0,
+  } = params;
+  const parts = [
+    `since=${encodeURIComponent(String(since))}`,
+    `client_id=${encodeURIComponent(String(clientId))}`,
+    `token_consumer=${encodeURIComponent(String(tokenConsumer))}`,
+    `history_start=${encodeURIComponent(String(historyStart))}`,
+    `history_end=${encodeURIComponent(String(historyEnd))}`,
+    `history_resolution=${encodeURIComponent(String(historyResolution))}`,
+    `history_max_points=${encodeURIComponent(String(historyMaxPoints))}`,
+  ];
+  if (!history) parts.push('history=0');
+  if (Number(tokenResolution) > 0) {
+    parts.push(`token_since=${encodeURIComponent(String(tokenSince))}`);
+    parts.push(`token_resolution=${encodeURIComponent(String(tokenResolution))}`);
+    parts.push(`token_history_start=${encodeURIComponent(String(tokenHistoryStart))}`);
+    parts.push(`token_history_end=${encodeURIComponent(String(tokenHistoryEnd))}`);
+  }
+  return `/api/stats-sample?${parts.join('&')}`;
 }
 
 function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
@@ -47311,12 +47351,19 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
       : 0;
     const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : (historyRequestSuppressed ? 0 : targetStart);
-    const tokenHistory = tokenResolution
-      ? `&token_since=${encodeURIComponent(String(readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0)))}&token_resolution=${encodeURIComponent(String(tokenResolution))}&token_history_start=${encodeURIComponent(String(targetStart))}&token_history_end=0`
-      : '';
-    const historyMode = historyRequestSuppressed ? '&history=0' : '';
-    const requestSince = readinessRequest ? 0 : (jsDebugStatsServerSequence || 0);
-    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${historyMode}${tokenHistory}`, {
+    const payload = await fetchJsDebugStatsJson(jsDebugStatsSampleQuery({
+      since: readinessRequest ? 0 : (jsDebugStatsServerSequence || 0),
+      clientId,
+      tokenConsumer,
+      historyStart,
+      historyEnd,
+      historyResolution,
+      history: !historyRequestSuppressed,
+      tokenResolution,
+      tokenSince: readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0),
+      tokenHistoryStart: targetStart,
+      tokenHistoryEnd: 0,
+    }), {
       cache: 'no-store',
       timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
     });

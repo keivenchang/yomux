@@ -1344,6 +1344,7 @@ globalThis.__layoutTestApi = {
     };
   },
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
+  jsDebugStatsSampleQueryForTest: jsDebugStatsSampleQuery,
   prefetchJsDebugHistoryFullRetentionForTest: prefetchJsDebugHistoryFullRetention,
   maybePrefetchJsDebugHistoryForTest: maybePrefetchJsDebugHistory,
   jsDebugHistoryPrefetchStateForTest() {

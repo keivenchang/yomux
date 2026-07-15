@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.browser_helpers.stats_request_shapes import reader_history_request
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
 
@@ -3016,19 +3017,12 @@ def test_host_metrics_survive_history_at_every_range_with_the_real_client_reques
                 }
                 service.store.upsert_bucket(bucket)
 
-        # The exact per-range request shapes the browser sends: token_resolution=0 below 4h,
-        # 120 at 4h..16h, 300 at 16h+ (debugGraphAgentTokenResolution).
-        for range_seconds, token_resolution in ((1800, 0), (3600, 0), (4 * 3600, 120), (8 * 3600, 120), (24 * 3600, 300)):
-            request = {
-                "history_start": now - range_seconds,
-                "history_end": 0,
-                "history_resolution": 1,
-                "history_max_points": 6000,
-                "include_history": True,
-                "client_id": "range-sweep",
-            }
-            if token_resolution:
-                request["token_resolution"] = token_resolution
+        # The exact per-range request shapes the browser sends, built through the ONE
+        # contract-tested request-shape mirror (never hand-rolled — a hand-rolled probe
+        # without token_resolution is how this bug originally escaped diagnosis).
+        for range_seconds in (1800, 3600, 4 * 3600, 8 * 3600, 24 * 3600):
+            request = reader_history_request(range_seconds, now)
+            token_resolution = request.get("token_resolution", 0)
             history = service._encoded_history(request)
             records = history.get("records", [])
             assert records, f"range {range_seconds}s returned no records"

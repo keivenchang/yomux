@@ -1077,6 +1077,8 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
 
+    # request-shape-exempt: deliberately NON-standard params to exercise the route parser
+    # itself (legacy `tokens=1`, missing history params); this is not a client-shape probe.
     handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1&token_since=3&token_resolution=120", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]

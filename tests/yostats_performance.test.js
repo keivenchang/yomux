@@ -292,6 +292,23 @@ async function runYostatsPerformanceSuite() {
     assert.ok(medianMs < 300, `24-hour graph HTML median took ${medianMs.toFixed(1)}ms; samples=[${sampleText}]ms`);
   });
 
+  test('CONTRACT: the client request-shape owner reproduces every shared golden byte-for-byte', () => {
+    // The python mirror (tests/browser_helpers/stats_request_shapes.py) asserts the SAME
+    // goldens (tests/test_stats_request_shapes.py). If jsDebugStatsSampleQuery changes,
+    // regenerate tests/fixtures/stats_request_shapes.json — both languages fail until the
+    // owner, the mirror, and the goldens agree. This exists because a diagnosis probe once
+    // hand-rolled a request without token_resolution and validated the wrong serve path.
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const goldens = JSON.parse(fs.readFileSync('tests/fixtures/stats_request_shapes.json', 'utf8'));
+    assert.ok(goldens.cases.length >= 11, 'the golden corpus covers every range plus prefetch and backoff shapes');
+    for (const testCase of goldens.cases) {
+      assert.equal(api.jsDebugStatsSampleQueryForTest(testCase.params), testCase.query, testCase.name);
+    }
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.equal((source.match(/\/api\/stats-sample\?/g) || []).length, 1, 'exactly one stats-sample query construction exists: the owner');
+    assert.equal((source.match(/return `\/api\/stats-sample\?\$\{parts\.join/g) || []).length, 1, 'and it is the parts-joining owner, not a hand-built string');
+  });
+
   test('host charts (Server Load, System memory, GPU) render at the 4h / 120s view when their data is present', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000 / 120) * 120 * 1000;
