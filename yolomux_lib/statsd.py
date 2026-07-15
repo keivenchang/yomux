@@ -2900,6 +2900,48 @@ class PersistentStatsService:
             "coarse_coverage": len(recovered["coarse_coverage"]),
         }
 
+    def _read_raw_samples(self, start: float, end: float) -> list[dict[str, Any]]:
+        """Read raw observations overlapping [start, end), newest schema only."""
+        rows = self.store._connection().execute(
+            "SELECT family, sample_time, payload_json FROM stats_raw_samples "
+            "WHERE sample_time >= ? AND sample_time < ? ORDER BY sample_time",
+            (float(start), float(end)),
+        ).fetchall()
+        samples = []
+        for family, sample_time, payload_json in rows:
+            try:
+                payload = json.loads(payload_json)
+            except (TypeError, ValueError):
+                continue
+            samples.append({"family": str(family), "sample_time": float(sample_time), "payload": payload})
+        return samples
+
+    def materialize_buckets(self, resolution: int, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fold raw per-instant samples into exact epoch-aligned buckets at `resolution`.
+
+        DOIT.1 item 3 core: reuses `_merge_bucket` so the per-family arithmetic is
+        the SAME sum-first-divide-once fold the serve path already uses — CPU
+        percent sums with its count, tokens sum with their seconds, cost atoms
+        dedup by identity, etc. — never a second, drifting formula. Buckets are
+        stable Unix-epoch aligned (`floor(t / resolution) * resolution`) so a named
+        bucket has the same identity across ranges/refreshes/clients. Every
+        returned bucket has `duration == resolution`; a resolution with no samples
+        in its window simply yields no bucket (a genuine gap), never a fabricated
+        zero row.
+        """
+        if resolution <= 0:
+            raise ValueError(f"resolution must be positive, got {resolution!r}")
+        targets: dict[int, dict[str, Any]] = {}
+        for sample in samples:
+            sample_time = float(sample["sample_time"])
+            bucket_start = int(math.floor(sample_time / resolution) * resolution)
+            target = targets.get(bucket_start)
+            if target is None:
+                target = stats_store.empty_bucket(bucket_start, resolution)
+                targets[bucket_start] = target
+            self._merge_bucket(target, sample.get("payload") or {})
+        return [targets[key] for key in sorted(targets)]
+
     def import_legacy_history_once(self, state_dir: Path | None = None) -> dict[str, Any]:
         """Import the legacy v4 snapshots once before public stats cutover."""
         if self.store.metadata_value(STATSD_LEGACY_IMPORT_MARKER) == str(STATSD_LEGACY_IMPORT_VERSION):
