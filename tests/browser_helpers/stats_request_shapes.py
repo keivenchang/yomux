@@ -68,16 +68,24 @@ def stats_sample_query(
 def reader_history_request(range_seconds: int, now_seconds: int, client_id: str = "range-sweep") -> dict[str, Any]:
     """The statsd `_encoded_history` request dict matching what the browser's wire query
     resolves to for a fresh fetch of `range_seconds` — INCLUDING the per-range
-    token_resolution. Serve-layer tests must use this instead of hand-built dicts."""
-    request: dict[str, Any] = {
-        "history_start": now_seconds - range_seconds,
-        "history_end": 0,
-        "history_resolution": 1,
-        "history_max_points": STATS_HISTORY_MAX_POINTS,
-        "include_history": True,
-        "client_id": client_id,
-    }
+    token_resolution — translated through the REAL web-layer translator
+    (`TmuxWebtermApp.stats_sample_history_query`), never a hand-mapped dict. The reader
+    dialect uses `start`/`end`/`resolution_seconds`/`max_points`, NOT the wire's
+    `history_*` names: hand-mapped dicts with the wire names silently queried the whole
+    unwindowed store (that mistake shipped in this very helper first)."""
+    from yolomux_lib.app import TmuxWebtermApp
+
     token_resolution = token_resolution_for_range(range_seconds)
-    if token_resolution:
-        request["token_resolution"] = token_resolution
-    return request
+    return TmuxWebtermApp.stats_sample_history_query(
+        since=0,
+        client_id=client_id,
+        token_since=0,
+        token_resolution_seconds=token_resolution,
+        token_history_start=(now_seconds - range_seconds) if token_resolution else None,
+        token_history_end=0 if token_resolution else None,
+        history_start=now_seconds - range_seconds,
+        history_end=0,
+        history_resolution_seconds=1,
+        history_max_points=STATS_HISTORY_MAX_POINTS,
+        include_history=True,
+    )

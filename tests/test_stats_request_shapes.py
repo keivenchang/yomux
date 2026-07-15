@@ -34,6 +34,9 @@ def test_python_mirror_matches_every_client_golden_query():
 
 
 def test_reader_request_shapes_match_the_goldens_including_token_resolution():
+    """The reader dialect is `start`/`end`/`resolution_seconds`/`max_points` — produced by
+    the REAL web-layer translator, never hand-mapped wire names (a hand-mapped
+    `history_*` dict silently queries the whole unwindowed store)."""
     now = int(GOLDENS["nowSeconds"])
     checked = 0
     for case in GOLDENS["cases"]:
@@ -41,10 +44,8 @@ def test_reader_request_shapes_match_the_goldens_including_token_resolution():
         if not expected or case["name"] == "full-retention-prefetch":
             continue
         produced = reader_history_request(case["rangeSeconds"], now, client_id="golden-client")
-        # The golden fresh-range reader request pins history_end to the golden `now`;
-        # the mirror requests through the live edge (history_end=0) like the client.
-        produced["history_end"] = expected["history_end"]
         assert produced == expected, case["name"]
+        assert "history_start" not in produced and produced["start"] == now - case["rangeSeconds"], case["name"]
         checked += 1
     assert checked >= 9
 

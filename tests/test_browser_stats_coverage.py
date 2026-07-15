@@ -535,3 +535,90 @@ def test_host_charts_render_data_at_four_hour_view_in_real_browser(browser, tmp_
     assert out["gpuUtilUnavailable"] is False, out
     assert out["gpuMemoryLine"] is True, out
     assert out["gpuNoneText"] is False, out
+
+
+def test_yostats_boot_smoke_fresh_open_renders_every_family_at_15m_4h_24h(browser, tmp_path):
+    """Phase-0c boot smoke (the screenshot-012 scenario): a FRESH YO!stats open against a
+    REAL seeded store must render every family with real drawn geometry at the default
+    range, then across 4h and 24h switches through the real poll + stale-while-revalidate
+    path — never an axes-only shell. History payloads come from the real statsd service +
+    encode via the contract-tested request shapes (the golden-pipeline seeder)."""
+    from tests.test_stats_golden_pipeline import _seed_real_pipeline
+
+    now = int(time.time() // 600 * 600)
+    histories = _seed_real_pipeline(tmp_path, now)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script(
+        "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+    ))
+    browser.execute_script(
+        """
+        const fixture = arguments[0];
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        resetJsDebugHistoryReadiness();
+        Date.now = () => Number(fixture.now) * 1000;
+        const originalFetch = window.fetch;
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+          const requestedStart = Number(url.searchParams.get('history_start'));
+          const requestedSpan = Math.max(1, Number(fixture.now) - requestedStart);
+          const key = Object.keys(fixture.histories).sort(
+            (left, right) => Math.abs(Number(left) - requestedSpan) - Math.abs(Number(right) - requestedSpan)
+          )[0];
+          return jsonResponse({ok: true, time: Number(fixture.now), pid: 1, uptime_seconds: 600,
+            cpu_percent: 20, system_cpu_percent: 30, rss_bytes: 1e8, history: fixture.histories[key]});
+        };
+        for (const key of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']) setDebugGraphChartVisible(key, true);
+        """,
+        {"now": now, "histories": histories},
+    )
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const results = {};
+          for (const rangeSeconds of [900, 4 * 3600, 24 * 3600]) {
+            setDebugGraphRange(rangeSeconds, {render: false});
+            await pollJsDebugStatsSample({forceGraphRefresh: true});
+            await window.__yolomuxTestHelpers.settle(3);
+            renderDebugPanels({force: true});
+            await window.__yolomuxTestHelpers.settle(2);
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const lineWidth = key => {
+              const node = graph?.querySelector(`[data-js-debug-series="${key}"]`);
+              if (!node) return 0;
+              const svg = node.closest('svg');
+              const svgWidth = svg ? svg.getBoundingClientRect().width : 0;
+              // Span ratio (%) of the line across its own chart plot: pane-size independent.
+              return svgWidth > 0 ? Math.round((node.getBoundingClientRect().width / svgWidth) * 100) : 0;
+            };
+            results[rangeSeconds] = {
+              phase: jsDebugHistoryReadinessSnapshot().phase,
+              emptyShell: Boolean(graph?.className.includes('js-debug-graph--empty')),
+              systemCpu: lineWidth('systemCpu'),
+              systemMemory: lineWidth('systemMemory'),
+              serversLoadWeb: lineWidth('serviceLoad:web:8881'),
+              gpuMemory: lineWidth('gpu:gpuMemory:gpu:0'),
+              gpuUnavailable: Boolean(graph?.querySelector('[data-js-debug-gpu-unavailable]')),
+              statusBars: graph?.querySelectorAll('[data-js-debug-bar-series="workingAgents"], [data-js-debug-bar-series="idleAgents"]').length || 0,
+            };
+          }
+          done(results);
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    for range_seconds in ("900", "14400", "86400"):
+        cell = out[range_seconds]
+        assert cell["phase"] == "ready", (range_seconds, cell)
+        assert cell["emptyShell"] is False, (range_seconds, cell)
+        # Real drawn geometry, not a token presence check: each family's line spans most
+        # of its own chart plot (percent of the chart svg width, pane-size independent).
+        assert cell["systemCpu"] > 60, (range_seconds, cell)
+        assert cell["systemMemory"] > 60, (range_seconds, cell)
+        assert cell["serversLoadWeb"] > 60, (range_seconds, cell)
+        assert cell["gpuMemory"] > 60, (range_seconds, cell)
+        assert cell["gpuUnavailable"] is False, (range_seconds, cell)
+        assert cell["statusBars"] > 0, (range_seconds, cell)

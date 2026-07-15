@@ -66,30 +66,33 @@ def _seed_real_pipeline(tmp_path, now: int) -> dict:
                 bucket["host_metrics"] = _host_metrics(step)
                 service.store.upsert_bucket(bucket)
 
-        # Real coverage epochs: recorded before and after the outage, never across it.
+        # Real coverage epochs: recorded before and after the outage, never across it, at
+        # each family's TRUE sampler cadence (a span-sized cadence would poison the serve
+        # tier choice into uniform-coarsest for every request).
         for family in ("cpu", "agent_status", "agent_tokens", "gpu", "system_memory", "service_load"):
             cadence = {"cpu": 1, "system_memory": 60}.get(family, 10)
             for span_start, span_end, epoch, generation in (
                 (now - 24 * 3600, now - OUTAGE_START_AGO, "before-outage", 1),
                 (now - OUTAGE_END_AGO, now, "after-outage", 2),
             ):
-                marker = service.handle({
-                    "action": "merge_server_records",
-                    "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
-                    "records": [{
-                        "time": span_start,
-                        "_stats_coverage": {
-                            "family": family,
-                            "cadence_seconds": span_end - span_start,
-                            "epoch_id": f"{epoch}:{family}",
-                            "owner_generation": generation,
-                        },
-                    }],
-                    "now": span_start,
-                    "compact": False,
-                    "refresh_rollups": False,
-                })
-                assert marker["ok"] is True
+                for sample_time in (span_start, span_end - cadence):
+                    marker = service.handle({
+                        "action": "merge_server_records",
+                        "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
+                        "records": [{
+                            "time": sample_time,
+                            "_stats_coverage": {
+                                "family": family,
+                                "cadence_seconds": span_end - span_start if sample_time == span_start else cadence,
+                                "epoch_id": f"{epoch}:{family}",
+                                "owner_generation": generation,
+                            },
+                        }],
+                        "now": sample_time,
+                        "compact": False,
+                        "refresh_rollups": False,
+                    })
+                    assert marker["ok"] is True
 
         histories = {}
         for range_seconds in RANGES:
