@@ -6463,25 +6463,24 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(costTotal > 0 && costTotal < 3000, `Cost reflects only the fine records, not the coarse smear (got ${costTotal})`);
   });
 
-  test('YO!stats full-retention prefetch cannot re-coarsen an active fine domain', () => {
+  test('YO!stats short-range domain keeps legitimately-coarse family data (cost/token cadence) with a 1s tail', () => {
+    // Regression guard (2026-07-15): a range/resolution change must NEVER drop a family's
+    // own coarser cadence just because it is coarser than the domain's finest retention
+    // tier. Tokens sample at 10s and Cost aggregates coarser than the 1s CPU tail; both must
+    // survive at a 5m range, or the Cost summary reads 0 tokens while the token charts show
+    // data (the reported "pricing broken" symptom).
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000 / 60) * 60 * 1000;
     const nowSec = now / 1000;
-    api.setDebugGraphRangeForTest(30 * 60, {render: false});
-    const domain = {startMs: now - 30 * 60 * 1000, endMs: now, rangeSeconds: 30 * 60};
-    // A fine live tail (1s) with a coarse 600s prefetch bucket landing over the same recent
-    // domain (the "prefetch resolves after the narrow snapshot" race).
+    api.setDebugGraphRangeForTest(5 * 60, {render: false});
     api.debugGraphApplyServerHistoryForTest({sequence: 3, records: [
-      {start: nowSec - 5, duration: 1, sequence: 1, cpu_total_percent: 20, cpu_count: 1},
-      {start: nowSec - 3, duration: 1, sequence: 2, cpu_total_percent: 20, cpu_count: 1},
-      {start: nowSec - 600, duration: 600, sequence: 3, cpu_total_percent: 20 * 600, cpu_count: 600},
+      {start: nowSec - 120, duration: 10, sequence: 1, active_agent_total: 1,
+        agent_token_rates: {'s1:0': {tokens: 1000, seconds: 10, samples: 1, total: 1000, model_rates: {'gpt-5': {tokens: 1000, seconds: 10, samples: 1, total: 1000}}}},
+        cost_summary: {total_micro_usd: 50, components: [{provider: 'openai', model: 'gpt-5', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 1000, micro_usd: 50}]}},
+      {start: nowSec - 5, duration: 1, sequence: 2, cpu_total_percent: 20, cpu_count: 1},
     ]});
-    const poisoned = api.debugGraphDisplayResolutionMsForTest(domain, 0, now);
-    assert.ok(poisoned >= 600000, 'the coarse prefetch bucket forces the coarse tier before the provenance guard runs');
-    const removed = api.purgeCoarsePrefetchBucketsFromActiveDomainForTest(now);
-    assert.ok(removed >= 1, 'the guard removes the coarse prefetch bucket intersecting the active fine domain');
-    const clean = api.debugGraphDisplayResolutionMsForTest(domain, 0, now);
-    assert.ok(clean < 600000, 'after the guard the active fine domain no longer renders at the coarse prefetch tier');
+    const cost = api.debugGraphCostSummaryForTest(api.debugGraphDisplayBucketsForTest(now)).totalMicroUsd;
+    assert.equal(cost, 50, `a 1s CPU tail must not evict the coarser (10s) token/cost bucket at a 5m range (got ${cost})`);
   });
 
   test('YO!stats finer replacement removes every intersecting coarser aggregate', () => {

@@ -5547,23 +5547,6 @@ function maybePrefetchJsDebugHistory() {
 // normal poll revalidates the switched-to range's fresh tail on top of this cache.
 // Finest-source-wins at render keeps the live 1s/10s tail intact (no replaceCoverage,
 // so no fine buckets are removed).
-function purgeCoarsePrefetchBucketsFromActiveDomain(nowMs = Date.now()) {
-  // The full-retention prefetch fills the whole window at the server's wide-range coarse
-  // tiers. Inside the ACTIVE domain a finer authoritative tier already owns the view, so a
-  // coarse prefetch bucket there must not survive to force the display resolution back up
-  // (even across an honest uncovered prefix around a real gap). Remove buckets coarser than
-  // the active domain's own age-derived tier that intersect it; wider domains keep the
-  // prefetch's coarse buckets for instant switching. This is the "prefetch resolves after
-  // the narrow snapshot" race guard; the finer-replacement removal covers the other race.
-  // Relative tier/domain check only — no hard-coded 16h/30m/600s special cases.
-  const domain = debugGraphDomain(nowMs);
-  const domainStartMs = Number(domain?.startMs);
-  const domainEndMs = Number(domain?.endMs);
-  if (!Number.isFinite(domainStartMs) || !Number.isFinite(domainEndMs) || domainEndMs <= domainStartMs) return 0;
-  const domainTierSeconds = debugGraphBucketDurationForTime(domainStartMs, nowMs) / 1000;
-  return debugGraphRemoveCoarserServerBuckets(Math.floor(domainStartMs / 1000), Math.ceil(domainEndMs / 1000), domainTierSeconds);
-}
-
 async function prefetchJsDebugHistoryFullRetention() {
   if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) return false;
   if (jsDebugHistoryPrefetchState.inFlight) return false;
@@ -5586,7 +5569,6 @@ async function prefetchJsDebugHistoryFullRetention() {
     // visible chart (unlike the readiness path, which must reject malformed coverage).
     if (!coverage) return false;
     debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: false});
-    purgeCoarsePrefetchBucketsFromActiveDomain();
     jsDebugHistoryPrefetchState.lastFullPrefetchAtMs = performanceNow();
     return true;
   } catch (error) {
