@@ -71,6 +71,12 @@ class LocalServiceSpec:
     protocol_version: int
     idle_seconds: float = LOCAL_SERVICE_IDLE_SECONDS
     extra_args: tuple[str, ...] = ()
+    # Optional code-revision stamp: when set, a daemon whose ping reports a DIFFERENT
+    # (or missing) revision is unhealthy and gets retired + respawned from current code.
+    # This closes the same-protocol stale-daemon class (repeated 2026-07-14/15 incidents:
+    # daemons surviving restarts while serving old code); a protocol bump already forces
+    # respawn, but most code changes do not bump the protocol.
+    code_revision: str = ""
 
 
 class LocalServiceRegistry:
@@ -188,6 +194,10 @@ class LocalServiceRegistry:
             and int(response.get("version") or 0) == self.spec.protocol_version
             and int(response.get("pid") or 0) > 0
         )
+        if healthy and self.spec.code_revision:
+            # Self-heal on code drift: an old daemon that omits the stamp counts as a
+            # mismatch too (respawning is idempotent and safe; never a hang).
+            healthy = str(response.get("code_revision") or "") == self.spec.code_revision
         if healthy:
             self.note_rpc_success()
         else:

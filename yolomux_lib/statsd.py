@@ -49,6 +49,23 @@ from . import session_files
 # or response fields are added during a rolling server update.
 STATSD_PROTOCOL_VERSION = 22
 STATSD_COMPAT_PROTOCOL_VERSION = 8
+
+def _statsd_code_revision() -> str:
+    """Deployment stamp for the stats daemon's code: a short content hash of the
+    modules that define its behavior. The registry retires-and-respawns a daemon
+    whose ping reports a different stamp, closing the same-protocol stale-daemon
+    class (daemons repeatedly survived restarts while serving old code)."""
+    digest = hashlib.sha256()
+    root = Path(__file__).resolve().parent
+    for relative in ("statsd.py", "stats_families.py", str(Path("local_services") / "stats_store.py")):
+        try:
+            digest.update((root / relative).read_bytes())
+        except OSError:
+            digest.update(relative.encode("utf-8"))
+    return digest.hexdigest()[:12]
+
+
+STATSD_CODE_REVISION = _statsd_code_revision()
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
@@ -3279,7 +3296,7 @@ class PersistentStatsService:
         response_protocol = STATSD_PROTOCOL_VERSION if requested_protocol >= STATSD_PROTOCOL_VERSION else STATSD_COMPAT_PROTOCOL_VERSION
         hot_version = {"version": STATSD_PROTOCOL_VERSION} if requested_protocol >= STATSD_PROTOCOL_VERSION else {}
         if action == "ping":
-            return {"ok": True, "version": response_protocol, "pid": os.getpid(), "started_at": self.started_at}, b""
+            return {"ok": True, "version": response_protocol, "pid": os.getpid(), "started_at": self.started_at, "code_revision": STATSD_CODE_REVISION}, b""
         if action == "status":
             return {**self.common_status(), "version": response_protocol}, b""
         if action == "profile":
@@ -3655,6 +3672,7 @@ class StatsClient(LocalServiceClient):
             STATSD_PROTOCOL_VERSION,
             idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
             extra_args=("--database", str(self.database_path), "--sampler-owner", str(default_sampler_owner_path(self.database_path.parent))),
+            code_revision=STATSD_CODE_REVISION,
         )
         # History/sample reads no longer cross a socket: the web process
         # encodes them in-process from a read-only WAL handle on the same
@@ -3663,7 +3681,11 @@ class StatsClient(LocalServiceClient):
 
     def healthy(self) -> bool:
         response = self.request({"action": "ping", "protocol_version": STATSD_PROTOCOL_VERSION}, timeout=0.15)
-        return bool(response.get("ok")) and int(response.get("version") or 0) == STATSD_PROTOCOL_VERSION
+        return (
+            bool(response.get("ok"))
+            and int(response.get("version") or 0) == STATSD_PROTOCOL_VERSION
+            and str(response.get("code_revision") or "") == STATSD_CODE_REVISION
+        )
 
     def runtime_status(self) -> dict[str, Any]:
         status = self.registry.status()

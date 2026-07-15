@@ -3391,3 +3391,50 @@ def test_agent_token_rates_fold_beyond_24_agents_into_one_other_row_preserving_t
         assert kept_keys == {f"s|{index}|codex" for index in range(agent_count - (statsd.STATS_AGENT_TOKEN_RATES_MAX_AGENTS - 1), agent_count)}
     finally:
         service.store.close()
+
+
+def test_ping_carries_the_code_revision_stamp(tmp_path):
+    """Same-protocol stale daemons repeatedly survived restarts while serving old code
+    (2026-07-14/15 incidents). The ping now carries a content-hash stamp of the stats
+    modules so the registry can retire-and-respawn a drifted daemon."""
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        response, _binary = service.handle_with_binary({"action": "ping", "protocol_version": statsd.STATSD_PROTOCOL_VERSION}) if hasattr(service, "handle_with_binary") else (service.handle({"action": "ping", "protocol_version": statsd.STATSD_PROTOCOL_VERSION}), b"")
+        assert response["ok"] is True
+        assert response["code_revision"] == statsd.STATSD_CODE_REVISION
+        assert len(statsd.STATSD_CODE_REVISION) == 12
+    finally:
+        service.store.close()
+
+
+def test_registry_health_rejects_code_revision_drift(tmp_path, monkeypatch):
+    """A daemon reporting a different (or missing) code revision is unhealthy, which
+    drives the registry's retire-and-respawn path. Missing counts as drift: an old
+    daemon that predates the stamp must also be replaced. Respawn is idempotent, so
+    this self-heals and can never hang a request (the never-hard-gate rule)."""
+    from yolomux_lib.local_services.registry import LocalServiceRegistry, LocalServiceSpec
+
+    spec = LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", statsd.STATSD_PROTOCOL_VERSION, code_revision="currentrev12")
+    registry = LocalServiceRegistry(tmp_path, spec, socket_path=tmp_path / "statsd.sock")
+
+    responses = {}
+
+    def fake_request(action, timeout=0.2):
+        return dict(responses)
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123, "code_revision": "currentrev12"}
+    assert registry.healthy() is True
+
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123, "code_revision": "staleoldrev0"}
+    assert registry.healthy() is False
+
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123}
+    assert registry.healthy() is False, "a daemon that predates the stamp is drift too"
+
+    unstamped = LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", statsd.STATSD_PROTOCOL_VERSION)
+    plain = LocalServiceRegistry(tmp_path, unstamped, socket_path=tmp_path / "jobd.sock")
+    monkeypatch.setattr(plain, "_request", fake_request)
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123}
+    assert plain.healthy() is True, "services that have not opted in keep the old contract"
